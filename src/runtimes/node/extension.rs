@@ -5,8 +5,36 @@ use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
 use crate::compile::ir::tasks::npm_authenticate::NpmAuthenticate;
 use crate::compile::ir::tasks::use_node::UseNode;
+use crate::compile::shell::ShellScript;
+use crate::shell_script;
 use crate::validate;
 use anyhow::Result;
+
+shell_script! {
+    /// Ensure a workspace-level `.npmrc` exists before `npmAuthenticate@0`
+    /// runs.
+    ///
+    /// `npmAuthenticate@0` requires its `workingFile:` to point at an
+    /// existing file, so a repo without a checked-in `.npmrc` would fail
+    /// the auth step. This script leaves any existing `.npmrc` untouched
+    /// and creates a minimal one otherwise, pointing at the configured
+    /// registry (or public npmjs when nothing is configured).
+    ENSURE_NPMRC {
+        interpreter: Bash,
+        bindings: [REGISTRY],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -eo pipefail
+if [ ! -f .npmrc ]; then
+  echo "registry=$REGISTRY" > .npmrc
+  echo "Created .npmrc with registry=$REGISTRY"
+else
+  echo '.npmrc already exists, skipping creation'
+fi
+"#,
+    }
+}
 
 /// Node.js runtime extension.
 ///
@@ -143,16 +171,9 @@ fn npm_authenticate_task_step() -> TaskStep {
 /// configured feed (or the default npmjs registry).
 fn ensure_npmrc_bash_step(config: &NodeRuntimeConfig) -> BashStep {
     let registry = config.feed_url().unwrap_or("https://registry.npmjs.org/");
-    let script = format!(
-        "set -eo pipefail\n\
-         if [ ! -f .npmrc ]; then\n  \
-           echo 'registry={registry}' > .npmrc\n  \
-           echo 'Created .npmrc with registry={registry}'\n\
-         else\n  \
-           echo '.npmrc already exists, skipping creation'\n\
-         fi\n"
-    );
-    BashStep::new("Ensure .npmrc exists", script)
+    ShellScript::new(&ENSURE_NPMRC)
+        .bind_text("REGISTRY", registry)
+        .into_step("Ensure .npmrc exists")
 }
 
 #[cfg(test)]

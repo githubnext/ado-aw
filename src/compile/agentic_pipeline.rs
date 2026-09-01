@@ -95,6 +95,7 @@ use super::ir::{
     CiTrigger, Parameter, ParameterDefault, ParameterKind, PipelineResource, PipelineVar,
     PrTrigger, RepositoryResource, Resources, Schedule, Triggers,
 };
+use super::shell::{Binding, ShellScript};
 use super::types::{
     ApprovalConfig, ApprovalOnTimeout, CheckoutFetchOpts, EngineConfig, FrontMatter, OnConfig,
     PipelineArtifactConfig, PrMode, ProviderToken, Repository as RepoCfg, SELF_CHECKOUT_ALIAS,
@@ -102,12 +103,12 @@ use super::types::{
 };
 use crate::ado_proxy::catalog;
 use crate::ado_proxy::policy::PolicyDocument;
+use crate::shell_script;
 
 /// The `safe-outputs:` key for the create-pull-request tool. Matches the kebab
 /// name `FrontMatter::create_pr_config`/`partition_safe_outputs_by_approval` use.
 const CREATE_PULL_REQUEST_TOOL: &str = "create-pull-request";
 const CUSTOM_PROPOSALS_STEP_ID: &str = "customProposals";
-const GITHUB_ISSUE_TOOLS: &[&str] = &["create-github-issue", "set-github-issue-type"];
 
 /// Built pipeline context — the result of running every validation,
 /// scalar computation, extension declaration fanout, and canonical-
@@ -177,6 +178,7 @@ fn validate_pipeline_front_matter(
     front_matter.validate_require_approval()?;
     front_matter.validate_staged()?;
     common::validate_github_issue_outputs_config(front_matter)?;
+    common::validate_work_item_assignment_outputs_config(front_matter)?;
     common::validate_comment_target(front_matter)?;
     common::validate_update_work_item_target(front_matter)?;
     common::validate_submit_pr_review_events(front_matter)?;
@@ -676,10 +678,17 @@ pub(crate) fn build_canonical_jobs(
     let create_pr_configured = front_matter.create_pr_config().is_some();
     let create_pr_reviewed = reviewed.iter().any(|t| t == CREATE_PULL_REQUEST_TOOL);
     let safeoutputs_waits_for_review = !reviewed.is_empty() && auto.is_empty();
-    let github_issue_tools_configured = front_matter.has_github_issue_outputs();
-    let github_issue_tools_reviewed = reviewed
+    let github_issue_tools_configured = front_matter.github_issue_tool_names();
+    let github_issue_tools_reviewed: Vec<String> = github_issue_tools_configured
         .iter()
-        .any(|tool| GITHUB_ISSUE_TOOLS.contains(&tool.as_str()));
+        .filter(|tool| reviewed.contains(tool))
+        .cloned()
+        .collect();
+    let github_issue_tools_automatic: Vec<String> = github_issue_tools_configured
+        .iter()
+        .filter(|tool| !reviewed.contains(tool))
+        .cloned()
+        .collect();
     if reviewed.is_empty() || auto.is_empty() {
         jobs.push(build_safeoutputs_job(
             front_matter,
@@ -699,7 +708,7 @@ pub(crate) fn build_canonical_jobs(
             &SafeOutputsVariant::automatic(
                 &reviewed,
                 create_pr_configured && !create_pr_reviewed,
-                github_issue_tools_configured && !github_issue_tools_reviewed,
+                github_issue_tools_automatic,
             )
             .with_excluded_tools(&custom_tool_names),
         )?);
@@ -710,7 +719,7 @@ pub(crate) fn build_canonical_jobs(
             &SafeOutputsVariant::reviewed(
                 &reviewed,
                 create_pr_configured && create_pr_reviewed,
-                github_issue_tools_configured && github_issue_tools_reviewed,
+                github_issue_tools_reviewed,
             ),
         )?);
     }
@@ -1358,8 +1367,9 @@ fn build_agent_job(
     if front_matter.has_any_safe_output_tool() {
         let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
         steps.push(Step::Bash(safe_outputs_summary_step(
+            front_matter,
             &reviewed_summary_tools,
-        )));
+        )?));
     }
 
     // 20. Stop MCPG and SafeOutputs
@@ -1659,7 +1669,7 @@ struct SafeOutputsVariant {
     /// (issue #1453 review). Avoids a wasted Node install + bundle fetch +
     /// prepare step in the variant that will never open a PR.
     runs_create_pull_request: bool,
-    runs_github_issue_tools: bool,
+    github_issue_tools: Vec<String>,
     /// Whether this is the manual-review-gated `SafeOutputs_Reviewed` variant.
     /// Used to select the correct pool override without relying on the job name.
     is_reviewed: bool,
@@ -1713,14 +1723,14 @@ impl SafeOutputsCheckoutLayout {
 impl SafeOutputsVariant {
     /// The default single-job variant: no filter, canonical names. Runs every
     /// configured tool, so it executes `create-pull-request` iff configured.
-    fn default_single(runs_create_pull_request: bool, runs_github_issue_tools: bool) -> Self {
+    fn default_single(runs_create_pull_request: bool, github_issue_tools: Vec<String>) -> Self {
         Self {
             base: "SafeOutputs",
             display: "SafeOutputs",
             artifact: "safe_outputs",
             filter_args: String::new(),
             runs_create_pull_request,
-            runs_github_issue_tools,
+            github_issue_tools,
             is_reviewed: false,
         }
     }
@@ -1730,7 +1740,7 @@ impl SafeOutputsVariant {
     fn automatic(
         reviewed: &[String],
         runs_create_pull_request: bool,
-        runs_github_issue_tools: bool,
+        github_issue_tools: Vec<String>,
     ) -> Self {
         Self {
             base: "SafeOutputs",
@@ -1738,7 +1748,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs",
             filter_args: filter_flags("--exclude", reviewed),
             runs_create_pull_request,
-            runs_github_issue_tools,
+            github_issue_tools,
             is_reviewed: false,
         }
     }
@@ -1748,7 +1758,7 @@ impl SafeOutputsVariant {
     fn reviewed(
         reviewed: &[String],
         runs_create_pull_request: bool,
-        runs_github_issue_tools: bool,
+        github_issue_tools: Vec<String>,
     ) -> Self {
         Self {
             base: "SafeOutputs_Reviewed",
@@ -1756,7 +1766,7 @@ impl SafeOutputsVariant {
             artifact: "safe_outputs_reviewed",
             filter_args: filter_flags("--only", reviewed),
             runs_create_pull_request,
-            runs_github_issue_tools,
+            github_issue_tools,
             is_reviewed: true,
         }
     }
@@ -2141,15 +2151,72 @@ fn custom_job_condition(def: &CustomSafeOutputJobDef) -> Result<Condition> {
     Ok(Condition::And(parts))
 }
 
+shell_script! {
+    /// Prepare the compiler binary at the well-known `/tmp/awf-tools/ado-aw`
+    /// location the custom safe-output executor picks up.
+    PREPARE_CUSTOM_EXECUTOR_BINARY {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r#"
+mkdir -p /tmp/awf-tools
+AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+chmod +x "$AGENTIC_PIPELINES_PATH"
+cp "$AGENTIC_PIPELINES_PATH" /tmp/awf-tools/ado-aw
+chmod +x /tmp/awf-tools/ado-aw
+"#,
+    }
+}
+
+shell_script! {
+    /// Add the downloaded compiler binary to PATH and mark it executable.
+    ADD_COMPILER_TO_PATH {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r###"
+ls -la "$(Pipeline.Workspace)/agentic-pipeline-compiler"
+chmod +x "$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+echo "##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler"
+"###,
+    }
+}
+
+shell_script! {
+    /// Create the per-job staging output directory.
+    PREPARE_OUTPUT_DIRECTORY {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP],
+        externals: [],
+        fragments: [],
+        body: r#"
+mkdir -p "$AGENT_TEMP/staging"
+"#,
+    }
+}
+
 fn prepare_custom_executor_binary_step() -> BashStep {
-    bash(
-        "Prepare custom safe-output executor",
-        "mkdir -p /tmp/awf-tools\n\
-         AGENTIC_PIPELINES_PATH=\"$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw\"\n\
-         chmod +x \"$AGENTIC_PIPELINES_PATH\"\n\
-         cp \"$AGENTIC_PIPELINES_PATH\" /tmp/awf-tools/ado-aw\n\
-         chmod +x /tmp/awf-tools/ado-aw\n",
-    )
+    ShellScript::new(&PREPARE_CUSTOM_EXECUTOR_BINARY)
+        .into_step("Prepare custom safe-output executor")
+}
+
+shell_script! {
+    /// Write the compiler-generated custom-tools runtime config to a file.
+    /// The payload is base64-encoded at compile time so no re-parsing is
+    /// needed at runtime — `base64 --decode` is the last command, so ADO's
+    /// fail-on-last-command default surfaces a corrupted transfer.
+    WRITE_CUSTOM_RUNTIME_CONFIG {
+        interpreter: Bash,
+        bindings: [ENCODED, AGENT_TEMP, CONFIG_FILENAME],
+        externals: [],
+        fragments: [],
+        body: r#"
+mkdir -p "$AGENT_TEMP/ado-aw-custom"
+printf '%s' "$ENCODED" | base64 --decode > "$AGENT_TEMP/$CONFIG_FILENAME"
+"#,
+    }
 }
 
 fn write_custom_runtime_config_step(
@@ -2161,31 +2228,56 @@ fn write_custom_runtime_config_step(
     let json = serde_json::to_string_pretty(&parsed)
         .context("failed to serialize custom job runtime config")?;
     let encoded = STANDARD.encode(json.as_bytes());
-    // No runtime JSON re-validation: the payload was round-trip parsed and
-    // re-serialized above, so it is valid JSON by construction. `base64
-    // --decode` is the last command in the script, so ADO's fail-on-last-command
-    // default already surfaces a corrupted transfer. Custom jobs run on
-    // consumer-owned pools, and this step is their only interpreter-dependent
-    // command, so keeping it to bash + base64 avoids a hard python3 dependency.
-    let script = format!(
-        "mkdir -p \"$(Agent.TempDirectory)/ado-aw-custom\"\n\
-        printf '%s' {encoded} | base64 --decode > \"{config_path}\"\n",
-        encoded = shell_quote(&encoded),
-    );
-    Ok(bash("Write custom job runtime config", script))
+    let filename = agent_temp_filename(config_path);
+    Ok(ShellScript::new(&WRITE_CUSTOM_RUNTIME_CONFIG)
+        .bind_text("ENCODED", encoded)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind_text("CONFIG_FILENAME", filename)
+        .into_step("Write custom job runtime config"))
+}
+
+shell_script! {
+    /// Materialise the aggregate `ADO_AW_AGENT_OUTPUT` payload for a
+    /// custom safe-output job by invoking `ado-aw execute` in
+    /// `--prepare-custom-agent-output` mode.
+    PREPARE_CUSTOM_AGENT_OUTPUT {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, BUILD_ID, CONFIG_FILENAME, OUTPUT_FILENAME],
+        externals: [],
+        fragments: [],
+        body: r#"
+/tmp/awf-tools/ado-aw execute \
+  --safe-output-dir "$PIPELINE_WORKSPACE/analyzed_outputs_$BUILD_ID" \
+  --resolved-config "$AGENT_TEMP/$CONFIG_FILENAME" \
+  --prepare-custom-agent-output "$AGENT_TEMP/$OUTPUT_FILENAME"
+"#,
+    }
 }
 
 fn prepare_custom_agent_output_step(config_path: &str, output_path: &str) -> BashStep {
-    let script = format!(
-        "# shellcheck disable=SC2016 # ADO expands path macros before bash evaluates the single-quoted arguments.\n\
-         /tmp/awf-tools/ado-aw execute \
-           --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" \
-           --resolved-config {config} \
-           --prepare-custom-agent-output {output}\n",
-        config = shell_quote(config_path),
-        output = shell_quote(output_path),
-    );
-    bash("Prepare custom Agent output", script)
+    ShellScript::new(&PREPARE_CUSTOM_AGENT_OUTPUT)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .bind("BUILD_ID", Binding::ado_macro("Build.BuildId"))
+        .bind_text("CONFIG_FILENAME", agent_temp_filename(config_path))
+        .bind_text("OUTPUT_FILENAME", agent_temp_filename(output_path))
+        .into_step("Prepare custom Agent output")
+}
+
+/// Extract the filename portion of an `$(Agent.TempDirectory)/<filename>`
+/// path so it can be passed through [`Binding::text`] (which forbids `$(`)
+/// while the `$(Agent.TempDirectory)` prefix is contributed separately as
+/// [`Binding::ado_macro`].
+fn agent_temp_filename(path: &str) -> String {
+    let prefix = "$(Agent.TempDirectory)/";
+    path.strip_prefix(prefix)
+        .unwrap_or_else(|| panic!(
+            "custom-tools config path {path:?} must start with {prefix:?}"
+        ))
+        .to_string()
 }
 
 fn component_step_with_custom_env(
@@ -2307,8 +2399,8 @@ fn build_safeoutputs_job(
     variant: &SafeOutputsVariant,
 ) -> Result<Job> {
     let layout = SafeOutputsCheckoutLayout::for_variant(front_matter, cfg, variant);
-    let github_auth = if variant.runs_github_issue_tools {
-        front_matter.github_safe_outputs_auth()?
+    let github_auth = if !variant.github_issue_tools.is_empty() {
+        front_matter.github_safe_outputs_auth_for_tools(&variant.github_issue_tools)?
     } else {
         None
     };
@@ -2366,17 +2458,15 @@ fn build_safeoutputs_job(
         front_matter.supply_chain(),
     ));
     // Add compiler to path
-    steps.push(Step::Bash(bash(
-        "Add agentic compiler to path",
-        "ls -la \"$(Pipeline.Workspace)/agentic-pipeline-compiler\"\n\
-         chmod +x \"$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw\"\n\
-         echo \"##vso[task.prependpath]$(Pipeline.Workspace)/agentic-pipeline-compiler\"\n",
-    )));
+    steps.push(Step::Bash(
+        ShellScript::new(&ADD_COMPILER_TO_PATH).into_step("Add agentic compiler to path"),
+    ));
     // Prepare output directory
-    steps.push(Step::Bash(bash(
-        "Prepare output directory",
-        "mkdir -p \"$(Agent.TempDirectory)/staging\"\n",
-    )));
+    steps.push(Step::Bash(
+        ShellScript::new(&PREPARE_OUTPUT_DIRECTORY)
+            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+            .into_step("Prepare output directory"),
+    ));
     // When `create-pull-request` is configured, fetch/deepen each target branch
     // in THIS job's checkout, immediately before the executor runs (issue
     // #1453). The prepare step also runs in the Agent job (for the containerized
@@ -2403,10 +2493,8 @@ fn build_safeoutputs_job(
         ));
     }
     if let Some(app) = github_app {
-        let permissions = std::collections::BTreeMap::from([(
-            "issues".to_string(),
-            crate::compile::types::GithubAppPermissionLevel::Write,
-        )]);
+        let permissions =
+            front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
         steps.push(
             super::extensions::ado_script::github_app_token_step_typed_for(
                 app,
@@ -2727,186 +2815,96 @@ fn build_teardown_job(
     Ok(Some(job))
 }
 
-fn build_conclusion_job(
+/// Apply a single per-tool config (`noop` / `missing-tool` / `missing-data`)
+/// to the Conclusion step as flat `AW_<TOOL>_*` env vars (gh-aw pattern).
+/// Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+fn apply_conclusion_tool_config_env(
+    mut conclusion_step: BashStep,
     front_matter: &FrontMatter,
-    cfg: &StandaloneCtx,
+    tool_key: &str,
+) -> BashStep {
+    let Some(tool_config) = front_matter.safe_outputs.get(tool_key) else {
+        return conclusion_step;
+    };
+    let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
+
+    // Tool disabled entirely (e.g. noop: false)
+    if tool_config.is_boolean() {
+        if tool_config.as_bool() == Some(false) {
+            conclusion_step = conclusion_step.with_env(
+                format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                EnvValue::Literal("false".to_string()),
+            );
+        }
+        return conclusion_step;
+    }
+
+    let Some(obj) = tool_config.as_object() else {
+        return conclusion_step;
+    };
+
+    // report-as-work-item: accept both YAML bool and string forms.
+    // serde_json::Value::to_string() on String("false") would emit
+    // "\"false\"" (JSON-encoded with quotes), which the TypeScript
+    // readBooleanEnv would reject and default to true — silently
+    // inverting the opt-out. Use as_bool()/as_str() instead.
+    if let Some(v) = obj.get("report-as-work-item") {
+        let bool_str = v
+            .as_bool()
+            .map(|b| b.to_string())
+            .or_else(|| v.as_str().map(|s| s.to_string()));
+        if let Some(s) = bool_str {
+            conclusion_step = conclusion_step.with_env(
+                format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
+                EnvValue::Literal(s),
+            );
+        }
+    }
+    if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_TITLE_PREFIX"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_WORK_ITEM_TYPE"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_AREA_PATH"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
+        conclusion_step = conclusion_step.with_env(
+            format!("{env_prefix}_ITERATION_PATH"),
+            EnvValue::Literal(crate::sanitize::sanitize(v)),
+        );
+    }
+    if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
+        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+        conclusion_step =
+            conclusion_step.with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
+    }
+    conclusion_step
+}
+
+/// Hoist upstream job results (Agent/Detection/SafeOutputs[/_Reviewed]/custom
+/// jobs) into job-level variables and wire them onto the Conclusion step as
+/// `$(name)` macro env vars.
+///
+/// ADO only evaluates `$[...]` runtime expressions inside `variables:` and
+/// `condition:` — NOT in step env blocks — so results are hoisted to job
+/// variables here and consumed as `$(name)` macros in the step env.
+fn hoist_conclusion_job_results(
+    mut conclusion_step: BashStep,
     prefix: &JobPrefix<'_>,
     custom_defs: &[CustomSafeOutputJobDef],
     has_reviewed_job: bool,
-) -> Result<Option<Job>> {
-    use crate::compile::ado_bundle::{Bundle, apply_bundle_auth, token_source_for};
-    // Conclusion job is always emitted when safe-outputs exist (gh-aw pattern).
-    if front_matter.safe_outputs.is_empty() {
-        return Ok(None);
-    }
-
-    let mut steps: Vec<Step> = Vec::new();
-    steps.push(checkout_none_step());
-
-    // Install Node + download/verify the ado-script bundle using the canonical
-    // helper. This keeps the supply-chain mirror handling and the unzip layout
-    // (`/tmp/ado-aw-scripts/ado-script/<bundle>.js`) consistent with the
-    // Agent/Setup jobs — a hand-rolled copy here previously double-nested the
-    // unzip path and bypassed the supply-chain feed.
-    steps.extend(
-        super::extensions::ado_script::install_and_download_steps_typed(
-            front_matter.supply_chain.as_ref(),
-        ),
-    );
-
-    // Acquire write token (when configured): same-job minting is required because
-    // Azure Pipelines task.setvariable variables are job-scoped and NOT propagated
-    // to downstream jobs without isOutput=true + dependsOn mapping. The SafeOutputs
-    // job mints its own SC_WRITE_TOKEN copy; Conclusion must do the same.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
-
-    let mut download_artifact = TaskStep::new(
-        "DownloadPipelineArtifact@2",
-        "Download SafeOutputs artifact",
-    )
-    .with_input("artifact", "safe_outputs")
-    .with_input("path", "$(Pipeline.Workspace)/conclusion_inputs");
-    download_artifact.condition = Some(Condition::Always);
-    // The safe_outputs artifact may not exist when SafeOutputs was skipped;
-    // ignore the download failure — conclusion.js handles a missing dir.
-    download_artifact.continue_on_error = true;
-    steps.push(Step::Task(download_artifact));
-
-    let conclusion_path = super::extensions::ado_script::CONCLUSION_PATH;
-    let conclusion_script = format!(
-        "\
-if command -v node >/dev/null 2>&1 && [ -f {conclusion_path} ]; then\n  \
-  node {conclusion_path}\n\
-else\n  \
-  echo \"##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting\"\n\
-fi\n"
-    );
-    let mut conclusion_step = bash("Report pipeline conclusion", conclusion_script);
-    conclusion_step = conclusion_step.with_condition(Condition::Always);
-    // The Conclusion job's contract is "always runs, never fails": it exists to
-    // surface OTHER jobs' failures, so it must not turn a non-zero exit of its
-    // own (e.g. node OOM/SIGKILL, or an unhandled rejection escaping
-    // conclusion.js's top-level `.then`) into a pipeline failure that masks the
-    // real signal. Use ADO's `continueOnError` rather than a blanket `|| true`
-    // in the bash body: the failure still shows up in the timeline as a warning
-    // (preserving observability) instead of being silently swallowed.
-    conclusion_step.continue_on_error = true;
-
-    // Global opt-out: safe-outputs.report-failure-as-work-item (default: true)
-    let report_failure = front_matter
-        .safe_outputs
-        .get("report-failure-as-work-item")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    conclusion_step = conclusion_step
-        .with_env(
-            "AW_REPORT_FAILURE_AS_WORK_ITEM",
-            EnvValue::Literal(report_failure.to_string()),
-        )
-        .with_env(
-            "AW_PIPELINE_NAME",
-            // Sanitize for consistency with the per-tool config fields below:
-            // the name flows verbatim into the ADO work-item title/body, and
-            // operator-controlled strings are sanitized everywhere else.
-            EnvValue::Literal(crate::sanitize::sanitize(&front_matter.name)),
-        )
-        .with_env(
-            "AW_SAFE_OUTPUT_DIR",
-            EnvValue::Literal("$(Pipeline.Workspace)/conclusion_inputs".to_string()),
-        );
-
-    // Use SC_WRITE_TOKEN when a write service connection is configured;
-    // fall back to System.AccessToken otherwise. The token source is selected
-    // by the shared `token_source_for` helper (same logic as the Stage 3
-    // executor) and projected via the bundle-auth applier so the Conclusion
-    // step can never ship without a bearer (the regression that was #1307).
-    let write_sc = front_matter
-        .permissions
-        .as_ref()
-        .and_then(|p| p.write.as_deref());
-    conclusion_step = apply_bundle_auth(
-        conclusion_step,
-        Bundle::Conclusion,
-        token_source_for(write_sc),
-    );
-
-    // Pass per-tool configs as individual flat env vars (gh-aw pattern).
-    // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
-    //
-    // Note: pipeline_failure has no per-tool config entry — it uses hardcoded
-    // defaults (type: Task, no area/iteration path). The global
-    // report-failure-as-work-item toggle controls whether it files at all.
-    for tool_key in &["noop", "missing-tool", "missing-data"] {
-        if let Some(tool_config) = front_matter.safe_outputs.get(*tool_key) {
-            let env_prefix = format!("AW_{}", tool_key.to_uppercase().replace('-', "_"));
-
-            // Tool disabled entirely (e.g. noop: false)
-            if tool_config.is_boolean() {
-                if tool_config.as_bool() == Some(false) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                        EnvValue::Literal("false".to_string()),
-                    );
-                }
-                continue;
-            }
-
-            if let Some(obj) = tool_config.as_object() {
-                // report-as-work-item: accept both YAML bool and string forms.
-                // serde_json::Value::to_string() on String("false") would emit
-                // "\"false\"" (JSON-encoded with quotes), which the TypeScript
-                // readBooleanEnv would reject and default to true — silently
-                // inverting the opt-out. Use as_bool()/as_str() instead.
-                if let Some(v) = obj.get("report-as-work-item") {
-                    let bool_str = v
-                        .as_bool()
-                        .map(|b| b.to_string())
-                        .or_else(|| v.as_str().map(|s| s.to_string()));
-                    if let Some(s) = bool_str {
-                        conclusion_step = conclusion_step.with_env(
-                            format!("{env_prefix}_REPORT_AS_WORK_ITEM"),
-                            EnvValue::Literal(s),
-                        );
-                    }
-                }
-                if let Some(v) = obj.get("title-prefix").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_TITLE_PREFIX"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("work-item-type").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_WORK_ITEM_TYPE"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("area-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_AREA_PATH"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(v) = obj.get("iteration-path").and_then(|v| v.as_str()) {
-                    conclusion_step = conclusion_step.with_env(
-                        format!("{env_prefix}_ITERATION_PATH"),
-                        EnvValue::Literal(crate::sanitize::sanitize(v)),
-                    );
-                }
-                if let Some(tags) = obj.get("tags").and_then(|v| v.as_array()) {
-                    let tags_json =
-                        serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
-                    conclusion_step = conclusion_step
-                        .with_env(format!("{env_prefix}_TAGS"), EnvValue::Literal(tags_json));
-                }
-            }
-        }
-    }
-
-    // Pass upstream job results via job-level variables hoist.
-    // ADO only evaluates $[...] runtime expressions inside `variables:` and
-    // `condition:` — NOT in step env blocks. We hoist to job variables and
-    // reference them as $(name) macros in the step env.
+) -> Result<(Vec<JobVariable>, BashStep)> {
     let agent_id = prefix.id("Agent")?;
     let detection_id = prefix.id("Detection")?;
     let safeoutputs_id = prefix.id("SafeOutputs")?;
@@ -2987,6 +2985,128 @@ fi\n"
                 );
         }
     }
+
+    Ok((conclusion_variables, conclusion_step))
+}
+
+fn build_conclusion_job(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+    custom_defs: &[CustomSafeOutputJobDef],
+    has_reviewed_job: bool,
+) -> Result<Option<Job>> {
+    use crate::compile::ado_bundle::{Bundle, apply_bundle_auth, token_source_for};
+    // Conclusion job is always emitted when safe-outputs exist (gh-aw pattern).
+    if front_matter.safe_outputs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut steps: Vec<Step> = Vec::new();
+    steps.push(checkout_none_step());
+
+    // Install Node + download/verify the ado-script bundle using the canonical
+    // helper. This keeps the supply-chain mirror handling and the unzip layout
+    // (`/tmp/ado-aw-scripts/ado-script/<bundle>.js`) consistent with the
+    // Agent/Setup jobs — a hand-rolled copy here previously double-nested the
+    // unzip path and bypassed the supply-chain feed.
+    steps.extend(
+        super::extensions::ado_script::install_and_download_steps_typed(
+            front_matter.supply_chain.as_ref(),
+        ),
+    );
+
+    // Acquire write token (when configured): same-job minting is required because
+    // Azure Pipelines task.setvariable variables are job-scoped and NOT propagated
+    // to downstream jobs without isOutput=true + dependsOn mapping. The SafeOutputs
+    // job mints its own SC_WRITE_TOKEN copy; Conclusion must do the same.
+    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
+
+    let mut download_artifact = TaskStep::new(
+        "DownloadPipelineArtifact@2",
+        "Download SafeOutputs artifact",
+    )
+    .with_input("artifact", "safe_outputs")
+    .with_input("path", "$(Pipeline.Workspace)/conclusion_inputs");
+    download_artifact.condition = Some(Condition::Always);
+    // The safe_outputs artifact may not exist when SafeOutputs was skipped;
+    // ignore the download failure — conclusion.js handles a missing dir.
+    download_artifact.continue_on_error = true;
+    steps.push(Step::Task(download_artifact));
+
+    let conclusion_path = super::extensions::ado_script::CONCLUSION_PATH;
+    let mut conclusion_step = ShellScript::new(&REPORT_CONCLUSION)
+        .bind_text("CONCLUSION_PATH", conclusion_path)
+        .into_step("Report pipeline conclusion");
+    conclusion_step = conclusion_step.with_condition(Condition::Always);
+    // The Conclusion job's contract is "always runs, never fails": it exists to
+    // surface OTHER jobs' failures, so it must not turn a non-zero exit of its
+    // own (e.g. node OOM/SIGKILL, or an unhandled rejection escaping
+    // conclusion.js's top-level `.then`) into a pipeline failure that masks the
+    // real signal. Use ADO's `continueOnError` rather than a blanket `|| true`
+    // in the bash body: the failure still shows up in the timeline as a warning
+    // (preserving observability) instead of being silently swallowed.
+    conclusion_step.continue_on_error = true;
+
+    // Global opt-out: safe-outputs.report-failure-as-work-item (default: true)
+    let report_failure = front_matter
+        .safe_outputs
+        .get("report-failure-as-work-item")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    conclusion_step = conclusion_step
+        .with_env(
+            "AW_REPORT_FAILURE_AS_WORK_ITEM",
+            EnvValue::Literal(report_failure.to_string()),
+        )
+        .with_env(
+            "AW_PIPELINE_NAME",
+            // Sanitize for consistency with the per-tool config fields below:
+            // the name flows verbatim into the ADO work-item title/body, and
+            // operator-controlled strings are sanitized everywhere else.
+            EnvValue::Literal(crate::sanitize::sanitize(&front_matter.name)),
+        )
+        .with_env(
+            "AW_SAFE_OUTPUT_DIR",
+            EnvValue::Literal("$(Pipeline.Workspace)/conclusion_inputs".to_string()),
+        );
+
+    // Use SC_WRITE_TOKEN when a write service connection is configured;
+    // fall back to System.AccessToken otherwise. The token source is selected
+    // by the shared `token_source_for` helper (same logic as the Stage 3
+    // executor) and projected via the bundle-auth applier so the Conclusion
+    // step can never ship without a bearer (the regression that was #1307).
+    let write_sc = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_deref());
+    conclusion_step = apply_bundle_auth(
+        conclusion_step,
+        Bundle::Conclusion,
+        token_source_for(write_sc),
+    );
+
+    // Pass per-tool configs as individual flat env vars (gh-aw pattern).
+    // Each field gets its own env var — avoids JSON-in-env-var corruption in ADO.
+    //
+    // Note: pipeline_failure has no per-tool config entry — it uses hardcoded
+    // defaults (type: Task, no area/iteration path). The global
+    // report-failure-as-work-item toggle controls whether it files at all.
+    for tool_key in &["noop", "missing-tool", "missing-data"] {
+        conclusion_step =
+            apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
+    }
+
+    // Pass upstream job results via job-level variables hoist.
+    // ADO only evaluates $[...] runtime expressions inside `variables:` and
+    // `condition:` — NOT in step env blocks. We hoist to job variables and
+    // reference them as $(name) macros in the step env.
+    let (conclusion_variables, conclusion_step) = hoist_conclusion_job_results(
+        conclusion_step,
+        prefix,
+        custom_defs,
+        has_reviewed_job,
+    )?;
 
     steps.push(Step::Bash(conclusion_step));
 
@@ -3347,16 +3467,63 @@ print("Validated candidate provenance:")
 print(json.dumps(diagnostic, indent=2, sort_keys=True))
 "#;
 
-/// Build the staging script for one payload from a pinned candidate artifact.
+shell_script! {
+    /// Stage a payload out of a provenance-checked candidate pipeline
+    /// artifact: locate exactly one payload, checksum manifest and provenance
+    /// document, copy them into place, verify an *exact* filename checksum
+    /// entry, then validate producer identity before the caller's tail runs.
+    ///
+    /// The exactly-one requirement is load-bearing. A `find` that matched two
+    /// files would otherwise let an attacker who can add a file to the
+    /// artifact decide which one is staged.
+    STAGE_CANDIDATE_ARTIFACT_PAYLOAD {
+        interpreter: Bash,
+        bindings: [STAGING, DEST, PAYLOAD_NAME, PROVENANCE_VALIDATOR, DEFINITION_ID, RUN_ID],
+        externals: [],
+        fragments: [tail],
+        body: r###"
+set -eo pipefail
+mkdir -p "$DEST"
+
+locate_one() {
+  local name="$1"
+  mapfile -d '' -t matches < <(find "$STAGING" -type f -name "$name" -print0)
+  if [ "${#matches[@]}" -ne 1 ]; then
+    echo "##vso[task.complete result=Failed]Expected exactly one $name in candidate artifact, found ${#matches[@]}" >&2
+    exit 1
+  fi
+  printf '%s' "${matches[0]}"
+}
+
+PAYLOAD="$(locate_one "$PAYLOAD_NAME")"
+CHK="$(locate_one checksums.txt)"
+PROVENANCE="$(locate_one provenance.json)"
+cp "$PAYLOAD" "$DEST/$PAYLOAD_NAME"
+cp "$CHK" "$DEST/checksums.txt"
+cp "$PROVENANCE" "$DEST/provenance.json"
+
+echo "Verifying exact checksum entry for $PAYLOAD_NAME..."
+cd "$DEST" || exit 1
+awk -v name="$PAYLOAD_NAME" '
+  { candidate=$2; sub(/^\*/, "", candidate); if (candidate == name) { count++; line=$0 } }
+  END { if (count != 1) exit 1; print line }
+' checksums.txt | sha256sum -c -
+
+python3 -c "$PROVENANCE_VALIDATOR" provenance.json "$DEFINITION_ID" "$RUN_ID"
+# ado-aw:fragment tail
+"###,
+    }
+}
+
+/// Bash body that stages a payload out of a provenance-checked candidate
+/// pipeline artifact, then runs the caller-supplied verify/relocate tail.
 ///
 /// The producer contract is `schema: ado-aw/candidate-artifact/1` with numeric
-/// `producer_definition_id` and `producer_build_id` fields. The script requires
-/// exactly one payload, checksum manifest, and provenance document; verifies an
-/// exact filename checksum entry; and validates producer identity before
-/// running `tail`.
+/// `producer_definition_id` and `producer_build_id` fields.
 ///
-/// SAFETY: shell-interpolated path, payload, and tail arguments must be
-/// compiler-owned constants. Producer IDs are validated positive `u64`s.
+/// Returns the rendered script rather than a step because two callers wrap it
+/// differently — see [`download_compiler_step`] here and
+/// `install_and_download_steps_typed` in `extensions/ado_script.rs`.
 pub(crate) fn stage_candidate_artifact_payload_bash(
     config: &PipelineArtifactConfig,
     staging: &str,
@@ -3364,92 +3531,78 @@ pub(crate) fn stage_candidate_artifact_payload_bash(
     payload: &str,
     tail: &str,
 ) -> String {
-    format!(
-        "set -eo pipefail\n\
-         STAGING=\"{staging}\"\n\
-         DEST=\"{dest_dir}\"\n\
-         PAYLOAD_NAME='{payload}'\n\
-         mkdir -p \"$DEST\"\n\
-         \n\
-         locate_one() {{\n  \
-           local name=\"$1\"\n  \
-           mapfile -d '' -t matches < <(find \"$STAGING\" -type f -name \"$name\" -print0)\n  \
-           if [ \"${{#matches[@]}}\" -ne 1 ]; then\n    \
-             echo \"##vso[task.complete result=Failed]Expected exactly one $name in candidate artifact, found ${{#matches[@]}}\" >&2\n    \
-             exit 1\n  \
-           fi\n  \
-           printf '%s' \"${{matches[0]}}\"\n\
-         }}\n\
-         \n\
-         PAYLOAD=\"$(locate_one \"$PAYLOAD_NAME\")\"\n\
-         CHK=\"$(locate_one checksums.txt)\"\n\
-         PROVENANCE=\"$(locate_one provenance.json)\"\n\
-         cp \"$PAYLOAD\" \"$DEST/$PAYLOAD_NAME\"\n\
-         cp \"$CHK\" \"$DEST/checksums.txt\"\n\
-         cp \"$PROVENANCE\" \"$DEST/provenance.json\"\n\
-         \n\
-         echo \"Verifying exact checksum entry for $PAYLOAD_NAME...\"\n\
-         cd \"$DEST\" || exit 1\n\
-         awk -v name=\"$PAYLOAD_NAME\" '\n  \
-           {{ candidate=$2; sub(/^\\*/, \"\", candidate); if (candidate == name) {{ count++; line=$0 }} }}\n  \
-           END {{ if (count != 1) exit 1; print line }}\n\
-         ' checksums.txt | sha256sum -c -\n\
-         \n\
-         python3 -c '{provenance_validator}' provenance.json {definition_id} {run_id}\n\
-         {tail}",
-        provenance_validator = CANDIDATE_PROVENANCE_VALIDATOR_PY,
-        definition_id = config.definition_id,
-        run_id = config.run_id,
-    )
+    ShellScript::new(&STAGE_CANDIDATE_ARTIFACT_PAYLOAD)
+        .bind("STAGING", Binding::ado_path(staging))
+        .bind("DEST", Binding::ado_path(dest_dir))
+        .bind_text("PAYLOAD_NAME", payload)
+        .bind(
+            "PROVENANCE_VALIDATOR",
+            Binding::document(CANDIDATE_PROVENANCE_VALIDATOR_PY),
+        )
+        .bind("DEFINITION_ID", Binding::number(config.definition_id))
+        .bind("RUN_ID", Binding::number(config.run_id))
+        .fragment("tail", tail)
+        .render()
 }
 
-/// Bash body that locates a payload file inside a `DownloadPackage@1` staging
-/// directory — handling both the extracted-tree and raw-`.nupkg` delivery
-/// shapes — copies it (plus `checksums.txt`) into `dest_dir`, then runs the
-/// caller-supplied verify/relocate tail. `payload` is the artifact file name
-/// (e.g. `ado-aw-linux-x64`); `tail` is appended after the files are staged in
-/// `dest_dir` (the working directory is `dest_dir`).
+shell_script! {
+    /// Locate a payload inside a `DownloadPackage@1` staging directory —
+    /// handling both the extracted-tree and raw-`.nupkg` delivery shapes —
+    /// copy it plus `checksums.txt` into place, verify the checksum, then run
+    /// the caller's tail with `DEST` as the working directory.
+    EXTRACT_PACKAGE_PAYLOAD {
+        interpreter: Bash,
+        bindings: [STAGING, DEST, PAYLOAD_NAME],
+        externals: [],
+        fragments: [tail],
+        body: r###"
+set -eo pipefail
+mkdir -p "$DEST"
+
+# DownloadPackage@1 may deliver an extracted tree or a raw .nupkg;
+# handle both by unzipping any .nupkg when the payload is absent.
+if [ -z "$(find "$STAGING" -name "$PAYLOAD_NAME" -print -quit)" ]; then
+  NUPKG="$(find "$STAGING" -name '*.nupkg' -print -quit)"
+  if [ -n "$NUPKG" ]; then
+    unzip -o "$NUPKG" -d "$STAGING" >/dev/null
+  fi
+fi
+
+BIN="$(find "$STAGING" -name "$PAYLOAD_NAME" -print -quit)"
+CHK="$(find "$STAGING" -name 'checksums.txt' -print -quit)"
+if [ -z "$BIN" ] || [ -z "$CHK" ]; then
+  echo "##vso[task.complete result=Failed]$PAYLOAD_NAME or checksums.txt not found in package"
+  exit 1
+fi
+cp "$BIN" "$DEST/$PAYLOAD_NAME"
+cp "$CHK" "$DEST/checksums.txt"
+
+echo "Verifying checksum..."
+cd "$DEST" || exit 1
+grep "$PAYLOAD_NAME" checksums.txt | sha256sum -c -
+# ado-aw:fragment tail
+"###,
+    }
+}
+
+/// Bash body that stages a payload out of a `DownloadPackage@1` staging
+/// directory and runs the caller-supplied verify/relocate tail.
 ///
-/// SAFETY: every parameter is interpolated verbatim into a `format!()` shell
-/// body with no escaping. All callers MUST pass compile-time-constant,
-/// trusted strings only (today: hardcoded ADO macro paths and literal payload
-/// names). Never pass user/front-matter-controlled data here — doing so would
-/// introduce shell-command injection into the generated pipeline.
+/// `payload` is the artifact file name (e.g. `ado-aw-linux-x64`); `tail` is
+/// appended once the files are staged in `dest_dir`, which is also the working
+/// directory by then.
 fn extract_package_payload_bash(
     staging: &str,
     dest_dir: &str,
     payload: &str,
     tail: &str,
 ) -> String {
-    format!(
-        "set -eo pipefail\n\
-         STAGING=\"{staging}\"\n\
-         DEST=\"{dest_dir}\"\n\
-         mkdir -p \"$DEST\"\n\
-         \n\
-         # DownloadPackage@1 may deliver an extracted tree or a raw .nupkg;\n\
-         # handle both by unzipping any .nupkg when the payload is absent.\n\
-         if [ -z \"$(find \"$STAGING\" -name '{payload}' -print -quit)\" ]; then\n  \
-           NUPKG=\"$(find \"$STAGING\" -name '*.nupkg' -print -quit)\"\n  \
-           if [ -n \"$NUPKG\" ]; then\n    \
-             unzip -o \"$NUPKG\" -d \"$STAGING\" >/dev/null\n  \
-           fi\n\
-         fi\n\
-         \n\
-         BIN=\"$(find \"$STAGING\" -name '{payload}' -print -quit)\"\n\
-         CHK=\"$(find \"$STAGING\" -name 'checksums.txt' -print -quit)\"\n\
-         if [ -z \"$BIN\" ] || [ -z \"$CHK\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]{payload} or checksums.txt not found in package\"\n  \
-           exit 1\n\
-         fi\n\
-         cp \"$BIN\" \"$DEST/{payload}\"\n\
-         cp \"$CHK\" \"$DEST/checksums.txt\"\n\
-         \n\
-         echo \"Verifying checksum...\"\n\
-         cd \"$DEST\" || exit 1\n\
-         grep \"{payload}\" checksums.txt | sha256sum -c -\n\
-         {tail}"
-    )
+    ShellScript::new(&EXTRACT_PACKAGE_PAYLOAD)
+        .bind("STAGING", Binding::ado_path(staging))
+        .bind("DEST", Binding::ado_path(dest_dir))
+        .bind_text("PAYLOAD_NAME", payload)
+        .fragment("tail", tail)
+        .render()
 }
 
 /// `NuGetAuthenticate@1` step to emit **once per job** when the feed mirror is
@@ -3486,7 +3639,10 @@ fn download_compiler_step(
                 "Download candidate artifact for agentic pipeline compiler",
                 staging,
             )),
-            Step::Bash(bash("Stage candidate agentic pipeline compiler", body)),
+            Step::Bash(BashStep::new(
+                "Stage candidate agentic pipeline compiler",
+                body,
+            )),
         ];
     }
 
@@ -3506,35 +3662,107 @@ fn download_compiler_step(
                 compiler_version,
                 staging,
             )),
-            Step::Bash(bash(
+            Step::Bash(BashStep::new(
                 format!("Stage agentic pipeline compiler (v{compiler_version})"),
                 body,
             )),
         ];
     }
 
-    let script = format!(
-        "set -eo pipefail\n\
-         COMPILER_VERSION=\"{compiler_version}\"\n\
-         DOWNLOAD_DIR=\"$(Pipeline.Workspace)/agentic-pipeline-compiler\"\n\
-         DOWNLOAD_URL=\"https://github.com/githubnext/ado-aw/releases/download/v${{COMPILER_VERSION}}/ado-aw-linux-x64\"\n\
-         CHECKSUM_URL=\"https://github.com/githubnext/ado-aw/releases/download/v${{COMPILER_VERSION}}/checksums.txt\"\n\
-         \n\
-         mkdir -p \"$DOWNLOAD_DIR\"\n\
-         echo \"Downloading ado-aw v${{COMPILER_VERSION}} from GitHub Releases...\"\n\
-         curl -fsSL -o \"$DOWNLOAD_DIR/ado-aw-linux-x64\" \"$DOWNLOAD_URL\"\n\
-         curl -fsSL -o \"$DOWNLOAD_DIR/checksums.txt\" \"$CHECKSUM_URL\"\n\
-         \n\
-         echo \"Verifying checksum...\"\n\
-         cd \"$DOWNLOAD_DIR\" || exit 1\n\
-         grep \"ado-aw-linux-x64\" checksums.txt | sha256sum -c -\n\
-         mv ado-aw-linux-x64 ado-aw\n\
-         chmod +x ado-aw\n"
-    );
-    vec![Step::Bash(bash(
-        format!("Download agentic pipeline compiler (v{compiler_version})"),
-        script,
-    ))]
+    vec![Step::Bash(
+        ShellScript::new(&DOWNLOAD_COMPILER_FROM_RELEASES)
+            .bind_text("COMPILER_VERSION", compiler_version)
+            .bind(
+                "PIPELINE_WORKSPACE",
+                Binding::ado_macro("Pipeline.Workspace"),
+            )
+            .into_step(format!(
+                "Download agentic pipeline compiler (v{compiler_version})"
+            )),
+    )]
+}
+
+shell_script! {
+    /// Fallback download path when no supply-chain feed or pipeline artifact
+    /// is configured: fetch the `ado-aw` binary directly from the GitHub
+    /// Releases page, verify its SHA-256 against the published
+    /// `checksums.txt`, and stage it at `<Pipeline.Workspace>/agentic-pipeline-compiler/ado-aw`.
+    DOWNLOAD_COMPILER_FROM_RELEASES {
+        interpreter: Bash,
+        bindings: [COMPILER_VERSION, PIPELINE_WORKSPACE],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -eo pipefail
+DOWNLOAD_DIR="$PIPELINE_WORKSPACE/agentic-pipeline-compiler"
+DOWNLOAD_URL="https://github.com/githubnext/ado-aw/releases/download/v$COMPILER_VERSION/ado-aw-linux-x64"
+CHECKSUM_URL="https://github.com/githubnext/ado-aw/releases/download/v$COMPILER_VERSION/checksums.txt"
+
+mkdir -p "$DOWNLOAD_DIR"
+echo "Downloading ado-aw v$COMPILER_VERSION from GitHub Releases..."
+curl -fsSL -o "$DOWNLOAD_DIR/ado-aw-linux-x64" "$DOWNLOAD_URL"
+curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+
+echo "Verifying checksum..."
+cd "$DOWNLOAD_DIR" || exit 1
+grep "ado-aw-linux-x64" checksums.txt | sha256sum -c -
+mv ado-aw-linux-x64 ado-aw
+chmod +x ado-aw
+"###,
+    }
+}
+
+shell_script! {
+    /// Fallback download path for the AWF (Agentic Workflow Firewall)
+    /// binary: fetch it directly from the GitHub Releases page of
+    /// `github/gh-aw-firewall`, verify its SHA-256, and expose it on `PATH`.
+    DOWNLOAD_AWF_FROM_RELEASES {
+        interpreter: Bash,
+        bindings: [AWF_VERSION, PIPELINE_WORKSPACE],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -eo pipefail
+
+DOWNLOAD_DIR="$PIPELINE_WORKSPACE/awf"
+DOWNLOAD_URL="https://github.com/github/gh-aw-firewall/releases/download/v$AWF_VERSION/awf-linux-x64"
+CHECKSUM_URL="https://github.com/github/gh-aw-firewall/releases/download/v$AWF_VERSION/checksums.txt"
+
+mkdir -p "$DOWNLOAD_DIR"
+echo "Downloading AWF v$AWF_VERSION from GitHub Releases..."
+curl -fsSL -o "$DOWNLOAD_DIR/awf-linux-x64" "$DOWNLOAD_URL"
+curl -fsSL -o "$DOWNLOAD_DIR/checksums.txt" "$CHECKSUM_URL"
+
+echo "Verifying checksum..."
+cd "$DOWNLOAD_DIR" || exit 1
+grep "awf-linux-x64" checksums.txt | sha256sum -c -
+mv awf-linux-x64 awf
+chmod +x awf
+echo "##vso[task.prependpath]$PIPELINE_WORKSPACE/awf"
+./awf --version
+"###,
+    }
+}
+
+shell_script! {
+    /// Pre-pull every AWF container image (and optionally MCPG) so that the
+    /// subsequent `docker run` on the isolated agent network has all images
+    /// available locally. The `mcpg_pull` fragment holds an optional extra
+    /// `docker pull` line for the MCPG image.
+    PREPULL_IMAGES {
+        interpreter: Bash,
+        bindings: [SQUID_IMAGE, AGENT_IMAGE, API_PROXY_IMAGE],
+        externals: [],
+        fragments: [mcpg_pull],
+        body: r###"
+set -eo pipefail
+
+docker pull "$SQUID_IMAGE"
+docker pull "$AGENT_IMAGE"
+docker pull "$API_PROXY_IMAGE"
+# ado-aw:fragment mcpg_pull
+"###,
+    }
 }
 
 fn substitute_integrity_check(yaml: &str, pipeline_path: &str, trigger_repo_dir: &str) -> String {
@@ -3545,106 +3773,153 @@ fn substitute_integrity_check(yaml: &str, pipeline_path: &str, trigger_repo_dir:
         .replace("{{ trigger_repo_directory }}", trigger_repo_dir)
 }
 
+shell_script! {
+    /// Stage the runtime MCPG config JSON, generate a per-run gateway API
+    /// key, and (optionally) stage the compiler-generated custom-tools JSON.
+    /// The two JSON payloads are spliced in via `mcpg_config_heredoc` and
+    /// `custom_tools_block` fragments so the compiler owns the heredoc
+    /// sentinels (each derived from the SHA of its own payload).
+    PREPARE_MCPG_CONFIG {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, MCPG_PORT, MCPG_DOMAIN],
+        externals: [],
+        fragments: [mcpg_config_heredoc, custom_tools_block],
+        body: r###"
+mkdir -p "$AGENT_TEMP/staging"
+
+# Generate MCPG API key early so it's available as an ADO secret variable
+# for both the MCPG config and the agent's mcp-config.json
+MCP_GATEWAY_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')
+echo "##vso[task.setvariable variable=MCP_GATEWAY_API_KEY;issecret=true]$MCP_GATEWAY_API_KEY"
+
+# Export gateway port and domain as pipeline variables (matching gh-aw pattern).
+# These duplicate the compile-time values baked into the YAML, but MCPG's
+# Docker container requires MCP_GATEWAY_PORT and MCP_GATEWAY_DOMAIN env vars
+# to start — the ADO variable indirection satisfies that contract.
+echo "##vso[task.setvariable variable=MCP_GATEWAY_PORT]$MCPG_PORT"
+echo "##vso[task.setvariable variable=MCP_GATEWAY_DOMAIN]$MCPG_DOMAIN"
+
+# Write MCPG (MCP Gateway) configuration to a file
+# ado-aw:fragment mcpg_config_heredoc
+
+# ado-aw:fragment custom_tools_block
+echo "MCPG config:"
+cat "$AGENT_TEMP/staging/mcpg-config.json"
+
+# Validate JSON
+python3 -m json.tool "$AGENT_TEMP/staging/mcpg-config.json" > /dev/null && echo "JSON is valid"
+"###,
+    }
+}
+
 fn prepare_mcpg_config_step(
     mcpg_config_json: &str,
     custom_tools_json: Option<&str>,
 ) -> Result<BashStep> {
-    // mcpg_config_json is pretty-printed JSON. We want `{` to align with
-    // the surrounding `cat`/`echo` lines (no extra leading indent) so the
-    // emitted block-scalar bash body matches base.yml.
-    let custom_tools_script = if let Some(custom_tools_json) = custom_tools_json {
-        let sentinel = super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
+    let mcpg_sentinel = super::common::heredoc_sentinel("MCPG_CONFIG_EOF", mcpg_config_json)?;
+    let mcpg_config_heredoc = format!(
+        "cat > \"$AGENT_TEMP/staging/mcpg-config.json\" << '{mcpg_sentinel}'\n\
+         {mcpg_config_json}\n\
+         {mcpg_sentinel}"
+    );
+    let custom_tools_fragment = if let Some(custom_tools_json) = custom_tools_json {
+        let sentinel =
+            super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
         format!(
             "# Write compiler-generated dynamic SafeOutputs tool definitions\n\
-             cat > \"$(Agent.TempDirectory)/staging/custom-tools.json\" << '{sentinel}'\n\
-{custom_tools_json}\n\
+             cat > \"$AGENT_TEMP/staging/custom-tools.json\" << '{sentinel}'\n\
+             {custom_tools_json}\n\
              {sentinel}\n\
-             python3 -m json.tool \"$(Agent.TempDirectory)/staging/custom-tools.json\" > /dev/null\n\
-             \n"
+             python3 -m json.tool \"$AGENT_TEMP/staging/custom-tools.json\" > /dev/null"
         )
     } else {
         String::new()
     };
-    let script = format!(
-        "mkdir -p \"$(Agent.TempDirectory)/staging\"\n\
-         \n\
-         # Generate MCPG API key early so it's available as an ADO secret variable\n\
-         # for both the MCPG config and the agent's mcp-config.json\n\
-         MCP_GATEWAY_API_KEY=$(openssl rand -base64 45 | tr -d '/+=')\n\
-         echo \"##vso[task.setvariable variable=MCP_GATEWAY_API_KEY;issecret=true]$MCP_GATEWAY_API_KEY\"\n\
-         \n\
-         # Export gateway port and domain as pipeline variables (matching gh-aw pattern).\n\
-         # These duplicate the compile-time values baked into the YAML, but MCPG's\n\
-         # Docker container requires MCP_GATEWAY_PORT and MCP_GATEWAY_DOMAIN env vars\n\
-         # to start — the ADO variable indirection satisfies that contract.\n\
-         echo \"##vso[task.setvariable variable=MCP_GATEWAY_PORT]{MCPG_PORT}\"\n\
-         echo \"##vso[task.setvariable variable=MCP_GATEWAY_DOMAIN]{MCPG_DOMAIN}\"\n\
-         \n\
-         # Write MCPG (MCP Gateway) configuration to a file\n\
-         cat > \"$(Agent.TempDirectory)/staging/mcpg-config.json\" << 'MCPG_CONFIG_EOF'\n\
-{mcpg_config_json}\n\
-         MCPG_CONFIG_EOF\n\
-         \n\
-{custom_tools_script}\
-         echo \"MCPG config:\"\n\
-         cat \"$(Agent.TempDirectory)/staging/mcpg-config.json\"\n\
-         \n\
-         # Validate JSON\n\
-         python3 -m json.tool \"$(Agent.TempDirectory)/staging/mcpg-config.json\" > /dev/null && echo \"JSON is valid\"\n"
-    );
-    Ok(bash("Prepare MCPG config", script))
+    Ok(ShellScript::new(&PREPARE_MCPG_CONFIG)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
+        .bind_text("MCPG_DOMAIN", MCPG_DOMAIN)
+        .fragment("mcpg_config_heredoc", mcpg_config_heredoc)
+        .fragment("custom_tools_block", custom_tools_fragment)
+        .into_step("Prepare MCPG config"))
+}
+
+shell_script! {
+    /// Prepare the AWF working directory (`/tmp/awf-tools/`) with the
+    /// compiler binary and MCPG staging JSON. Copies the compiler out of the
+    /// Pipeline.Workspace and into `/tmp/` so it is reachable inside the
+    /// AWF-managed container (AWF auto-mounts `/tmp:/tmp:rw`).
+    PREPARE_TOOLING {
+        interpreter: Bash,
+        bindings: [PIPELINE_WORKSPACE, AGENT_TEMP],
+        externals: [HOME],
+        fragments: [],
+        body: r###"
+mkdir -p /tmp/awf-tools/staging
+
+echo "HOME: $HOME"
+
+# Use absolute path since MCP subprocess may not inherit PATH
+AGENTIC_PIPELINES_PATH="$PIPELINE_WORKSPACE/agentic-pipeline-compiler/ado-aw"
+
+# Verify the binary exists and is executable
+ls -la "$AGENTIC_PIPELINES_PATH"
+chmod +x "$AGENTIC_PIPELINES_PATH"
+
+$AGENTIC_PIPELINES_PATH -h
+
+# Copy compiler binary to /tmp so it's accessible inside AWF container
+cp "$AGENTIC_PIPELINES_PATH" /tmp/awf-tools/ado-aw
+chmod +x /tmp/awf-tools/ado-aw
+
+# Copy MCPG config to /tmp
+cp "$AGENT_TEMP/staging/mcpg-config.json" /tmp/awf-tools/staging/mcpg-config.json
+if [ -f "$AGENT_TEMP/staging/custom-tools.json" ]; then
+  cp "$AGENT_TEMP/staging/custom-tools.json" /tmp/awf-tools/staging/custom-tools.json
+fi
+"###,
+    }
 }
 
 fn prepare_tooling_step() -> BashStep {
-    let script = "mkdir -p /tmp/awf-tools/staging\n\
-                  \n\
-                  echo \"HOME: $HOME\"\n\
-                  \n\
-                  # Use absolute path since MCP subprocess may not inherit PATH\n\
-                  AGENTIC_PIPELINES_PATH=\"$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw\"\n\
-                  \n\
-                  # Verify the binary exists and is executable\n\
-                  ls -la \"$AGENTIC_PIPELINES_PATH\"\n\
-                  chmod +x \"$AGENTIC_PIPELINES_PATH\"\n\
-                  \n\
-                  $AGENTIC_PIPELINES_PATH -h\n\
-                  \n\
-                  # Copy compiler binary to /tmp so it's accessible inside AWF container\n\
-                  cp \"$AGENTIC_PIPELINES_PATH\" /tmp/awf-tools/ado-aw\n\
-                  chmod +x /tmp/awf-tools/ado-aw\n\
-                  \n\
-                  # Copy MCPG config to /tmp\n\
-                  cp \"$(Agent.TempDirectory)/staging/mcpg-config.json\" /tmp/awf-tools/staging/mcpg-config.json\n\
-                  if [ -f \"$(Agent.TempDirectory)/staging/custom-tools.json\" ]; then\n\
-                    cp \"$(Agent.TempDirectory)/staging/custom-tools.json\" /tmp/awf-tools/staging/custom-tools.json\n\
-                  fi\n";
-    bash("Prepare tooling", script)
+    ShellScript::new(&PREPARE_TOOLING)
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .into_step("Prepare tooling")
+}
+
+shell_script! {
+    /// Write the agent-prompt markdown to `/tmp/awf-tools/agent-prompt.md`
+    /// so that it is reachable inside the AWF container (AWF auto-mounts
+    /// `/tmp:/tmp:rw`). The `heredoc` fragment carries a per-content
+    /// SHA-derived sentinel so a malicious agent markdown body cannot
+    /// terminate the heredoc early and inject shell into the Agent job.
+    PREPARE_AGENT_PROMPT {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [heredoc],
+        body: r###"
+# Write agent instructions to /tmp so it's accessible inside AWF container
+# ado-aw:fragment heredoc
+
+echo "Agent prompt:"
+cat "/tmp/awf-tools/agent-prompt.md"
+"###,
+    }
 }
 
 fn prepare_agent_prompt_step(agent_content: &str) -> Result<BashStep> {
-    // The agent_content lands inside a bash heredoc at the same indent as
-    // `cat > ...` (no extra prefix), matching base.yml's emission.
-    // The template uses leading-9-space `\n\` continuations; `dedent()`
-    // strips them uniformly so the resulting bash body has 0-indent
-    // surrounding lines and the interpolated content lands flush left.
-    //
-    // The sentinel is per-content SHA-derived so a malicious agent
-    // markdown body cannot terminate the heredoc early and inject
-    // shell commands into the Agent job. See
-    // [`crate::compile::common::heredoc_sentinel`].
     let sentinel = super::common::heredoc_sentinel("AGENT_PROMPT_EOF", agent_content)?;
-    let template = format!(
-        "\
-         # Write agent instructions to /tmp so it's accessible inside AWF container\n\
-         cat > \"/tmp/awf-tools/agent-prompt.md\" << '{sentinel}'\n\
-         {{INTERP}}\n\
-         {sentinel}\n\
-         \n\
-         echo \"Agent prompt:\"\n\
-         cat \"/tmp/awf-tools/agent-prompt.md\"\n"
+    let heredoc = format!(
+        "cat > \"/tmp/awf-tools/agent-prompt.md\" << '{sentinel}'\n{agent_content}\n{sentinel}"
     );
-    let script = dedent(&template).replace("{INTERP}", agent_content);
-    Ok(bash("Prepare agent prompt", script))
+    Ok(ShellScript::new(&PREPARE_AGENT_PROMPT)
+        .fragment("heredoc", heredoc)
+        .into_step("Prepare agent prompt"))
 }
 
 fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
@@ -3663,7 +3938,7 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
                 "Download candidate artifact for AWF",
                 staging,
             )),
-            Step::Bash(bash(
+            Step::Bash(BashStep::new(
                 "Stage candidate AWF (Agentic Workflow Firewall)",
                 body,
             )),
@@ -3687,38 +3962,24 @@ fn download_awf_step(supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
                 AWF_VERSION,
                 staging,
             )),
-            Step::Bash(bash(
+            Step::Bash(BashStep::new(
                 format!("Stage AWF (Agentic Workflow Firewall) v{AWF_VERSION}"),
                 body,
             )),
         ];
     }
 
-    let script = format!(
-        "set -eo pipefail\n\
-         \n\
-         AWF_VERSION=\"{AWF_VERSION}\"\n\
-         DOWNLOAD_DIR=\"$(Pipeline.Workspace)/awf\"\n\
-         DOWNLOAD_URL=\"https://github.com/github/gh-aw-firewall/releases/download/v${{AWF_VERSION}}/awf-linux-x64\"\n\
-         CHECKSUM_URL=\"https://github.com/github/gh-aw-firewall/releases/download/v${{AWF_VERSION}}/checksums.txt\"\n\
-         \n\
-         mkdir -p \"$DOWNLOAD_DIR\"\n\
-         echo \"Downloading AWF v${{AWF_VERSION}} from GitHub Releases...\"\n\
-         curl -fsSL -o \"$DOWNLOAD_DIR/awf-linux-x64\" \"$DOWNLOAD_URL\"\n\
-         curl -fsSL -o \"$DOWNLOAD_DIR/checksums.txt\" \"$CHECKSUM_URL\"\n\
-         \n\
-         echo \"Verifying checksum...\"\n\
-         cd \"$DOWNLOAD_DIR\" || exit 1\n\
-         grep \"awf-linux-x64\" checksums.txt | sha256sum -c -\n\
-         mv awf-linux-x64 awf\n\
-         chmod +x awf\n\
-         echo \"##vso[task.prependpath]$(Pipeline.Workspace)/awf\"\n\
-         ./awf --version\n"
-    );
-    vec![Step::Bash(bash(
-        format!("Download AWF (Agentic Workflow Firewall) v{AWF_VERSION}"),
-        script,
-    ))]
+    vec![Step::Bash(
+        ShellScript::new(&DOWNLOAD_AWF_FROM_RELEASES)
+            .bind_text("AWF_VERSION", AWF_VERSION)
+            .bind(
+                "PIPELINE_WORKSPACE",
+                Binding::ado_macro("Pipeline.Workspace"),
+            )
+            .into_step(format!(
+                "Download AWF (Agentic Workflow Firewall) v{AWF_VERSION}"
+            )),
+    )]
 }
 
 fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConfig>) -> Vec<Step> {
@@ -3741,19 +4002,17 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
         registry_base,
     );
 
-    let mut script = format!(
-        "set -eo pipefail\n\
-         \n\
-         docker pull {squid}\n\
-         docker pull {agent}\n\
-         docker pull {api_proxy}\n"
-    );
-    let display = if include_mcpg {
+    let (display, mcpg_pull) = if include_mcpg {
         let mcpg = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
-        script.push_str(&format!("docker pull {mcpg}\n"));
-        format!("Pre-pull AWF and MCPG container images (v{AWF_VERSION})")
+        (
+            format!("Pre-pull AWF and MCPG container images (v{AWF_VERSION})"),
+            format!("docker pull \"{mcpg}\""),
+        )
     } else {
-        format!("Pre-pull AWF container images (v{AWF_VERSION})")
+        (
+            format!("Pre-pull AWF container images (v{AWF_VERSION})"),
+            String::new(),
+        )
     };
 
     let mut steps = Vec::new();
@@ -3766,8 +4025,149 @@ fn prepull_images_step(include_mcpg: bool, supply_chain: Option<&SupplyChainConf
     ) {
         steps.push(Step::Task(acr_login_step(base, conn)));
     }
-    steps.push(Step::Bash(bash(display, script)));
+    steps.push(Step::Bash(
+        ShellScript::new(&PREPULL_IMAGES)
+            .bind_text("SQUID_IMAGE", &squid)
+            .bind_text("AGENT_IMAGE", &agent)
+            .bind_text("API_PROXY_IMAGE", &api_proxy)
+            .fragment("mcpg_pull", mcpg_pull)
+            .into_step(display),
+    ));
     steps
+}
+
+shell_script! {
+    /// Start the MCP Gateway (MCPG) on the runner's Docker daemon so that AWF
+    /// can later attach it to its isolated internal network. This is
+    /// contractually a *single* Bash task — the API key never leaves the
+    /// process — so the block-scalar body has to carry the full multi-line
+    /// `docker run …` invocation. The compiler-owned `docker_env_lines` and
+    /// `debug_flag` fragments splice any extra `-e VAR=…` and `-e DEBUG=…`
+    /// continuation lines directly into the middle of that invocation.
+    ///
+    /// Uses:
+    /// - the pipeline variables `MCP_GATEWAY_API_KEY` (secret) and
+    ///   `ADO_PROXY_IP` (from the optional ado-proxy startup step) as
+    ///   externals routed via `env:`, so the secret is not baked into the
+    ///   emitted YAML prelude
+    /// - `Binding::text` for the two static topology names (container +
+    ///   image ref) and `Binding::number` for the fixed listen port
+    /// - Compile-time constant `MCP_GATEWAY_DOMAIN` bound as text so the
+    ///   docker container receives the same domain constant used elsewhere
+    START_MCPG {
+        interpreter: Bash,
+        bindings: [MCPG_CONTAINER, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN],
+        externals: [MCP_GATEWAY_API_KEY, ADO_PROXY_IP],
+        fragments: [debug_flag, docker_env_lines],
+        body: r###"
+# Substitute runtime values into MCPG config
+MCP_RUNNER_UID=$(id -u)
+MCP_RUNNER_GID=$(id -g)
+MCPG_CONFIG=$(sed \
+  -e "s|\${MCP_RUNNER_UID}|$MCP_RUNNER_UID|g" \
+  -e "s|\${MCP_RUNNER_GID}|$MCP_RUNNER_GID|g" \
+  -e "s|\${MCP_GATEWAY_API_KEY}|$MCP_GATEWAY_API_KEY|g" \
+  -e "s|\${ADO_PROXY_IP}|${ADO_PROXY_IP:-}|g" \
+  /tmp/awf-tools/staging/mcpg-config.json)
+
+# A client redirected at an empty address would resolve the real
+# Azure DevOps instead of the policy engine, quietly restoring the
+# direct path this design removes. Fail loudly rather than start.
+if grep -q 'ADO_PROXY_IP' /tmp/awf-tools/staging/mcpg-config.json \
+   && [ -z "${ADO_PROXY_IP:-}" ]; then
+  echo "##vso[task.complete result=Failed]ado-proxy address is unknown; refusing to start MCP clients unredirected"
+  exit 1
+fi
+
+# Log the template config (before API key substitution) for debugging.
+echo "Starting MCPG with config template:"
+python3 -m json.tool < /tmp/awf-tools/staging/mcpg-config.json
+
+# Remove any leftover container or stale output from a previous interrupted run
+# (--rm only cleans up on clean exit; OOM/SIGKILL may leave it behind)
+docker rm -f "$MCPG_CONTAINER" 2>/dev/null || true
+GATEWAY_OUTPUT="/tmp/gh-aw/mcp-config/gateway-output.json"
+mkdir -p "$(dirname "$GATEWAY_OUTPUT")" /tmp/gh-aw/mcp-logs
+rm -f "$GATEWAY_OUTPUT"
+
+# Start MCPG on Docker's bridge network. AWF attaches this named,
+# trusted container to its internal network after creating awf-net.
+# The Docker socket mount is required because MCPG spawns stdio-based MCP
+# servers as sibling containers. This grants significant host access — acceptable
+# here because the pipeline agent is already trusted and network-isolated by AWF.
+#
+# stdout → gateway-output.json (machine-readable config, read after health check)
+echo "$MCPG_CONFIG" | docker run -i --rm \
+  --name "$MCPG_CONTAINER" \
+  --network bridge \
+  -p "127.0.0.1:$MCPG_PORT:$MCPG_PORT" \
+  --entrypoint /app/awmg \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e MCP_GATEWAY_PORT="$MCPG_PORT" \
+  -e MCP_GATEWAY_DOMAIN="$MCPG_DOMAIN" \
+  -e MCP_GATEWAY_API_KEY="$MCP_GATEWAY_API_KEY" \
+  # ado-aw:fragment debug_flag
+  # ado-aw:fragment docker_env_lines
+  "$MCPG_IMAGE" \
+  --routed --listen "0.0.0.0:$MCPG_PORT" --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
+  > "$GATEWAY_OUTPUT" 2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2) &
+MCPG_PID=$!
+echo "MCPG started (PID: $MCPG_PID)"
+
+# Wait for MCPG to be ready
+READY=false
+for _i in $(seq 1 30); do
+  if curl -sf "http://localhost:$MCPG_PORT/health" > /dev/null 2>&1; then
+    echo "MCPG is ready"
+    READY=true
+    break
+  fi
+  sleep 1
+done
+if [ "$READY" != "true" ]; then
+  echo "##vso[task.complete result=Failed]MCPG did not become ready within 30s"
+  exit 1
+fi
+
+# Wait for gateway output file to contain valid JSON with mcpServers.
+# Health check passing doesn't guarantee stdout is flushed, so poll.
+echo "Waiting for gateway output file..."
+GATEWAY_READY=false
+for _i in $(seq 1 15); do
+  if [ -s "$GATEWAY_OUTPUT" ] && jq -e '.mcpServers' "$GATEWAY_OUTPUT" > /dev/null 2>&1; then
+    echo "Gateway output is ready"
+    GATEWAY_READY=true
+    break
+  fi
+  sleep 1
+done
+if [ "$GATEWAY_READY" != "true" ]; then
+  echo "##vso[task.complete result=Failed]Gateway output file not ready within 15s"
+  echo "Gateway output content:"
+  cat "$GATEWAY_OUTPUT" 2>/dev/null || echo "(empty or missing)"
+  exit 1
+fi
+
+echo "Gateway output:"
+cat "$GATEWAY_OUTPUT"
+
+# Convert gateway output to Copilot CLI mcp-config.json.
+# Mirrors gh-aw's convert_gateway_config_copilot.cjs:
+#   - Rewrite gateway URLs to the stable MCPG container name that AWF
+#     attaches to its internal network
+#   - Ensure tools: ["*"] on each server entry (Copilot CLI requirement)
+#   - Mark generated MCPG entries as default/trusted servers for Copilot CLI
+#   - Preserve all other fields (headers, type, etc.)
+jq --arg prefix "http://$MCPG_DOMAIN:$MCPG_PORT" \
+  '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub("^http://[^/]+/"; "\($prefix)/") | .value.tools = ["*"] | .value.isDefaultServer = true) | from_entries)' \
+  "$GATEWAY_OUTPUT" > /tmp/awf-tools/mcp-config.json
+
+chmod 600 /tmp/awf-tools/mcp-config.json
+
+echo "Generated MCP config at: /tmp/awf-tools/mcp-config.json"
+cat /tmp/awf-tools/mcp-config.json
+"###,
+    }
 }
 
 fn start_mcpg_step(
@@ -3780,155 +4180,48 @@ fn start_mcpg_step(
         .and_then(|sc| sc.registry.as_ref())
         .map(|r| r.name.as_str());
     let mcpg_image_v = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
-    // Build the docker-env block as additional `-e VAR=...` lines, one per
-    // line, joined with `\n  ` (newline + 2-space continuation indent to
-    // match the surrounding `-e MCP_GATEWAY_*` lines). When no extensions
-    // contribute docker env, emit two empty `\`-continuation lines as
-    // placeholders for the legacy `{{ mcpg_debug_flags }}` and
-    // `{{ mcpg_docker_env }}` markers — bash treats them as no-op
-    // continuations and ignoring them keeps the lock file shape stable.
-    // Build the docker-env block as additional `-e VAR=...` lines, one per
-    // line, joined with `\n  ` (newline + 2-space continuation indent to
-    // match the surrounding `-e MCP_GATEWAY_*` lines). When no extensions
-    // contribute docker env, emit two empty `\`-continuation lines as
-    // placeholders for the legacy `{{ mcpg_debug_flags }}` and
-    // `{{ mcpg_docker_env }}` markers — bash treats them as no-op
-    // continuations and ignoring them keeps the lock file shape stable.
-    //
+
+    // Match the legacy layout of two placeholder `\`-continuation lines when
+    // no extensions contribute docker env — bash treats a lone `\` as a
+    // no-op continuation and preserving the shape keeps the docker-run
+    // command's argument boundaries identical to the pre-migration YAML.
     // `generate_mcpg_docker_env` returns a single `\` byte when no
-    // extensions contribute, so check for that sentinel as well as a
-    // literal empty string.
+    // extensions contribute, so match that sentinel as well as an empty
+    // string.
     let docker_env_lines: String =
         if mcpg_docker_env.trim().is_empty() || mcpg_docker_env.trim() == "\\" {
             // Two empty continuation lines mirror the legacy template's
             // two-marker layout.
             "\\\n  \\".to_string()
         } else {
-            // `generate_mcpg_docker_env` already terminates every line with a
-            // ` \` continuation, so re-indent the lines without re-appending
-            // another ` \` (doing so would emit a stray `\ \` that bash reads
-            // as a one-character " " argument, corrupting the `docker run`
-            // image reference — see issue #1034).
+            // `generate_mcpg_docker_env` already terminates every line with
+            // ` \` continuation, so re-indent the lines without appending
+            // another ` \` (issue #1034).
             mcpg_docker_env.lines().collect::<Vec<_>>().join("\n  ")
         };
-    // `--debug-pipeline` injects an extra `-e DEBUG="*" \` continuation
-    // line into the `docker run …` invocation so MCPG (and the stdio
-    // backends it spawns) emit verbose logs to the gateway stderr stream.
-    // Mirrors the legacy `{{ mcpg_debug_flags }}` template marker; emits
-    // the trailing `\n  ` so the next continuation line aligns under it.
+    // `--debug-pipeline` injects an extra `-e DEBUG="*" \` continuation line
+    // into the `docker run …` invocation so MCPG (and the stdio backends it
+    // spawns) emit verbose logs to the gateway stderr stream.
     let debug_flag = if debug_pipeline {
-        "-e DEBUG=\"*\" \\\n  ".to_string()
+        "-e DEBUG=\"*\" \\".to_string()
     } else {
-        String::new()
+        "\\".to_string()
     };
-    let script = format!(
-        "# Substitute runtime values into MCPG config\n\
-         MCP_RUNNER_UID=$(id -u)\n\
-         MCP_RUNNER_GID=$(id -g)\n\
-         MCPG_CONFIG=$(sed \\\n  \
-           -e \"s|\\${{MCP_RUNNER_UID}}|$MCP_RUNNER_UID|g\" \\\n  \
-           -e \"s|\\${{MCP_RUNNER_GID}}|$MCP_RUNNER_GID|g\" \\\n  \
-           -e \"s|\\${{MCP_GATEWAY_API_KEY}}|$(MCP_GATEWAY_API_KEY)|g\" \\\n  \
-           -e \"s|\\${{ADO_PROXY_IP}}|${{ADO_PROXY_IP:-}}|g\" \\\n  \
-           /tmp/awf-tools/staging/mcpg-config.json)\n\
-         \n\
-         # A client redirected at an empty address would resolve the real\n\
-         # Azure DevOps instead of the policy engine, quietly restoring the\n\
-         # direct path this design removes. Fail loudly rather than start.\n\
-         if grep -q 'ADO_PROXY_IP' /tmp/awf-tools/staging/mcpg-config.json \\\n  \
-            && [ -z \"${{ADO_PROXY_IP:-}}\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]ado-proxy address is unknown; refusing to start MCP clients unredirected\"\n  \
-           exit 1\n\
-         fi\n\
-         \n\
-         # Log the template config (before API key substitution) for debugging.\n\
-         echo \"Starting MCPG with config template:\"\n\
-         python3 -m json.tool < /tmp/awf-tools/staging/mcpg-config.json\n\
-         \n\
-         # Remove any leftover container or stale output from a previous interrupted run\n\
-         # (--rm only cleans up on clean exit; OOM/SIGKILL may leave it behind)\n\
-         docker rm -f {MCPG_CONTAINER_NAME} 2>/dev/null || true\n\
-         GATEWAY_OUTPUT=\"/tmp/gh-aw/mcp-config/gateway-output.json\"\n\
-         mkdir -p \"$(dirname \"$GATEWAY_OUTPUT\")\" /tmp/gh-aw/mcp-logs\n\
-         rm -f \"$GATEWAY_OUTPUT\"\n\
-         \n\
-         # Start MCPG on Docker's bridge network. AWF attaches this named,\n\
-         # trusted container to its internal network after creating awf-net.\n\
-         # The Docker socket mount is required because MCPG spawns stdio-based MCP\n\
-         # servers as sibling containers. This grants significant host access — acceptable\n\
-         # here because the pipeline agent is already trusted and network-isolated by AWF.\n\
-         #\n\
-         # stdout → gateway-output.json (machine-readable config, read after health check)\n\
-         echo \"$MCPG_CONFIG\" | docker run -i --rm \\\n  \
-           --name {MCPG_CONTAINER_NAME} \\\n  \
-           --network bridge \\\n  \
-           -p 127.0.0.1:{MCPG_PORT}:{MCPG_PORT} \\\n  \
-           --entrypoint /app/awmg \\\n  \
-           -v /var/run/docker.sock:/var/run/docker.sock \\\n  \
-           -e MCP_GATEWAY_PORT=\"$(MCP_GATEWAY_PORT)\" \\\n  \
-           -e MCP_GATEWAY_DOMAIN=\"$(MCP_GATEWAY_DOMAIN)\" \\\n  \
-           -e MCP_GATEWAY_API_KEY=\"$(MCP_GATEWAY_API_KEY)\" \\\n  \
-           {debug_flag}{docker_env_lines}\n  \
-           {mcpg_image_v} \\\n  \
-           --routed --listen 0.0.0.0:{MCPG_PORT} --config-stdin --log-dir /tmp/gh-aw/mcp-logs \\\n  \
-           > \"$GATEWAY_OUTPUT\" 2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2) &\n\
-         MCPG_PID=$!\n\
-         echo \"MCPG started (PID: $MCPG_PID)\"\n\
-         \n\
-         # Wait for MCPG to be ready\n\
-         READY=false\n\
-         for _i in $(seq 1 30); do\n  \
-           if curl -sf \"http://localhost:{MCPG_PORT}/health\" > /dev/null 2>&1; then\n    \
-             echo \"MCPG is ready\"\n    \
-             READY=true\n    \
-             break\n  \
-           fi\n  \
-           sleep 1\n\
-         done\n\
-         if [ \"$READY\" != \"true\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]MCPG did not become ready within 30s\"\n  \
-           exit 1\n\
-         fi\n\
-         \n\
-         # Wait for gateway output file to contain valid JSON with mcpServers.\n\
-         # Health check passing doesn't guarantee stdout is flushed, so poll.\n\
-         echo \"Waiting for gateway output file...\"\n\
-         GATEWAY_READY=false\n\
-         for _i in $(seq 1 15); do\n  \
-           if [ -s \"$GATEWAY_OUTPUT\" ] && jq -e '.mcpServers' \"$GATEWAY_OUTPUT\" > /dev/null 2>&1; then\n    \
-             echo \"Gateway output is ready\"\n    \
-             GATEWAY_READY=true\n    \
-             break\n  \
-           fi\n  \
-           sleep 1\n\
-         done\n\
-         if [ \"$GATEWAY_READY\" != \"true\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]Gateway output file not ready within 15s\"\n  \
-           echo \"Gateway output content:\"\n  \
-           cat \"$GATEWAY_OUTPUT\" 2>/dev/null || echo \"(empty or missing)\"\n  \
-           exit 1\n\
-         fi\n\
-         \n\
-         echo \"Gateway output:\"\n\
-         cat \"$GATEWAY_OUTPUT\"\n\
-         \n\
-         # Convert gateway output to Copilot CLI mcp-config.json.\n\
-         # Mirrors gh-aw's convert_gateway_config_copilot.cjs:\n\
-         #   - Rewrite gateway URLs to the stable MCPG container name that AWF\n\
-         #     attaches to its internal network\n\
-         #   - Ensure tools: [\"*\"] on each server entry (Copilot CLI requirement)\n\
-         #   - Mark generated MCPG entries as default/trusted servers for Copilot CLI\n\
-         #   - Preserve all other fields (headers, type, etc.)\n\
-         jq --arg prefix \"http://$(MCP_GATEWAY_DOMAIN):$(MCP_GATEWAY_PORT)\" \\\n  \
-           '.mcpServers |= (to_entries | sort_by(.key) | map(.value.url |= sub(\"^http://[^/]+/\"; \"\\($prefix)/\") | .value.tools = [\"*\"] | .value.isDefaultServer = true) | from_entries)' \\\n  \
-           \"$GATEWAY_OUTPUT\" > /tmp/awf-tools/mcp-config.json\n\
-         \n\
-         chmod 600 /tmp/awf-tools/mcp-config.json\n\
-         \n\
-         echo \"Generated MCP config at: /tmp/awf-tools/mcp-config.json\"\n\
-         cat /tmp/awf-tools/mcp-config.json\n"
-    );
-    let mut step = bash("Start MCP Gateway (MCPG)", script);
+
+    use super::ir::env::EnvValue;
+    let mut step = ShellScript::new(&START_MCPG)
+        .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
+        .bind_text("MCPG_IMAGE", &mcpg_image_v)
+        .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
+        .bind_text("MCPG_DOMAIN", MCPG_DOMAIN)
+        .fragment("debug_flag", debug_flag)
+        .fragment("docker_env_lines", docker_env_lines)
+        .into_step("Start MCP Gateway (MCPG)")
+        .with_env(
+            "MCP_GATEWAY_API_KEY",
+            EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
+        )
+        .with_env("ADO_PROXY_IP", EnvValue::pipeline_var("ADO_PROXY_IP"));
     for (k, v) in parse_env_block(mcpg_step_env)? {
         step = step.with_env(k, v);
     }
@@ -3978,6 +4271,81 @@ fn awf_exclude_env_flags(exclude_keys: &[String]) -> String {
     block
 }
 
+shell_script! {
+    /// Invoke the AI agent inside AWF's network-isolated Docker topology.
+    ///
+    /// This is the workflow's *single* Bash task — the pre-signed engine
+    /// command must reach `awf` without any wrapper mutating it, so the
+    /// entire multi-line `awf …` invocation lives in a single block-scalar
+    /// body. Everything variable is spliced via fragments:
+    /// - `topology_attach` — one `--topology-attach` line per trusted peer
+    ///   (MCPG always, ado-proxy when the policy engine is enabled)
+    /// - `image_flags` — `--image-tag` plus optional `--image-registry`
+    /// - `exclude_env` — one `--exclude-env <key>` line per BYOM/BYOK secret
+    ///   AWF's api-proxy sidecar strips out of the agent env
+    /// - `awf_mounts` — the compiler-supplied chain of `--mount "…"` args
+    /// - `routed_engine_run` — the single-quoted `NO_PROXY` prefix + engine
+    ///   command that AWF invokes inside the sandbox
+    RUN_AGENT {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, ALLOWED_DOMAINS],
+        externals: [WORKING_DIRECTORY],
+        fragments: [topology_attach, image_flags, exclude_env, awf_mounts, routed_engine_run],
+        body: r###"
+set -o pipefail
+
+AGENT_OUTPUT_FILE="$AGENT_TEMP/staging/logs/agent-output.txt"
+mkdir -p "$AGENT_TEMP/staging/logs"
+AGENT_EXIT_CODE=0
+
+echo "=== Running AI agent with AWF network isolation ==="
+echo "Allowed domains: $ALLOWED_DOMAINS"
+
+# AWF provides L7 domain whitelisting via a rootless Docker topology.
+# The named MCPG container is attached to AWF's internal network as a
+# trusted endpoint; the agent has no route to the host.
+# AWF auto-mounts /tmp:/tmp:rw into the container, so copilot binary,
+# agent prompt, and MCP config are placed under /tmp/awf-tools/.
+# The argument list is assembled into an array so runtime-supplied
+# fragments splice in as ordinary shell statements (`AWF_ARGS+=(...)`)
+# — no `\`-continuation chain to break with fragment marker comments.
+AWF_ARGS=(
+  --allow-domains "$ALLOWED_DOMAINS"
+  --network-isolation
+)
+# ado-aw:fragment topology_attach
+# ado-aw:fragment image_flags
+AWF_ARGS+=(--skip-pull --env-all)
+# ado-aw:fragment exclude_env
+# ado-aw:fragment awf_mounts
+AWF_ARGS+=(
+  --container-workdir "$WORKING_DIRECTORY"
+  --log-level info
+  --proxy-logs-dir "$AGENT_TEMP/staging/logs/firewall"
+)
+# ado-aw:fragment routed_engine_run
+
+# Stream agent output in real-time while filtering VSO commands.
+# sed -u = unbuffered (line-by-line) so output appears immediately.
+# tee writes to both stdout (ADO pipeline log) and the artifact file.
+# pipefail (set above) ensures AWF's exit code propagates through the pipe.
+# shellcheck disable=SC2016 # The single-quoted engine command inside AWF_ARGS is intentionally expanded by AWF inside the sandbox
+"$PIPELINE_WORKSPACE/awf/awf" "${AWF_ARGS[@]}" 2>&1 \
+  | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
+  | tee "$AGENT_OUTPUT_FILE" \
+  || AGENT_EXIT_CODE=$?
+
+# Print firewall summary if available
+if [ -x "$PIPELINE_WORKSPACE/awf/awf" ]; then
+  echo "=== Firewall Summary ==="
+  "$PIPELINE_WORKSPACE/awf/awf" logs summary --source "$AGENT_TEMP/staging/logs/firewall" 2>/dev/null || true
+fi
+
+exit "$AGENT_EXIT_CODE"
+"###,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_agent_step(
     allowed_domains: &str,
@@ -3989,43 +4357,87 @@ fn run_agent_step(
     supply_chain: Option<&SupplyChainConfig>,
     ado_proxy_enabled: bool,
 ) -> Result<BashStep> {
-    // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines.
-    // Render each at 2-space indent inside the bash body (the surrounding
-    // `--allow-domains` line is at 2-space indent too — the block-scalar
-    // body indent is set by the first non-empty line).
+    // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines;
+    // splice it in at the fragment marker's own indent.
     let awf_mounts_block: String = if awf_mounts == "\\" {
-        "  \\".to_string()
+        // "\\" is the sentinel for "no mounts" in the legacy string
+        // shape; produce an empty append so the array stays unchanged.
+        String::new()
     } else {
-        awf_mounts
-            .lines()
-            .map(|l| format!("  {l}"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        // The legacy shape is `--mount "..." \` per line. Strip the trailing
+        // `\`, split on whitespace-separated `--mount` occurrences, and rebuild
+        // as an `AWF_ARGS+=(...)` statement.
+        let mut lines: Vec<String> = Vec::new();
+        for line in awf_mounts.lines() {
+            let line = line.trim();
+            let line = line.strip_suffix('\\').unwrap_or(line).trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            lines.push(line.to_string());
+        }
+        if lines.is_empty() {
+            String::new()
+        } else {
+            // The ADO macro `$(AW_AZ_MOUNTS)` (contributed by the Azure CLI
+            // extension) is substituted at YAML load time before bash sees it.
+            // shellcheck cannot see the ADO substitution and mis-reads it as
+            // bash command substitution word-splitting into the array (SC2207),
+            // which is precisely what we want here because ADO expands the
+            // macro to zero or more `--mount ...` tokens.
+            format!(
+                "# shellcheck disable=SC2207 # $(AW_AZ_MOUNTS) is an ADO macro substituted at YAML load; word-splitting into the array is intentional.\nAWF_ARGS+=({})",
+                lines.join(" ")
+            )
+        }
     };
     let image_flags_block = awf_image_flags(supply_chain);
     let exclude_env_block = awf_exclude_env_flags(byom_exclude_keys);
 
     // AWF attaches externally-launched trusted containers to its internal
-    // network by name. The flag is repeatable (verified against the pinned
-    // v0.27.32 binary: "Repeatable. Example: --topology-attach mcp-gateway
-    // --topology-attach difc-proxy"), which is what lets the policy engine
-    // join alongside MCPG.
-    //
-    // Attaching also gives the agent an `/etc/hosts` entry for the container,
-    // so the `az` wrapper can resolve the engine by name without relying on
-    // Docker's embedded DNS — which AWF itself works around under gVisor and
-    // ARC/DinD.
+    // network by name. The flag is repeatable, which is what lets the policy
+    // engine join alongside MCPG. Attaching also gives the agent an
+    // `/etc/hosts` entry for the container, so the `az` wrapper can resolve
+    // the engine by name without relying on Docker's embedded DNS.
     let topology_attach_block = {
-        // The preceding `--network-isolation` continuation supplies the indent
-        // for the first line; any additional line must carry its own, matching
-        // `awf_image_flags`.
-        let mut block = format!("--topology-attach \"{MCPG_CONTAINER_NAME}\" \\\n");
+        let mut parts = vec![format!("--topology-attach \"{MCPG_CONTAINER_NAME}\"")];
         if ado_proxy_enabled {
-            block.push_str(&format!(
-                "  --topology-attach \"{ADO_PROXY_CONTAINER_NAME}\" \\\n"
-            ));
+            parts.push(format!("--topology-attach \"{ADO_PROXY_CONTAINER_NAME}\""));
         }
-        block
+        format!("AWF_ARGS+=({})", parts.join(" "))
+    };
+
+    // Convert `awf_image_flags`'s legacy `  --flag "..." \\\n` shape into
+    // `AWF_ARGS+=(--flag "..." ...)`.
+    let image_flags_line = {
+        let mut parts: Vec<String> = Vec::new();
+        for line in image_flags_block.lines() {
+            let line = line.trim();
+            let line = line.strip_suffix('\\').unwrap_or(line).trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            parts.push(line.to_string());
+        }
+        format!("AWF_ARGS+=({})", parts.join(" "))
+    };
+
+    // Same conversion for `awf_exclude_env_flags`.
+    let exclude_env_line = {
+        let mut parts: Vec<String> = Vec::new();
+        for line in exclude_env_block.lines() {
+            let line = line.trim();
+            let line = line.strip_suffix('\\').unwrap_or(line).trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            parts.push(line.to_string());
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("AWF_ARGS+=({})", parts.join(" "))
+        }
     };
 
     // Trusted peers must bypass Squid: their names are not public DNS, and
@@ -4037,55 +4449,23 @@ fn run_agent_step(
         MCPG_CONTAINER_NAME.to_string()
     };
     let routed_engine_run = format!(
-        "export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{no_proxy_peers}\"; \
-         export no_proxy=\"$NO_PROXY\"; {engine_run}"
+        "AWF_ARGS+=(-- 'export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{no_proxy_peers}\"; \
+         export no_proxy=\"$NO_PROXY\"; {engine_run}')"
     );
-    let script = format!(
-        "set -o pipefail\n\
-         \n\
-         AGENT_OUTPUT_FILE=\"$(Agent.TempDirectory)/staging/logs/agent-output.txt\"\n\
-         mkdir -p \"$(Agent.TempDirectory)/staging/logs\"\n\
-         \n\
-         echo \"=== Running AI agent with AWF network isolation ===\"\n\
-         echo \"Allowed domains: {allowed_domains}\"\n\
-         \n\
-         # AWF provides L7 domain whitelisting via a rootless Docker topology.\n\
-         # The named MCPG container is attached to AWF's internal network as a\n\
-         # trusted endpoint; the agent has no route to the host.\n\
-         # AWF auto-mounts /tmp:/tmp:rw into the container, so copilot binary,\n\
-         # agent prompt, and MCP config are placed under /tmp/awf-tools/.\n\
-         # Stream agent output in real-time while filtering VSO commands.\n\
-         # sed -u = unbuffered (line-by-line) so output appears immediately.\n\
-         # tee writes to both stdout (ADO pipeline log) and the artifact file.\n\
-         # pipefail (set above) ensures AWF's exit code propagates through the pipe.\n\
-         # shellcheck disable=SC2046,SC2016 # ADO macros are substituted before bash; the single-quoted engine command is intentionally expanded by AWF inside the sandbox\n\
-         \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
-           --allow-domains \"{allowed_domains}\" \\\n  \
-           --network-isolation \\\n  \
-{topology_attach_block}\
-{image_flags_block}\
-           --skip-pull \\\n  \
-           --env-all \\\n  \
-{exclude_env_block}\
-{awf_mounts_block}\n  \
-           --container-workdir \"{working_directory}\" \\\n  \
-           --log-level info \\\n  \
-           --proxy-logs-dir \"$(Agent.TempDirectory)/staging/logs/firewall\" \\\n  \
-           -- '{routed_engine_run}' \\\n  \
-           2>&1 \\\n  \
-           | sed -u 's/##vso\\[/[VSO-FILTERED] vso[/g; s/##\\[/[VSO-FILTERED] [/g' \\\n  \
-           | tee \"$AGENT_OUTPUT_FILE\" \\\n  \
-           && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?\n\
-         \n\
-         # Print firewall summary if available\n\
-         if [ -x \"$(Pipeline.Workspace)/awf/awf\" ]; then\n  \
-           echo \"=== Firewall Summary ===\"\n  \
-           \"$(Pipeline.Workspace)/awf/awf\" logs summary --source \"$(Agent.TempDirectory)/staging/logs/firewall\" 2>/dev/null || true\n\
-         fi\n\
-         \n\
-         exit \"$AGENT_EXIT_CODE\"\n"
-    );
-    let mut step = bash("Run copilot (AWF network isolated)", script);
+
+    let mut step = ShellScript::new(&RUN_AGENT)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .bind_text("ALLOWED_DOMAINS", allowed_domains)
+        .fragment("topology_attach", topology_attach_block)
+        .fragment("image_flags", image_flags_line)
+        .fragment("exclude_env", exclude_env_line)
+        .fragment("awf_mounts", awf_mounts_block)
+        .fragment("routed_engine_run", routed_engine_run)
+        .into_step("Run copilot (AWF network isolated)");
     step.working_directory = Some(working_directory.to_string());
     // Engine env comes as a multi-line YAML env block — `KEY: VALUE` lines
     // joined by `\n`, no `env:` prefix (it's the value side of an env: mapping).
@@ -4097,10 +4477,52 @@ fn run_agent_step(
             .collect::<Vec<_>>()
             .join("\n")
     );
+    use super::ir::env::EnvValue;
+    // WORKING_DIRECTORY is passed via env: so ADO substitutes any `$(...)`
+    // macros in the value before bash sees it. The prelude `Binding::text`
+    // channel deliberately refuses `$(` to prevent unreviewed macro
+    // substitutions.
+    step = step.with_env("WORKING_DIRECTORY", EnvValue::literal(working_directory));
     for (k, v) in parse_env_block(&synthetic_block)? {
         step = step.with_env(k, v);
     }
     Ok(step)
+}
+
+shell_script! {
+    /// Run `ado-aw execute` (Stage 3). Translates a `SucceededWithIssues`
+    /// exit code (2) from the executor into an ADO SucceededWithIssues
+    /// result rather than a hard failure.
+    ///
+    /// The path externals are supplied through the step `env:` block so ADO
+    /// expands their `$(…)` macros before bash sees the value; the compiler
+    /// itself would refuse to bake an unreviewed `$(` into a binding.
+    ///
+    /// `FILTER_ARGS` is intentionally expanded unquoted so an authored value
+    /// like `--only foo --exclude bar` word-splits into individual flags.
+    /// The producer restricts each token to the safe-output allow-list
+    /// vocabulary (`is_safe_tool_name`), so no shell metacharacter can appear.
+    EXECUTE_SAFE_OUTPUTS {
+        interpreter: Bash,
+        bindings: [FILTER_ARGS],
+        externals: [
+            ADO_AW_SOURCE_PATH,
+            ADO_AW_RESOLVED_CONFIG_PATH,
+            ADO_AW_SAFE_OUTPUT_DIR,
+            ADO_AW_OUTPUT_DIR,
+        ],
+        fragments: [],
+        body: r###"
+# shellcheck disable=SC2086 # FILTER_ARGS is a compiler-owned run of --only/--exclude flags; unquoted expansion is intentional.
+ado-aw execute --source "$ADO_AW_SOURCE_PATH" --resolved-config "$ADO_AW_RESOLVED_CONFIG_PATH" --safe-output-dir "$ADO_AW_SAFE_OUTPUT_DIR" --output-dir "$ADO_AW_OUTPUT_DIR" $FILTER_ARGS
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 2 ]; then
+  echo "##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings"
+  exit 0
+fi
+exit $EXIT_CODE
+"###,
+    }
 }
 
 fn execute_safe_outputs_step(
@@ -4116,21 +4538,30 @@ fn execute_safe_outputs_step(
 ) -> Result<BashStep> {
     // `filter_args` is either empty or a leading-space-prefixed run of
     // `--only <tool>` / `--exclude <tool>` flags appended to the command.
-    let script = format!(
-        "ado-aw execute --source \"{source_path}\" --resolved-config \"{resolved_config_path}\" --safe-output-dir \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)\" --output-dir \"$(Agent.TempDirectory)/staging\"{filter_args}\n\
-         EXIT_CODE=$?\n\
-         if [ $EXIT_CODE -eq 2 ]; then\n  \
-           echo \"##vso[task.complete result=SucceededWithIssues;]Executor completed with warnings\"\n  \
-           exit 0\n\
-         fi\n\
-         exit $EXIT_CODE\n",
-    );
-    let mut step = bash("Execute safe outputs (Stage 3)", script);
-    step.working_directory = Some(self_repository_directory.to_string());
+    let mut script = ShellScript::new(&EXECUTE_SAFE_OUTPUTS)
+        .bind_text("FILTER_ARGS", filter_args.trim())
+        .into_step("Execute safe outputs (Stage 3)");
+    script.working_directory = Some(self_repository_directory.to_string());
+    // Path externals reach bash through ADO env expansion, which is the
+    // documented mechanism for values holding predefined macros.
+    script = script
+        .with_env("ADO_AW_SOURCE_PATH", EnvValue::literal(source_path))
+        .with_env(
+            "ADO_AW_RESOLVED_CONFIG_PATH",
+            EnvValue::literal(resolved_config_path),
+        )
+        .with_env(
+            "ADO_AW_SAFE_OUTPUT_DIR",
+            EnvValue::literal("$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)"),
+        )
+        .with_env(
+            "ADO_AW_OUTPUT_DIR",
+            EnvValue::literal("$(Agent.TempDirectory)/staging"),
+        );
     for (k, v) in parse_env_block(executor_ado_env)? {
-        step = step.with_env(k, v);
+        script = script.with_env(k, v);
     }
-    step = step.with_env(
+    script = script.with_env(
         "ADO_AW_SELF_REPOSITORY_DIRECTORY",
         // The value embeds `$(Build.SourcesDirectory)`, but it is still a
         // `Literal`: ADO expands `$(...)` macros in step `env:` values at agent
@@ -4140,17 +4571,51 @@ fn execute_safe_outputs_step(
         // no part of it needs separate lowering.
         EnvValue::literal(self_repository_directory),
     );
-    step = step.with_env("ADO_AW_SELF_REPOSITORY_NAME", self_repository_name.clone());
-    Ok(step)
+    script = script.with_env(
+        "ADO_AW_SELF_REPOSITORY_NAME",
+        self_repository_name.clone(),
+    );
+    Ok(script)
+}
+
+shell_script! {
+    /// Copy staged safe outputs from AWF's `/tmp` mount back into the
+    /// ADO staging directory for artifact publish.
+    COLLECT_SAFE_OUTPUTS {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP],
+        externals: [],
+        fragments: [],
+        body: r#"
+# Copy safe outputs from /tmp back to staging for artifact publish
+mkdir -p "$AGENT_TEMP/staging"
+cp -r /tmp/awf-tools/staging/* "$AGENT_TEMP/staging/" 2>/dev/null || true
+echo "Safe outputs copied to $AGENT_TEMP/staging"
+ls -la "$AGENT_TEMP/staging" 2>/dev/null || echo "No safe outputs found"
+"#,
+    }
 }
 
 fn collect_safe_outputs_step() -> BashStep {
-    let script = "# Copy safe outputs from /tmp back to staging for artifact publish\n\
-                  mkdir -p \"$(Agent.TempDirectory)/staging\"\n\
-                  cp -r /tmp/awf-tools/staging/* \"$(Agent.TempDirectory)/staging/\" 2>/dev/null || true\n\
-                  echo \"Safe outputs copied to $(Agent.TempDirectory)/staging\"\n\
-                  ls -la \"$(Agent.TempDirectory)/staging\" 2>/dev/null || echo \"No safe outputs found\"\n";
-    bash("Collect safe outputs from AWF container", script).with_condition(Condition::Always)
+    ShellScript::new(&COLLECT_SAFE_OUTPUTS)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .into_step("Collect safe outputs from AWF container")
+        .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Render the proposed safe outputs to a sanitized markdown file for the
+    /// build summary tab. Best-effort: a non-zero exit is downgraded to a
+    /// warning so the summary can never block the review gate.
+    SAFE_OUTPUTS_SUMMARY {
+        interpreter: Bash,
+        bindings: [APPROVAL_SUMMARY_PATH],
+        externals: [],
+        fragments: [],
+        body: r###"
+node "$APPROVAL_SUMMARY_PATH" || echo "##vso[task.logissue type=warning]approval-summary step failed (non-fatal)"
+"###,
+    }
 }
 
 /// Render the proposed safe outputs to a sanitized markdown file and attach it
@@ -4178,14 +4643,34 @@ fn collect_safe_outputs_step() -> BashStep {
 /// The output base name is namespaced (`ado-aw-safe-outputs.md`) so the
 /// ADO-derived summary-tab title never collides with a consumer/template-target
 /// `task.uploadsummary` tab.
-fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
+fn approval_summary_repository_policies(front_matter: &FrontMatter) -> Result<String> {
+    let mut policies = serde_json::Map::new();
+    for tool in front_matter.github_issue_tool_names() {
+        let Some(config) = front_matter.github_issue_compiler_config(&tool)? else {
+            continue;
+        };
+        policies.insert(
+            tool,
+            serde_json::json!({
+                "targetRepo": config.target_repo,
+                "allowedRepos": config.allowed_repos,
+            }),
+        );
+    }
+    Ok(serde_json::Value::Object(policies).to_string())
+}
+
+fn safe_outputs_summary_step(front_matter: &FrontMatter, reviewed: &[String]) -> Result<BashStep> {
     use super::ir::env::EnvValue;
     let approval_summary_path = super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
-    let script = format!(
-        "node '{approval_summary_path}' \
-         || echo \"##vso[task.logissue type=warning]approval-summary step failed (non-fatal)\"\n"
-    );
-    bash("Render safe-outputs summary", script)
+    let repository_policies = approval_summary_repository_policies(front_matter)?;
+    let github_api_url = front_matter
+        .github_safe_outputs_auth()?
+        .map(|auth| auth.api_url().to_string())
+        .unwrap_or_default();
+    Ok(ShellScript::new(&SAFE_OUTPUTS_SUMMARY)
+        .bind_text("APPROVAL_SUMMARY_PATH", approval_summary_path)
+        .into_step("Render safe-outputs summary")
         .with_env(
             "AW_SAFE_OUTPUTS_NDJSON",
             EnvValue::literal("$(Agent.TempDirectory)/staging/safe_outputs.ndjson"),
@@ -4195,29 +4680,102 @@ fn safe_outputs_summary_step(reviewed: &[String]) -> BashStep {
             EnvValue::literal("$(Agent.TempDirectory)/ado-aw-safe-outputs.md"),
         )
         .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join("\n")))
-        .with_condition(Condition::Always)
+        .with_env(
+            "AW_GITHUB_REPOSITORY_POLICIES",
+            EnvValue::literal(repository_policies),
+        )
+        .with_env(
+            "AW_CURRENT_REPOSITORY",
+            EnvValue::ado_macro("Build.Repository.Name")?,
+        )
+        .with_env(
+            "AW_CURRENT_REPOSITORY_PROVIDER",
+            EnvValue::ado_macro("Build.Repository.Provider")?,
+        )
+        .with_env("AW_GITHUB_API_URL", EnvValue::literal(github_api_url))
+        .with_condition(Condition::Always))
+}
+
+shell_script! {
+    /// Prepare the isolated Docker network shared by the proxy and optional
+    /// MCP. `--internal` is load-bearing, not tidiness.
+    PREPARE_ADO_PROXY_NETWORK {
+        interpreter: Bash,
+        bindings: [PROXY_NETWORK],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+
+# Network shared by the policy engine and the Azure DevOps MCP.
+#
+# `--internal` is load-bearing, not tidiness. A normal user-defined
+# bridge has outbound NAT, so the MCP would keep a direct route to the
+# internet — including Azure DevOps hosts that are not redirected —
+# and the engine would police only the one hostname we happen to
+# override. Measured: a container on a normal bridge reaches the
+# internet; on an internal bridge it cannot, while still reaching its
+# peers. The engine keeps its own egress because AWF dual-homes it
+# onto awf-net, where Squid lives.
+if ! docker network inspect "$PROXY_NETWORK" >/dev/null 2>&1; then
+  docker network create --internal "$PROXY_NETWORK"
+fi
+"#,
+    }
 }
 
 /// Prepare the isolated Docker network shared by the proxy and optional MCP.
 fn prepare_ado_proxy_network_step() -> BashStep {
-    let script = format!(
-        "set -euo pipefail\n\
-         \n\
-         # Network shared by the policy engine and the Azure DevOps MCP.\n\
-         #\n\
-         # `--internal` is load-bearing, not tidiness. A normal user-defined\n\
-         # bridge has outbound NAT, so the MCP would keep a direct route to the\n\
-         # internet — including Azure DevOps hosts that are not redirected —\n\
-         # and the engine would police only the one hostname we happen to\n\
-         # override. Measured: a container on a normal bridge reaches the\n\
-         # internet; on an internal bridge it cannot, while still reaching its\n\
-         # peers. The engine keeps its own egress because AWF dual-homes it\n\
-         # onto awf-net, where Squid lives.\n\
-         if ! docker network inspect {ADO_PROXY_NETWORK_NAME} >/dev/null 2>&1; then\n  \
-           docker network create --internal {ADO_PROXY_NETWORK_NAME}\n\
-         fi\n"
-    );
-    bash("Prepare ado-proxy network", script)
+    ShellScript::new(&PREPARE_ADO_PROXY_NETWORK)
+        .bind_text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
+        .into_step("Prepare ado-proxy network")
+}
+
+shell_script! {
+    /// Stage the Azure DevOps MCP package on the runner. It is installed on
+    /// the runner (which has registry access) and mounted read-only into a
+    /// container that does not. The mount point is load-bearing: Node
+    /// resolves dependencies by walking upward from the importing file, so
+    /// the tree must land at `/app/node_modules`.
+    PREPARE_ADO_MCP {
+        interpreter: Bash,
+        bindings: [MCP_HOST_NODE_MODULES, MCP_PACKAGE, MCP_VERSION],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -euo pipefail
+
+# Install the MCP on the runner and stage it for mounting. The
+# container it is mounted into can reach nothing but the engine, so it
+# cannot fetch this itself.
+MCP_STAGE="$(dirname "$MCP_HOST_NODE_MODULES")"
+rm -rf "$MCP_STAGE"
+mkdir -p "$MCP_STAGE"
+cd "$MCP_STAGE"
+npm init -y >/dev/null 2>&1
+npm install --omit=dev --no-audit --no-fund --save-exact \
+  "$MCP_PACKAGE@$MCP_VERSION"
+
+# Verify the pin actually took. `npm install` resolves a *range* for
+# anything it also has to satisfy transitively, so a matching request
+# does not by itself guarantee a matching tree — and the agent's tool
+# surface is defined by whatever ends up on disk here.
+MCP_INSTALLED=$(node -p \
+  "require('$MCP_HOST_NODE_MODULES/$MCP_PACKAGE/package.json').version")
+if [ "$MCP_INSTALLED" != "$MCP_VERSION" ]; then
+  echo "##vso[task.complete result=Failed]Azure DevOps MCP resolved to $MCP_INSTALLED, expected $MCP_VERSION"
+  exit 1
+fi
+
+# Fail here rather than at MCP start time, where a missing entry
+# script surfaces as an opaque MCPG backend error.
+if [ ! -f "$MCP_HOST_NODE_MODULES/$MCP_PACKAGE/dist/index.js" ]; then
+  echo "##vso[task.complete result=Failed]Azure DevOps MCP package did not install"
+  exit 1
+fi
+echo "Azure DevOps MCP $MCP_INSTALLED staged at $MCP_HOST_NODE_MODULES"
+"###,
+    }
 }
 
 /// Stage the Azure DevOps MCP package only when its tool is enabled.
@@ -4227,59 +4785,56 @@ fn prepare_ado_proxy_network_step() -> BashStep {
 /// Node resolves dependencies by walking upward from the importing file, so
 /// the tree must land at `/app/node_modules`.
 fn prepare_ado_mcp_step(version: &str) -> BashStep {
-    let script = format!(
-        "set -euo pipefail\n\
-         \n\
-         # Install the MCP on the runner and stage it for mounting. The\n\
-         # container it is mounted into can reach nothing but the engine, so it\n\
-         # cannot fetch this itself.\n\
-         MCP_STAGE=\"$(dirname {ADO_MCP_HOST_NODE_MODULES})\"\n\
-         rm -rf \"$MCP_STAGE\"\n\
-         mkdir -p \"$MCP_STAGE\"\n\
-         cd \"$MCP_STAGE\"\n\
-         npm init -y >/dev/null 2>&1\n\
-         npm install --omit=dev --no-audit --no-fund --save-exact \\\n  \
-           \"{ADO_MCP_PACKAGE}@{version}\"\n\
-         \n\
-         # Verify the pin actually took. `npm install` resolves a *range* for\n\
-         # anything it also has to satisfy transitively, so a matching request\n\
-         # does not by itself guarantee a matching tree — and the agent's tool\n\
-         # surface is defined by whatever ends up on disk here.\n\
-         MCP_INSTALLED=$(node -p \\\n  \
-           \"require('{ADO_MCP_HOST_NODE_MODULES}/{ADO_MCP_PACKAGE}/package.json').version\")\n\
-         if [ \"$MCP_INSTALLED\" != \"{version}\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]Azure DevOps MCP resolved to $MCP_INSTALLED, expected {version}\"\n  \
-           exit 1\n\
-         fi\n\
-         \n\
-         # Fail here rather than at MCP start time, where a missing entry\n\
-         # script surfaces as an opaque MCPG backend error.\n\
-         if [ ! -f \"{ADO_MCP_HOST_NODE_MODULES}/{ADO_MCP_PACKAGE}/dist/index.js\" ]; then\n  \
-           echo \"##vso[task.complete result=Failed]Azure DevOps MCP package did not install\"\n  \
-           exit 1\n\
-         fi\n\
-         echo \"Azure DevOps MCP $MCP_INSTALLED staged at {ADO_MCP_HOST_NODE_MODULES}\"\n"
-    );
-    bash("Prepare Azure DevOps MCP", script)
+    ShellScript::new(&PREPARE_ADO_MCP)
+        .bind_text("MCP_HOST_NODE_MODULES", ADO_MCP_HOST_NODE_MODULES)
+        .bind_text("MCP_PACKAGE", ADO_MCP_PACKAGE)
+        .bind_text("MCP_VERSION", version)
+        .into_step("Prepare Azure DevOps MCP")
+}
+
+shell_script! {
+    /// Remove the network created for the policy engine and its clients.
+    TEARDOWN_ADO_PROXY_NETWORK {
+        interpreter: Bash,
+        bindings: [PROXY_NETWORK],
+        externals: [],
+        fragments: [],
+        body: r#"
+# Remove the policy-engine network once its containers are gone
+docker network rm "$PROXY_NETWORK" 2>/dev/null || true
+"#,
+    }
 }
 
 /// Remove the network created for the policy engine and its clients.
 fn teardown_ado_proxy_network_step() -> BashStep {
-    let script = format!(
-        "# Remove the policy-engine network once its containers are gone\n\
-         docker network rm {ADO_PROXY_NETWORK_NAME} 2>/dev/null || true\n"
-    );
-    bash("Remove ado-proxy network", script).with_condition(Condition::Always)
+    ShellScript::new(&TEARDOWN_ADO_PROXY_NETWORK)
+        .bind_text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
+        .into_step("Remove ado-proxy network")
+        .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Stop the MCPG container.
+    STOP_MCPG {
+        interpreter: Bash,
+        bindings: [MCPG_CONTAINER],
+        externals: [],
+        fragments: [],
+        body: r#"
+# Stop MCPG container
+echo "Stopping MCPG..."
+docker stop "$MCPG_CONTAINER" 2>/dev/null || true
+echo "MCPG and stdio child containers stopped"
+"#,
+    }
 }
 
 fn stop_mcpg_step() -> BashStep {
-    let script = format!(
-        "# Stop MCPG container\n\
-         echo \"Stopping MCPG...\"\n\
-         docker stop {MCPG_CONTAINER_NAME} 2>/dev/null || true\n\
-         echo \"MCPG and stdio child containers stopped\"\n"
-    );
-    bash("Stop MCPG", script).with_condition(Condition::Always)
+    ShellScript::new(&STOP_MCPG)
+        .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
+        .into_step("Stop MCPG")
+        .with_condition(Condition::Always)
 }
 
 /// Start the `ado-proxy` policy engine as a host container.
@@ -4300,202 +4855,518 @@ fn stop_mcpg_step() -> BashStep {
 /// read them from a file would hand the agent the exact credential this whole
 /// design exists to withhold.
 ///
+/// # Structure
+///
+/// The step's ~200-line body is composed from ordered phases, each registered
+/// as its own [`shell_script!`] so shellcheck sees it in isolation and the
+/// declared variable surface at each phase boundary is visible in the source.
+/// See [`docs/ado-script.md`] and issue #1833 for the design rationale. All
+/// phases still emit into a **single ADO Bash task**: the credential-custody
+/// contract (bearer via `env:` only, private material streamed on stdin,
+/// destroyed before readiness polling) requires atomic execution.
+///
 /// Not yet emitted: see [`stop_ado_proxy_step`].
 fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
     let policy = PolicyDocument::new(front_matter).to_json();
-    let hosts = catalog::catalog().protected_hosts;
-    // Mint one leaf per catalogued protected host. A host without a leaf
-    // cannot be intercepted, so this list must track the catalog rather than
-    // be maintained separately.
-    let leaf_loop = hosts
-        .iter()
-        .map(|host| format!("\"{host}\""))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let hosts: Vec<&str> = catalog::catalog().protected_hosts.to_vec();
 
-    let script = format!(
-        "# Start the ado-proxy policy engine.\n\
-         #\n\
-         # The agent never receives an Azure DevOps credential. This container\n\
-         # holds it, and serves only the operations in the versioned catalog.\n\
-         set -euo pipefail\n\
-         \n\
-         # Generate into the agent work directory, NOT /tmp: AWF mounts /tmp\n\
-         # into the agent chroot, so /tmp is readable by the agent.\n\
-         umask 077\n\
-         PROXY_DIR=$(mktemp -d \"$(Agent.TempDirectory)/ado-proxy.XXXXXX\")\n\
-         cleanup_material() {{ rm -rf \"$PROXY_DIR\"; }}\n\
-         trap cleanup_material EXIT\n\
-         \n\
-         # Policy document. Non-secret, so it is mounted rather than streamed.\n\
-         # Scope is substituted here rather than at compile time so the same\n\
-         # compiled pipeline can be queued against a different project.\n\
-         #\n\
-         # Both the name and the GUID of the project and repository are\n\
-         # supplied: clients address them either way — `az` substitutes\n\
-         # whichever it cached — and the bundle treats an absent identifier as\n\
-         # matching nothing, so omitting one is a silent denial.\n\
-{org_resolve}\
-         ADO_PROXY_PROJECT=\"$(System.TeamProject)\"\n\
-         ADO_PROXY_PROJECT_ID=\"$(System.TeamProjectId)\"\n\
-         ADO_PROXY_REPOSITORY=\"$(Build.Repository.Name)\"\n\
-         ADO_PROXY_REPOSITORY_ID=\"$(Build.Repository.ID)\"\n\
-         mkdir -p \"$PROXY_DIR/policy\"\n\
-         cat > \"$PROXY_DIR/policy/policy.json\" <<'ADO_PROXY_POLICY_EOF'\n\
-         {policy}\n\
-         ADO_PROXY_POLICY_EOF\n\
-         sed -i \\\n  \
-           -e \"s|\\${{ADO_PROXY_ORGANIZATION}}|$ADO_PROXY_ORGANIZATION|g\" \\\n  \
-           -e \"s|\\${{ADO_PROXY_PROJECT}}|$ADO_PROXY_PROJECT|g\" \\\n  \
-           -e \"s|\\${{ADO_PROXY_PROJECT_ID}}|$ADO_PROXY_PROJECT_ID|g\" \\\n  \
-           -e \"s|\\${{ADO_PROXY_REPOSITORY}}|$ADO_PROXY_REPOSITORY|g\" \\\n  \
-           -e \"s|\\${{ADO_PROXY_REPOSITORY_ID}}|$ADO_PROXY_REPOSITORY_ID|g\" \\\n  \
-           \"$PROXY_DIR/policy/policy.json\"\n\
-         \n\
-         # A surviving placeholder would be read as a literal organization or\n\
-         # repository name, matching nothing — a total denial that reads as a\n\
-         # policy decision rather than a bug.\n\
-         if grep -q 'ADO_PROXY_' \"$PROXY_DIR/policy/policy.json\"; then\n  \
-           echo \"##vso[task.complete result=Failed]ado-proxy policy still contains an unsubstituted placeholder\"\n  \
-           exit 1\n\
-         fi\n\
-         echo \"ado-proxy policy:\"\n\
-         python3 -m json.tool < \"$PROXY_DIR/policy/policy.json\"\n\
-         \n\
-         # Interception certificate authority and one leaf per protected host.\n\
-         openssl req -x509 -newkey rsa:2048 -nodes -days 2 \\\n  \
-           -subj \"/CN=ado-aw ado-proxy interception CA\" \\\n  \
-           -keyout \"$PROXY_DIR/ca.key\" -out \"$PROXY_DIR/ca.pem\" \\\n  \
-           -addext \"basicConstraints=critical,CA:TRUE,pathlen:0\" \\\n  \
-           -addext \"keyUsage=critical,keyCertSign,cRLSign\" 2>/dev/null\n\
-         for PROXY_HOST in {leaf_loop}; do\n  \
-           printf 'basicConstraints=CA:FALSE\\nkeyUsage=critical,digitalSignature,keyEncipherment\\nextendedKeyUsage=serverAuth\\nsubjectAltName=DNS:%s\\n' \"$PROXY_HOST\" > \"$PROXY_DIR/leaf.ext\"\n  \
-           openssl req -new -newkey rsa:2048 -nodes -subj \"/CN=$PROXY_HOST\" \\\n    \
-             -keyout \"$PROXY_DIR/$PROXY_HOST.key\" -out \"$PROXY_DIR/$PROXY_HOST.csr\" 2>/dev/null\n  \
-           openssl x509 -req -in \"$PROXY_DIR/$PROXY_HOST.csr\" \\\n    \
-             -CA \"$PROXY_DIR/ca.pem\" -CAkey \"$PROXY_DIR/ca.key\" -CAcreateserial \\\n    \
-             -days 2 -extfile \"$PROXY_DIR/leaf.ext\" -out \"$PROXY_DIR/$PROXY_HOST.pem\" 2>/dev/null\n\
-         done\n\
-         \n\
-         # The proxy publishes its own interception CA certificate for clients\n\
-         # to trust. It goes under /tmp deliberately: AWF mounts /tmp into the\n\
-         # agent chroot, so this one file is what the az wrapper reads and what\n\
-         # the MCP container mounts. Publishing once means no client can trust\n\
-         # a stale copy. The matching private key never leaves $PROXY_DIR and\n\
-         # is destroyed below.\n\
-         mkdir -p {az_wrapper_dir}\n\
-         echo \"##vso[task.setvariable variable=ADO_PROXY_CA_FILE]{ca_host_path}\"\n\
-         \n\
-         # Build the material document. jq assembles it so that a value\n\
-         # containing JSON metacharacters cannot alter the document shape.\n\
-         PROXY_MATERIAL=$(jq -n \\\n  \
-           --arg schema 'ado-aw/ado-proxy-material/v1' \\\n  \
-           --arg ca_cert \"$(base64 -w0 < \"$PROXY_DIR/ca.pem\")\" \\\n  \
-           --arg token \"$(printf '%s' \"$ADO_PROXY_BEARER\" | base64 -w0)\" \\\n  \
-           '{{schema: $schema, ca_cert: $ca_cert, token: $token, leaves: {{}}}}')\n\
-         for PROXY_HOST in {leaf_loop}; do\n  \
-           PROXY_MATERIAL=$(printf '%s' \"$PROXY_MATERIAL\" | jq \\\n    \
-             --arg host \"$PROXY_HOST\" \\\n    \
-             --arg key \"$(base64 -w0 < \"$PROXY_DIR/$PROXY_HOST.key\")\" \\\n    \
-             --arg cert \"$(base64 -w0 < \"$PROXY_DIR/$PROXY_HOST.pem\")\" \\\n    \
-             '.leaves[$host] = {{key: $key, cert: $cert}}')\n\
-         done\n\
-         \n\
-         # Remove any container left behind by an interrupted run.\n\
-         docker rm -f {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n\
-         mkdir -p /tmp/gh-aw/ado-proxy-logs\n\
-         \n\
-         # Start detached so the container lifetime belongs to Docker, not to\n\
-         # this Bash task's attached STDIO. Azure Pipelines cleans up inherited\n\
-         # child streams between tasks; an attached `docker run -i ... &` was\n\
-         # observed to exit and `--rm` itself before AWF could attach it.\n\
-         #\n\
-         # A container-local FIFO preserves the stdin-only custody contract:\n\
-         # material is streamed through `docker exec -i`, never written to a\n\
-         # runner path, container layer, argv, or environment.\n\
-         docker run -d \\\n  \
-           --name {ADO_PROXY_CONTAINER_NAME} \\\n  \
-           --network {ADO_PROXY_NETWORK_NAME} \\\n  \
-           --entrypoint sh \\\n  \
-           -v \"{ado_proxy_path}:/app/ado-proxy.js:ro\" \\\n  \
-           -v \"$PROXY_DIR/policy:/etc/ado-proxy:ro\" \\\n  \
-           -v /tmp/ado-aw-lib:/var/lib/ado-proxy \\\n  \
-           -v /tmp/gh-aw/ado-proxy-logs:/var/log/ado-proxy \\\n  \
-           {ado_proxy_image} \\\n  \
-           -c 'set -eu; umask 077; MATERIAL_FIFO=/tmp/ado-proxy-material; mkfifo \"$MATERIAL_FIFO\"; exec node /app/ado-proxy.js --policy-file /etc/ado-proxy/policy.json --public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem --upstream-proxy {squid_url} --listen-port {listen_port} --tls-port {tls_port} --log-dir /var/log/ado-proxy < \"$MATERIAL_FIFO\"' \\\n  \
-           >/dev/null\n\
-         \n\
-         # Wait until the detached container is blocked on its private FIFO,\n\
-         # then hand over the one-shot material. A transfer failure prints the\n\
-         # durable Docker log and container state before failing the pipeline.\n\
-         FIFO_READY=false\n\
-         for _i in $(seq 1 30); do\n  \
-           if docker exec {ADO_PROXY_CONTAINER_NAME} test -p /tmp/ado-proxy-material 2>/dev/null; then\n    \
-             FIFO_READY=true\n    \
-             break\n  \
-           fi\n  \
-           sleep 1\n\
-         done\n\
-         if [ \"$FIFO_READY\" != \"true\" ]; then\n  \
-           echo \"##vso[task.logissue type=error]ado-proxy container did not create its private material channel\"\n  \
-           docker inspect -f 'state={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}} error={{{{.State.Error}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n  \
-           docker logs --tail 200 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n  \
-           exit 1\n\
-         fi\n\
-         if ! printf '%s' \"$PROXY_MATERIAL\" | docker exec -i {ADO_PROXY_CONTAINER_NAME} sh -c 'cat > /tmp/ado-proxy-material'; then\n  \
-           echo \"##vso[task.logissue type=error]ado-proxy material handover failed\"\n  \
-           docker inspect -f 'state={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}} error={{{{.State.Error}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n  \
-           docker logs --tail 200 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n  \
-           exit 1\n\
-         fi\n\
-         \n\
-         # Drop the private material as soon as it has been handed over. The\n\
-         # container has it in memory; nothing else needs it again.\n\
-         PROXY_MATERIAL=\"\"\n\
-         unset PROXY_MATERIAL\n\
-         shred -u \"$PROXY_DIR/ca.key\" \"$PROXY_DIR\"/*.key 2>/dev/null || rm -f \"$PROXY_DIR/ca.key\" \"$PROXY_DIR\"/*.key\n\
-         \n\
-         # Resolve the container IP only after the engine has parsed policy,\n\
-         # published its public CA and reached its listening state.\n\
-         PROXY_READY=false\n\
-         for _i in $(seq 1 30); do\n  \
-           PROXY_STATE=$(docker inspect -f '{{{{.State.Status}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true)\n  \
-           if [ \"$PROXY_STATE\" = \"exited\" ] || [ \"$PROXY_STATE\" = \"dead\" ]; then\n    \
-             break\n  \
-           fi\n  \
-           ADO_PROXY_IP=$(docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{.IPAddress}}}}{{{{end}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true)\n  \
-           if [ -n \"$ADO_PROXY_IP\" ] \\\n    \
-              && [ -f {ca_host_path} ] \\\n    \
-              && docker logs {ADO_PROXY_CONTAINER_NAME} 2>&1 | grep -q '\\[ado-proxy\\] listening'; then\n    \
-             PROXY_READY=true\n    \
-             break\n  \
-           fi\n  \
-           sleep 1\n\
-         done\n\
-         if [ \"$PROXY_READY\" != \"true\" ]; then\n  \
-           echo \"##vso[task.logissue type=error]ado-proxy did not become ready within 30s (state=${{PROXY_STATE:-missing}})\"\n  \
-           docker inspect -f 'state={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}} error={{{{.State.Error}}}}' {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n  \
-           docker logs --tail 200 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n  \
-           exit 1\n\
-         fi\n\
-         echo \"ado-proxy is ready at $ADO_PROXY_IP\"\n\
-         docker logs --tail 1 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n\
-         echo \"##vso[task.setvariable variable=ADO_PROXY_IP]$ADO_PROXY_IP\"\n",
-        org_resolve = common::resolve_ado_organization_bash(),
-        ado_proxy_path = paths::ADO_PROXY_PATH,
-        ca_host_path = ADO_PROXY_PUBLIC_CA_HOST_PATH,
-        az_wrapper_dir = AZ_WRAPPER_DIR,
-        ado_proxy_image = ADO_PROXY_IMAGE,
-        squid_url = AWF_SQUID_URL,
-        listen_port = ADO_PROXY_LISTEN_PORT,
-        tls_port = ADO_PROXY_TLS_PORT,
-    );
-
-    bash("Start ado-proxy policy engine", script)
+    ShellScript::new(&START_ADO_PROXY)
+        .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+        .bind_text("PROXY_IMAGE", ADO_PROXY_IMAGE)
+        .bind_text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
+        .bind_text("PROXY_SCRIPT_PATH", paths::ADO_PROXY_PATH)
+        .bind_text("AZ_WRAPPER_DIR", AZ_WRAPPER_DIR)
+        .bind_text("CA_HOST_PATH", ADO_PROXY_PUBLIC_CA_HOST_PATH)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind(
+            "ADO_PROXY_PROJECT",
+            Binding::ado_macro("System.TeamProject"),
+        )
+        .bind(
+            "ADO_PROXY_PROJECT_ID",
+            Binding::ado_macro("System.TeamProjectId"),
+        )
+        .bind(
+            "ADO_PROXY_REPOSITORY",
+            Binding::ado_macro("Build.Repository.Name"),
+        )
+        .bind(
+            "ADO_PROXY_REPOSITORY_ID",
+            Binding::ado_macro("Build.Repository.ID"),
+        )
+        .bind("LEAF_HOSTS", Binding::words(&hosts))
+        .bind("POLICY", Binding::document(policy))
+        .bind(
+            "CONTAINER_ENTRYPOINT",
+            Binding::text(ado_proxy_container_entrypoint_flattened()),
+        )
+        .fragment("resolve_org", common::resolve_ado_organization_bash())
+        .fragment(
+            "setup_workdir",
+            phase_body(&START_ADO_PROXY_SETUP_WORKDIR),
+        )
+        .fragment("write_policy", phase_body(&START_ADO_PROXY_WRITE_POLICY))
+        .fragment(
+            "mint_material",
+            phase_body(&START_ADO_PROXY_MINT_MATERIAL),
+        )
+        .fragment(
+            "build_material",
+            phase_body(&START_ADO_PROXY_BUILD_MATERIAL),
+        )
+        .fragment(
+            "run_container",
+            phase_body(&START_ADO_PROXY_RUN_CONTAINER),
+        )
+        .fragment(
+            "handover_material",
+            phase_body(&START_ADO_PROXY_HANDOVER_MATERIAL),
+        )
+        .fragment(
+            "destroy_private",
+            phase_body(&START_ADO_PROXY_DESTROY_PRIVATE),
+        )
+        .fragment("wait_ready", phase_body(&START_ADO_PROXY_WAIT_READY))
+        .into_step("Start ado-proxy policy engine")
         // The bearer is read from the environment here and immediately
         // base64-encoded into the stdin document; it is never written to a
         // file and never reaches the container's `Env`.
         .with_env("ADO_PROXY_BEARER", EnvValue::secret("SC_READ_TOKEN"))
+}
+
+/// Return a phase's body verbatim (trimmed and dedented) so it can be
+/// spliced as a `# ado-aw:fragment` in [`START_ADO_PROXY`]. Each phase is
+/// still registered — and therefore shellchecked — in isolation.
+fn phase_body(def: &crate::compile::shell::ShellScriptDef) -> String {
+    // Skip a leading shebang line if present (phases don't carry one; guard
+    // is defence-in-depth), then dedent the raw body.
+    let body = def.body.trim_start_matches('\n');
+    crate::compile::shell::dedent(body).trim().to_string()
+}
+
+/// The one-liner passed to the container's `sh -c`. Kept in sync with the
+/// registered [`START_ADO_PROXY_CONTAINER_ENTRYPOINT_SH`] script via
+/// `container_entrypoint_matches_registered_body`.
+fn ado_proxy_container_entrypoint_flattened() -> String {
+    format!(
+        "set -eu; umask 077; MATERIAL_FIFO=/tmp/ado-proxy-material; \
+         mkfifo \"$MATERIAL_FIFO\"; \
+         exec node /app/ado-proxy.js \
+         --policy-file /etc/ado-proxy/policy.json \
+         --public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem \
+         --upstream-proxy {url} \
+         --listen-port {lp} \
+         --tls-port {tp} \
+         --log-dir /var/log/ado-proxy < \"$MATERIAL_FIFO\"",
+        url = AWF_SQUID_URL,
+        lp = ADO_PROXY_LISTEN_PORT,
+        tp = ADO_PROXY_TLS_PORT,
+    )
+}
+
+// ── ado-proxy phase scripts ─────────────────────────────────────────────
+//
+// The start_ado_proxy step's ~200-line body is composed from these ordered
+// phases. Each is registered so `src/compile/shell/lint.rs` shellchecks it in
+// isolation, and each phase's declared `externals:` list makes the
+// inter-phase variable contract visible in the source.
+//
+// The full script still runs as a **single trusted Bash task** because the
+// credential-custody contract (bearer via env only, private material on
+// stdin, destroyed before polling) requires atomic execution.
+
+shell_script! {
+    /// Phase 1: create the agent-private work directory outside `/tmp` and
+    /// register a cleanup trap. AWF mounts `/tmp` into the agent chroot, so
+    /// any private material generated under `/tmp` would be agent-readable.
+    START_ADO_PROXY_SETUP_WORKDIR {
+        interpreter: Bash,
+        bindings: [],
+        externals: [AGENT_TEMP],
+        fragments: [],
+        body: r###"
+set -euo pipefail
+
+# Generate into the agent work directory, NOT /tmp: AWF mounts /tmp
+# into the agent chroot, so /tmp is readable by the agent.
+umask 077
+PROXY_DIR=$(mktemp -d "$AGENT_TEMP/ado-proxy.XXXXXX")
+cleanup_material() { rm -rf "$PROXY_DIR"; }
+trap cleanup_material EXIT
+"###,
+    }
+}
+
+shell_script! {
+    /// Phase 3: write the policy document, substitute the scope identifiers
+    /// resolved at pipeline runtime, refuse to start if any placeholder
+    /// survives, then dump the fully substituted policy for auditability.
+    ///
+    /// Both name and GUID of project and repository are supplied because
+    /// clients may address either — `az` substitutes whichever it cached.
+    /// The bundle treats an absent identifier as matching nothing, so
+    /// omitting one is a silent denial.
+    START_ADO_PROXY_WRITE_POLICY {
+        interpreter: Bash,
+        bindings: [],
+        externals: [
+            PROXY_DIR, POLICY,
+            ADO_PROXY_ORGANIZATION,
+            ADO_PROXY_PROJECT, ADO_PROXY_PROJECT_ID,
+            ADO_PROXY_REPOSITORY, ADO_PROXY_REPOSITORY_ID
+        ],
+        fragments: [],
+        body: r###"
+# Policy document. Non-secret, so it is mounted rather than streamed.
+# Scope is substituted here rather than at compile time so the same
+# compiled pipeline can be queued against a different project.
+mkdir -p "$PROXY_DIR/policy"
+printf '%s\n' "$POLICY" > "$PROXY_DIR/policy/policy.json"
+sed -i \
+  -e "s|\${ADO_PROXY_ORGANIZATION}|$ADO_PROXY_ORGANIZATION|g" \
+  -e "s|\${ADO_PROXY_PROJECT}|$ADO_PROXY_PROJECT|g" \
+  -e "s|\${ADO_PROXY_PROJECT_ID}|$ADO_PROXY_PROJECT_ID|g" \
+  -e "s|\${ADO_PROXY_REPOSITORY}|$ADO_PROXY_REPOSITORY|g" \
+  -e "s|\${ADO_PROXY_REPOSITORY_ID}|$ADO_PROXY_REPOSITORY_ID|g" \
+  "$PROXY_DIR/policy/policy.json"
+
+# A surviving placeholder would be read as a literal organization or
+# repository name, matching nothing — a total denial that reads as a
+# policy decision rather than a bug.
+if grep -q 'ADO_PROXY_' "$PROXY_DIR/policy/policy.json"; then
+  echo "##vso[task.complete result=Failed]ado-proxy policy still contains an unsubstituted placeholder"
+  exit 1
+fi
+echo "ado-proxy policy:"
+python3 -m json.tool < "$PROXY_DIR/policy/policy.json"
+"###,
+    }
+}
+
+shell_script! {
+    /// Phase 4: mint the interception CA plus one leaf per catalogued
+    /// protected host, then publish the CA path via `task.setvariable` for
+    /// clients (the `az` wrapper, the ADO MCP mount). The matching private
+    /// key never leaves `$PROXY_DIR` and is destroyed in
+    /// [`START_ADO_PROXY_DESTROY_PRIVATE`].
+    ///
+    /// `keyUsage=critical,keyCertSign,cRLSign` is load-bearing: OpenSSL 3
+    /// (as used by Python `requests`) rejects `pathlen` without an explicit
+    /// `keyCertSign`, so a lax CA would fail strict verifiers.
+    START_ADO_PROXY_MINT_MATERIAL {
+        interpreter: Bash,
+        bindings: [],
+        externals: [PROXY_DIR, LEAF_HOSTS, AZ_WRAPPER_DIR, CA_HOST_PATH],
+        fragments: [],
+        body: r###"
+# Interception certificate authority and one leaf per protected host.
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+  -subj "/CN=ado-aw ado-proxy interception CA" \
+  -keyout "$PROXY_DIR/ca.key" -out "$PROXY_DIR/ca.pem" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
+# shellcheck disable=SC2086 # LEAF_HOSTS is Binding::words; unquoted expansion is the documented word-list contract.
+for PROXY_HOST in $LEAF_HOSTS; do
+  printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:%s\n' "$PROXY_HOST" > "$PROXY_DIR/leaf.ext"
+  openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$PROXY_HOST" \
+    -keyout "$PROXY_DIR/$PROXY_HOST.key" -out "$PROXY_DIR/$PROXY_HOST.csr" 2>/dev/null
+  openssl x509 -req -in "$PROXY_DIR/$PROXY_HOST.csr" \
+    -CA "$PROXY_DIR/ca.pem" -CAkey "$PROXY_DIR/ca.key" -CAcreateserial \
+    -days 2 -extfile "$PROXY_DIR/leaf.ext" -out "$PROXY_DIR/$PROXY_HOST.pem" 2>/dev/null
+done
+
+# The proxy publishes its own interception CA certificate for clients
+# to trust. It goes under /tmp deliberately: AWF mounts /tmp into the
+# agent chroot, so this one file is what the az wrapper reads and what
+# the MCP container mounts. Publishing once means no client can trust
+# a stale copy. The matching private key never leaves $PROXY_DIR and
+# is destroyed below.
+mkdir -p "$AZ_WRAPPER_DIR"
+echo "##vso[task.setvariable variable=ADO_PROXY_CA_FILE]$CA_HOST_PATH"
+"###,
+    }
+}
+
+shell_script! {
+    /// Phase 5: assemble the material document with `jq` so a value
+    /// containing JSON metacharacters cannot alter the document shape. The
+    /// bearer is read from the environment here and immediately base64-
+    /// encoded into the JSON string — it never lands in argv, in a file, or
+    /// in the container `Env`.
+    START_ADO_PROXY_BUILD_MATERIAL {
+        interpreter: Bash,
+        bindings: [],
+        externals: [PROXY_DIR, LEAF_HOSTS, ADO_PROXY_BEARER],
+        fragments: [],
+        body: r###"
+# Build the material document. jq assembles it so that a value
+# containing JSON metacharacters cannot alter the document shape.
+PROXY_MATERIAL=$(jq -n \
+  --arg schema 'ado-aw/ado-proxy-material/v1' \
+  --arg ca_cert "$(base64 -w0 < "$PROXY_DIR/ca.pem")" \
+  --arg token "$(printf '%s' "$ADO_PROXY_BEARER" | base64 -w0)" \
+  '{schema: $schema, ca_cert: $ca_cert, token: $token, leaves: {}}')
+# shellcheck disable=SC2086 # LEAF_HOSTS is Binding::words; unquoted expansion is the documented word-list contract.
+for PROXY_HOST in $LEAF_HOSTS; do
+  PROXY_MATERIAL=$(printf '%s' "$PROXY_MATERIAL" | jq \
+    --arg host "$PROXY_HOST" \
+    --arg key "$(base64 -w0 < "$PROXY_DIR/$PROXY_HOST.key")" \
+    --arg cert "$(base64 -w0 < "$PROXY_DIR/$PROXY_HOST.pem")" \
+    '.leaves[$host] = {key: $key, cert: $cert}')
+done
+"###,
+    }
+}
+
+shell_script! {
+    /// Phase 6: start the proxy container detached, so the container
+    /// lifetime belongs to Docker, not to this Bash task's attached STDIO.
+    /// Azure Pipelines cleans up inherited child streams between tasks; an
+    /// attached `docker run -i ... &` was observed to exit and `--rm` itself
+    /// before AWF could attach it.
+    ///
+    /// A container-local FIFO preserves the stdin-only custody contract:
+    /// material is streamed through `docker exec -i`, never written to a
+    /// runner path, container layer, argv, or environment.
+    START_ADO_PROXY_RUN_CONTAINER {
+        interpreter: Bash,
+        bindings: [],
+        externals: [
+            PROXY_CONTAINER, PROXY_NETWORK, PROXY_SCRIPT_PATH,
+            PROXY_DIR, PROXY_IMAGE, CONTAINER_ENTRYPOINT, AZ_WRAPPER_DIR
+        ],
+        fragments: [],
+        body: r###"
+# Remove any container left behind by an interrupted run.
+docker rm -f "$PROXY_CONTAINER" 2>/dev/null || true
+mkdir -p /tmp/gh-aw/ado-proxy-logs
+
+# Start detached so the container lifetime belongs to Docker, not to
+# this Bash task's attached STDIO. Azure Pipelines cleans up inherited
+# child streams between tasks; an attached `docker run -i ... &` was
+# observed to exit and `--rm` itself before AWF could attach it.
+#
+# A container-local FIFO preserves the stdin-only custody contract:
+# material is streamed through `docker exec -i`, never written to a
+# runner path, container layer, argv, or environment.
+docker run -d \
+  --name "$PROXY_CONTAINER" \
+  --network "$PROXY_NETWORK" \
+  --entrypoint sh \
+  -v "$PROXY_SCRIPT_PATH:/app/ado-proxy.js:ro" \
+  -v "$PROXY_DIR/policy:/etc/ado-proxy:ro" \
+  -v "$AZ_WRAPPER_DIR:/var/lib/ado-proxy" \
+  -v /tmp/gh-aw/ado-proxy-logs:/var/log/ado-proxy \
+  "$PROXY_IMAGE" \
+  -c "$CONTAINER_ENTRYPOINT" \
+  >/dev/null
+"###,
+    }
+}
+
+shell_script! {
+    /// Phase 7: wait for the container to open its private material FIFO,
+    /// then stream the assembled material in over `docker exec -i`. A
+    /// failed transfer prints durable Docker log + inspect state before
+    /// failing the pipeline so the true cause reaches the audit trail.
+    START_ADO_PROXY_HANDOVER_MATERIAL {
+        interpreter: Bash,
+        bindings: [],
+        externals: [PROXY_CONTAINER, PROXY_MATERIAL],
+        fragments: [],
+        body: r###"
+# Wait until the detached container is blocked on its private FIFO,
+# then hand over the one-shot material. A transfer failure prints the
+# durable Docker log and container state before failing the pipeline.
+FIFO_READY=false
+for _i in $(seq 1 30); do
+  if docker exec "$PROXY_CONTAINER" test -p /tmp/ado-proxy-material 2>/dev/null; then
+    FIFO_READY=true
+    break
+  fi
+  sleep 1
+done
+if [ "$FIFO_READY" != "true" ]; then
+  echo "##vso[task.logissue type=error]ado-proxy container did not create its private material channel"
+  docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' "$PROXY_CONTAINER" 2>/dev/null || true
+  docker logs --tail 200 "$PROXY_CONTAINER" 2>&1 || true
+  exit 1
+fi
+if ! printf '%s' "$PROXY_MATERIAL" | docker exec -i "$PROXY_CONTAINER" sh -c 'cat > /tmp/ado-proxy-material'; then
+  echo "##vso[task.logissue type=error]ado-proxy material handover failed"
+  docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' "$PROXY_CONTAINER" 2>/dev/null || true
+  docker logs --tail 200 "$PROXY_CONTAINER" 2>&1 || true
+  exit 1
+fi
+"###,
+    }
+}
+
+shell_script! {
+    /// Phase 8: destroy the private material as soon as the container has
+    /// consumed it. The container holds material in memory only; nothing
+    /// else needs it. Ordering matters: this must run before readiness
+    /// polling so a hung poll cannot keep the CA private key on disk.
+    START_ADO_PROXY_DESTROY_PRIVATE {
+        interpreter: Bash,
+        bindings: [],
+        externals: [PROXY_DIR],
+        fragments: [],
+        body: r###"
+# Drop the private material as soon as it has been handed over. The
+# container has it in memory; nothing else needs it again.
+#
+# Blanking before `unset` is deliberate: `unset` alone removes the name
+# binding but a shell is free to leave the value in the freed slot, and this
+# value is the ADO bearer plus the CA private key. Assigning "" overwrites it
+# first.
+# shellcheck disable=SC2034  # write-only by design; the assignment *is* the erasure
+PROXY_MATERIAL=""
+unset PROXY_MATERIAL
+shred -u "$PROXY_DIR/ca.key" "$PROXY_DIR"/*.key 2>/dev/null || rm -f "$PROXY_DIR/ca.key" "$PROXY_DIR"/*.key
+"###,
+    }
+}
+
+shell_script! {
+    /// Phase 9: resolve the container IP after the engine has parsed
+    /// policy, published its public CA, and reached its listening state.
+    /// Publish the IP so downstream MCPG config substitution can redirect
+    /// clients at the engine.
+    START_ADO_PROXY_WAIT_READY {
+        interpreter: Bash,
+        bindings: [],
+        externals: [PROXY_CONTAINER, CA_HOST_PATH],
+        fragments: [],
+        body: r###"
+# Resolve the container IP only after the engine has parsed policy,
+# published its public CA and reached its listening state.
+PROXY_READY=false
+PROXY_STATE=""
+ADO_PROXY_IP=""
+for _i in $(seq 1 30); do
+  PROXY_STATE=$(docker inspect -f '{{.State.Status}}' "$PROXY_CONTAINER" 2>/dev/null || true)
+  if [ "$PROXY_STATE" = "exited" ] || [ "$PROXY_STATE" = "dead" ]; then
+    break
+  fi
+  ADO_PROXY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PROXY_CONTAINER" 2>/dev/null || true)
+  if [ -n "$ADO_PROXY_IP" ] \
+     && [ -f "$CA_HOST_PATH" ] \
+     && docker logs "$PROXY_CONTAINER" 2>&1 | grep -q '\[ado-proxy\] listening'; then
+    PROXY_READY=true
+    break
+  fi
+  sleep 1
+done
+if [ "$PROXY_READY" != "true" ]; then
+  echo "##vso[task.logissue type=error]ado-proxy did not become ready within 30s (state=${PROXY_STATE:-missing})"
+  docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' "$PROXY_CONTAINER" 2>/dev/null || true
+  docker logs --tail 200 "$PROXY_CONTAINER" 2>&1 || true
+  exit 1
+fi
+echo "ado-proxy is ready at $ADO_PROXY_IP"
+docker logs --tail 1 "$PROXY_CONTAINER" 2>&1 || true
+echo "##vso[task.setvariable variable=ADO_PROXY_IP]$ADO_PROXY_IP"
+"###,
+    }
+}
+
+shell_script! {
+    /// The container's `sh -c` entrypoint. Registered as its own `Sh`
+    /// script so shellcheck lints the multi-line source; the actual
+    /// `docker run` invocation embeds the semicolon-flattened form
+    /// returned by [`ado_proxy_container_entrypoint_flattened`], which
+    /// `container_entrypoint_matches_registered_body` keeps in sync.
+    ADO_PROXY_CONTAINER_ENTRYPOINT_SH {
+        interpreter: Sh,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -eu
+umask 077
+MATERIAL_FIFO=/tmp/ado-proxy-material
+mkfifo "$MATERIAL_FIFO"
+exec node /app/ado-proxy.js \
+  --policy-file /etc/ado-proxy/policy.json \
+  --public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem \
+  --upstream-proxy http://172.30.0.10:3128 \
+  --listen-port 11080 \
+  --tls-port 443 \
+  --log-dir /var/log/ado-proxy < "$MATERIAL_FIFO"
+"###,
+    }
+}
+
+shell_script! {
+    /// The **atomic** `start_ado_proxy` step: composed from
+    /// independently-registered phases, still emitted as a single trusted
+    /// Bash task so the credential-custody contract holds. See
+    /// [`start_ado_proxy_step`] for the phase catalogue and issue #1833 for
+    /// the design.
+    START_ADO_PROXY {
+        interpreter: Bash,
+        bindings: [
+            PROXY_CONTAINER, PROXY_IMAGE, PROXY_NETWORK,
+            PROXY_SCRIPT_PATH, AZ_WRAPPER_DIR, CA_HOST_PATH,
+            AGENT_TEMP,
+            ADO_PROXY_PROJECT, ADO_PROXY_PROJECT_ID,
+            ADO_PROXY_REPOSITORY, ADO_PROXY_REPOSITORY_ID,
+            LEAF_HOSTS, POLICY, CONTAINER_ENTRYPOINT
+        ],
+        externals: [],
+        fragments: [
+            setup_workdir,
+            resolve_org,
+            write_policy,
+            mint_material,
+            build_material,
+            run_container,
+            handover_material,
+            destroy_private,
+            wait_ready
+        ],
+        // Every phase but `resolve_org` is a registered script, so the lint
+        // shellchecks the *composed* body rather than an outline of markers.
+        // That is what catches a variable one phase sets and another reads —
+        // the one new risk splitting a script into phases introduces.
+        // `resolve_org` is supplied at runtime by `common`, so it keeps its
+        // marker and is linted where it is produced.
+        phases: [
+            setup_workdir = START_ADO_PROXY_SETUP_WORKDIR,
+            write_policy = START_ADO_PROXY_WRITE_POLICY,
+            mint_material = START_ADO_PROXY_MINT_MATERIAL,
+            build_material = START_ADO_PROXY_BUILD_MATERIAL,
+            run_container = START_ADO_PROXY_RUN_CONTAINER,
+            handover_material = START_ADO_PROXY_HANDOVER_MATERIAL,
+            destroy_private = START_ADO_PROXY_DESTROY_PRIVATE,
+            wait_ready = START_ADO_PROXY_WAIT_READY,
+        ],
+        body: r###"
+# Start the ado-proxy policy engine.
+#
+# The agent never receives an Azure DevOps credential. This container
+# holds it, and serves only the operations in the versioned catalog.
+
+# ado-aw:fragment setup_workdir
+
+# ado-aw:fragment resolve_org
+
+# ado-aw:fragment write_policy
+
+# ado-aw:fragment mint_material
+
+# ado-aw:fragment build_material
+
+# ado-aw:fragment run_container
+
+# ado-aw:fragment handover_material
+
+# ado-aw:fragment destroy_private
+
+# ado-aw:fragment wait_ready
+"###,
+    }
 }
 
 /// Stop the `ado-proxy` container.
@@ -4508,26 +5379,43 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
 /// once AWF is also told to attach the container. Landing the lifecycle first
 /// keeps that change to the wiring alone.
 fn stop_ado_proxy_step() -> BashStep {
-    let script = format!(
-        "# Preserve auditable lifecycle output before stopping the policy engine\n\
-         mkdir -p /tmp/gh-aw/ado-proxy-logs\n\
-         if docker inspect {ADO_PROXY_CONTAINER_NAME} >/dev/null 2>&1; then\n  \
-           docker inspect -f 'state={{{{.State.Status}}}} exit={{{{.State.ExitCode}}}} error={{{{.State.Error}}}}' {ADO_PROXY_CONTAINER_NAME} \\\n    \
-             > /tmp/gh-aw/ado-proxy-logs/container-state.txt 2>&1 || true\n  \
-           docker logs {ADO_PROXY_CONTAINER_NAME} \\\n    \
-             > /tmp/gh-aw/ado-proxy-logs/container.log 2>&1 || true\n\
-         else\n  \
-           echo 'state=missing before teardown' > /tmp/gh-aw/ado-proxy-logs/container-state.txt\n\
-           echo \"##vso[task.logissue type=warning]ado-proxy container was already missing at teardown; inspect the preflight/AWF step and ado-proxy log artifact\"\n\
-         fi\n\
-         \n\
-         # Stop the ado-proxy policy engine\n\
-         echo \"Stopping ado-proxy...\"\n\
-         docker stop {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n\
-         docker rm -f {ADO_PROXY_CONTAINER_NAME} 2>/dev/null || true\n\
-         echo \"ado-proxy stopped\"\n"
-    );
-    bash("Stop ado-proxy", script).with_condition(Condition::Always)
+    ShellScript::new(&STOP_ADO_PROXY)
+        .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+        .into_step("Stop ado-proxy")
+        .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Stop the ado-proxy container, preserving auditable lifecycle output
+    /// (`docker inspect` state + `docker logs` tail) even when the
+    /// container disappeared between the start step and here — that
+    /// scenario is precisely the one worth debugging, so a missing
+    /// container publishes an explicit warning rather than a silent skip.
+    STOP_ADO_PROXY {
+        interpreter: Bash,
+        bindings: [PROXY_CONTAINER],
+        externals: [],
+        fragments: [],
+        body: r###"
+# Preserve auditable lifecycle output before stopping the policy engine
+mkdir -p /tmp/gh-aw/ado-proxy-logs
+if docker inspect "$PROXY_CONTAINER" >/dev/null 2>&1; then
+  docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' "$PROXY_CONTAINER" \
+    > /tmp/gh-aw/ado-proxy-logs/container-state.txt 2>&1 || true
+  docker logs "$PROXY_CONTAINER" \
+    > /tmp/gh-aw/ado-proxy-logs/container.log 2>&1 || true
+else
+  echo 'state=missing before teardown' > /tmp/gh-aw/ado-proxy-logs/container-state.txt
+  echo "##vso[task.logissue type=warning]ado-proxy container was already missing at teardown; inspect the preflight/AWF step and ado-proxy log artifact"
+fi
+
+# Stop the ado-proxy policy engine
+echo "Stopping ado-proxy..."
+docker stop "$PROXY_CONTAINER" 2>/dev/null || true
+docker rm -f "$PROXY_CONTAINER" 2>/dev/null || true
+echo "ado-proxy stopped"
+"###,
+    }
 }
 
 /// Verify externally-launched peers still exist immediately before AWF tries
@@ -4538,142 +5426,336 @@ fn stop_ado_proxy_step() -> BashStep {
 /// Reporting the peer's Docker state and logs here turns AWF's otherwise opaque
 /// "No such container" error into an actionable startup/lifecycle failure.
 fn verify_trusted_topology_peers_step() -> BashStep {
-    let script = format!(
-        "set -euo pipefail\n\
-         mkdir -p /tmp/gh-aw/ado-proxy-logs\n\
-         for PEER in {MCPG_CONTAINER_NAME} {ADO_PROXY_CONTAINER_NAME}; do\n  \
-           PEER_STATE=$(docker inspect -f '{{{{.State.Status}}}}' \"$PEER\" 2>/dev/null || true)\n  \
-           if [ \"$PEER_STATE\" != \"running\" ]; then\n    \
-             echo \"##vso[task.logissue type=error]trusted topology peer $PEER is not running before AWF attachment (state=${{PEER_STATE:-missing}})\"\n    \
-             docker ps -a --filter \"name=^/${{PEER}}$\" --no-trunc || true\n    \
-             if [ \"$PEER\" = \"{ADO_PROXY_CONTAINER_NAME}\" ]; then\n      \
-               docker logs --tail 200 \"$PEER\" 2>&1 \\\n        \
-                 | tee /tmp/gh-aw/ado-proxy-logs/container.log || true\n    \
-             else\n      \
-               docker logs --tail 200 \"$PEER\" 2>&1 || true\n    \
-             fi\n    \
-             exit 1\n  \
-           fi\n  \
-           echo \"Trusted topology peer $PEER is running\"\n  \
-         done\n\
-         if [ ! -r {ca_host_path} ]; then\n  \
-           echo \"##vso[task.logissue type=error]ado-proxy public CA is not readable by the runner/agent identity: {ca_host_path}\"\n  \
-           ls -l {ca_host_path} 2>&1 || true\n  \
-           echo \"The proxy publishes this intentionally public certificate for the wrapped az process and Azure DevOps MCP. A restrictive container umask must not leave it owner-only.\"\n  \
-           docker logs --tail 200 {ADO_PROXY_CONTAINER_NAME} 2>&1 || true\n  \
-           exit 1\n  \
-         fi\n\
-         CA_MODE=$(stat -c '%a' {ca_host_path} 2>/dev/null || echo unknown)\n\
-         echo \"ado-proxy public CA is readable (mode=$CA_MODE)\"\n\
-         echo \"ado-proxy policy and client configuration are ready; runtime denials will include the policy reason and sanitized decision logs\"\n",
-        ca_host_path = ADO_PROXY_PUBLIC_CA_HOST_PATH
-    );
-    bash("Verify trusted topology peers", script)
+    ShellScript::new(&VERIFY_TRUSTED_TOPOLOGY_PEERS)
+        .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
+        .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+        .bind_text("CA_HOST_PATH", ADO_PROXY_PUBLIC_CA_HOST_PATH)
+        .into_step("Verify trusted topology peers")
+}
+
+shell_script! {
+    /// Verify externally-launched trusted peers (MCPG, the ado-proxy) are
+    /// still running immediately before AWF attaches them to its internal
+    /// network. Turns AWF's opaque "No such container" into an actionable
+    /// startup / lifecycle failure with `docker ps -a` and `docker logs`
+    /// tails; also asserts the ado-proxy public CA is readable, since a
+    /// too-restrictive container umask leaves it owner-only and clients
+    /// then can't verify the intercepted chain.
+    VERIFY_TRUSTED_TOPOLOGY_PEERS {
+        interpreter: Bash,
+        bindings: [MCPG_CONTAINER, PROXY_CONTAINER, CA_HOST_PATH],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -euo pipefail
+mkdir -p /tmp/gh-aw/ado-proxy-logs
+for PEER in "$MCPG_CONTAINER" "$PROXY_CONTAINER"; do
+  PEER_STATE=$(docker inspect -f '{{.State.Status}}' "$PEER" 2>/dev/null || true)
+  if [ "$PEER_STATE" != "running" ]; then
+    echo "##vso[task.logissue type=error]trusted topology peer $PEER is not running before AWF attachment (state=${PEER_STATE:-missing})"
+    docker ps -a --filter "name=^/${PEER}$" --no-trunc || true
+    if [ "$PEER" = "$PROXY_CONTAINER" ]; then
+      docker logs --tail 200 "$PEER" 2>&1 \
+        | tee /tmp/gh-aw/ado-proxy-logs/container.log || true
+    else
+      docker logs --tail 200 "$PEER" 2>&1 || true
+    fi
+    exit 1
+  fi
+  echo "Trusted topology peer $PEER is running"
+done
+if [ ! -r "$CA_HOST_PATH" ]; then
+  echo "##vso[task.logissue type=error]ado-proxy public CA is not readable by the runner/agent identity: $CA_HOST_PATH"
+  ls -l "$CA_HOST_PATH" 2>&1 || true
+  echo "The proxy publishes this intentionally public certificate for the wrapped az process and Azure DevOps MCP. A restrictive container umask must not leave it owner-only."
+  docker logs --tail 200 "$PROXY_CONTAINER" 2>&1 || true
+  exit 1
+fi
+CA_MODE=$(stat -c '%a' "$CA_HOST_PATH" 2>/dev/null || echo unknown)
+echo "ado-proxy public CA is readable (mode=$CA_MODE)"
+echo "ado-proxy policy and client configuration are ready; runtime denials will include the policy reason and sanitized decision logs"
+"###,
+    }
+}
+
+shell_script! {
+    /// Report the overall pipeline conclusion. Best-effort: falls back to a
+    /// warning when `conclusion.js` (delivered by the ado-script extension)
+    /// is unavailable, since the Conclusion job is contractually always
+    /// runs / never fails.
+    REPORT_CONCLUSION {
+        interpreter: Bash,
+        bindings: [CONCLUSION_PATH],
+        externals: [],
+        fragments: [],
+        body: r###"
+if command -v node >/dev/null 2>&1 && [ -f "$CONCLUSION_PATH" ]; then
+  node "$CONCLUSION_PATH"
+else
+  echo "##vso[task.logissue type=warning]conclusion.js unavailable; skipping conclusion reporting"
+fi
+"###,
+    }
+}
+
+shell_script! {
+    /// Copy every engine + ado-aw log to the Detection job's analyzed-outputs
+    /// artifact directory (each source landing in its own subdirectory).
+    /// The `engine_log_dir` fragment assigns `ENGINE_LOG_DIR` from a
+    /// compile-time-constant literal so a shell like `$HOME` re-expands.
+    COPY_LOGS_DETECTION {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP],
+        externals: [ADO_AW_LOG_DIR, ENGINE_LOG_DIR, HOME],
+        fragments: [engine_log_dir],
+        body: r###"
+# Copy all logs to analyzed outputs for artifact upload
+mkdir -p "$AGENT_TEMP/analyzed_outputs/logs"
+# ado-aw:fragment engine_log_dir
+if [ -d "$ENGINE_LOG_DIR" ]; then
+  mkdir -p "$AGENT_TEMP/analyzed_outputs/logs/copilot"
+  cp -r "$ENGINE_LOG_DIR"/* "$AGENT_TEMP/analyzed_outputs/logs/copilot/" 2>/dev/null || true
+fi
+ADO_AW_LOG_DIR="${ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}"
+if [ -d "$ADO_AW_LOG_DIR" ]; then
+  mkdir -p "$AGENT_TEMP/analyzed_outputs/logs/ado-aw"
+  cp -r "$ADO_AW_LOG_DIR"/* "$AGENT_TEMP/analyzed_outputs/logs/ado-aw/" 2>/dev/null || true
+fi
+echo "Logs copied to $AGENT_TEMP/analyzed_outputs/logs"
+ls -laR "$AGENT_TEMP/analyzed_outputs/logs" 2>/dev/null || echo "No logs found"
+"###,
+    }
+}
+
+shell_script! {
+    /// Copy every engine + ado-aw + MCPG + ado-proxy log to the Agent job's
+    /// staging/logs directory (each source landing in its own subdirectory
+    /// when it exists at runtime).
+    COPY_LOGS_AGENT {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP],
+        externals: [ADO_AW_LOG_DIR, ENGINE_LOG_DIR, HOME],
+        fragments: [engine_log_dir],
+        body: r###"
+# Copy all logs to output directory for artifact upload
+mkdir -p "$AGENT_TEMP/staging/logs"
+# ado-aw:fragment engine_log_dir
+if [ -d "$ENGINE_LOG_DIR" ]; then
+  cp -r "$ENGINE_LOG_DIR"/* "$AGENT_TEMP/staging/logs/" 2>/dev/null || true
+fi
+ADO_AW_LOG_DIR="${ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}"
+if [ -d "$ADO_AW_LOG_DIR" ]; then
+  cp -r "$ADO_AW_LOG_DIR"/* "$AGENT_TEMP/staging/logs/" 2>/dev/null || true
+fi
+if [ -d /tmp/gh-aw/mcp-logs ]; then
+  mkdir -p "$AGENT_TEMP/staging/logs/mcpg"
+  cp -r /tmp/gh-aw/mcp-logs/* "$AGENT_TEMP/staging/logs/mcpg/" 2>/dev/null || true
+fi
+if [ -d /tmp/gh-aw/ado-proxy-logs ]; then
+  mkdir -p "$AGENT_TEMP/staging/logs/ado-proxy"
+  cp -r /tmp/gh-aw/ado-proxy-logs/* "$AGENT_TEMP/staging/logs/ado-proxy/" 2>/dev/null || true
+fi
+echo "Logs copied to $AGENT_TEMP/staging/logs"
+ls -la "$AGENT_TEMP/staging/logs" 2>/dev/null || echo "No logs found"
+"###,
+    }
 }
 
 fn copy_logs_step(engine_log_dir: &str, is_detection: bool) -> BashStep {
+    // Fragment content assigns ENGINE_LOG_DIR from a double-quoted literal so
+    // that a shell variable such as `$HOME` re-expands at runtime — a
+    // `Binding::text` value is single-quoted and would leave `$HOME` literal.
+    // The value is a compiler-controlled constant (`Engine::log_dir`), never
+    // a runtime input, so quoting it verbatim carries no injection risk.
+    let engine_log_dir_fragment = format!("ENGINE_LOG_DIR=\"{engine_log_dir}\"");
     if is_detection {
-        // Detection job copies its logs into analyzed_outputs/logs (the
-        // artifact published from that job), with per-subdir nesting.
-        let script = format!(
-            "# Copy all logs to analyzed outputs for artifact upload\n\
-             mkdir -p \"$(Agent.TempDirectory)/analyzed_outputs/logs\"\n\
-             if [ -d \"{engine_log_dir}\" ]; then\n  \
-               mkdir -p \"$(Agent.TempDirectory)/analyzed_outputs/logs/copilot\"\n  \
-               cp -r \"{engine_log_dir}\"/* \"$(Agent.TempDirectory)/analyzed_outputs/logs/copilot/\" 2>/dev/null || true\n\
-             fi\n\
-             ADO_AW_LOG_DIR=\"${{ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}}\"\n\
-             if [ -d \"$ADO_AW_LOG_DIR\" ]; then\n  \
-               mkdir -p \"$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw\"\n  \
-               cp -r \"$ADO_AW_LOG_DIR\"/* \"$(Agent.TempDirectory)/analyzed_outputs/logs/ado-aw/\" 2>/dev/null || true\n\
-             fi\n\
-             echo \"Logs copied to $(Agent.TempDirectory)/analyzed_outputs/logs\"\n\
-             ls -laR \"$(Agent.TempDirectory)/analyzed_outputs/logs\" 2>/dev/null || echo \"No logs found\"\n"
-        );
-        return bash("Copy logs to output directory", script).with_condition(Condition::Always);
+        return ShellScript::new(&COPY_LOGS_DETECTION)
+            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+            .fragment("engine_log_dir", engine_log_dir_fragment)
+            .into_step("Copy logs to output directory")
+            .with_condition(Condition::Always);
     }
-    let script = format!(
-        "# Copy all logs to output directory for artifact upload\n\
-         mkdir -p \"$(Agent.TempDirectory)/staging/logs\"\n\
-         if [ -d \"{engine_log_dir}\" ]; then\n  \
-           cp -r \"{engine_log_dir}\"/* \"$(Agent.TempDirectory)/staging/logs/\" 2>/dev/null || true\n\
-         fi\n\
-         ADO_AW_LOG_DIR=\"${{ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}}\"\n\
-         if [ -d \"$ADO_AW_LOG_DIR\" ]; then\n  \
-           cp -r \"$ADO_AW_LOG_DIR\"/* \"$(Agent.TempDirectory)/staging/logs/\" 2>/dev/null || true\n\
-         fi\n\
-         if [ -d /tmp/gh-aw/mcp-logs ]; then\n  \
-           mkdir -p \"$(Agent.TempDirectory)/staging/logs/mcpg\"\n  \
-           cp -r /tmp/gh-aw/mcp-logs/* \"$(Agent.TempDirectory)/staging/logs/mcpg/\" 2>/dev/null || true\n\
-         fi\n\
-         if [ -d /tmp/gh-aw/ado-proxy-logs ]; then\n  \
-           mkdir -p \"$(Agent.TempDirectory)/staging/logs/ado-proxy\"\n  \
-           cp -r /tmp/gh-aw/ado-proxy-logs/* \"$(Agent.TempDirectory)/staging/logs/ado-proxy/\" 2>/dev/null || true\n  \
-         fi\n\
-         echo \"Logs copied to $(Agent.TempDirectory)/staging/logs\"\n\
-         ls -la \"$(Agent.TempDirectory)/staging/logs\" 2>/dev/null || echo \"No logs found\"\n"
-    );
-    bash("Copy logs to output directory", script).with_condition(Condition::Always)
+    ShellScript::new(&COPY_LOGS_AGENT)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .fragment("engine_log_dir", engine_log_dir_fragment)
+        .into_step("Copy logs to output directory")
+        .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Copy the SafeOutputs job's own logs to `staging/logs/`, plus the
+    /// Agent job's `agent-output.txt` and the executed-outputs NDJSON so the
+    /// Conclusion job can read diagnostic signals from the SafeOutputs
+    /// artifact.
+    COPY_LOGS_SAFEOUTPUTS {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, BUILD_ID],
+        externals: [ADO_AW_LOG_DIR, ENGINE_LOG_DIR, HOME],
+        fragments: [engine_log_dir],
+        body: r###"
+# Copy all logs to output directory for artifact upload
+mkdir -p "$AGENT_TEMP/staging/logs"
+# Copy agent output log from analyzed_outputs for optimisation use
+cp "$PIPELINE_WORKSPACE/analyzed_outputs_$BUILD_ID/logs/agent-output.txt" \
+  "$AGENT_TEMP/staging/logs/agent-output.txt" 2>/dev/null || true
+# Copy executed NDJSON manifest so the Conclusion job can read diagnostic signals
+cp "$PIPELINE_WORKSPACE/analyzed_outputs_$BUILD_ID/safe-outputs-executed.ndjson" \
+  "$AGENT_TEMP/staging/safe-outputs-executed.ndjson" 2>/dev/null || true
+# ado-aw:fragment engine_log_dir
+if [ -d "$ENGINE_LOG_DIR" ]; then
+  mkdir -p "$AGENT_TEMP/staging/logs/copilot"
+  cp -r "$ENGINE_LOG_DIR"/* "$AGENT_TEMP/staging/logs/copilot/" 2>/dev/null || true
+fi
+ADO_AW_LOG_DIR="${ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}"
+if [ -d "$ADO_AW_LOG_DIR" ]; then
+  mkdir -p "$AGENT_TEMP/staging/logs/ado-aw"
+  cp -r "$ADO_AW_LOG_DIR"/* "$AGENT_TEMP/staging/logs/ado-aw/" 2>/dev/null || true
+fi
+echo "Logs copied to $AGENT_TEMP/staging/logs"
+ls -laR "$AGENT_TEMP/staging/logs" 2>/dev/null || echo "No logs found"
+"###,
+    }
 }
 
 fn copy_logs_safeoutputs_step(engine_log_dir: &str) -> BashStep {
-    let script = format!(
-        "# Copy all logs to output directory for artifact upload\n\
-         mkdir -p \"$(Agent.TempDirectory)/staging/logs\"\n\
-         # Copy agent output log from analyzed_outputs for optimisation use\n\
-         cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/logs/agent-output.txt\" \\\n  \
-           \"$(Agent.TempDirectory)/staging/logs/agent-output.txt\" 2>/dev/null || true\n\
-         # Copy executed NDJSON manifest so the Conclusion job can read diagnostic signals\n\
-         cp \"$(Pipeline.Workspace)/analyzed_outputs_$(Build.BuildId)/safe-outputs-executed.ndjson\" \\\n  \
-           \"$(Agent.TempDirectory)/staging/safe-outputs-executed.ndjson\" 2>/dev/null || true\n\
-         if [ -d \"{engine_log_dir}\" ]; then\n  \
-           mkdir -p \"$(Agent.TempDirectory)/staging/logs/copilot\"\n  \
-           cp -r \"{engine_log_dir}\"/* \"$(Agent.TempDirectory)/staging/logs/copilot/\" 2>/dev/null || true\n\
-         fi\n\
-         ADO_AW_LOG_DIR=\"${{ADO_AW_LOG_DIR:-$HOME/.ado-aw/logs}}\"\n\
-         if [ -d \"$ADO_AW_LOG_DIR\" ]; then\n  \
-           mkdir -p \"$(Agent.TempDirectory)/staging/logs/ado-aw\"\n  \
-           cp -r \"$ADO_AW_LOG_DIR\"/* \"$(Agent.TempDirectory)/staging/logs/ado-aw/\" 2>/dev/null || true\n\
-         fi\n\
-         echo \"Logs copied to $(Agent.TempDirectory)/staging/logs\"\n\
-         ls -laR \"$(Agent.TempDirectory)/staging/logs\" 2>/dev/null || echo \"No logs found\"\n"
-    );
-    bash("Copy logs to output directory", script).with_condition(Condition::Always)
+    let engine_log_dir_fragment = format!("ENGINE_LOG_DIR=\"{engine_log_dir}\"");
+    ShellScript::new(&COPY_LOGS_SAFEOUTPUTS)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .bind("BUILD_ID", Binding::ado_macro("Build.BuildId"))
+        .fragment("engine_log_dir", engine_log_dir_fragment)
+        .into_step("Copy logs to output directory")
+        .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Copy the Agent job's proposed safe outputs into the Detection job's
+    /// working directory for analysis.
+    PREPARE_SAFE_OUTPUTS_FOR_ANALYSIS {
+        interpreter: Bash,
+        bindings: [PIPELINE_WORKSPACE, BUILD_ID],
+        externals: [WORKING_DIRECTORY],
+        fragments: [],
+        body: r#"
+mkdir -p "$WORKING_DIRECTORY/safe_outputs"
+cp -a "$PIPELINE_WORKSPACE/agent_outputs_$BUILD_ID/." "$WORKING_DIRECTORY/safe_outputs"
+"#,
+    }
 }
 
 fn prepare_safe_outputs_for_analysis(working_directory: &str) -> BashStep {
-    let script = format!(
-        "mkdir -p \"{working_directory}/safe_outputs\"\n\
-         cp -a \"$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/.\"  \"{working_directory}/safe_outputs\"\n"
-    );
-    bash("Prepare safe outputs for analysis", script)
+    use super::ir::env::EnvValue;
+    ShellScript::new(&PREPARE_SAFE_OUTPUTS_FOR_ANALYSIS)
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .bind("BUILD_ID", Binding::ado_macro("Build.BuildId"))
+        .into_step("Prepare safe outputs for analysis")
+        .with_env("WORKING_DIRECTORY", EnvValue::literal(working_directory))
+}
+
+shell_script! {
+    /// Write the threat-analysis prompt to
+    /// `/tmp/awf-tools/threat-analysis-prompt.md`. The `heredoc` fragment
+    /// carries a per-content SHA-derived sentinel — the same mitigation
+    /// used in [`PREPARE_AGENT_PROMPT`] — so a malicious front-matter
+    /// `description:` (which lands inside this prompt body) cannot
+    /// terminate the heredoc early and inject commands into the Detection
+    /// job.
+    PREPARE_THREAT_ANALYSIS_PROMPT {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [heredoc],
+        body: r###"
+# Write threat analysis prompt to /tmp (accessible inside AWF container)
+# ado-aw:fragment heredoc
+
+echo "Threat analysis prompt:"
+cat "/tmp/awf-tools/threat-analysis-prompt.md"
+"###,
+    }
 }
 
 fn prepare_threat_analysis_prompt_step(threat_prompt: &str) -> Result<BashStep> {
-    // Same heredoc-injection mitigation as `prepare_agent_prompt_step`:
-    // the sentinel is SHA-derived per content so a malicious
-    // front-matter `description:` (which lands inside this prompt
-    // body) cannot terminate the heredoc early and inject commands
-    // into the Detection job.
     let sentinel = super::common::heredoc_sentinel("THREAT_ANALYSIS_EOF", threat_prompt)?;
-    let template = format!(
-        "\
-         # Write threat analysis prompt to /tmp (accessible inside AWF container)\n\
-         cat > \"/tmp/awf-tools/threat-analysis-prompt.md\" << '{sentinel}'\n\
-         {{INTERP}}\n\
-         {sentinel}\n\
-         \n\
-         echo \"Threat analysis prompt:\"\n\
-         cat \"/tmp/awf-tools/threat-analysis-prompt.md\"\n"
+    let heredoc = format!(
+        "cat > \"/tmp/awf-tools/threat-analysis-prompt.md\" << '{sentinel}'\n\
+         {threat_prompt}\n\
+         {sentinel}"
     );
-    let script = dedent(&template).replace("{INTERP}", threat_prompt);
-    Ok(bash("Prepare threat analysis prompt", script))
+    Ok(ShellScript::new(&PREPARE_THREAT_ANALYSIS_PROMPT)
+        .fragment("heredoc", heredoc)
+        .into_step("Prepare threat analysis prompt"))
+}
+
+shell_script! {
+    /// Ensure the downloaded compiler is executable at the well-known path.
+    SETUP_COMPILER {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r###"
+AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
+chmod +x "$AGENTIC_PIPELINES_PATH"
+"###,
+    }
 }
 
 fn setup_compiler_step() -> BashStep {
-    let script = "AGENTIC_PIPELINES_PATH=\"$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw\"\n\
-                  chmod +x \"$AGENTIC_PIPELINES_PATH\"\n";
-    bash("Setup agentic pipeline compiler", script)
+    ShellScript::new(&SETUP_COMPILER).into_step("Setup agentic pipeline compiler")
+}
+
+shell_script! {
+    /// Invoke the Detection stage's threat-analysis agent inside AWF's
+    /// network-isolated Docker topology. Structured like [`RUN_AGENT`] but
+    /// without a topology-attach block (Detection has no MCPG/ado-proxy
+    /// peers) and with the single-quoted engine command passed through
+    /// verbatim.
+    RUN_THREAT_ANALYSIS {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, ALLOWED_DOMAINS],
+        externals: [WORKING_DIRECTORY],
+        fragments: [image_flags, exclude_env, engine_run_detection],
+        body: r###"
+set -o pipefail
+
+# Run threat analysis with AWF network isolation
+THREAT_OUTPUT_FILE="$AGENT_TEMP/threat-analysis-output.txt"
+AGENT_EXIT_CODE=0
+
+# The argument list is assembled into an array so runtime-supplied
+# fragments splice in as ordinary shell statements (`AWF_ARGS+=(...)`)
+# — no `\`-continuation chain to break with fragment marker comments.
+AWF_ARGS=(
+  --allow-domains "$ALLOWED_DOMAINS"
+  --network-isolation
+)
+# ado-aw:fragment image_flags
+AWF_ARGS+=(--skip-pull --env-all)
+# ado-aw:fragment exclude_env
+AWF_ARGS+=(
+  --container-workdir "$WORKING_DIRECTORY"
+  --log-level info
+  --proxy-logs-dir "$AGENT_TEMP/threat-analysis-logs/firewall"
+)
+# ado-aw:fragment engine_run_detection
+
+# Stream threat analysis output in real-time with VSO command filtering
+# shellcheck disable=SC2016 # The single-quoted engine command inside AWF_ARGS is intentionally expanded by AWF inside the sandbox
+"$PIPELINE_WORKSPACE/awf/awf" "${AWF_ARGS[@]}" 2>&1 \
+  | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
+  | tee "$THREAT_OUTPUT_FILE" \
+  || AGENT_EXIT_CODE=$?
+
+exit "$AGENT_EXIT_CODE"
+"###,
+    }
 }
 
 fn run_threat_analysis_step(
@@ -4687,39 +5769,56 @@ fn run_threat_analysis_step(
 ) -> Result<BashStep> {
     let image_flags_block = awf_image_flags(supply_chain);
     let exclude_env_block = awf_exclude_env_flags(byom_exclude_keys);
-    let script = format!(
-        "set -o pipefail\n\
-         \n\
-         # Run threat analysis with AWF network isolation\n\
-         THREAT_OUTPUT_FILE=\"$(Agent.TempDirectory)/threat-analysis-output.txt\"\n\
-         \n\
-         # Stream threat analysis output in real-time with VSO command filtering\n\
-         # shellcheck disable=SC2016 # The single-quoted engine command is intentionally expanded by AWF inside the sandbox\n\
-         \"$(Pipeline.Workspace)/awf/awf\" \\\n  \
-           --allow-domains \"{allowed_domains}\" \\\n  \
-           --network-isolation \\\n\
-{image_flags_block}\
-           --skip-pull \\\n  \
-           --env-all \\\n\
-{exclude_env_block}  \
-           --container-workdir \"{working_directory}\" \\\n  \
-           --log-level info \\\n  \
-           --proxy-logs-dir \"$(Agent.TempDirectory)/threat-analysis-logs/firewall\" \\\n  \
-           -- '{engine_run_detection}' \\\n  \
-           2>&1 \\\n  \
-           | sed -u 's/##vso\\[/[VSO-FILTERED] vso[/g; s/##\\[/[VSO-FILTERED] [/g' \\\n  \
-           | tee \"$THREAT_OUTPUT_FILE\" \\\n  \
-           && AGENT_EXIT_CODE=0 || AGENT_EXIT_CODE=$?\n\
-         \n\
-         exit \"$AGENT_EXIT_CODE\"\n"
-    );
-    let mut step = bash("Run threat analysis (AWF network isolated)", script);
+    let image_flags_line = {
+        let mut parts: Vec<String> = Vec::new();
+        for line in image_flags_block.lines() {
+            let line = line.trim();
+            let line = line.strip_suffix('\\').unwrap_or(line).trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            parts.push(line.to_string());
+        }
+        format!("AWF_ARGS+=({})", parts.join(" "))
+    };
+    let exclude_env_line = {
+        let mut parts: Vec<String> = Vec::new();
+        for line in exclude_env_block.lines() {
+            let line = line.trim();
+            let line = line.strip_suffix('\\').unwrap_or(line).trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            parts.push(line.to_string());
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("AWF_ARGS+=({})", parts.join(" "))
+        }
+    };
+    let engine_run_detection_line = format!("AWF_ARGS+=(-- '{engine_run_detection}')");
+
+    let mut step = ShellScript::new(&RUN_THREAT_ANALYSIS)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .bind_text("ALLOWED_DOMAINS", allowed_domains)
+        .fragment("image_flags", image_flags_line)
+        .fragment("exclude_env", exclude_env_line)
+        .fragment("engine_run_detection", engine_run_detection_line)
+        .into_step("Run threat analysis (AWF network isolated)");
     step.working_directory = Some(working_directory.to_string());
     // env block: GITHUB_TOKEN + GITHUB_READ_ONLY — emit the latter as
     // a typed YAML integer so it round-trips unquoted (matching the
     // legacy copilot_env output of `GITHUB_READ_ONLY: 1`, not `'1'`).
+    // WORKING_DIRECTORY is passed via env: so ADO substitutes any `$(...)`
+    // macros in the value before bash sees it.
     use super::ir::env::EnvValue;
     step = step
+        .with_env("WORKING_DIRECTORY", EnvValue::literal(working_directory))
         .with_env("GITHUB_TOKEN", EnvValue::pipeline_var(github_token_var))
         .with_env(
             "GITHUB_READ_ONLY",
@@ -4733,53 +5832,111 @@ fn run_threat_analysis_step(
     Ok(step)
 }
 
+shell_script! {
+    /// Detection job: copy the original Agent proposal payload into
+    /// `analyzed_outputs/`, then extract the JSON verdict from the
+    /// `THREAT_DETECTION_RESULT:` line printed by the threat-analysis
+    /// engine run.
+    PREPARE_ANALYZED_OUTPUTS {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, BUILD_ID],
+        externals: [],
+        fragments: [],
+        body: r###"
+# Create analyzed outputs directory with original safe outputs and analysis
+mkdir -p "$AGENT_TEMP/analyzed_outputs"
+
+# Copy original safe outputs
+cp -a "$PIPELINE_WORKSPACE/agent_outputs_$BUILD_ID/." "$AGENT_TEMP/analyzed_outputs/"
+
+# Copy threat analysis output
+if [ -f "$AGENT_TEMP/threat-analysis-output.txt" ]; then
+  cp "$AGENT_TEMP/threat-analysis-output.txt" "$AGENT_TEMP/analyzed_outputs/"
+fi
+
+# Extract JSON from THREAT_DETECTION_RESULT line in threat analysis output
+if [ -f "$AGENT_TEMP/threat-analysis-output.txt" ]; then
+  RESULT_LINE=$(grep "THREAT_DETECTION_RESULT:" "$AGENT_TEMP/threat-analysis-output.txt" | tail -1)
+  if [ -n "$RESULT_LINE" ]; then
+    # Extract JSON after the prefix
+    JSON_CONTENT="${RESULT_LINE##*THREAT_DETECTION_RESULT:}"
+    echo "$JSON_CONTENT" > "$AGENT_TEMP/analyzed_outputs/threat-analysis.json"
+    echo "Extracted threat analysis JSON:"
+    cat "$AGENT_TEMP/analyzed_outputs/threat-analysis.json"
+  else
+    echo "Warning: No THREAT_DETECTION_RESULT found in threat analysis output"
+  fi
+else
+  echo "Warning: No threat analysis output file found"
+fi
+
+echo "Analyzed outputs directory contents:"
+ls -laR "$AGENT_TEMP/analyzed_outputs"
+"###,
+    }
+}
+
 fn prepare_analyzed_outputs_step() -> BashStep {
-    let script = "# Create analyzed outputs directory with original safe outputs and analysis\n\
-                  mkdir -p \"$(Agent.TempDirectory)/analyzed_outputs\"\n\
-                  \n\
-                  # Copy original safe outputs\n\
-                  cp -a \"$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/.\" \"$(Agent.TempDirectory)/analyzed_outputs/\"\n\
-                  \n\
-                  # Copy threat analysis output\n\
-                  if [ -f \"$(Agent.TempDirectory)/threat-analysis-output.txt\" ]; then\n  \
-                    cp \"$(Agent.TempDirectory)/threat-analysis-output.txt\" \"$(Agent.TempDirectory)/analyzed_outputs/\"\n\
-                  fi\n\
-                  \n\
-                  # Extract JSON from THREAT_DETECTION_RESULT line in threat analysis output\n\
-                  if [ -f \"$(Agent.TempDirectory)/threat-analysis-output.txt\" ]; then\n  \
-                    RESULT_LINE=$(grep \"THREAT_DETECTION_RESULT:\" \"$(Agent.TempDirectory)/threat-analysis-output.txt\" | tail -1)\n  \
-                    if [ -n \"$RESULT_LINE\" ]; then\n    \
-                      # Extract JSON after the prefix\n    \
-                      JSON_CONTENT=\"${RESULT_LINE##*THREAT_DETECTION_RESULT:}\"\n    \
-                      echo \"$JSON_CONTENT\" > \"$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json\"\n    \
-                      echo \"Extracted threat analysis JSON:\"\n    \
-                      cat \"$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json\"\n  \
-                    else\n    \
-                      echo \"Warning: No THREAT_DETECTION_RESULT found in threat analysis output\"\n  \
-                    fi\n\
-                  else\n  \
-                    echo \"Warning: No threat analysis output file found\"\n\
-                  fi\n\
-                  \n\
-                  echo \"Analyzed outputs directory contents:\"\n\
-                  ls -laR \"$(Agent.TempDirectory)/analyzed_outputs\"\n";
-    bash("Prepare analyzed outputs", script).with_condition(Condition::Always)
+    ShellScript::new(&PREPARE_ANALYZED_OUTPUTS)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .bind("BUILD_ID", Binding::ado_macro("Build.BuildId"))
+        .into_step("Prepare analyzed outputs")
+        .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Detection job (AI threat detection disabled): copy Agent proposals to
+    /// `analyzed_outputs/` unchanged. The Detection stage still runs as a
+    /// pipeline boundary even when analysis is skipped.
+    PREPARE_ANALYZED_OUTPUTS_PASSTHROUGH {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, BUILD_ID],
+        externals: [],
+        fragments: [],
+        body: r###"
+set -eo pipefail
+mkdir -p "$AGENT_TEMP/analyzed_outputs"
+cp -a "$PIPELINE_WORKSPACE/agent_outputs_$BUILD_ID/." "$AGENT_TEMP/analyzed_outputs/"
+echo "AI threat detection is disabled; copied Agent outputs unchanged."
+"###,
+    }
 }
 
 fn prepare_analyzed_outputs_passthrough_step() -> BashStep {
-    let script = "set -eo pipefail\n\
-                  mkdir -p \"$(Agent.TempDirectory)/analyzed_outputs\"\n\
-                  cp -a \"$(Pipeline.Workspace)/agent_outputs_$(Build.BuildId)/.\" \
-                    \"$(Agent.TempDirectory)/analyzed_outputs/\"\n\
-                  echo \"AI threat detection is disabled; copied Agent outputs unchanged.\"\n";
-    bash("Prepare analyzed outputs (detection disabled)", script)
+    ShellScript::new(&PREPARE_ANALYZED_OUTPUTS_PASSTHROUGH)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .bind("BUILD_ID", Binding::ado_macro("Build.BuildId"))
+        .into_step("Prepare analyzed outputs (detection disabled)")
+}
+
+shell_script! {
+    /// Detection-disabled short-circuit: publish `SafeToProcess=true` so
+    /// downstream jobs consuming this output variable behave as if analysis
+    /// had run and passed.
+    THREAT_ANALYSIS_DISABLED {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r###"
+echo "AI threat detection was explicitly disabled by workflow configuration."
+echo "##vso[task.setvariable variable=SafeToProcess;isOutput=true]true"
+echo "SafeToProcess set to: true"
+"###,
+    }
 }
 
 fn threat_analysis_disabled_step() -> BashStep {
-    let script = "echo \"AI threat detection was explicitly disabled by workflow configuration.\"\n\
-                  echo \"##vso[task.setvariable variable=SafeToProcess;isOutput=true]true\"\n\
-                  echo \"SafeToProcess set to: true\"\n";
-    bash("Bypass AI threat analysis", script)
+    ShellScript::new(&THREAT_ANALYSIS_DISABLED)
+        .into_step("Bypass AI threat analysis")
         .with_id(
             StepId::new("threatAnalysis")
                 .expect("threatAnalysis is a valid StepId — see StepId::new contract"),
@@ -4787,32 +5944,50 @@ fn threat_analysis_disabled_step() -> BashStep {
         .with_output(OutputDecl::new("SafeToProcess"))
 }
 
+shell_script! {
+    /// Detection stage: read the JSON verdict extracted by
+    /// [`PREPARE_ANALYZED_OUTPUTS`] and publish a `SafeToProcess` output
+    /// variable driving the SafeOutputs job's `condition:`. Defaults to
+    /// `false` (unsafe) on any parse/read failure so the pipeline
+    /// fails safe.
+    EVALUATE_THREAT_ANALYSIS {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP],
+        externals: [],
+        fragments: [],
+        body: r###"
+SAFE_TO_PROCESS="false"
+JSON_FILE="$AGENT_TEMP/analyzed_outputs/threat-analysis.json"
+
+if [ -f "$JSON_FILE" ]; then
+  if jq -e . "$JSON_FILE" > /dev/null 2>&1; then
+    echo "JSON is valid"
+
+    # Check if any threat field is true
+    if jq -e '.prompt_injection or .secret_leak or .malicious_patch' "$JSON_FILE" > /dev/null 2>&1; then
+      echo "##vso[task.logissue type=warning]Threats detected - safe outputs will NOT be processed"
+      jq -r '.reasons[]? // empty' "$JSON_FILE" | sed 's/^/  - /'
+    else
+      echo "No threats detected - safe outputs will be processed"
+      SAFE_TO_PROCESS="true"
+    fi
+  else
+    echo "##vso[task.logissue type=warning]Invalid JSON in threat analysis - defaulting to unsafe"
+  fi
+else
+  echo "##vso[task.logissue type=warning]No threat analysis JSON found - defaulting to unsafe"
+fi
+
+echo "##vso[task.setvariable variable=SafeToProcess;isOutput=true]$SAFE_TO_PROCESS"
+echo "SafeToProcess set to: $SAFE_TO_PROCESS"
+"###,
+    }
+}
+
 fn evaluate_threat_analysis_step() -> BashStep {
-    let script = "SAFE_TO_PROCESS=\"false\"\n\
-                  JSON_FILE=\"$(Agent.TempDirectory)/analyzed_outputs/threat-analysis.json\"\n\
-                  \n\
-                  if [ -f \"$JSON_FILE\" ]; then\n  \
-                    if jq -e . \"$JSON_FILE\" > /dev/null 2>&1; then\n    \
-                      echo \"JSON is valid\"\n    \
-                      \n    \
-                      # Check if any threat field is true\n    \
-                      if jq -e '.prompt_injection or .secret_leak or .malicious_patch' \"$JSON_FILE\" > /dev/null 2>&1; then\n      \
-                        echo \"##vso[task.logissue type=warning]Threats detected - safe outputs will NOT be processed\"\n      \
-                        jq -r '.reasons[]? // empty' \"$JSON_FILE\" | sed 's/^/  - /'\n    \
-                      else\n      \
-                        echo \"No threats detected - safe outputs will be processed\"\n      \
-                        SAFE_TO_PROCESS=\"true\"\n    \
-                      fi\n  \
-                    else\n    \
-                      echo \"##vso[task.logissue type=warning]Invalid JSON in threat analysis - defaulting to unsafe\"\n  \
-                    fi\n\
-                  else\n  \
-                    echo \"##vso[task.logissue type=warning]No threat analysis JSON found - defaulting to unsafe\"\n\
-                  fi\n\
-                  \n\
-                  echo \"##vso[task.setvariable variable=SafeToProcess;isOutput=true]$SAFE_TO_PROCESS\"\n\
-                  echo \"SafeToProcess set to: $SAFE_TO_PROCESS\"\n";
-    bash("Evaluate threat analysis", script)
+    ShellScript::new(&EVALUATE_THREAT_ANALYSIS)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .into_step("Evaluate threat analysis")
         .with_id(
             StepId::new("threatAnalysis")
                 .expect("threatAnalysis is a valid StepId — see StepId::new contract"),
@@ -4821,76 +5996,109 @@ fn evaluate_threat_analysis_step() -> BashStep {
         .with_condition(Condition::Always)
 }
 
-/// Scan the agent's proposed safe-output NDJSON for any approval-gated tool
-/// and publish a `HasReviewedProposals` output variable. The ManualReview gate
-/// is conditioned on this so a run never pauses for a human when the agent did
-/// not propose anything that requires review.
+shell_script! {
+    /// Scan the agent's proposed safe-output NDJSON for any approval-gated
+    /// tool and publish a `HasReviewedProposals` output variable. The
+    /// ManualReview gate is conditioned on this so a run never pauses for a
+    /// human when the agent did not propose anything that requires review.
+    DETECT_REVIEWED_PROPOSALS {
+        interpreter: Bash,
+        bindings: [ALTERNATION],
+        externals: [WORKING_DIRECTORY],
+        fragments: [],
+        body: r###"
+HAS_REVIEWED="false"
+NAMES=""
+PROPOSALS=$(find "$WORKING_DIRECTORY/safe_outputs" -name "safe_outputs.ndjson" 2>/dev/null | head -n 1)
+if [ -n "$PROPOSALS" ] && [ -f "$PROPOSALS" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    # Match only the top-level "name" of each NDJSON object so a
+    # "name" key nested inside a tool's params can't false-positive.
+    if NAMES=$(jq -r 'select(type=="object") | .name // empty' "$PROPOSALS" 2>/dev/null); then
+      if printf '%s\n' "$NAMES" | grep -Eqx "($ALTERNATION)"; then
+        HAS_REVIEWED="true"
+      fi
+    else
+      # jq failed (e.g. corrupt/truncated proposals). Fall back to the
+      # broad raw scan so detection fails safe (over-match, never under-
+      # match) and record that detection was inconclusive.
+      echo "##vso[task.logissue type=warning]approval-gate: jq failed to parse $PROPOSALS; using raw scan for reviewed-proposal detection"
+      if grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"($ALTERNATION)\"" "$PROPOSALS"; then
+        HAS_REVIEWED="true"
+      fi
+    fi
+  elif grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"($ALTERNATION)\"" "$PROPOSALS"; then
+    # jq unavailable: fall back to a broad scan. May over-match (pause
+    # unnecessarily) but never under-matches, so the gate stays fail-safe.
+    HAS_REVIEWED="true"
+  fi
+fi
+echo "##vso[task.setvariable variable=HasReviewedProposals;isOutput=true]$HAS_REVIEWED"
+echo "HasReviewedProposals set to: $HAS_REVIEWED"
+"###,
+    }
+}
+
 fn detect_reviewed_proposals_step(working_directory: &str, reviewed: &[String]) -> BashStep {
+    use super::ir::env::EnvValue;
     // `reviewed` are compiler-controlled safe-output names (ASCII
     // alphanumeric/hyphen only — see `validate::is_safe_tool_name`), so they
     // are safe to embed directly in a jq/grep alternation.
     let alternation = reviewed.join("|");
-    let script = format!(
-        "HAS_REVIEWED=\"false\"\n\
-         PROPOSALS=$(find \"{working_directory}/safe_outputs\" -name \"safe_outputs.ndjson\" 2>/dev/null | head -n 1)\n\
-         if [ -n \"$PROPOSALS\" ] && [ -f \"$PROPOSALS\" ]; then\n  \
-           if command -v jq >/dev/null 2>&1; then\n    \
-             # Match only the top-level \"name\" of each NDJSON object so a\n    \
-             # \"name\" key nested inside a tool's params can't false-positive.\n    \
-             if NAMES=$(jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null); then\n      \
-               if printf '%s\\n' \"$NAMES\" | grep -Eqx '({alternation})'; then\n        \
-                 HAS_REVIEWED=\"true\"\n      \
-               fi\n    \
-             else\n      \
-               # jq failed (e.g. corrupt/truncated proposals). Fall back to the\n      \
-               # broad raw scan so detection fails safe (over-match, never under-\n      \
-               # match) and record that detection was inconclusive.\n      \
-               echo \"##vso[task.logissue type=warning]approval-gate: jq failed to parse $PROPOSALS; using raw scan for reviewed-proposal detection\"\n      \
-               if grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n        \
-                 HAS_REVIEWED=\"true\"\n      \
-               fi\n    \
-             fi\n  \
-           elif grep -Eq '\"name\"[[:space:]]*:[[:space:]]*\"({alternation})\"' \"$PROPOSALS\"; then\n    \
-             # jq unavailable: fall back to a broad scan. May over-match (pause\n    \
-             # unnecessarily) but never under-matches, so the gate stays fail-safe.\n    \
-             HAS_REVIEWED=\"true\"\n  \
-           fi\n\
-         fi\n\
-         echo \"##vso[task.setvariable variable=HasReviewedProposals;isOutput=true]$HAS_REVIEWED\"\n\
-         echo \"HasReviewedProposals set to: $HAS_REVIEWED\"\n"
-    );
-    bash("Detect reviewed proposals", script)
+    ShellScript::new(&DETECT_REVIEWED_PROPOSALS)
+        .bind_text("ALTERNATION", alternation)
+        .into_step("Detect reviewed proposals")
         .with_id(
             StepId::new("reviewedProposals")
                 .expect("reviewedProposals is a valid StepId — see StepId::new contract"),
         )
         .with_output(OutputDecl::new("HasReviewedProposals"))
         .with_condition(Condition::Always)
+        .with_env("WORKING_DIRECTORY", EnvValue::literal(working_directory))
 }
 
-/// Scan the analyzed proposal NDJSON once and publish one output variable per
-/// custom tool. Custom executor jobs use these booleans in their job-level
-/// `condition:` so an empty/no-op custom proposal set does not start a job.
+shell_script! {
+    /// Scan the analyzed proposal NDJSON once and publish one output variable
+    /// per custom tool. The `tool_checks` fragment is populated by
+    /// [`detect_custom_proposals_step`] with one block of shell per registered
+    /// custom tool. Custom executor jobs use these booleans in their job-level
+    /// `condition:` so an empty/no-op custom proposal set does not start a
+    /// job.
+    DETECT_CUSTOM_PROPOSALS {
+        interpreter: Bash,
+        bindings: [],
+        externals: [WORKING_DIRECTORY],
+        fragments: [tool_checks],
+        body: r###"
+PROPOSALS=$(find "$WORKING_DIRECTORY/safe_outputs" -name "safe_outputs.ndjson" 2>/dev/null | head -n 1)
+NAMES=""
+RAW_SCAN="false"
+if [ -n "$PROPOSALS" ] && [ -f "$PROPOSALS" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    if ! NAMES=$(jq -r 'select(type=="object") | .name // empty' "$PROPOSALS" 2>/dev/null); then
+      echo "##vso[task.logissue type=warning]custom-proposals: jq failed to parse $PROPOSALS; using raw scan"
+      RAW_SCAN="true"
+    fi
+  else
+    RAW_SCAN="true"
+  fi
+fi
+# Fake use so shellcheck (which cannot see the compiler-spliced
+# tool_checks fragment) does not flag NAMES / RAW_SCAN as SC2034
+# unused. This is a runtime no-op — `:` discards its arguments.
+: "${NAMES}" "${RAW_SCAN}"
+# ado-aw:fragment tool_checks
+"###,
+    }
+}
+
 fn detect_custom_proposals_step(working_directory: &str, tools: &[String]) -> Result<BashStep> {
-    let mut script = format!(
-        "PROPOSALS=$(find \"{working_directory}/safe_outputs\" -name \"safe_outputs.ndjson\" 2>/dev/null | head -n 1)\n\
-         NAMES=\"\"\n\
-         RAW_SCAN=\"false\"\n\
-         if [ -n \"$PROPOSALS\" ] && [ -f \"$PROPOSALS\" ]; then\n  \
-           if command -v jq >/dev/null 2>&1; then\n    \
-             if ! NAMES=$(jq -r 'select(type==\"object\") | .name // empty' \"$PROPOSALS\" 2>/dev/null); then\n      \
-               echo \"##vso[task.logissue type=warning]custom-proposals: jq failed to parse $PROPOSALS; using raw scan\"\n      \
-               RAW_SCAN=\"true\"\n    \
-             fi\n  \
-           else\n    \
-             RAW_SCAN=\"true\"\n  \
-           fi\n\
-         fi\n"
-    );
-    let mut step = bash("Detect custom proposals", "");
+    use super::ir::env::EnvValue;
+    let mut tool_checks = String::new();
+    let mut outputs = Vec::with_capacity(tools.len());
     for tool in tools {
         let output = custom_tool_output_var(tool);
-        script.push_str(&format!(
+        tool_checks.push_str(&format!(
             "{output}=\"false\"\n\
              if [ -n \"$NAMES\" ] && printf '%s\\n' \"$NAMES\" | grep -Fxq {tool_q}; then\n  \
                {output}=\"true\"\n\
@@ -4901,133 +6109,98 @@ fn detect_custom_proposals_step(working_directory: &str, tools: &[String]) -> Re
              echo \"{output} set to: ${output}\"\n",
             tool_q = shell_quote(tool),
         ));
+        outputs.push(output);
+    }
+    let mut step = ShellScript::new(&DETECT_CUSTOM_PROPOSALS)
+        .fragment("tool_checks", tool_checks)
+        .into_step("Detect custom proposals")
+        .with_env("WORKING_DIRECTORY", EnvValue::literal(working_directory));
+    for output in outputs {
         step = step.with_output(OutputDecl::new(output));
     }
-    step.script = dedent(&script);
     Ok(step
         .with_id(StepId::new(CUSTOM_PROPOSALS_STEP_ID)?)
         .with_condition(Condition::Always))
 }
 
+shell_script! {
+    /// Debug-only probe (emitted when `--debug-pipeline` is on). Probes every
+    /// MCPG backend via MCP `initialize` + `tools/list` to surface broken
+    /// backends early. Mirrors the legacy
+    /// `generate_debug_pipeline_replacements` bash body.
+    VERIFY_MCP_BACKENDS {
+        interpreter: Bash,
+        bindings: [MCPG_PORT],
+        externals: [MCPG_API_KEY],
+        fragments: [],
+        body: r###"
+echo "=== Probing MCP backends ==="
+PROBE_FAILED=false
+for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
+  echo ""
+  echo "--- Probing: $server ---"
+  # MCP requires initialize handshake before tools/list.
+  # Send initialize first, then tools/list in a second request
+  # using the session ID from the initialize response.
+  INIT_RESPONSE=$(curl -s -D /tmp/probe-headers.txt -o /tmp/probe-init.json -w "%{http_code}" --max-time 120 -X POST \
+    -H "Authorization: $MCPG_API_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ado-aw-probe","version":"1.0"}}}' \
+    "http://localhost:$MCPG_PORT/mcp/$server" 2>&1)
+  SESSION_ID=$(grep -i "mcp-session-id" /tmp/probe-headers.txt 2>/dev/null | tr -d '\r' | awk '{print $2}')
+  echo "Initialize: HTTP $INIT_RESPONSE, session=$SESSION_ID"
+
+  if [ -z "$SESSION_ID" ]; then
+    echo "##vso[task.logissue type=warning]MCP backend '$server' did not return a session ID"
+    cat /tmp/probe-init.json 2>/dev/null || true
+    PROBE_FAILED=true
+    continue
+  fi
+
+  # Now send tools/list with the session
+  HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w "%{http_code}" --max-time 120 -X POST \
+    -H "Authorization: $MCPG_API_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Mcp-Session-Id: $SESSION_ID" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    "http://localhost:$MCPG_PORT/mcp/$server" 2>&1)
+  BODY=$(cat /tmp/probe-response.json 2>/dev/null || echo "(empty)")
+  # Extract tool count from SSE data line
+  TOOL_COUNT=$(echo "$BODY" | grep '^data:' | sed 's/^data: //' | jq -r '.result.tools | length' 2>/dev/null || echo "?")
+  echo "tools/list: HTTP $HTTP_CODE"
+  if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ "$TOOL_COUNT" != "?" ]; then
+    echo "✓ $server: $TOOL_COUNT tools available"
+  else
+    echo "##vso[task.logissue type=warning]MCP backend '$server' tools/list returned HTTP $HTTP_CODE"
+    echo "Response: $BODY"
+    PROBE_FAILED=true
+  fi
+done
+
+echo ""
+echo "=== MCPG health after probes ==="
+curl -sf "http://localhost:$MCPG_PORT/health" | jq . || true
+
+if [ "$PROBE_FAILED" = "true" ]; then
+  echo "##vso[task.logissue type=warning]One or more MCP backends failed to initialize — check logs above"
+fi
+"###,
+    }
+}
+
 fn verify_mcp_backends_step() -> BashStep {
-    // Debug-only probe (emitted when --debug-pipeline is on). Probes every
-    // MCPG backend via MCP initialize + tools/list to surface broken
-    // backends early. Mirrors the legacy `generate_debug_pipeline_replacements`
-    // bash body. `{{ mcpg_port }}` in the legacy template is interpolated
-    // here as the `MCPG_PORT` const value.
-    let script = format!(
-        "echo \"=== Probing MCP backends ===\"\n\
-PROBE_FAILED=false\n\
-for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do\n  \
-  echo \"\"\n  \
-  echo \"--- Probing: $server ---\"\n  \
-  # MCP requires initialize handshake before tools/list.\n  \
-  # Send initialize first, then tools/list in a second request\n  \
-  # using the session ID from the initialize response.\n  \
-  INIT_RESPONSE=$(curl -s -D /tmp/probe-headers.txt -o /tmp/probe-init.json -w \"%{{http_code}}\" --max-time 120 -X POST \\\n    \
-    -H \"Authorization: $MCPG_API_KEY\" \\\n    \
-    -H \"Content-Type: application/json\" \\\n    \
-    -H \"Accept: application/json, text/event-stream\" \\\n    \
-    -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"ado-aw-probe\",\"version\":\"1.0\"}}}}}}' \\\n    \
-    \"http://localhost:{MCPG_PORT}/mcp/$server\" 2>&1)\n  \
-  SESSION_ID=$(grep -i \"mcp-session-id\" /tmp/probe-headers.txt 2>/dev/null | tr -d '\\r' | awk '{{print $2}}')\n  \
-  echo \"Initialize: HTTP $INIT_RESPONSE, session=$SESSION_ID\"\n  \
-\n  \
-  if [ -z \"$SESSION_ID\" ]; then\n    \
-    echo \"##vso[task.logissue type=warning]MCP backend '$server' did not return a session ID\"\n    \
-    cat /tmp/probe-init.json 2>/dev/null || true\n    \
-    PROBE_FAILED=true\n    \
-    continue\n  \
-  fi\n  \
-\n  \
-  # Now send tools/list with the session\n  \
-  HTTP_CODE=$(curl -s -o /tmp/probe-response.json -w \"%{{http_code}}\" --max-time 120 -X POST \\\n    \
-    -H \"Authorization: $MCPG_API_KEY\" \\\n    \
-    -H \"Content-Type: application/json\" \\\n    \
-    -H \"Accept: application/json, text/event-stream\" \\\n    \
-    -H \"Mcp-Session-Id: $SESSION_ID\" \\\n    \
-    -d '{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}}' \\\n    \
-    \"http://localhost:{MCPG_PORT}/mcp/$server\" 2>&1)\n  \
-  BODY=$(cat /tmp/probe-response.json 2>/dev/null || echo \"(empty)\")\n  \
-  # Extract tool count from SSE data line\n  \
-  TOOL_COUNT=$(echo \"$BODY\" | grep '^data:' | sed 's/^data: //' | jq -r '.result.tools | length' 2>/dev/null || echo \"?\")\n  \
-  echo \"tools/list: HTTP $HTTP_CODE\"\n  \
-  if [ \"$HTTP_CODE\" -ge 200 ] && [ \"$HTTP_CODE\" -lt 300 ] && [ \"$TOOL_COUNT\" != \"?\" ]; then\n    \
-    echo \"\u{2713} $server: $TOOL_COUNT tools available\"\n  \
-  else\n    \
-    echo \"##vso[task.logissue type=warning]MCP backend '$server' tools/list returned HTTP $HTTP_CODE\"\n    \
-    echo \"Response: $BODY\"\n    \
-    PROBE_FAILED=true\n  \
-  fi\n\
-done\n\
-\n\
-echo \"\"\n\
-echo \"=== MCPG health after probes ===\"\n\
-curl -sf \"http://localhost:{MCPG_PORT}/health\" | jq . || true\n\
-\n\
-if [ \"$PROBE_FAILED\" = \"true\" ]; then\n  \
-  echo \"##vso[task.logissue type=warning]One or more MCP backends failed to initialize \u{2014} check logs above\"\n\
-fi\n"
-    );
     use super::ir::env::EnvValue;
-    bash("Verify MCP backends", script).with_env(
-        "MCPG_API_KEY",
-        EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
-    )
+    ShellScript::new(&VERIFY_MCP_BACKENDS)
+        .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
+        .into_step("Verify MCP backends")
+        .with_env("MCPG_API_KEY", EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"))
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
-
-/// Construct a [`BashStep`] with its script body run through
-/// [`dedent`]. Every compiler-generated bash body in this module is
-/// built by `format!()` with `\n\` continuations whose source
-/// indentation leaks into the emitted YAML; `dedent()` strips it.
-fn bash(name: impl Into<String>, script: impl Into<String>) -> BashStep {
-    BashStep::new(name, dedent(&script.into()))
-}
-
-/// Strip the common leading whitespace from every non-empty line of
-/// `s`, **and** strip trailing whitespace from every line. The
-/// trailing-whitespace strip is critical for block-scalar emission:
-/// serde_yaml falls back to the double-quoted form when a block
-/// scalar contains lines with trailing spaces (because the scalar's
-/// re-parse would lose them), which produces hard-to-read YAML.
-///
-/// Used to clean Rust source-string indentation out of the bash
-/// bodies we hand to [`BashStep::new`]. Without this, the
-/// `\n\`-continuation indent in Rust source ends up inside the
-/// emitted YAML block scalar.
-fn dedent(s: &str) -> String {
-    let min = s
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.chars().take_while(|c| *c == ' ').count())
-        .min()
-        .unwrap_or(0);
-    let mut out = String::with_capacity(s.len());
-    let mut first = true;
-    for line in s.lines() {
-        if !first {
-            out.push('\n');
-        }
-        first = false;
-        // Only strip the leading `min` chars when the line actually
-        // has that many leading spaces; otherwise leave it alone
-        // (this avoids mangling interpolated content whose indent is
-        // intentionally lower than the surrounding template indent).
-        let leading_spaces = line.chars().take_while(|c| *c == ' ').count();
-        let strip = leading_spaces.min(min);
-        let stripped_leading = &line[strip..];
-        let stripped = stripped_leading.trim_end_matches([' ', '\t']);
-        out.push_str(stripped);
-    }
-    if s.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
 
 /// Classify a single raw env-var value string into a typed [`EnvValue`].
 ///
@@ -5868,12 +7041,17 @@ safe-outputs:
         // address, which does not exist until the engine is running. Starting
         // MCPG first would leave the redirect unresolvable.
         let network_script = prepare_ado_proxy_network_step().script;
-        assert!(network_script.contains(&format!(
-            "docker network create --internal {ADO_PROXY_NETWORK_NAME}"
-        )));
+        assert!(
+            network_script.contains(&format!("PROXY_NETWORK='{ADO_PROXY_NETWORK_NAME}'"))
+                && network_script.contains(r#"docker network create --internal "$PROXY_NETWORK""#),
+            "the internal network must be created from the compiler-supplied \
+             PROXY_NETWORK binding: {network_script}"
+        );
         let script = prepare_ado_mcp_step(common::ADO_MCP_VERSION).script;
         assert!(
-            script.contains(&format!("{ADO_MCP_PACKAGE}@{}", common::ADO_MCP_VERSION)),
+            script.contains(&format!("MCP_PACKAGE='{ADO_MCP_PACKAGE}'"))
+                && script.contains(&format!("MCP_VERSION='{}'", common::ADO_MCP_VERSION))
+                && script.contains(r#""$MCP_PACKAGE@$MCP_VERSION""#),
             "the MCP package must be pinned, not floating: {script}"
         );
         assert!(
@@ -5885,11 +7063,25 @@ safe-outputs:
             "the resolved version must be verified, not just requested: {script}"
         );
 
+        // A caller-supplied version must reach the script, and the compiled-in
+        // default must not survive alongside it. The version is a binding now,
+        // so assert on the prelude — that proves the producer supplied it,
+        // where a bare substring would also match the verification message.
         let override_script = prepare_ado_mcp_step("2.9.0").script;
-        assert!(override_script.contains(&format!("{ADO_MCP_PACKAGE}@2.9.0")));
-        assert!(override_script.contains("expected 2.9.0"));
         assert!(
-            !override_script.contains(&format!("{ADO_MCP_PACKAGE}@{}", common::ADO_MCP_VERSION))
+            override_script.contains("MCP_VERSION='2.9.0'"),
+            "the override must be bound: {override_script}"
+        );
+        assert!(
+            !override_script.contains(&format!("MCP_VERSION='{}'", common::ADO_MCP_VERSION)),
+            "the default version must not survive an override: {override_script}"
+        );
+        // The pin and its verification both read the binding, so an override
+        // cannot be applied to one and not the other.
+        assert!(
+            override_script.contains(r#""$MCP_PACKAGE@$MCP_VERSION""#)
+                && override_script.contains("expected $MCP_VERSION"),
+            "install and verification must share one version: {override_script}"
         );
     }
 
@@ -5928,6 +7120,10 @@ safe-outputs:
         // was previously omitted entirely, which killed all twelve catalogued
         // repository operations without any test noticing.
         let script = start_ado_proxy_step(&proxy_fm()).script;
+        // `ShellScript` renders ADO predefined macros as `Binding::ado_macro`
+        // — single-quoted so the value can never break out of the RHS — so the
+        // prelude carries `NAME='$(macro)'` rather than the older
+        // double-quoted `NAME="$(macro)"` form.
         for (variable, macro_name) in [
             ("ADO_PROXY_PROJECT", "System.TeamProject"),
             ("ADO_PROXY_PROJECT_ID", "System.TeamProjectId"),
@@ -5935,7 +7131,7 @@ safe-outputs:
             ("ADO_PROXY_REPOSITORY_ID", "Build.Repository.ID"),
         ] {
             assert!(
-                script.contains(&format!("{variable}=\"$({macro_name})\"")),
+                script.contains(&format!("{variable}='$({macro_name})'")),
                 "{variable} must be sourced from $({macro_name}): {script}"
             );
             assert!(
@@ -6065,8 +7261,14 @@ safe-outputs:
         let script = start_ado_proxy_step(&proxy_fm()).script;
 
         assert!(
-            script.contains("mktemp -d \"$(Agent.TempDirectory)/ado-proxy."),
+            script.contains("mktemp -d \"$AGENT_TEMP/ado-proxy."),
             "private material must be generated outside /tmp: {script}"
+        );
+        // AGENT_TEMP is bound from the ADO `Agent.TempDirectory` macro, which
+        // is confined to the agent work directory — never under /tmp.
+        assert!(
+            script.contains("AGENT_TEMP='$(Agent.TempDirectory)'"),
+            "AGENT_TEMP must come from Agent.TempDirectory: {script}"
         );
         for private in ["ca.key", "$ADO_PROXY_BEARER", "PROXY_MATERIAL"] {
             for line in script.lines().filter(|line| line.contains(private)) {
@@ -6085,10 +7287,18 @@ safe-outputs:
     fn ado_proxy_streams_material_on_stdin_rather_than_via_env_or_argv() {
         let step = start_ado_proxy_step(&proxy_fm());
 
+        // The container name reaches the body through the `PROXY_CONTAINER`
+        // binding, so the docker invocations reference `$PROXY_CONTAINER`
+        // rather than the literal `awmg-ado-proxy`.
         assert!(
+            step.script.contains("PROXY_CONTAINER='awmg-ado-proxy'"),
+            "PROXY_CONTAINER must be bound to the ado-proxy container name: {}",
             step.script
-                .contains("printf '%s' \"$PROXY_MATERIAL\" | docker exec -i awmg-ado-proxy")
-                && step.script.contains("cat > /tmp/ado-proxy-material"),
+        );
+        assert!(
+            step.script.contains(
+                "printf '%s' \"$PROXY_MATERIAL\" | docker exec -i \"$PROXY_CONTAINER\""
+            ) && step.script.contains("cat > /tmp/ado-proxy-material"),
             "material must stream through the container-private FIFO: {}",
             step.script
         );
@@ -6148,7 +7358,10 @@ safe-outputs:
         assert!(copy.script.contains("/tmp/gh-aw/ado-proxy-logs"));
         assert!(
             copy.script
-                .contains("$(Agent.TempDirectory)/staging/logs/ado-proxy"),
+                .contains("AGENT_TEMP='$(Agent.TempDirectory)'")
+                && copy
+                    .script
+                    .contains(r#""$AGENT_TEMP/staging/logs/ado-proxy""#),
             "proxy lifecycle and sanitized decision logs must reach the agent artifact"
         );
     }
@@ -6172,12 +7385,19 @@ safe-outputs:
         // `--public-ca-file` is an *output*: the proxy writes its interception
         // CA there so clients can trust it. It must land somewhere the agent
         // can read (AWF mounts /tmp into the chroot) — unlike the signing key.
+        // The flag lives inside the flattened container entrypoint that the
+        // `CONTAINER_ENTRYPOINT` binding carries into the prelude.
         assert!(script.contains("--public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem"));
-        assert!(script.contains(&format!("-v {AZ_WRAPPER_DIR}:/var/lib/ado-proxy")));
         assert!(
-            script.contains(&format!(
-                "##vso[task.setvariable variable=ADO_PROXY_CA_FILE]{ADO_PROXY_PUBLIC_CA_HOST_PATH}"
-            )),
+            script.contains(&format!("AZ_WRAPPER_DIR='{AZ_WRAPPER_DIR}'"))
+                && script.contains("-v \"$AZ_WRAPPER_DIR:/var/lib/ado-proxy\""),
+            "the wrapper directory must be bound and mounted at /var/lib/ado-proxy: {script}"
+        );
+        assert!(
+            script.contains(&format!("CA_HOST_PATH='{ADO_PROXY_PUBLIC_CA_HOST_PATH}'"))
+                && script.contains(
+                    "##vso[task.setvariable variable=ADO_PROXY_CA_FILE]$CA_HOST_PATH"
+                ),
             "clients need the published certificate's path: {script}"
         );
         assert!(
@@ -6221,8 +7441,21 @@ safe-outputs:
         // runner, so it must not introduce an image to build, pin or mirror.
         let script = start_ado_proxy_step(&proxy_fm()).script;
         assert_eq!(ADO_PROXY_IMAGE, common::ADO_MCP_IMAGE);
-        assert!(script.contains(&format!("{ADO_PROXY_IMAGE} \\")));
-        assert!(script.contains(&format!("{}:/app/ado-proxy.js:ro", paths::ADO_PROXY_PATH)));
+        // The image and the bundle path both reach the body through bindings,
+        // so the docker invocation references them as `$PROXY_IMAGE` and
+        // `$PROXY_SCRIPT_PATH` while the concrete values live in the prelude.
+        assert!(
+            script.contains(&format!("PROXY_IMAGE='{ADO_PROXY_IMAGE}'"))
+                && script.contains("\"$PROXY_IMAGE\" \\"),
+            "docker run must reuse the bound $PROXY_IMAGE: {script}"
+        );
+        assert!(
+            script.contains(&format!(
+                "PROXY_SCRIPT_PATH='{}'",
+                paths::ADO_PROXY_PATH
+            )) && script.contains("\"$PROXY_SCRIPT_PATH:/app/ado-proxy.js:ro\""),
+            "docker run must mount the bound ado-proxy bundle: {script}"
+        );
     }
 
     #[test]
@@ -6249,16 +7482,19 @@ safe-outputs:
     #[test]
     fn ado_proxy_recovers_from_an_interrupted_previous_run() {
         // --rm only fires on clean exit; an OOM or SIGKILL leaves the
-        // container, and with it a live credential, behind.
+        // container, and with it a live credential, behind. Both scripts now
+        // read the container name through the `PROXY_CONTAINER` binding.
+        let start = start_ado_proxy_step(&proxy_fm()).script;
         assert!(
-            start_ado_proxy_step(&proxy_fm())
-                .script
-                .contains(&format!("docker rm -f {ADO_PROXY_CONTAINER_NAME}"))
+            start.contains(&format!("PROXY_CONTAINER='{ADO_PROXY_CONTAINER_NAME}'"))
+                && start.contains("docker rm -f \"$PROXY_CONTAINER\""),
+            "start_ado_proxy_step must reap a stale container: {start}"
         );
+        let stop = stop_ado_proxy_step().script;
         assert!(
-            stop_ado_proxy_step()
-                .script
-                .contains(&format!("docker rm -f {ADO_PROXY_CONTAINER_NAME}"))
+            stop.contains(&format!("PROXY_CONTAINER='{ADO_PROXY_CONTAINER_NAME}'"))
+                && stop.contains("docker rm -f \"$PROXY_CONTAINER\""),
+            "stop_ado_proxy_step must reap the container: {stop}"
         );
     }
 

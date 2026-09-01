@@ -139,6 +139,22 @@ export class AdoRest {
     return res;
   }
 
+  /** Find the newest live work item with an exact title. Used for cleanup recovery. */
+  async findWorkItemByTitle(title: string): Promise<number | undefined> {
+    const escapedTitle = title.replaceAll("'", "''");
+    const path = this.projPath("_apis/wit/wiql?api-version=7.1");
+    const res = await this.request<{ workItems?: { id: number }[] }>(path, {
+      method: "POST",
+      body: {
+        query:
+          "SELECT [System.Id] FROM WorkItems " +
+          `WHERE [System.TeamProject] = @project AND [System.Title] = '${escapedTitle}' ` +
+          "ORDER BY [System.Id] DESC",
+      },
+    });
+    return res?.workItems?.[0]?.id;
+  }
+
   async getWorkItemComments(id: number): Promise<{ text: string; id: number }[]> {
     const path = this.projPath(
       `_apis/wit/workItems/${id}/comments?api-version=7.1-preview.4`,

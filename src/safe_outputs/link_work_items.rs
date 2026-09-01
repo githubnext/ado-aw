@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
 use crate::safe_outputs::comment_on_work_item::CommentTarget;
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{
+    ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReference, WorkItemResolution,
+};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use ado_aw_derive::SanitizeConfig;
@@ -41,11 +43,13 @@ const VALID_LINK_TYPES: &[&str] = &[
 /// Parameters for linking two work items
 #[derive(Deserialize, JsonSchema)]
 pub struct LinkWorkItemsParams {
-    /// The source work item ID (the item the link is added to)
-    pub source_id: i64,
+    /// The source work item (the item the link is added to): a positive ID, or
+    /// a temporary ID from an earlier `create-work-item` call in the same run.
+    pub source_id: WorkItemReference,
 
-    /// The target work item ID (the item being linked to)
-    pub target_id: i64,
+    /// The target work item (the item being linked to): a positive ID, or a
+    /// temporary ID from an earlier `create-work-item` call in the same run.
+    pub target_id: WorkItemReference,
 
     /// Link type: parent, child, related, predecessor, successor, duplicate, duplicate-of
     pub link_type: String,
@@ -56,8 +60,16 @@ pub struct LinkWorkItemsParams {
 
 impl Validate for LinkWorkItemsParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(self.source_id > 0, "source_id must be positive");
-        ensure!(self.target_id > 0, "target_id must be positive");
+        if let WorkItemReference::Number(source_id) = self.source_id {
+            ensure!(source_id > 0, "source_id must be positive");
+        }
+        if let WorkItemReference::Number(target_id) = self.target_id {
+            ensure!(target_id > 0, "target_id must be positive");
+        }
+        // Catches the literally identical case only. A temporary ID and a
+        // numeric ID that name the same work item are indistinguishable until
+        // Stage 3 resolution, so `execute_impl` repeats this check on the
+        // resolved IDs.
         ensure!(
             self.source_id != self.target_id,
             "source_id and target_id must be different"
@@ -82,8 +94,8 @@ tool_result! {
     default_max = 5,
     /// Result of linking two work items
     pub struct LinkWorkItemsResult {
-        source_id: i64,
-        target_id: i64,
+        source_id: WorkItemReference,
+        target_id: WorkItemReference,
         link_type: String,
         comment: Option<String>,
     }
@@ -122,18 +134,35 @@ pub struct LinkWorkItemsConfig {
     pub target: Option<CommentTarget>,
 }
 
+/// Resolve one reference to `(id, needs_target_check)`, or the failure message
+/// to surface when a temporary ID cannot be traced to a create in this run.
+fn resolve_reference(
+    reference: &WorkItemReference,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<Result<(i64, bool), String>> {
+    let (id, needs_target) = match reference.resolve(ctx)? {
+        WorkItemResolution::Unresolved(message) => return Ok(Err(message)),
+        WorkItemResolution::SameRun(id) => (id, false),
+        WorkItemResolution::Numeric(id) => (id, true),
+    };
+    match i64::try_from(id) {
+        Ok(id) => Ok(Ok((id, needs_target))),
+        Err(_) => Ok(Err(format!("work item ID {id} is out of range"))),
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for LinkWorkItemsResult {
     fn dry_run_summary(&self) -> String {
         format!(
-            "link work items #{} -> #{} ({})",
+            "link work items {} -> {} ({})",
             self.source_id, self.target_id, self.link_type
         )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
-            "Linking work item #{} -> #{} ({})",
+            "Linking work item {} -> {} ({})",
             self.source_id, self.target_id, self.link_type
         );
         debug!(
@@ -155,37 +184,50 @@ impl Executor for LinkWorkItemsResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: LinkWorkItemsConfig = ctx.get_tool_config("link-work-items");
+        let config: LinkWorkItemsConfig = ctx.get_tool_config("link-work-items")?;
         debug!("Allowed link types: {:?}", config.allowed_link_types);
 
-        // Validate work item IDs against target scope
-        match &config.target {
-            None => {
+        // Resolve each reference. Temporary IDs resolve only against creates
+        // that already succeeded in this SafeOutputs job, and are exempt from
+        // `target` because that create is scoped by its own configuration.
+        let (source_id, source_needs_target) = match resolve_reference(&self.source_id, ctx)? {
+            Ok(resolved) => resolved,
+            Err(message) => return Ok(ExecutionResult::failure(message)),
+        };
+        let (target_id, target_needs_target) = match resolve_reference(&self.target_id, ctx)? {
+            Ok(resolved) => resolved,
+            Err(message) => return Ok(ExecutionResult::failure(message)),
+        };
+        if source_id == target_id {
+            return Ok(ExecutionResult::failure(
+                "source_id and target_id resolve to the same work item".to_string(),
+            ));
+        }
+
+        // Validate numeric work item IDs against target scope
+        if source_needs_target || target_needs_target {
+            let Some(target) = &config.target else {
                 return Ok(ExecutionResult::failure(
                     "link-work-items requires a 'target' field in safe-outputs configuration \
                      to scope which work items can be linked. Example:\n  safe-outputs:\n    \
                      link-work-items:\n      target: \"*\""
                         .to_string(),
                 ));
+            };
+            // Check source_id
+            if source_needs_target && target.allows_id(source_id) == Some(false) {
+                return Ok(ExecutionResult::failure(format!(
+                    "Source work item #{source_id} is not allowed by the configured target scope"
+                )));
             }
-            Some(target) => {
-                // Check source_id
-                if let Some(false) = target.allows_id(self.source_id) {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Source work item #{} is not allowed by the configured target scope",
-                        self.source_id
-                    )));
-                }
-                // Check target_id
-                if let Some(false) = target.allows_id(self.target_id) {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Target work item #{} is not allowed by the configured target scope",
-                        self.target_id
-                    )));
-                }
-                // Area path validation is deferred — would need API calls for both IDs.
-                // For now, ID-based and wildcard scoping is enforced.
+            // Check target_id
+            if target_needs_target && target.allows_id(target_id) == Some(false) {
+                return Ok(ExecutionResult::failure(format!(
+                    "Target work item #{target_id} is not allowed by the configured target scope"
+                )));
             }
+            // Area path validation is deferred — would need API calls for both IDs.
+            // For now, ID-based and wildcard scoping is enforced.
         }
 
         // Validate link type against configured allow-list
@@ -215,7 +257,7 @@ impl Executor for LinkWorkItemsResult {
             "{}/{}/_apis/wit/workitems/{}",
             org_url.trim_end_matches('/'),
             utf8_percent_encode(project, PATH_SEGMENT),
-            self.target_id,
+            target_id,
         );
 
         // Build the JSON Patch body
@@ -241,7 +283,7 @@ impl Executor for LinkWorkItemsResult {
             "{}/{}/_apis/wit/workitems/{}?api-version=7.1",
             org_url.trim_end_matches('/'),
             utf8_percent_encode(project, PATH_SEGMENT),
-            self.source_id,
+            source_id,
         );
         debug!("API URL: {}", url);
 
@@ -249,7 +291,7 @@ impl Executor for LinkWorkItemsResult {
 
         info!(
             "Sending link request: #{} -[{}]-> #{}",
-            self.source_id, self.link_type, self.target_id
+            source_id, self.link_type, target_id
         );
         let response = client
             .patch(&url)
@@ -270,17 +312,17 @@ impl Executor for LinkWorkItemsResult {
 
             info!(
                 "Linked work item #{} -> #{} ({})",
-                self.source_id, self.target_id, self.link_type
+                source_id, target_id, self.link_type
             );
 
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Linked work item #{} -> #{} ({})",
-                    self.source_id, self.target_id, self.link_type
+                    source_id, target_id, self.link_type
                 ),
                 serde_json::json!({
-                    "source_id": self.source_id,
-                    "target_id": self.target_id,
+                    "source_id": source_id,
+                    "target_id": target_id,
                     "link_type": self.link_type,
                     "relation_type": relation_type,
                     "work_item_id": work_item_id,
@@ -296,7 +338,7 @@ impl Executor for LinkWorkItemsResult {
 
             Ok(ExecutionResult::failure(format!(
                 "Failed to link work item #{} -> #{} (HTTP {}): {}",
-                self.source_id, self.target_id, status, error_body
+                source_id, target_id, status, error_body
             )))
         }
     }
@@ -304,14 +346,241 @@ impl Executor for LinkWorkItemsResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::safe_outputs::ResolvedWorkItem;
+    use crate::secure::WorkItemTemporaryId;
+
+    #[test]
+    fn temporary_ids_deserialize_for_both_ends() {
+        let params: LinkWorkItemsParams = serde_json::from_value(serde_json::json!({
+            "source_id": "#aw_created1",
+            "target_id": 200,
+            "link_type": "related"
+        }))
+        .unwrap();
+        assert_eq!(
+            params.source_id,
+            WorkItemReference::Temporary(WorkItemTemporaryId::parse("#aw_created1").unwrap())
+        );
+        assert_eq!(params.target_id, WorkItemReference::Number(200));
+    }
+
+    #[tokio::test]
+    async fn unresolved_temporary_id_fails_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "link-work-items".to_string(),
+            serde_json::json!({"target": "*"}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let mut result: LinkWorkItemsResult = LinkWorkItemsParams {
+            source_id: WorkItemReference::Temporary(
+                WorkItemTemporaryId::parse("#aw_missing").unwrap(),
+            ),
+            target_id: WorkItemReference::Number(200),
+            link_type: "related".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("has not been resolved"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn temporary_ids_resolving_to_the_same_work_item_are_rejected() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "link-work-items".to_string(),
+            serde_json::json!({"target": "*"}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created1").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            ResolvedWorkItem {
+                id: 4242,
+                url: "https://example.invalid/4242".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: LinkWorkItemsResult = LinkWorkItemsParams {
+            source_id: WorkItemReference::Temporary(temporary_id),
+            target_id: WorkItemReference::Number(4242),
+            link_type: "related".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("same work item"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_temporary_ids_link_without_target() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // The relation URL is derived from the resolved numeric ID, not from the
+        // URL the create recorded, so it points at the mock server.
+        let target_url = format!("{}/Project/_apis/wit/workitems/43", server.uri());
+        Mock::given(method("PATCH"))
+            .and(path("/Project/_apis/wit/workitems/42"))
+            .and(body_json(serde_json::json!([{
+                "op": "add",
+                "path": "/relations/-",
+                "value": {
+                    "rel": "System.LinkTypes.Related",
+                    "url": target_url,
+                }
+            }])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": 42 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut tool_configs = std::collections::HashMap::new();
+        // No `target` configured: both ends resolve to work items created in
+        // this run, so the target policy does not apply.
+        tool_configs.insert("link-work-items".to_string(), serde_json::json!({}));
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let source_temporary = WorkItemTemporaryId::parse("#aw_source1").unwrap();
+        let target_temporary = WorkItemTemporaryId::parse("#aw_target1").unwrap();
+        ctx.register_resolved_work_item(
+            &source_temporary,
+            ResolvedWorkItem {
+                id: 42,
+                url: "https://example.test/items/42".to_string(),
+            },
+        )
+        .unwrap();
+        ctx.register_resolved_work_item(
+            &target_temporary,
+            ResolvedWorkItem {
+                id: 43,
+                url: "https://example.test/items/43".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: LinkWorkItemsResult = LinkWorkItemsParams {
+            source_id: WorkItemReference::Temporary(source_temporary),
+            target_id: WorkItemReference::Temporary(target_temporary),
+            link_type: "related".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "link failed: {}", execution.message);
+        assert_eq!(
+            execution
+                .data
+                .as_ref()
+                .and_then(|data| data["source_id"].as_i64()),
+            Some(42)
+        );
+        assert_eq!(
+            execution
+                .data
+                .as_ref()
+                .and_then(|data| data["target_id"].as_i64()),
+            Some(43)
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_ids_fail_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "link-work-items".to_string(),
+            serde_json::json!({"target": "*"}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created2").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            ResolvedWorkItem {
+                id: u64::MAX,
+                url: "https://example.invalid/huge".to_string(),
+            },
+        )
+        .unwrap();
+        // Resolved temporary ID out of range.
+        let mut result: LinkWorkItemsResult = LinkWorkItemsParams {
+            source_id: WorkItemReference::Temporary(temporary_id),
+            target_id: WorkItemReference::Number(200),
+            link_type: "related".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("is out of range"),
+            "unexpected message: {}",
+            execution.message
+        );
+
+        // Numeric ID out of range.
+        let mut result: LinkWorkItemsResult = LinkWorkItemsParams {
+            source_id: WorkItemReference::Number(100),
+            target_id: WorkItemReference::Number(u64::MAX),
+            link_type: "related".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("is out of range"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
     use super::*;
 
     #[test]
     fn test_params_deserializes() {
         let json = r#"{"source_id": 100, "target_id": 200, "link_type": "parent", "comment": "test linking"}"#;
         let params: LinkWorkItemsParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.source_id, 100);
-        assert_eq!(params.target_id, 200);
+        assert_eq!(params.source_id, WorkItemReference::Number(100));
+        assert_eq!(params.target_id, WorkItemReference::Number(200));
         assert_eq!(params.link_type, "parent");
         assert_eq!(params.comment.as_deref(), Some("test linking"));
     }
@@ -319,15 +588,15 @@ mod tests {
     #[test]
     fn test_params_converts_to_result() {
         let params = LinkWorkItemsParams {
-            source_id: 100,
-            target_id: 200,
+            source_id: WorkItemReference::Number(100),
+            target_id: WorkItemReference::Number(200),
             link_type: "child".to_string(),
             comment: Some("Links parent to child".to_string()),
         };
         let result: LinkWorkItemsResult = params.try_into().unwrap();
         assert_eq!(result.name, "link-work-items");
-        assert_eq!(result.source_id, 100);
-        assert_eq!(result.target_id, 200);
+        assert_eq!(result.source_id, WorkItemReference::Number(100));
+        assert_eq!(result.target_id, WorkItemReference::Number(200));
         assert_eq!(result.link_type, "child");
         assert_eq!(result.comment.as_deref(), Some("Links parent to child"));
     }
@@ -335,8 +604,8 @@ mod tests {
     #[test]
     fn test_validation_rejects_zero_source_id() {
         let params = LinkWorkItemsParams {
-            source_id: 0,
-            target_id: 200,
+            source_id: WorkItemReference::Number(0),
+            target_id: WorkItemReference::Number(200),
             link_type: "related".to_string(),
             comment: None,
         };
@@ -350,8 +619,8 @@ mod tests {
     #[test]
     fn test_validation_rejects_zero_target_id() {
         let params = LinkWorkItemsParams {
-            source_id: 100,
-            target_id: 0,
+            source_id: WorkItemReference::Number(100),
+            target_id: WorkItemReference::Number(0),
             link_type: "related".to_string(),
             comment: None,
         };
@@ -365,14 +634,15 @@ mod tests {
     #[test]
     fn test_validation_rejects_same_ids() {
         let params = LinkWorkItemsParams {
-            source_id: 100,
-            target_id: 100,
+            source_id: WorkItemReference::Number(100),
+            target_id: WorkItemReference::Number(100),
             link_type: "related".to_string(),
             comment: None,
         };
         let err = LinkWorkItemsResult::try_from(params).unwrap_err();
         assert!(
-            err.to_string().contains("source_id and target_id must be different"),
+            err.to_string()
+                .contains("source_id and target_id must be different"),
             "expected error about same ids, got: {err}"
         );
     }
@@ -380,8 +650,8 @@ mod tests {
     #[test]
     fn test_validation_rejects_invalid_link_type() {
         let params = LinkWorkItemsParams {
-            source_id: 100,
-            target_id: 200,
+            source_id: WorkItemReference::Number(100),
+            target_id: WorkItemReference::Number(200),
             link_type: "unknown".to_string(),
             comment: None,
         };
@@ -450,8 +720,8 @@ allowed-link-types:
     #[test]
     fn test_result_serializes_correctly() {
         let params = LinkWorkItemsParams {
-            source_id: 100,
-            target_id: 200,
+            source_id: WorkItemReference::Number(100),
+            target_id: WorkItemReference::Number(200),
             link_type: "related".to_string(),
             comment: None,
         };

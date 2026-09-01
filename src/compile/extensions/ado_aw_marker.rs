@@ -25,7 +25,50 @@
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::condition::Condition;
 use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::shell::{Binding, ShellScript};
+use crate::shell_script;
 use serde::Serialize;
+
+shell_script! {
+    /// Discovery marker: a `# ado-aw-metadata: {json}` shell comment plus a
+    /// human-readable echo. Both lines are spliced as a single fragment
+    /// because the JSON is dynamic and the echo values still flow through
+    /// `bash_single_quote_escape` — the fragment lets that quoting stay
+    /// verbatim without piping it through Binding::text (which would reject
+    /// `$(` in a user-supplied filename).
+    ADO_AW_MARKER {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [marker],
+        body: r#"
+# ado-aw:fragment marker
+"#,
+    }
+}
+
+shell_script! {
+    /// Write `aw_info.json` to Agent.TempDirectory/staging.
+    ///
+    /// The JSON is spliced as a fragment because it may (harmlessly) contain
+    /// substrings that `Binding::document`'s SECRET_NAMES check would reject
+    /// as false-positives, and the quoted heredoc delimiter here means the
+    /// splice is *shell data*, not shell to execute.
+    EMIT_AW_INFO {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP],
+        externals: [],
+        fragments: [aw_info_json],
+        body: r#"
+set -eo pipefail
+
+mkdir -p "$AGENT_TEMP/staging"
+cat >"$AGENT_TEMP/staging/aw_info.json" <<'AW_INFO_EOF'
+# ado-aw:fragment aw_info_json
+AW_INFO_EOF
+"#,
+    }
+}
 
 // ─── ado-aw marker (always-on, internal) ─────────────────────────────
 
@@ -147,9 +190,9 @@ fn marker_bash_step(metadata: &CompileMetadata) -> BashStep {
     let echo_repo = bash_single_quote_escape(&crate::sanitize::neutralize_pipeline_commands(
         &metadata.repo,
     ));
-    let script = format!(
+    let fragment = format!(
         "# ado-aw-metadata: {metadata_json}\n\
-         echo 'ado-aw metadata: source={echo_source} org={echo_org} repo={echo_repo} version={version} target={target}'\n",
+         echo 'ado-aw metadata: source={echo_source} org={echo_org} repo={echo_repo} version={version} target={target}'",
         metadata_json = metadata.marker_json(),
         echo_source = echo_source,
         echo_org = echo_org,
@@ -157,21 +200,18 @@ fn marker_bash_step(metadata: &CompileMetadata) -> BashStep {
         version = metadata.compiler_version.as_str(),
         target = metadata.target.as_str(),
     );
-    BashStep::new("ado-aw", script)
+    ShellScript::new(&ADO_AW_MARKER)
+        .fragment("marker", fragment)
+        .into_step("ado-aw")
 }
 
 /// Build the typed [`BashStep`] form of the `aw_info.json` emit step.
 fn aw_info_bash_step(metadata: &CompileMetadata) -> BashStep {
-    let script = format!(
-        "set -eo pipefail\n\
-         \n\
-         mkdir -p \"$(Agent.TempDirectory)/staging\"\n\
-         cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'\n\
-         {aw_info_json}\n\
-         AW_INFO_EOF\n",
-        aw_info_json = metadata.aw_info_json(),
-    );
-    BashStep::new("Emit aw_info.json", script).with_condition(Condition::Always)
+    ShellScript::new(&EMIT_AW_INFO)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .fragment("aw_info_json", metadata.aw_info_json())
+        .into_step("Emit aw_info.json")
+        .with_condition(Condition::Always)
 }
 
 struct CompileMetadata {
@@ -525,8 +565,13 @@ mod tests {
         assert!(matches!(step.condition, Some(Condition::Always)));
         assert!(
             step.script
-                .contains("cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'"),
+                .contains("cat >\"$AGENT_TEMP/staging/aw_info.json\" <<'AW_INFO_EOF'"),
             "step missing quoted heredoc write:\n{}",
+            step.script
+        );
+        assert!(
+            step.script.contains("AGENT_TEMP='$(Agent.TempDirectory)'"),
+            "step missing AGENT_TEMP binding to $(Agent.TempDirectory):\n{}",
             step.script
         );
         assert!(

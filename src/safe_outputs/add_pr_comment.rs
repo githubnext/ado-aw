@@ -418,7 +418,7 @@ impl Executor for AddPrCommentResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: AddPrCommentConfig = ctx.get_tool_config("add-pr-comment");
+        let config: AddPrCommentConfig = ctx.get_tool_config("add-pr-comment")?;
         debug!("Config: {:?}", config);
 
         let status_int = match self.validate_against_config(&config) {

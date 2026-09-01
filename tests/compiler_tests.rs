@@ -199,11 +199,11 @@ fn test_compiled_output_no_unreplaced_markers() {
         "Compiled output should reference GitHub Releases for AWF"
     );
     assert!(
-        compiled.contains("AWF_VERSION=\"0.27.32\""),
+        compiled.contains("AWF_VERSION='0.27.32'"),
         "Compiled output should download the AWF version that provides strict topology isolation"
     );
     assert!(
-        !compiled.contains("AWF_VERSION=\"0.27.9\""),
+        !compiled.contains("AWF_VERSION='0.27.9'"),
         "Compiled output must not fall back to the legacy host-access AWF version"
     );
 
@@ -249,9 +249,11 @@ fn test_compiled_output_no_unreplaced_markers() {
         "Generated AWF invocations must not use legacy host security"
     );
     assert!(
-        compiled.contains("--name awmg-mcpg")
+        compiled.contains("MCPG_CONTAINER='awmg-mcpg'")
+            && compiled.contains(r#"--name "$MCPG_CONTAINER""#)
             && compiled.contains("--network bridge")
-            && compiled.contains("-p 127.0.0.1:8080:8080"),
+            && compiled.contains("MCPG_PORT=8080")
+            && compiled.contains(r#"-p "127.0.0.1:$MCPG_PORT:$MCPG_PORT""#),
         "MCPG must use the stable bridge-network topology"
     );
     for line in compiled
@@ -1662,8 +1664,7 @@ Vote on pull requests.
     ];
 
     for (dir_prefix, test_content, case_desc) in configs {
-        let temp_dir =
-            std::env::temp_dir().join(format!("{}-{}", dir_prefix, std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("{}-{}", dir_prefix, std::process::id()));
         fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
         let test_input = temp_dir.join("upr-agent.md");
@@ -2076,9 +2077,26 @@ Test.
 "#,
     );
 
-    assert!(compiled.contains("\"@azure-devops/mcp@2.9.0\""));
-    assert!(compiled.contains("expected 2.9.0"));
-    assert!(!compiled.contains("\"@azure-devops/mcp@2.8.1\""));
+    // The version is supplied as a `ShellScript` binding rather than
+    // interpolated into the install command, so assert on the generated
+    // prelude — that proves the override reached the producer, where a bare
+    // substring would also match the verification message.
+    assert!(
+        compiled.contains("MCP_PACKAGE='@azure-devops/mcp'")
+            && compiled.contains("MCP_VERSION='2.9.0'"),
+        "the front-matter version override must reach the install step"
+    );
+    // Install and verification read the same binding, so an override cannot
+    // be applied to one and not the other.
+    assert!(
+        compiled.contains("\"$MCP_PACKAGE@$MCP_VERSION\"")
+            && compiled.contains("expected $MCP_VERSION"),
+        "the install and its verification must share one version"
+    );
+    assert!(
+        !compiled.contains("MCP_VERSION='2.8.1'"),
+        "the compiler default must not survive an explicit override"
+    );
 }
 
 /// Test that the Azure DevOps MCP fixture compiles successfully with no unreplaced markers
@@ -2114,14 +2132,17 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled output");
 
-    let policy_marker = "cat > \"$PROXY_DIR/policy/policy.json\" <<'ADO_PROXY_POLICY_EOF'\n";
+    // The policy document is now carried by the `POLICY` binding, which
+    // `Binding::document` renders as a quoted heredoc in the generated
+    // prelude. Nothing expands inside it, so the JSON survives verbatim.
+    let policy_marker = "POLICY=$(cat <<'ADO_AW_SHELL_DOC_EOF'\n";
     let policy_start = compiled
         .find(policy_marker)
         .map(|index| index + policy_marker.len())
         .expect("compiled pipeline must carry an ado-proxy policy document");
     let policy_tail = &compiled[policy_start..];
     let policy_end = policy_tail
-        .find("\n      ADO_PROXY_POLICY_EOF")
+        .find("\n      ADO_AW_SHELL_DOC_EOF")
         .expect("compiled policy heredoc must terminate");
     let policy_json = policy_tail[..policy_end]
         .lines()
@@ -2130,6 +2151,12 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         .join("\n");
     let policy: serde_json::Value =
         serde_json::from_str(&policy_json).expect("compiled policy must be valid JSON");
+
+    // The document is written to the path the container mounts read-only.
+    assert!(
+        compiled.contains(r#"printf '%s\n' "$POLICY" > "$PROXY_DIR/policy/policy.json""#),
+        "the policy binding must be written to the mounted policy path"
+    );
 
     // No unreplaced template markers (except ADO ${{ }} expressions)
     for line in compiled.lines() {
@@ -2157,8 +2184,9 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should contain the container image"
     );
     assert!(
-        compiled.contains("\"@azure-devops/mcp@2.8.1\"")
-            && compiled.contains("expected 2.8.1"),
+        compiled.contains("MCP_PACKAGE='@azure-devops/mcp'")
+            && compiled.contains("MCP_VERSION='2.8.1'")
+            && compiled.contains("expected $MCP_VERSION"),
         "the unversioned frontmatter form must use and verify the compiler default"
     );
     assert!(
@@ -2227,7 +2255,8 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "only explicitly selected capabilities plus discovery may be emitted"
     );
     assert!(
-        compiled.contains("case \" devops repos rest \" in"),
+        compiled.contains("ALLOWED_GROUPS='devops repos rest'")
+            && compiled.contains(r#"case " $ALLOWED_GROUPS " in"#),
         "the az wrapper must narrow to the same capability set"
     );
     assert!(
@@ -4266,8 +4295,16 @@ fn assert_aw_info_step_present(
         compiled.contains("condition: always()"),
         "{fixture_name}: compiled YAML missing always() condition on aw_info step"
     );
+    // `Agent.TempDirectory` now reaches the script as a binding rather than
+    // being interpolated inline, so assert on both the binding and its use.
+    // That is stronger: it proves the producer supplied the macro, where a
+    // bare substring would also match a comment.
     assert!(
-        compiled.contains("cat >\"$(Agent.TempDirectory)/staging/aw_info.json\" <<'AW_INFO_EOF'"),
+        compiled.contains("AGENT_TEMP='$(Agent.TempDirectory)'"),
+        "{fixture_name}: compiled YAML missing the Agent.TempDirectory binding"
+    );
+    assert!(
+        compiled.contains("cat >\"$AGENT_TEMP/staging/aw_info.json\" <<'AW_INFO_EOF'"),
         "{fixture_name}: compiled YAML missing quoted heredoc aw_info write step"
     );
     // Softer suffix check on the source path: fixtures compile under
@@ -5195,8 +5232,9 @@ fn test_pr_filter_tier1_has_evaluator_gate() {
         "Should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
-        "Should invoke node gate evaluator"
+        compiled.contains("EVALUATOR_PATH='/tmp/ado-aw-scripts/ado-script/gate.js'")
+            && compiled.contains(r#"node "$EVALUATOR_PATH""#),
+        "Should invoke node gate evaluator via its bound path"
     );
     assert!(
         compiled.contains("ado-script.zip"),
@@ -5398,8 +5436,9 @@ fn test_pr_filter_tier2_has_extension_gate() {
         "Tier 2 should include base64-encoded spec"
     );
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/gate.js'"),
-        "Tier 2 should invoke node gate evaluator"
+        compiled.contains("EVALUATOR_PATH='/tmp/ado-aw-scripts/ado-script/gate.js'")
+            && compiled.contains(r#"node "$EVALUATOR_PATH""#),
+        "Tier 2 should invoke node gate evaluator via its bound path"
     );
     assert!(compiled.contains("name: prGate"), "Should have prGate step");
 }
@@ -5876,8 +5915,13 @@ fn test_byom_provider_env_compiles_and_merges() {
     // the exact version selected by --image-tag.
     assert_eq!(
         compiled
-            .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
+            .matches("API_PROXY_IMAGE='ghcr.io/github/gh-aw-firewall/api-proxy:")
             .count(),
+        2,
+        "BYOK must bind the api-proxy image in both the Agent and Detection jobs: {compiled}"
+    );
+    assert_eq!(
+        compiled.matches(r#"docker pull "$API_PROXY_IMAGE""#).count(),
         2,
         "BYOK must pre-pull the api-proxy container image in both the Agent and Detection jobs: {compiled}"
     );
@@ -5960,8 +6004,13 @@ fn test_non_byom_agent_uses_always_on_api_proxy() {
     );
     assert_eq!(
         compiled
-            .matches("docker pull ghcr.io/github/gh-aw-firewall/api-proxy:")
+            .matches("API_PROXY_IMAGE='ghcr.io/github/gh-aw-firewall/api-proxy:")
             .count(),
+        2,
+        "Agent and Detection must bind the api-proxy image for pre-pull: {compiled}"
+    );
+    assert_eq!(
+        compiled.matches(r#"docker pull "$API_PROXY_IMAGE""#).count(),
         2,
         "Agent and Detection must pre-pull the always-on api-proxy image: {compiled}"
     );
@@ -6075,13 +6124,14 @@ fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
     let compiled = compile_fixture("github-issue-app-agent.md");
     assert_valid_yaml(&compiled, "github-issue-app-agent.md");
     assert!(compiled_has_enabled_tool(&compiled, "create-github-issue"));
-    assert!(compiled_has_enabled_tool(&compiled, "set-github-issue-type"));
+    assert!(compiled_has_enabled_tool(
+        &compiled,
+        "set-github-issue-type"
+    ));
     assert!(compiled.contains("Mint GitHub App token (SafeOutputs)"));
     assert!(compiled.contains("--output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN'"));
     assert!(compiled.contains("--permissions-json '{\"issues\":\"write\"}'"));
-    assert!(compiled.contains(
-        "ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"
-    ));
+    assert!(compiled.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"));
 
     let agent_start = compiled.find("- job: Agent").expect("Agent job");
     let detection_start = compiled.find("- job: Detection").expect("Detection job");
@@ -6092,11 +6142,51 @@ fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
         &compiled[agent_start..detection_start],
         &compiled[detection_start..safe_outputs_start],
     ] {
-        assert!(block.contains(
-            "--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"
-        ));
+        assert!(block.contains("--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"));
         assert!(!block.contains("ADO_AW_GITHUB_TOKEN"));
     }
+}
+
+#[test]
+fn test_compile_github_app_auth_is_scoped_to_reviewed_variant() {
+    let compiled = compile_inline_agent(
+        "github-app-reviewed-variant",
+        r#"---
+name: "GitHub App Reviewed Variant"
+description: "GitHub App auth is emitted only in the GitHub execution lane"
+engine:
+  id: copilot
+  github-app-token:
+    app-id: 1234567
+    owner: octo-org
+    permissions:
+      issues: read
+safe-outputs:
+  noop:
+    require-approval: false
+  create-github-issue:
+    target-repo: octo-org/reviewed-repo
+    require-approval: true
+---
+
+Create a reviewed GitHub issue.
+"#,
+    );
+    let automatic_start = compiled
+        .find("- job: SafeOutputs\n")
+        .expect("automatic job");
+    let reviewed_start = compiled
+        .find("- job: SafeOutputs_Reviewed")
+        .expect("reviewed job");
+    let automatic = &compiled[automatic_start..reviewed_start];
+    let reviewed = &compiled[reviewed_start..];
+
+    assert!(!automatic.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(!automatic.contains("ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN"));
+    assert!(reviewed.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(reviewed.contains("--repositories 'reviewed-repo'"));
+    assert!(reviewed.contains("--permissions-json '{\"issues\":\"write\"}'"));
+    assert!(reviewed.contains("Revoke GitHub App token (SafeOutputs)"));
 }
 
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
@@ -6442,8 +6532,8 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // IS expected at Agent-job-level `variables:` scope, the documented
     // safe location — that hoist is asserted separately.)
     let parsed = parse_compiled_yaml(&compiled);
-    let agent_job = find_job_mapping(&parsed, "Agent")
-        .expect("compiled YAML must contain the Agent job");
+    let agent_job =
+        find_job_mapping(&parsed, "Agent").expect("compiled YAML must contain the Agent job");
     let stage_step = agent_job
         .get(yaml_key("steps"))
         .and_then(|v| v.as_sequence())
@@ -6492,8 +6582,9 @@ fn test_execution_context_pr_emits_prepare_step_and_prompt_supplement() {
     // `ExtensionPhase::System` and thus appears before this step
     // (which runs in `ExtensionPhase::Tool`).
     assert!(
-        compiled.contains("node '/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'"),
-        "v7: prepare step must invoke the exec-context-pr.js bundle"
+        compiled.contains("BUNDLE='/tmp/ado-aw-scripts/ado-script/exec-context-pr.js'")
+            && compiled.contains(r#"node "$BUNDLE""#),
+        "v7: prepare step must invoke the exec-context-pr.js bundle via its bound path"
     );
 
     // v7: all the bash-side specifics (GIT_CONFIG_*, regex validation,
@@ -7399,7 +7490,10 @@ safe-outputs:
 
     assert!(detection.contains("--model detection-model"), "{detection}");
     assert!(detection.contains("--reasoning-effort=low"), "{detection}");
-    assert!(!detection.contains("--reasoning-effort=high"), "{detection}");
+    assert!(
+        !detection.contains("--reasoning-effort=high"),
+        "{detection}"
+    );
     assert!(detection.contains("INHERITED_ENV: agent"), "{detection}");
     assert!(detection.contains("DETECTION_ENV: enabled"), "{detection}");
     assert!(
@@ -7443,9 +7537,7 @@ safe-outputs:
     assert!(!detection.contains("Prepare threat analysis prompt"));
     assert!(detection.contains("name: threatAnalysis"), "{detection}");
     assert!(
-        detection.contains(
-            "##vso[task.setvariable variable=SafeToProcess;isOutput=true]true"
-        ),
+        detection.contains("##vso[task.setvariable variable=SafeToProcess;isOutput=true]true"),
         "{detection}"
     );
     assert!(detection.contains("name: reviewedProposals"), "{detection}");
@@ -7464,8 +7556,7 @@ safe-outputs:
     );
     let safe_outputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safe_outputs
-            .contains("dependencies.Detection.outputs['threatAnalysis.SafeToProcess']"),
+        safe_outputs.contains("dependencies.Detection.outputs['threatAnalysis.SafeToProcess']"),
         "{safe_outputs}"
     );
 }
@@ -7487,9 +7578,15 @@ safe-outputs:
 "#;
     let (ok, compiled, stderr) =
         compile_inline_source("threat-detection-disabled-invalid-version", source);
-    assert!(ok, "disabled Detection should not resolve install steps: {stderr}");
+    assert!(
+        ok,
+        "disabled Detection should not resolve install steps: {stderr}"
+    );
     let detection = job_block(&compiled, "Detection");
-    assert!(detection.contains("Bypass AI threat analysis"), "{detection}");
+    assert!(
+        detection.contains("Bypass AI threat analysis"),
+        "{detection}"
+    );
     assert!(!detection.contains("bad version"), "{detection}");
 }
 
@@ -7574,7 +7671,10 @@ safe-outputs:
     let detection = job_block(&compiled, "Detection");
     assert!(!agent.contains("detector.example.com"), "{agent}");
     assert!(detection.contains("detector.example.com"), "{detection}");
-    assert!(detection.contains("COPILOT_PROVIDER_BASE_URL"), "{detection}");
+    assert!(
+        detection.contains("COPILOT_PROVIDER_BASE_URL"),
+        "{detection}"
+    );
     assert!(detection.contains("DETECTION_API_KEY"), "{detection}");
     assert!(
         detection.contains("--exclude-env COPILOT_PROVIDER_API_KEY"),
@@ -7822,9 +7922,16 @@ supply-chain:
     assert!(ok, "pipeline-artifact + registry should compile: {stderr}");
     assert!(compiled.contains("source: specific"));
     assert!(compiled.contains("runId: '630001'"));
-    assert!(compiled.contains("docker pull myacr.azurecr.io/candidate/squid:"));
+    assert!(
+        compiled.contains("SQUID_IMAGE='myacr.azurecr.io/candidate/squid:")
+            && compiled.contains(r#"docker pull "$SQUID_IMAGE""#),
+        "AWF squid image must be bound from the internal registry: {compiled}"
+    );
     assert!(compiled.contains("azureSubscription: acr-conn"));
-    assert!(!compiled.contains("docker pull ghcr.io"));
+    assert!(
+        !compiled.contains("_IMAGE='ghcr.io"),
+        "no image binding should point at ghcr.io in registry mode: {compiled}"
+    );
     assert!(!compiled.contains("DownloadPackage@1"));
     assert!(!compiled.contains("NuGetAuthenticate@1"));
     assert!(!compiled.contains("github.com/githubnext/ado-aw/releases"));
@@ -7922,12 +8029,14 @@ fn test_supply_chain_full_reroutes_all_artifacts() {
         "ACR login must be emitted before docker pull in registry mode"
     );
     assert!(
-        compiled.contains("docker pull myacr.azurecr.io/oss-mirror/squid:"),
-        "AWF images must be pulled from the internal registry base path (artifact name only)"
+        compiled.contains("SQUID_IMAGE='myacr.azurecr.io/oss-mirror/squid:")
+            && compiled.contains(r#"docker pull "$SQUID_IMAGE""#),
+        "AWF squid image must be bound from the internal registry base path (artifact name only): {compiled}"
     );
     assert!(
-        compiled.contains("docker pull myacr.azurecr.io/oss-mirror/api-proxy:"),
-        "the always-on api-proxy must be pulled from the internal registry"
+        compiled.contains("API_PROXY_IMAGE='myacr.azurecr.io/oss-mirror/api-proxy:")
+            && compiled.contains(r#"docker pull "$API_PROXY_IMAGE""#),
+        "the always-on api-proxy must be bound from the internal registry"
     );
     assert!(
         compiled.contains("myacr.azurecr.io/oss-mirror/gh-aw-mcpg:"),
@@ -8043,6 +8152,88 @@ supply-chain:
     assert!(
         stderr.contains("supply-chain.registry requires a service connection"),
         "error must explain the missing registry connection: {stderr}"
+    );
+}
+
+/// `supply-chain.registry` with characters outside the validated allowlist
+/// (e.g. embedded whitespace or a shell-injection attempt) must be rejected
+/// at compile time rather than silently reaching the generated YAML —
+/// `RegistryRef::parse` / `is_valid_registry_ref` is the enforcement point.
+#[test]
+fn test_supply_chain_registry_invalid_chars_fails() {
+    let source = r#"---
+name: "Bad Registry Chars"
+description: "registry containing disallowed characters"
+supply-chain:
+  registry:
+    name: "myacr.azurecr.io; rm -rf /"
+    service-connection: acr-conn
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-registry-chars", source);
+    assert!(
+        !ok,
+        "registry name with disallowed characters must fail to compile: {compiled}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "compile failure must surface a diagnostic message"
+    );
+}
+
+/// `supply-chain.service-connection` containing a double quote (control for
+/// downstream YAML/task-input injection) must be rejected at compile time —
+/// `ServiceConnection::parse` / `is_valid_service_connection` is the
+/// enforcement point.
+#[test]
+fn test_supply_chain_service_connection_invalid_chars_fails() {
+    let source = r#"---
+name: "Bad Connection"
+description: "service connection containing a quote"
+supply-chain:
+  feed: my-internal-feed
+  service-connection: "acr\"conn"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-service-connection", source);
+    assert!(
+        !ok,
+        "service-connection with a quote character must fail to compile: {compiled}"
+    );
+    assert!(
+        stderr.contains("service-connection") || stderr.contains("service_connection"),
+        "error must reference the invalid service-connection field: {stderr}"
+    );
+}
+
+/// `supply-chain.feed` with a path-traversal segment (`..`) must be rejected
+/// at compile time — `FeedRef::parse` / `is_valid_feed_ref` is the
+/// enforcement point, and this is a security-relevant guard against feed
+/// path escapes reaching the generated NuGetAuthenticate/DownloadPackage
+/// steps.
+#[test]
+fn test_supply_chain_feed_path_traversal_fails() {
+    let source = r#"---
+name: "Bad Feed"
+description: "feed containing a path traversal segment"
+supply-chain:
+  feed: "../escape-feed"
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("bad-feed-traversal", source);
+    assert!(
+        !ok,
+        "feed with a '..' path-traversal segment must fail to compile: {compiled}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "compile failure must surface a diagnostic message"
     );
 }
 
@@ -8368,6 +8559,16 @@ safe-outputs:
         compiled.contains("AW_REVIEWED_TOOLS: create-pull-request"),
         "expected the reviewed tool list passed via env:\n{compiled}"
     );
+    assert!(
+        compiled.contains("AW_GITHUB_REPOSITORY_POLICIES: '{}'")
+            || compiled.contains("AW_GITHUB_REPOSITORY_POLICIES: {}"),
+        "expected an empty trusted repository-policy map:\n{compiled}"
+    );
+    assert!(
+        compiled.contains("AW_CURRENT_REPOSITORY: $(Build.Repository.Name)")
+            && compiled.contains("AW_CURRENT_REPOSITORY_PROVIDER: $(Build.Repository.Provider)"),
+        "expected trusted ADO repository metadata:\n{compiled}"
+    );
 
     // The step lives in the Agent job, not the Detection job.
     let agent_block = job_block(&compiled, "Agent");
@@ -8379,6 +8580,66 @@ safe-outputs:
     assert!(
         !detection_block.contains("Render safe-outputs summary"),
         "summary step must NOT be in the Detection job:\n{detection_block}"
+    );
+}
+
+#[test]
+fn test_safe_outputs_summary_step_embeds_trusted_github_repository_policy() {
+    let source = r#"---
+name: "GitHub Summary Agent"
+description: "Trusted repository summary"
+safe-outputs:
+  create-github-issue:
+    target-repo: octo/default
+    allowed-repos: [octo/other]
+    require-approval: true
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-github-repo", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    let agent_block = job_block(&compiled, "Agent");
+    assert!(
+        agent_block.contains("AW_GITHUB_REPOSITORY_POLICIES:")
+            && agent_block.contains("create-github-issue")
+            && agent_block.contains("targetRepo")
+            && agent_block.contains("octo/default")
+            && agent_block.contains("allowedRepos")
+            && agent_block.contains("octo/other"),
+        "expected compiler-owned GitHub repository policy:\n{agent_block}"
+    );
+    assert!(
+        agent_block.contains("AW_GITHUB_API_URL: https://api.github.com"),
+        "expected resolved GitHub API URL:\n{agent_block}"
+    );
+}
+
+#[test]
+fn test_safe_outputs_summary_step_preserves_current_repository_fallback() {
+    let source = r#"---
+name: "GitHub Current Repository Summary"
+description: "Runtime current repository fallback"
+safe-outputs:
+  create-github-issue: {}
+---
+
+## Body
+"#;
+    let (ok, compiled, stderr) = compile_inline_source("summary-github-current", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    let agent_block = job_block(&compiled, "Agent");
+    assert!(
+        agent_block.contains("create-github-issue")
+            && agent_block.contains("targetRepo")
+            && agent_block.contains("null")
+            && agent_block.contains("allowedRepos"),
+        "expected a trusted policy with no fixed target:\n{agent_block}"
+    );
+    assert!(
+        agent_block.contains("AW_CURRENT_REPOSITORY: $(Build.Repository.Name)")
+            && agent_block.contains("AW_CURRENT_REPOSITORY_PROVIDER: $(Build.Repository.Provider)"),
+        "expected runtime current-repository fallback inputs:\n{agent_block}"
     );
 }
 
@@ -8852,17 +9113,28 @@ engine:
 /// nowhere else, for a given compiled pipeline.
 fn assert_github_app_token_wiring(compiled: &str) {
     // Total bundle invocations = mint (Agent + Detection) + revoke
-    // (Agent + Detection) = 4. Revoke invocations carry the ` revoke` arg.
+    // (Agent + Detection) = 4. Both mint and revoke read the bundle path
+    // through the bound `$GITHUB_APP_TOKEN_PATH`; only revoke follows it
+    // with the literal `revoke` word.
     let total_bundle = compiled
-        .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'")
+        .matches("node \"$GITHUB_APP_TOKEN_PATH\"")
         .count();
     let revoke_hits = compiled
-        .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js' revoke")
+        .matches("node \"$GITHUB_APP_TOKEN_PATH\" revoke")
         .count();
     let mint_hits = total_bundle - revoke_hits;
     assert_eq!(
         mint_hits, 2,
         "expected the mint step in exactly Agent + Detection, found {mint_hits}:\n{compiled}"
+    );
+    // The bundle path is projected through the prelude in every mint/revoke
+    // step (Agent + Detection = 4 preludes).
+    let path_bindings = compiled
+        .matches("GITHUB_APP_TOKEN_PATH='/tmp/ado-aw-scripts/ado-script/github-app-token.js'")
+        .count();
+    assert_eq!(
+        path_bindings, 4,
+        "expected the bundle path bound in every mint + revoke prelude, found {path_bindings}:\n{compiled}"
     );
     let mint_display = compiled
         .matches("Mint GitHub App token (Copilot engine auth)")
@@ -8972,17 +9244,17 @@ fn test_github_app_token_skip_revocation() {
     // Mint step still present in Agent + Detection.
     assert_eq!(
         compiled
-            .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js'")
+            .matches("node \"$GITHUB_APP_TOKEN_PATH\"")
             .count()
             - compiled
-                .matches("node '/tmp/ado-aw-scripts/ado-script/github-app-token.js' revoke")
+                .matches("node \"$GITHUB_APP_TOKEN_PATH\" revoke")
                 .count(),
         2,
         "mint step must still be present:\n{compiled}"
     );
     // ...but no revoke step.
     assert!(
-        !compiled.contains("github-app-token.js' revoke"),
+        !compiled.contains("\"$GITHUB_APP_TOKEN_PATH\" revoke"),
         "skip-token-revocation must suppress the revoke step:\n{compiled}"
     );
 }
@@ -9027,14 +9299,21 @@ fn test_github_app_token_literal_app_id_and_api_url() {
         !compiled.contains("$(GITHUB_APP_PRIVATE_KEY)"),
         "override must replace the default private-key variable:\n{compiled}"
     );
-    // GHES api-url flows into both mint and revoke steps as an argv flag.
-    // Mint: `... --api-url '...'`; revoke: `revoke --api-url '...'`.
-    let api_url_args = compiled
+    // GHES api-url flows into both mint (fragment argv) and revoke (prelude
+    // binding + `${API_URL:+…}` guard) steps in both jobs.
+    let mint_api_url = compiled
         .matches("--api-url 'https://ghe.example.com/api/v3'")
         .count();
     assert_eq!(
-        api_url_args, 4,
-        "api-url must appear as an argv flag in both mint and both revoke steps (2 jobs x 2):\n{compiled}"
+        mint_api_url, 2,
+        "api-url must appear as a mint-step argv fragment in both jobs (Agent + Detection):\n{compiled}"
+    );
+    let revoke_api_url = compiled
+        .matches("API_URL='https://ghe.example.com/api/v3'")
+        .count();
+    assert_eq!(
+        revoke_api_url, 2,
+        "api-url must be projected through the revoke-step prelude in both jobs (Agent + Detection):\n{compiled}"
     );
     assert!(
         !compiled.contains("GH_APP_API_URL:"),
@@ -9249,7 +9528,15 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_agent() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        agent.contains("PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"),
+        "Agent job must project the bundle path through the prelude:\n{agent}"
+    );
+    assert!(
+        agent.contains("MODE='patch-base'"),
+        "Agent job must project the patch-base mode through the prelude:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "Agent job must invoke patch-base without shell-expanding the runtime self source ref:\n{agent}"
     );
     assert!(
@@ -9291,7 +9578,15 @@ fn test_create_pull_request_prepare_step_defaults_target_branch() {
     );
     let agent = job_block(&compiled, "Agent");
     assert!(
-        agent.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode patch-base --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        agent.contains("PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"),
+        "bare create-pull-request must project the bundle path through the prelude:\n{agent}"
+    );
+    assert!(
+        agent.contains("MODE='patch-base'"),
+        "bare create-pull-request must project the patch-base mode through the prelude:\n{agent}"
+    );
+    assert!(
+        agent.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "bare create-pull-request must emit the prepare step targeting 'main':\n{agent}"
     );
     // Single `self` checkout ⇒ exactly one --repo-dir (the working directory).
@@ -9377,7 +9672,19 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains("node '/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js' --mode target-worktree --repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
+        safeoutputs.contains(
+            "PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"
+        ),
+        "SafeOutputs job must project the bundle path through the prelude:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("MODE='target-worktree'"),
+        "SafeOutputs job must project the target-worktree mode through the prelude:\n{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains(
+            "--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"
+        ),
         "SafeOutputs job must invoke prepare-pr-base with the self dir/target pair:\n{safeoutputs}"
     );
     assert!(
@@ -9414,7 +9721,8 @@ fn test_create_pull_request_safeoutputs_prepare_step_covers_all_checkout_repos()
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
+        safeoutputs
+            .contains("--repo-dir \"$(Build.SourcesDirectory)/self\" --target-branch 'main'"),
         "self must target the literal default 'main' in the SafeOutputs job:\n{safeoutputs}"
     );
     assert!(
@@ -9528,8 +9836,7 @@ fn test_issue_1731_safeoutputs_checks_out_additional_repos_for_create_pr() {
         "Agent must check out self at its fixed multi-checkout path:\n{agent}"
     );
     assert!(
-        agent.contains("- checkout: build-tools")
-            && agent.contains("path: s/build-tools"),
+        agent.contains("- checkout: build-tools") && agent.contains("path: s/build-tools"),
         "Agent must check out tools at its explicit alias path:\n{agent}"
     );
     assert!(
@@ -9610,14 +9917,17 @@ fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout()
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     // With additional repos, self is pinned to $(Build.SourcesDirectory)/self.
+    // The compiler now passes the source path to the executor through the step
+    // `env:` block (ADO_AW_SOURCE_PATH), which the shell reads as
+    // `--source "$ADO_AW_SOURCE_PATH"`.
     assert!(
-        safeoutputs
-            .contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
+        safeoutputs.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+            && safeoutputs
+                .contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "SafeOutputs executor --source must use the multi-checkout layout path:\n{safeoutputs}"
     );
     assert!(
-        safeoutputs
-            .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
+        safeoutputs.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "SafeOutputs must pass the exact self checkout to the executor:\n{safeoutputs}"
     );
     assert!(
@@ -9703,24 +10013,22 @@ fn test_issue_1731_split_approval_additional_checkouts_only_in_pr_variant() {
         "auto SafeOutputs must NOT check out additional repos (it never runs create-pull-request):\n{auto}"
     );
     assert!(
-        auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
-            && !auto.contains(
-                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
-            ),
+        auto.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)")
+            && !auto.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+            && auto.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "self-only SafeOutputs must use its single-checkout source path:\n{auto}"
     );
     assert!(
         auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
-            && !auto.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && !auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "self-only SafeOutputs must pass its checkout root as the self repo:\n{auto}"
     );
     assert!(
-        reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
+        reviewed.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
             && reviewed.contains(
                 "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            )
+            && reviewed.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "PR-capable reviewed job must use its multi-checkout self path:\n{reviewed}"
     );
 }
@@ -9750,24 +10058,23 @@ fn test_issue_1731_split_approval_additional_checkouts_in_auto_when_sibling_gate
         "SafeOutputs_Reviewed must NOT check out additional repos when it doesn't run create-pull-request:\n{reviewed}"
     );
     assert!(
-        auto.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/")
+        auto.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+            && auto.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#)
             && auto.contains(
                 "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
             ),
         "PR-capable automatic job must use its multi-checkout self path:\n{auto}"
     );
     assert!(
-        reviewed.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
-            && !reviewed.contains(
-                "ado-aw execute --source \"$(Build.SourcesDirectory)/self/"
-            ),
+        reviewed.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)")
+            && !reviewed.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+            && reviewed.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "self-only reviewed job must use its single-checkout source path:\n{reviewed}"
     );
     assert!(
         reviewed.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)")
-            && !reviewed.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && !reviewed
+                .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "self-only reviewed job must pass its checkout root as the self repo:\n{reviewed}"
     );
 }
@@ -9788,7 +10095,8 @@ fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
             "{target}: tools must be checked out in Agent and the PR-capable Stage 3 job only:\n{compiled}"
         );
         assert!(
-            compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/self/"),
+            compiled.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
+                && compiled.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
             "{target}: PR-capable Stage 3 source must use multi-checkout layout:\n{compiled}"
         );
         assert!(
@@ -9798,7 +10106,7 @@ fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
             "{target}: Stage 3 self identity must be compile-time resolved:\n{compiled}"
         );
         assert!(
-            compiled.contains("ado-aw execute --source \"$(Build.SourcesDirectory)/")
+            compiled.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)")
                 && compiled.contains(
                     "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"
                 ),

@@ -7,7 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::PATH_SEGMENT;
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{
+    ExecutionContext, ExecutionResult, Executor, Validate, WorkItemReference, WorkItemResolution,
+};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text};
 use crate::tool_result;
 use anyhow::{Context, ensure};
@@ -15,8 +17,9 @@ use anyhow::{Context, ensure};
 /// Parameters for uploading an attachment to a work item
 #[derive(Deserialize, JsonSchema)]
 pub struct UploadWorkitemAttachmentParams {
-    /// The work item ID to attach the file to
-    pub work_item_id: i64,
+    /// Positive ID of the work item to attach the file to, or a temporary ID
+    /// from an earlier `create-work-item` call in the same run.
+    pub work_item_id: WorkItemReference,
 
     /// Path to the file in the workspace to upload. Must be a relative path with no directory traversal.
     pub file_path: String,
@@ -27,7 +30,9 @@ pub struct UploadWorkitemAttachmentParams {
 
 impl Validate for UploadWorkitemAttachmentParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(self.work_item_id > 0, "work_item_id must be positive");
+        if let WorkItemReference::Number(work_item_id) = self.work_item_id {
+            ensure!(work_item_id > 0, "work_item_id must be positive");
+        }
         crate::validate::validate_relative_safe_path(&self.file_path, "file_path")?;
         // `validate_relative_safe_path` only blocks a colon in a Windows drive
         // prefix (position 1), not colons elsewhere. This explicit check is
@@ -49,7 +54,7 @@ tool_result! {
     params = UploadWorkitemAttachmentParams,
     /// Result of uploading an attachment to a work item
     pub struct UploadWorkitemAttachmentResult {
-        work_item_id: i64,
+        work_item_id: WorkItemReference,
         file_path: String,
         comment: Option<String>,
     }
@@ -111,20 +116,35 @@ impl Default for UploadWorkitemAttachmentConfig {
 impl Executor for UploadWorkitemAttachmentResult {
     fn dry_run_summary(&self) -> String {
         format!(
-            "upload '{}' to work item #{}",
+            "upload '{}' to work item {}",
             self.file_path, self.work_item_id
         )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
-            "Uploading attachment '{}' to work item #{}",
+            "Uploading attachment '{}' to work item {}",
             self.file_path, self.work_item_id
         );
         debug!(
             "upload-workitem-attachment: work_item_id={}, file_path='{}'",
             self.work_item_id, self.file_path
         );
+
+        // Temporary IDs resolve only against creates that already succeeded in
+        // this SafeOutputs job, so an attachment can never land on an unrelated
+        // work item.
+        let work_item_id = match self.work_item_id.resolve(ctx)? {
+            WorkItemResolution::Unresolved(message) => {
+                return Ok(ExecutionResult::failure(message));
+            }
+            WorkItemResolution::Numeric(id) | WorkItemResolution::SameRun(id) => id,
+        };
+        let Ok(work_item_id) = i64::try_from(work_item_id) else {
+            return Ok(ExecutionResult::failure(format!(
+                "work item ID {work_item_id} is out of range"
+            )));
+        };
 
         let org_url = ctx
             .ado_org_url
@@ -141,7 +161,7 @@ impl Executor for UploadWorkitemAttachmentResult {
         debug!("ADO org: {}, project: {}", org_url, project);
 
         let config: UploadWorkitemAttachmentConfig =
-            ctx.get_tool_config("upload-workitem-attachment");
+            ctx.get_tool_config("upload-workitem-attachment")?;
         debug!("Max file size: {} bytes", config.max_file_size);
         debug!("Allowed extensions: {:?}", config.allowed_extensions);
 
@@ -273,7 +293,7 @@ impl Executor for UploadWorkitemAttachmentResult {
             "{}/{}/_apis/wit/workitems/{}?api-version=7.1",
             org_url.trim_end_matches('/'),
             utf8_percent_encode(project, PATH_SEGMENT),
-            self.work_item_id,
+            work_item_id,
         );
         debug!("Link URL: {}", link_url);
 
@@ -289,7 +309,7 @@ impl Executor for UploadWorkitemAttachmentResult {
             }
         }]);
 
-        info!("Linking attachment to work item #{}", self.work_item_id);
+        info!("Linking attachment to work item #{}", work_item_id);
         let link_response = client
             .patch(&link_url)
             .header("Content-Type", "application/json-patch+json")
@@ -302,16 +322,16 @@ impl Executor for UploadWorkitemAttachmentResult {
         if link_response.status().is_success() {
             info!(
                 "Attachment '{}' linked to work item #{}",
-                filename, self.work_item_id
+                filename, work_item_id
             );
 
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Uploaded '{}' and linked to work item #{}",
-                    filename, self.work_item_id
+                    filename, work_item_id
                 ),
                 serde_json::json!({
-                    "work_item_id": self.work_item_id,
+                    "work_item_id": work_item_id,
                     "file_path": self.file_path,
                     "attachment_url": attachment_url,
                     "project": project,
@@ -331,7 +351,7 @@ impl Executor for UploadWorkitemAttachmentResult {
 
             Ok(ExecutionResult::failure(format!(
                 "Attachment uploaded but failed to link to work item #{} (HTTP {}): {}",
-                self.work_item_id, status, error_body
+                work_item_id, status, error_body
             )))
         }
     }
@@ -339,6 +359,149 @@ impl Executor for UploadWorkitemAttachmentResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::secure::WorkItemTemporaryId;
+
+    #[test]
+    fn temporary_work_item_id_deserializes() {
+        let params: UploadWorkitemAttachmentParams = serde_json::from_value(serde_json::json!({
+            "work_item_id": "#aw_created1",
+            "file_path": "output/report.pdf"
+        }))
+        .unwrap();
+        assert_eq!(
+            params.work_item_id,
+            WorkItemReference::Temporary(WorkItemTemporaryId::parse("#aw_created1").unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_temporary_id_fails_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "upload-workitem-attachment".to_string(),
+            serde_json::json!({}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let mut result: UploadWorkitemAttachmentResult = UploadWorkitemAttachmentParams {
+            work_item_id: WorkItemReference::Temporary(
+                WorkItemTemporaryId::parse("#aw_missing").unwrap(),
+            ),
+            file_path: "output/report.pdf".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("has not been resolved"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_temporary_id_uploads_to_the_created_work_item() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let attachment_url = format!("{}/Project/_apis/wit/attachments/abc", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/Project/_apis/wit/attachments"))
+            .and(query_param("fileName", "report.txt"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "url": attachment_url.clone() })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/Project/_apis/wit/workitems/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": 42 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let source_directory = tempfile::tempdir().unwrap();
+        std::fs::write(source_directory.path().join("report.txt"), "report body").unwrap();
+
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "upload-workitem-attachment".to_string(),
+            serde_json::json!({}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            source_directory: source_directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        let temporary_id = WorkItemTemporaryId::parse("#aw_created1").unwrap();
+        ctx.register_resolved_work_item(
+            &temporary_id,
+            crate::safe_outputs::ResolvedWorkItem {
+                id: 42,
+                url: "https://example.test/items/42".to_string(),
+            },
+        )
+        .unwrap();
+        let mut result: UploadWorkitemAttachmentResult = UploadWorkitemAttachmentParams {
+            work_item_id: WorkItemReference::Temporary(temporary_id),
+            file_path: "report.txt".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "upload failed: {}", execution.message);
+        assert_eq!(
+            execution
+                .data
+                .as_ref()
+                .and_then(|data| data["work_item_id"].as_i64()),
+            Some(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_work_item_id_fails_before_http() {
+        let mut tool_configs = std::collections::HashMap::new();
+        tool_configs.insert(
+            "upload-workitem-attachment".to_string(),
+            serde_json::json!({}),
+        );
+        let ctx = ExecutionContext {
+            tool_configs,
+            ado_org_url: Some("https://dev.azure.com/org".to_string()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let mut result: UploadWorkitemAttachmentResult = UploadWorkitemAttachmentParams {
+            work_item_id: WorkItemReference::Number(u64::MAX),
+            file_path: "output/report.pdf".to_string(),
+            comment: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution.message.contains("is out of range"),
+            "unexpected message: {}",
+            execution.message
+        );
+    }
     use super::*;
 
     #[test]
@@ -346,7 +509,7 @@ mod tests {
         let json =
             r#"{"work_item_id": 42, "file_path": "output/report.pdf", "comment": "Weekly report"}"#;
         let params: UploadWorkitemAttachmentParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.work_item_id, 42);
+        assert_eq!(params.work_item_id, WorkItemReference::Number(42));
         assert_eq!(params.file_path, "output/report.pdf");
         assert_eq!(params.comment, Some("Weekly report".to_string()));
     }
@@ -354,13 +517,13 @@ mod tests {
     #[test]
     fn test_params_converts_to_result() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "output/report.pdf".to_string(),
             comment: Some("Weekly report".to_string()),
         };
         let result: UploadWorkitemAttachmentResult = params.try_into().unwrap();
         assert_eq!(result.name, "upload-workitem-attachment");
-        assert_eq!(result.work_item_id, 42);
+        assert_eq!(result.work_item_id, WorkItemReference::Number(42));
         assert_eq!(result.file_path, "output/report.pdf");
         assert_eq!(result.comment, Some("Weekly report".to_string()));
     }
@@ -368,11 +531,14 @@ mod tests {
     #[test]
     fn test_validation_rejects_zero_work_item_id() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 0,
+            work_item_id: WorkItemReference::Number(0),
             file_path: "output/report.pdf".to_string(),
             comment: None,
         };
-        let err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(params)
+        let err =
+            <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(
+                params,
+            )
             .unwrap_err();
         assert!(
             err.to_string().contains("work_item_id must be positive"),
@@ -383,11 +549,14 @@ mod tests {
     #[test]
     fn test_validation_rejects_empty_file_path() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "".to_string(),
             comment: None,
         };
-        let err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(params)
+        let err =
+            <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(
+                params,
+            )
             .unwrap_err();
         assert!(
             err.to_string().contains("must not be empty"),
@@ -398,11 +567,14 @@ mod tests {
     #[test]
     fn test_validation_rejects_path_traversal() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "../etc/passwd".to_string(),
             comment: None,
         };
-        let err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(params)
+        let err =
+            <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(
+                params,
+            )
             .unwrap_err();
         assert!(
             err.to_string().contains("path-traversal"),
@@ -414,7 +586,7 @@ mod tests {
     fn test_validation_rejects_embedded_traversal() {
         // "src/../secret" has ".." as a standalone component
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "src/../secret".to_string(),
             comment: None,
         };
@@ -428,7 +600,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_backslash_traversal() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "src\\..\\secret.txt".to_string(),
             comment: None,
         };
@@ -442,7 +614,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_backslash_absolute_path() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "\\etc\\passwd".to_string(),
             comment: None,
         };
@@ -457,7 +629,7 @@ mod tests {
     fn test_validation_accepts_filename_with_dots_in_name() {
         // "report..v2.pdf" has ".." inside a filename, not as a standalone component
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "report..v2.pdf".to_string(),
             comment: None,
         };
@@ -469,7 +641,7 @@ mod tests {
     fn test_validation_accepts_directory_with_dots_in_name() {
         // "v2..3/notes.md" — ".." inside a directory name, not a standalone component
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "v2..3/notes.md".to_string(),
             comment: None,
         };
@@ -480,7 +652,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_absolute_path() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "/etc/passwd".to_string(),
             comment: None,
         };
@@ -494,7 +666,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_newline_in_file_path() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "output\n/report.pdf".to_string(),
             comment: None,
         };
@@ -508,7 +680,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_carriage_return_in_file_path() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "output\r/report.pdf".to_string(),
             comment: None,
         };
@@ -522,19 +694,24 @@ mod tests {
     #[test]
     fn test_validation_rejects_pipeline_command_sequences_in_file_path() {
         let vso = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "##vso[task.setvariable variable=EXPLOIT]value.txt".to_string(),
             comment: None,
         };
         let shorthand = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "##[error]value.txt".to_string(),
             comment: None,
         };
-        let vso_err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(vso)
+        let vso_err =
+            <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(
+                vso,
+            )
             .unwrap_err();
-        let shorthand_err = <UploadWorkitemAttachmentParams as TryInto<UploadWorkitemAttachmentResult>>::try_into(shorthand)
-            .unwrap_err();
+        let shorthand_err = <UploadWorkitemAttachmentParams as TryInto<
+            UploadWorkitemAttachmentResult,
+        >>::try_into(shorthand)
+        .unwrap_err();
         assert!(
             vso_err.to_string().contains("pipeline command"),
             "unexpected error for ##vso[: {vso_err}"
@@ -548,7 +725,7 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = UploadWorkitemAttachmentParams {
-            work_item_id: 42,
+            work_item_id: WorkItemReference::Number(42),
             file_path: "output/report.pdf".to_string(),
             comment: Some("Test attachment".to_string()),
         };

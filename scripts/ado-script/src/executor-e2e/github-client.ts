@@ -51,6 +51,83 @@ function ghSignal(opts: GitHubClientOptions): AbortSignal {
   return AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_GITHUB_TIMEOUT_MS);
 }
 
+async function githubJson<T>(
+  opts: GitHubClientOptions,
+  method: string,
+  path: string,
+  payload?: unknown,
+): Promise<T> {
+  const res = await ghFetch(opts)(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      ...ghHeaders(opts.token),
+      ...(payload === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+    signal: ghSignal(opts),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`GitHub ${method} ${path} failed: HTTP ${res.status}: ${text}`);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+function repoPath(opts: GitHubClientOptions): string {
+  const { owner, name } = splitRepo(opts.repo);
+  return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+}
+
+export interface GraphQLResponse<T> {
+  data?: T;
+  errors?: { message?: string; type?: string }[];
+}
+
+/** Execute a GitHub GraphQL request and surface product errors verbatim. */
+export async function githubGraphql<T>(
+  opts: GitHubClientOptions,
+  query: string,
+  variables: Record<string, unknown> = {},
+): Promise<T> {
+  const json = await githubJson<GraphQLResponse<T>>(opts, "POST", "/graphql", {
+    query,
+    variables,
+  });
+  if (json.errors?.length) {
+    throw new Error(
+      `GitHub GraphQL failed: ${json.errors.map((e) => e.message ?? e.type ?? "unknown error").join("; ")}`,
+    );
+  }
+  if (json.data === undefined) throw new Error("GitHub GraphQL response omitted data");
+  return json.data;
+}
+
+/**
+ * Probe a preview GraphQL field without mutating repository state.
+ *
+ * Callers turn a false result into SkipError. Once a field exists, later
+ * product/permission errors remain scenario failures rather than skips.
+ */
+export async function supportsGraphqlField(
+  opts: GitHubClientOptions,
+  typeName: string,
+  fieldName: string,
+): Promise<boolean> {
+  const data = await githubGraphql<{
+    __type?: { fields?: { name?: string }[] | null } | null;
+  }>(
+    opts,
+    `query($type: String!) {
+      __type(name: $type) {
+        fields { name }
+      }
+    }`,
+    { type: typeName },
+  );
+  return Boolean(data.__type?.fields?.some((field) => field.name === fieldName));
+}
+
 /**
  * Trim a pipeline env value, treating an UNEXPANDED ADO macro (e.g. the literal
  * `$(EXECUTOR_E2E_ISSUE_REPO)`) as absent. ADO passes a `$(VAR)` reference
@@ -117,34 +194,405 @@ export async function createGitHubIssue(
 /** One GitHub issue, reduced to the fields the scenarios assert on. */
 export interface GitHubIssue {
   number: number;
+  nodeId?: string;
   title: string;
   body: string | null;
   state: string;
+  stateReason?: string | null;
   labels: string[];
+  assignees?: string[];
+  milestone?: { number: number; title: string } | null;
   /** Native issue type name, or undefined when the issue has no type. */
   type?: string;
 }
 
 interface RawIssue {
   number?: number;
+  node_id?: string;
   title?: string;
   body?: string | null;
   state?: string;
+  state_reason?: string | null;
   labels?: (string | { name?: string })[];
+  assignees?: { login?: string }[];
+  milestone?: { number?: number; title?: string } | null;
   type?: { name?: string } | null;
 }
 
 function toIssue(raw: RawIssue): GitHubIssue {
   return {
     number: typeof raw.number === "number" ? raw.number : 0,
+    nodeId: raw.node_id,
     title: raw.title ?? "",
     body: raw.body ?? null,
     state: raw.state ?? "",
+    stateReason: raw.state_reason,
     labels: (raw.labels ?? [])
       .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
       .filter((l) => l.length > 0),
+    assignees: (raw.assignees ?? []).map((a) => a.login ?? "").filter((a) => a.length > 0),
+    milestone:
+      raw.milestone?.number !== undefined && raw.milestone.title !== undefined
+        ? { number: raw.milestone.number, title: raw.milestone.title }
+        : null,
     type: raw.type?.name ?? undefined,
   };
+}
+
+export interface GitHubIssueComment {
+  id: number;
+  nodeId: string;
+  body: string;
+  user: string;
+}
+
+export async function listIssueComments(
+  opts: GitHubClientOptions,
+  issueNumber: number,
+): Promise<GitHubIssueComment[]> {
+  const comments = await githubJson<
+    { id?: number; node_id?: string; body?: string; user?: { login?: string } }[]
+  >(opts, "GET", `${repoPath(opts)}/issues/${issueNumber}/comments?per_page=100`);
+  return comments
+    .filter((c) => typeof c.id === "number" && typeof c.node_id === "string")
+    .map((c) => ({
+      id: c.id!,
+      nodeId: c.node_id!,
+      body: c.body ?? "",
+      user: c.user?.login ?? "",
+    }));
+}
+
+export async function createIssueComment(
+  opts: GitHubClientOptions,
+  issueNumber: number,
+  body: string,
+): Promise<GitHubIssueComment> {
+  const comment = await githubJson<{
+    id: number;
+    node_id: string;
+    body?: string;
+    user?: { login?: string };
+  }>(opts, "POST", `${repoPath(opts)}/issues/${issueNumber}/comments`, { body });
+  return {
+    id: comment.id,
+    nodeId: comment.node_id,
+    body: comment.body ?? "",
+    user: comment.user?.login ?? "",
+  };
+}
+
+export async function deleteIssueComment(
+  opts: GitHubClientOptions,
+  commentId: number,
+): Promise<void> {
+  await githubJson<void>(opts, "DELETE", `${repoPath(opts)}/issues/comments/${commentId}`);
+}
+
+export async function createRepoLabel(
+  opts: GitHubClientOptions,
+  name: string,
+  color = "5319e7",
+): Promise<void> {
+  const path = `${repoPath(opts)}/labels`;
+  const res = await ghFetch(opts)(`https://api.github.com${path}`, {
+    method: "POST",
+    headers: { ...ghHeaders(opts.token), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name,
+      color,
+      description: "Temporary ado-aw executor E2E label",
+    }),
+    signal: ghSignal(opts),
+  });
+  if (res.ok) return;
+  const text = await res.text().catch(() => "");
+  // A same-build job retry may encounter the deterministic label left by the
+  // interrupted attempt. Treat that exact GitHub conflict as "already set up".
+  if (res.status === 422 && /already_exists|already exists/i.test(text)) return;
+  throw new Error(`GitHub POST ${path} failed: HTTP ${res.status}: ${text}`);
+}
+
+export async function deleteRepoLabel(
+  opts: GitHubClientOptions,
+  name: string,
+): Promise<void> {
+  await githubJson<void>(
+    opts,
+    "DELETE",
+    `${repoPath(opts)}/labels/${encodeURIComponent(name)}`,
+  );
+}
+
+export interface GitHubMilestone {
+  number: number;
+  title: string;
+}
+
+export async function createMilestone(
+  opts: GitHubClientOptions,
+  title: string,
+): Promise<GitHubMilestone> {
+  const path = `${repoPath(opts)}/milestones`;
+  const res = await ghFetch(opts)(`https://api.github.com${path}`, {
+    method: "POST",
+    headers: { ...ghHeaders(opts.token), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title,
+      description: "Temporary ado-aw executor E2E milestone",
+    }),
+    signal: ghSignal(opts),
+  });
+  if (res.ok) return (await res.json()) as GitHubMilestone;
+  const text = await res.text().catch(() => "");
+  if (res.status === 422 && /already_exists|already exists/i.test(text)) {
+    const milestones = await githubJson<GitHubMilestone[]>(
+      opts,
+      "GET",
+      `${path}?state=all&per_page=100`,
+    );
+    const existing = milestones.find((milestone) => milestone.title === title);
+    if (existing) return existing;
+  }
+  throw new Error(`GitHub POST ${path} failed: HTTP ${res.status}: ${text}`);
+}
+
+export async function deleteMilestone(
+  opts: GitHubClientOptions,
+  milestoneNumber: number,
+): Promise<void> {
+  await githubJson<void>(
+    opts,
+    "DELETE",
+    `${repoPath(opts)}/milestones/${milestoneNumber}`,
+  );
+}
+
+export async function getAuthenticatedUser(opts: GitHubClientOptions): Promise<string> {
+  const user = await githubJson<{ login?: string }>(opts, "GET", "/user");
+  if (!user.login) throw new Error("GitHub /user response omitted login");
+  return user.login;
+}
+
+export async function addIssueAssignees(
+  opts: GitHubClientOptions,
+  issueNumber: number,
+  assignees: string[],
+): Promise<void> {
+  await githubJson(opts, "POST", `${repoPath(opts)}/issues/${issueNumber}/assignees`, {
+    assignees,
+  });
+}
+
+export async function removeIssueAssignees(
+  opts: GitHubClientOptions,
+  issueNumber: number,
+  assignees: string[],
+): Promise<void> {
+  await githubJson(opts, "DELETE", `${repoPath(opts)}/issues/${issueNumber}/assignees`, {
+    assignees,
+  });
+}
+
+export interface GitHubIssueField {
+  id: string;
+  name: string;
+  type: string;
+  options: { id: string; name: string }[];
+}
+
+export interface GitHubIssueFieldValue {
+  fieldId: string;
+  fieldName: string;
+  fieldType: string;
+  valueType: string;
+  value: string | number;
+}
+
+/** Discover repository issue fields using the same preview surface as the executor. */
+export async function listRepositoryIssueFields(
+  opts: GitHubClientOptions,
+): Promise<GitHubIssueField[]> {
+  const { owner, name } = splitRepo(opts.repo);
+  const data = await githubGraphql<{
+    repository?: {
+      issueFields?: {
+        nodes?: {
+          id?: string;
+          name?: string;
+          __typename?: string;
+          options?: { id?: string; name?: string }[];
+        }[];
+      };
+    };
+  }>(
+    opts,
+    `query($owner: String!, $repo: String!) {
+      repository(owner: $owner, name: $repo) {
+        issueFields(first: 100) {
+          nodes {
+            __typename
+            ... on IssueFieldText { id name }
+            ... on IssueFieldNumber { id name }
+            ... on IssueFieldDate { id name }
+            ... on IssueFieldSingleSelect { id name options { id name } }
+            ... on IssueFieldMultiSelect { id name options { id name } }
+          }
+        }
+      }
+    }`,
+    { owner, repo: name },
+  );
+  return (data.repository?.issueFields?.nodes ?? [])
+    .filter((field) => typeof field.id === "string" && typeof field.name === "string")
+    .map((field) => ({
+      id: field.id!,
+      name: field.name!,
+      type: field.__typename ?? "",
+      options: (field.options ?? [])
+        .filter((option) => typeof option.id === "string" && typeof option.name === "string")
+        .map((option) => ({ id: option.id!, name: option.name! })),
+    }));
+}
+
+/** Read one persisted repository-defined field value from an issue. */
+export async function getIssueFieldValue(
+  opts: GitHubClientOptions,
+  issueNumber: number,
+  fieldId: string,
+): Promise<GitHubIssueFieldValue | undefined> {
+  const { owner, name } = splitRepo(opts.repo);
+  const data = await githubGraphql<{
+    repository?: {
+      issue?: {
+        issueFieldValues?: {
+          nodes?: {
+            __typename?: string;
+            value?: string | number;
+            name?: string;
+            field?: {
+              id?: string;
+              name?: string;
+              __typename?: string;
+            } | null;
+          }[];
+        };
+      } | null;
+    };
+  }>(
+    opts,
+    `query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          issueFieldValues(first: 100) {
+            nodes {
+              __typename
+              ... on IssueFieldTextValue {
+                value
+                field { __typename ... on IssueFieldText { id name } }
+              }
+              ... on IssueFieldNumberValue {
+                value
+                field { __typename ... on IssueFieldNumber { id name } }
+              }
+              ... on IssueFieldDateValue {
+                value
+                field { __typename ... on IssueFieldDate { id name } }
+              }
+              ... on IssueFieldSingleSelectValue {
+                name
+                field { __typename ... on IssueFieldSingleSelect { id name } }
+              }
+            }
+          }
+        }
+      }
+    }`,
+    { owner, repo: name, number: issueNumber },
+  );
+  const node = (data.repository?.issue?.issueFieldValues?.nodes ?? []).find(
+    (candidate) => candidate.field?.id === fieldId,
+  );
+  if (!node) return undefined;
+
+  const fieldName = node.field?.name;
+  const fieldType = node.field?.__typename;
+  const valueType = node.__typename;
+  if (!fieldName || !fieldType || !valueType) {
+    throw new Error(`GitHub issue field value '${fieldId}' omitted type or field metadata`);
+  }
+
+  const value = valueType === "IssueFieldSingleSelectValue" ? node.name : node.value;
+  if (typeof value !== "string" && typeof value !== "number") {
+    throw new Error(`GitHub issue field value '${fieldId}' omitted its persisted value`);
+  }
+  return { fieldId, fieldName, fieldType, valueType, value };
+}
+
+export async function getCommentMinimization(
+  opts: GitHubClientOptions,
+  nodeId: string,
+): Promise<{ isMinimized: boolean; reason?: string | null }> {
+  const data = await githubGraphql<{
+    node?: { isMinimized?: boolean; minimizedReason?: string | null } | null;
+  }>(
+    opts,
+    `query($id: ID!) {
+      node(id: $id) {
+        ... on Minimizable {
+          isMinimized
+          minimizedReason
+        }
+      }
+    }`,
+    { id: nodeId },
+  );
+  return {
+    isMinimized: data.node?.isMinimized === true,
+    reason: data.node?.minimizedReason,
+  };
+}
+
+export async function getSubIssueParent(
+  opts: GitHubClientOptions,
+  issueNumber: number,
+): Promise<number | undefined> {
+  const { owner, name } = splitRepo(opts.repo);
+  const data = await githubGraphql<{
+    repository?: { issue?: { parent?: { number?: number } | null } | null };
+  }>(
+    opts,
+    `query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) { parent { number } }
+      }
+    }`,
+    { owner, repo: name, number: issueNumber },
+  );
+  return data.repository?.issue?.parent?.number;
+}
+
+export async function unlinkSubIssue(
+  opts: GitHubClientOptions,
+  parentIssueNumber: number,
+  subIssueNumber: number,
+): Promise<void> {
+  const [parent, sub] = await Promise.all([
+    getIssue(opts, parentIssueNumber),
+    getIssue(opts, subIssueNumber),
+  ]);
+  if (!parent?.nodeId || !sub?.nodeId) {
+    throw new Error("cannot unlink sub-issue: GitHub issue node IDs are unavailable");
+  }
+  await githubGraphql(
+    opts,
+    `mutation($parentId: ID!, $subIssueId: ID!) {
+      removeSubIssue(input: { issueId: $parentId, subIssueId: $subIssueId }) {
+        clientMutationId
+      }
+    }`,
+    { parentId: parent.nodeId, subIssueId: sub.nodeId },
+  );
 }
 
 /** Fetch a single issue. Returns undefined on 404. */

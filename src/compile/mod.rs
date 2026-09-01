@@ -26,6 +26,7 @@ mod onees;
 mod onees_ir;
 mod path_layout_check;
 pub(crate) mod pr_filters;
+pub mod shell;
 pub mod source_path_guard;
 mod stage;
 mod stage_ir;

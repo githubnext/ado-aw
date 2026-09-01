@@ -128,7 +128,7 @@ impl Executor for ReplyToPrCommentResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: ReplyToPrCommentConfig = ctx.get_tool_config("reply-to-pr-comment");
+        let config: ReplyToPrCommentConfig = ctx.get_tool_config("reply-to-pr-comment")?;
         debug!("Config: {:?}", config);
 
         let repository = self.repository.as_deref().unwrap_or("self");
@@ -322,7 +322,8 @@ mod tests {
         let result: Result<ReplyToPrCommentResult, _> = params.try_into();
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("content must be at least 10 characters"),
+            err.to_string()
+                .contains("content must be at least 10 characters"),
             "unexpected error: {err}"
         );
     }

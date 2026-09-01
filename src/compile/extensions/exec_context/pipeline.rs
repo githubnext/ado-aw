@@ -43,10 +43,27 @@ use crate::compile::extensions::CompileContext;
 use crate::compile::ado_bundle::{Bundle, TokenSource, apply_bundle_auth};
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_PIPELINE_PATH;
 use crate::compile::ir::condition::{Condition, Expr};
-use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::step::Step;
+use crate::compile::shell::ShellScript;
 use crate::compile::types::PipelineContextConfig;
+use crate::shell_script;
 
 use super::contributor::{ContextContributor, succeeded_and};
+
+shell_script! {
+    /// Invoke the exec-context-pipeline node bundle. The step's own
+    /// `condition:` gates on `Build.Reason == ResourceTrigger`.
+    EXEC_CONTEXT_PIPELINE {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+node "$BUNDLE"
+"#,
+    }
+}
 
 /// Pipeline-context contributor.
 pub(super) struct PipelineContextContributor {
@@ -87,21 +104,20 @@ impl ContextContributor for PipelineContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_PIPELINE_PATH}'\n");
+        let script = ShellScript::new(&EXEC_CONTEXT_PIPELINE)
+            .bind_text("BUNDLE", EXEC_CONTEXT_PIPELINE_PATH);
         // ADO auto-injects every predefined System.*/Build.* variable into the
         // step env (SCREAMING_SNAKE form), so the bundle reads
         // SYSTEM_COLLECTIONURI / BUILD_SOURCESDIRECTORY / BUILD_TRIGGEREDBY_*
         // directly without re-projection. Only the non-auto-injected
         // SYSTEM_ACCESSTOKEN bearer is projected, via the bundle-auth applier.
         let step = apply_bundle_auth(
-            BashStep::new(
-                "Stage pipeline execution context (aw-context/pipeline/*)",
-                script,
-            )
-            .with_condition(succeeded_and(Condition::Eq(
-                Expr::Variable("Build.Reason".to_string()),
-                Expr::Literal("ResourceTrigger".to_string()),
-            ))),
+            script
+                .into_step("Stage pipeline execution context (aw-context/pipeline/*)")
+                .with_condition(succeeded_and(Condition::Eq(
+                    Expr::Variable("Build.Reason".to_string()),
+                    Expr::Literal("ResourceTrigger".to_string()),
+                ))),
             Bundle::ExecContextPipeline,
             TokenSource::SystemAccessToken,
         );

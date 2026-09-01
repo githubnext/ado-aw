@@ -36,6 +36,7 @@
 //! - [`AdoOrganization`] — an Azure DevOps Services organization name.
 //! - [`AdoProject`] — an Azure DevOps project name or GUID.
 //! - [`AdoRepository`] — an Azure DevOps repository name or GUID.
+//! - [`AdoWorkItemFieldRef`] — an Azure DevOps work item field reference name.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
 //! - [`SemanticVersion`] — an exact semantic version (`1.2.3`, `2.0.0-beta.1`).
 //!
@@ -200,6 +201,11 @@ validated_string! {
 }
 
 validated_string! {
+    /// An Azure DevOps work item field reference name.
+    AdoWorkItemFieldRef, "work item field", validate::validate_ado_work_item_field_ref
+}
+
+validated_string! {
     /// A git ref name obeying `git check-ref-format`.
     GitRefName, "ref", validate::validate_git_ref_name
 }
@@ -268,32 +274,47 @@ validated_string! {
     }
 }
 
+fn validate_temporary_id(value: &str, label: &str) -> anyhow::Result<()> {
+    let bare = value.strip_prefix('#').unwrap_or(value);
+    let Some(suffix) = bare.strip_prefix("aw_") else {
+        anyhow::bail!(
+            "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+        );
+    };
+    if !(3..=12).contains(&suffix.len())
+        || !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        anyhow::bail!(
+            "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+        );
+    }
+    Ok(())
+}
+
 validated_string! {
     /// A temporary GitHub issue identifier used to link safe outputs in one run.
-    ///
-    /// Accepts gh-aw's canonical `#aw_<id>` form and the bare `aw_<id>` alias,
-    /// where `<id>` is 3-12 ASCII alphanumeric/underscore characters.
-    GithubTemporaryId, "temporary_id", |value: &str, label: &str| {
-        let bare = value.strip_prefix('#').unwrap_or(value);
-        let Some(suffix) = bare.strip_prefix("aw_") else {
-            anyhow::bail!(
-                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
-            );
-        };
-        if !(3..=12).contains(&suffix.len())
-            || !suffix
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            anyhow::bail!(
-                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
-            );
-        }
-        Ok(())
-    }
+    GithubTemporaryId, "temporary_id", validate_temporary_id
+}
+
+validated_string! {
+    /// A temporary Azure DevOps work-item identifier used to link safe outputs in one run.
+    WorkItemTemporaryId, "temporary_id", validate_temporary_id
 }
 
 impl GithubTemporaryId {
+    /// Canonical map/reference form with the leading `#`.
+    pub fn canonical(&self) -> String {
+        if self.as_str().starts_with('#') {
+            self.as_str().to_string()
+        } else {
+            format!("#{}", self.as_str())
+        }
+    }
+}
+
+impl WorkItemTemporaryId {
     /// Canonical map/reference form with the leading `#`.
     pub fn canonical(&self) -> String {
         if self.as_str().starts_with('#') {

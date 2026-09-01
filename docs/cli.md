@@ -198,6 +198,12 @@ These commands are not shown in `--help` but are available for contributors work
 - `export-ado-proxy-catalog` - Export the `ado-proxy` catalog data as JSON. Build-time drift guard for the bundle's committed catalog snapshot (see [`docs/ado-proxy-design.md`](ado-proxy-design.md)).
   - `--output, -o <path>` - Write the catalog to a file instead of stdout.
 
+- `export-bash-scripts` - Materialize every shell script the compiler can emit as ordinary files, so generated shell can be reviewed and analysed without reading Rust. Reads the `src/compile/shell/` registry directly, so unlike the fixture-driven bash lint it reaches *every* script — including ones no pipeline currently emits.
+  - `--output, -o <dir>` - Directory to write into. Created if it does not exist. Required.
+  - `--format <files|json>` - `files` (default) writes one `.sh` per script with a provenance header naming the producing Rust source; `json` writes a single `bash-scripts.json` carrying the same content plus each script's declared binding surface.
+  - What is written is the *lint source*: the body with declared variables stub-assigned, which is the form that stands alone and the form the shellcheck harness judges. A rendered script needs real bindings, which only the producing call site has.
+  - Typical use: `cargo run -- export-bash-scripts --output /tmp/ado-aw-shell && shellcheck /tmp/ado-aw-shell/*.sh`
+
 ### Hidden Pipeline-Internal Commands
 
 These commands are started by the pipeline itself (or by AWF on its behalf) and are not part of the authoring surface:
@@ -213,6 +219,6 @@ These commands are started by the pipeline itself (or by AWF on its behalf) and 
 
 ## Pipeline IR Reference
 
-The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional always-running Conclusion job when `safe-outputs:` is configured, lives in `agentic_pipeline.rs` (shared by every target); target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
+The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → (ManualReview?) → Custom_\<tool\>* → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape lives in `agentic_pipeline.rs` (shared by every target); `ManualReview` is inserted only when a safe output is configured with `require-approval`, and the `SafeOutputs`/`SafeOutputs_Reviewed` split occurs only when both gated and non-gated outputs are configured. Conclusion runs whenever `safe-outputs:` is configured. Target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
 
 See [`docs/ir.md`](ir.md) for the complete IR reference.

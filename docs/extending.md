@@ -9,7 +9,7 @@ ado-aw compiles agent markdown into Azure DevOps YAML through the typed pipeline
 When extending the compiler:
 
 1. **New CLI commands**: add variants to the `Commands` enum in `src/main.rs`, implement dispatch, and add parsing/behavior tests.
-2. **New compile targets**: build a typed `Pipeline` IR in a target wrapper module under `src/compile/` (use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references). The canonical Setup → Agent → Detection → SafeOutputs → Teardown shape, plus the optional Conclusion job, lives in `src/compile/agentic_pipeline.rs` and is reused by every target — wrappers only set the per-target `PipelineShape` and lift the shared `BuiltPipelineContext` into the right envelope.
+2. **New compile targets**: build a typed `Pipeline` IR in a target wrapper module under `src/compile/` (use existing `standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs` as references). The canonical Setup → Agent → Detection → (ManualReview?) → Custom_\<tool\>* → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape lives in `src/compile/agentic_pipeline.rs` and is reused by every target — wrappers only set the per-target `PipelineShape` and lift the shared `BuiltPipelineContext` into the right envelope.
 3. **New front matter fields**: add fields to `FrontMatter` or nested config types in `src/compile/types.rs`. Breaking changes require a codemod under `src/compile/codemods/`; see [`docs/codemods.md`](codemods.md).
 4. **New compiler extensions**: implement `name()` and `phase()`; override `declarations()` (which defaults to `Ok(Declarations::default())`) when the extension contributes steps, hosts, tools, or other signals.
 5. **New safe-output tools**: add to `src/safe_outputs/`, implement the safe-output data model and executor, and register it in MCP and Stage 3 execution wiring.
@@ -66,7 +66,13 @@ System extensions run first, runtimes run before tools, and definition order is 
 - `SafeOutputsExtension` — SafeOutputs MCP plumbing.
 - `AdoScriptExtension` — gate evaluator, runtime-import resolver, and synthetic PR helpers.
 - `ExecContextExtension` — `aw-context/` precompute contributors.
-- `AzureCliExtension` — Azure CLI mounts, allowlist entries, and PATH setup.
+
+`AzureCliExtension` (Azure CLI mounts, allowlist entries, and PATH setup) is
+**conditionally** pushed after the always-on list, only when `permissions.read`
+is configured (`ado_proxy_enabled()`). The pinned AWF agent image ships no
+built-in `az`, so omitting `permissions.read` makes the command unavailable
+rather than exposing an unproxied fallback — see
+[`docs/network.md`](network.md#proxy-gated-azure-cli-az).
 
 User-configured runtimes and tools are appended after those always-on extensions, then sorted by phase.
 
@@ -105,6 +111,8 @@ Return `Declarations::default()` and fill only the fields your feature owns. The
 Compiler-owned steps should be `Step` variants from `src/compile/ir/step.rs`.
 
 ### Bash steps
+
+Compiler-generated shell must go through `ShellScript` — see [Generated shell scripts](#generated-shell-scripts) below. Construct `BashStep::new` directly only for a body with no substitution at all.
 
 ```rust
 use crate::compile::ir::env::EnvValue;
@@ -286,6 +294,137 @@ First-class tools live under `src/tools/<name>/`.
 6. Extend `ToolsConfig` in `src/compile/types.rs` and `collect_extensions()`.
 7. Add tests for config parsing, declarations, and emitted pipeline behavior.
 
+## Generated shell scripts
+
+Every shell script the compiler emits lives in `src/compile/shell/` as a
+registered raw-string constant, not as a `format!` template. `format!` forced
+three layers of escaping onto a script at once — `\n\` continuations, doubled
+braces to survive `format!` itself, and an escaped quote for every quoted word
+— which made a long body impossible to review as shell. Reviewing it as shell
+is the only way to know it is correct.
+
+### Declaring a script
+
+```rust
+use crate::shell_script;
+use crate::compile::shell::{Binding, ShellScript};
+
+shell_script! {
+    /// One line on why this script exists.
+    STOP_ADO_PROXY {
+        interpreter: Bash,           // or Sh
+        bindings: [PROXY_CONTAINER], // the compiler supplies these
+        externals: [SOME_ENV_VAR],   // the runtime supplies these
+        fragments: [],               // shell composed in from elsewhere
+        body: r#"
+docker rm -f "$PROXY_CONTAINER" 2>/dev/null || true
+"#,
+    }
+}
+
+ShellScript::new(&STOP_ADO_PROXY)
+    .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+    .into_step("Stop ado-proxy")
+```
+
+The `body:` is the shell **exactly as it will run**. Nothing is escaped: a
+Docker Go-template is written literally as `{{.State.Status}}`.
+
+### Bindings
+
+A value can only ever be the right-hand side of an assignment in the generated
+prelude. That is the one position where a value's own quoting fully determines
+its meaning, so it cannot alter the structure of the script no matter what it
+contains. Pick the constructor that matches the shape:
+
+| Constructor | Renders as | Use for |
+|---|---|---|
+| `Binding::text(s)` | `'s'` | any single-line literal |
+| `Binding::number(n)` | `n` | ports, counts, timeouts |
+| `Binding::boolean(b)` | `true` / `false` | flags read as `[ "$V" = true ]` |
+| `Binding::words([…])` | `'a b c'` | a list the body expands unquoted in `for` |
+| `Binding::ado_macro("Agent.TempDirectory")` | `'$(Agent.TempDirectory)'` | ADO predefined variables |
+| `Binding::ado_path(p)` | `'$(Pipeline.Workspace)/x'` | a path built around one |
+| `Binding::document(text)` | quoted heredoc | JSON, prompts, certificates |
+
+Each validates its own shape: `words` rejects an entry containing whitespace
+or a glob (the consumer expands it unquoted, so that would silently change the
+list), `ado_macro` accepts only a well-formed dotted name, and `ado_path`
+checks every embedded `$(…)` is such a name — so the value can only ever
+expand to a variable Azure DevOps substitutes, never to a command the runner
+executes.
+
+### Declaring the variable surface
+
+Every variable the body reads must be declared as a `binding` (the compiler
+supplies it) or an `external` (the runtime does — step `env:`, an ADO
+`##vso[task.setvariable]` from an earlier step, or a fragment). Anything the
+body assigns itself needs no declaration.
+
+This is enforced two ways: `ShellScript::render` refuses to render with a
+declared binding unbound, and a registry-wide test fails on a body that reads
+an undeclared variable.
+
+### Secrets
+
+A credential must never become a binding. The prelude is written verbatim into
+the `*.lock.yml` committed to the repository. `Binding` rejects values naming a
+known credential; credentials arrive through `env:` as `EnvValue::secret`,
+which Azure DevOps masks in logs.
+
+```rust
+ShellScript::new(&START_ADO_PROXY)
+    .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
+    .into_step("Start ado-proxy policy engine")
+    .with_env("ADO_PROXY_BEARER", EnvValue::secret("SC_READ_TOKEN"))
+```
+
+### Composing a long script from phases
+
+A script too long to review whole is assembled from registered phases spliced
+at markers:
+
+```rust
+body: r#"
+set -euo pipefail
+# ado-aw:fragment resolve_org
+echo "$ADO_PROXY_ORGANIZATION"
+"#,
+```
+
+```rust
+.fragment("resolve_org", common::resolve_ado_organization_bash())
+```
+
+A marker is an ordinary shell comment, so the outline body stays valid,
+shellcheck-able shell whether or not the fragment is spliced. Any variable a
+fragment defines must be declared in the consumer's `externals:`, which forces
+the inter-phase contract somewhere a reviewer can see it. Declaring a fragment
+without marking it (or vice versa) is a test failure, not a silent no-op.
+
+### Reviewing the scripts as files
+
+```bash
+cargo run -- export-bash-scripts --out /tmp/ado-aw-shell
+cargo run -- export-bash-scripts --out /tmp/ado-aw-shell --format json
+```
+
+Writes one `.sh` per registered script with a provenance header naming the
+producing Rust source, for review with ordinary shell tooling.
+
+### The guard
+
+`tests/generated_shell_guard.rs` fails the build if generated shell regresses
+to the old shape: a `BashStep::new` whose *script* argument is built with
+`format!`, an escaped `\n\` continuation inside a `shell_script!` body, or a
+reintroduced `bash()` / `dedent()` helper.
+
+It deliberately does not grep for `\n\` across the codebase. Most such lines
+are Rust markdown and error text — `safe_outputs/create_pull_request.rs` has 38
+of them and no shell at all — so counting them says nothing about how much
+shell is left. The guard checks one unambiguous thing instead, and a test
+proves it distinguishes an inline body from a `format!` display name.
+
 ## Filter IR (`src/compile/filter_ir.rs`)
 
 Trigger filter expressions still use the separate filter IR. It lowers `PrFilters` / `PipelineFilters` into typed checks, validates conflicts, and emits bash consumed by `AdoScriptExtension` declarations. The generated gate steps are now returned as typed IR steps instead of being spliced into YAML templates.
@@ -300,10 +439,28 @@ To add a new filter type:
 
 ## Bash step linting
 
-`tests/bash_lint_tests.rs` compiles representative fixtures and runs `shellcheck` against every literal `bash:` body in generated YAML. When adding or modifying bash:
+Generated shell is linted at two levels, and both matter.
 
-1. Run `cargo test --test bash_lint_tests` if `shellcheck` is available locally.
-2. Fix findings such as unquoted variables, `cd` without failure handling, masked exit codes, and tilde-in-double-quotes.
-3. If a finding is intentional, add a `# shellcheck disable=SCxxxx` comment immediately above the line in the bash body.
+**Every registered script, in isolation** (`src/compile/shell/lint.rs`). Reads
+the registry directly, so it reaches every script whether or not any pipeline
+emits it. Declared bindings and externals are stub-assigned so SC2154 still
+fires for a variable the body reads without declaring. This closes a real gap:
+lint coverage used to be a function of fixture reachability, so a generator no
+fixture happened to exercise — including several hundred lines of `ado-proxy`
+and `az` wrapper shell — was linted by nothing.
 
-Do not add blanket `set -eo pipefail` to every step just to satisfy lint. Use targeted fail-fast behavior only when the step requires it.
+**Every bash body that reaches the emitted YAML** (`tests/bash_lint_tests.rs`).
+Compiles representative fixtures and shellchecks what actually ships. This
+proves scripts are *emitted*, where the registry lint proves they are *correct*.
+
+When adding or modifying shell:
+
+1. Run `ENFORCE_BASH_LINT=1 cargo test --test bash_lint_tests` and
+   `cargo test --bin ado-aw compile::shell` if `shellcheck` is available locally.
+2. Fix findings such as unquoted variables, `cd` without failure handling,
+   masked exit codes, and tilde-in-double-quotes.
+3. If a finding is intentional, add a `# shellcheck disable=SCxxxx` comment
+   immediately above the line in the body.
+
+Do not add blanket `set -eo pipefail` to every step just to satisfy lint. Use
+targeted fail-fast behavior only when the step requires it.

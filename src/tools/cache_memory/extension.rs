@@ -4,8 +4,58 @@ use crate::compile::ir::tasks::download_pipeline_artifact::{
     ArtifactSource, DownloadPipelineArtifact, RunVersion,
 };
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
+use crate::compile::shell::{Binding, ShellScript};
 use crate::compile::types::CacheMemoryToolConfig;
+use crate::shell_script;
 use anyhow::Result;
+
+shell_script! {
+    /// Restore the agent memory directory from the previous run's
+    /// `safe_outputs` artifact, if one was downloaded.
+    ///
+    /// The artifact download step ([`DownloadPipelineArtifact@2`]) writes
+    /// into `$AGENT_TEMP/previous_memory/`; when it succeeded, this
+    /// script copies the `agent_memory` subfolder into the staging area
+    /// the agent reads. `cp -a` preserves modes; the `|| true` swallows
+    /// spurious "no such file" tails when nested optional trees are
+    /// missing, matching the previous behaviour.
+    RESTORE_AGENT_MEMORY {
+        interpreter: Bash,
+        bindings: [MEMORY_DIR, AGENT_TEMP],
+        externals: [],
+        fragments: [],
+        body: r#"
+mkdir -p "$MEMORY_DIR"
+if [ -d "$AGENT_TEMP/previous_memory/agent_memory" ]; then
+  cp -a "$AGENT_TEMP/previous_memory/agent_memory/." "$MEMORY_DIR/" 2>/dev/null || true
+  echo "Previous agent memory restored to $MEMORY_DIR"
+  ls -laR "$MEMORY_DIR"
+else
+  echo "No previous agent memory found - empty memory directory created"
+fi
+"#,
+    }
+}
+
+shell_script! {
+    /// Initialise an empty agent memory directory when the operator
+    /// forces a fresh run via `clearMemory=true`.
+    INIT_AGENT_MEMORY {
+        interpreter: Bash,
+        bindings: [MEMORY_DIR],
+        externals: [],
+        fragments: [],
+        body: r#"
+mkdir -p "$MEMORY_DIR"
+echo "Memory cleared by pipeline parameter - starting fresh"
+"#,
+    }
+}
+
+/// Absolute path to the agent's staging memory directory. Fixed by the
+/// AWF-mount layout and mirrored in the prompt supplement below, so a
+/// change here requires a matching change to the prompt text.
+const STAGING_MEMORY_DIR: &str = "/tmp/awf-tools/staging/agent_memory";
 
 /// Cache memory tool extension.
 ///
@@ -100,17 +150,13 @@ fn download_previous_memory_task_step() -> TaskStep {
 /// previous_memory artifact into the staging directory. Runs only
 /// when `clearMemory=false`.
 fn restore_previous_memory_bash_step() -> BashStep {
-    let script = "mkdir -p /tmp/awf-tools/staging/agent_memory\n\
-                  if [ -d \"$(Agent.TempDirectory)/previous_memory/agent_memory\" ]; then\n  \
-                    cp -a \"$(Agent.TempDirectory)/previous_memory/agent_memory/.\" /tmp/awf-tools/staging/agent_memory/ 2>/dev/null || true\n  \
-                    echo \"Previous agent memory restored to /tmp/awf-tools/staging/agent_memory\"\n  \
-                    ls -laR /tmp/awf-tools/staging/agent_memory\n\
-                  else\n  \
-                    echo \"No previous agent memory found - empty memory directory created\"\n\
-                  fi\n";
-    let mut b = BashStep::new("Restore previous agent memory", script).with_condition(
-        Condition::Custom("eq(${{ parameters.clearMemory }}, false)".to_string()),
-    );
+    let mut b = ShellScript::new(&RESTORE_AGENT_MEMORY)
+        .bind_text("MEMORY_DIR", STAGING_MEMORY_DIR)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .into_step("Restore previous agent memory")
+        .with_condition(Condition::Custom(
+            "eq(${{ parameters.clearMemory }}, false)".to_string(),
+        ));
     b.continue_on_error = true;
     b
 }
@@ -118,11 +164,12 @@ fn restore_previous_memory_bash_step() -> BashStep {
 /// Typed bash step that initialises an empty agent_memory directory
 /// when the operator forces a fresh run via `clearMemory=true`.
 fn initialize_empty_memory_bash_step() -> BashStep {
-    let script = "mkdir -p /tmp/awf-tools/staging/agent_memory\n\
-                  echo \"Memory cleared by pipeline parameter - starting fresh\"\n";
-    BashStep::new("Initialize empty agent memory (clearMemory=true)", script).with_condition(
-        Condition::Custom("eq(${{ parameters.clearMemory }}, true)".to_string()),
-    )
+    ShellScript::new(&INIT_AGENT_MEMORY)
+        .bind_text("MEMORY_DIR", STAGING_MEMORY_DIR)
+        .into_step("Initialize empty agent memory (clearMemory=true)")
+        .with_condition(Condition::Custom(
+            "eq(${{ parameters.clearMemory }}, true)".to_string(),
+        ))
 }
 
 #[cfg(test)]

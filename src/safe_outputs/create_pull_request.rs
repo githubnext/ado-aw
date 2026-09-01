@@ -137,10 +137,7 @@ fn find_identity_in_response(data: &serde_json::Value, reviewer: &str) -> Option
     }
 
     // Fall back to first result if no exact match
-    let local_id = identities
-        .first()?
-        .get("localId")?
-        .as_str()?;
+    let local_id = identities.first()?.get("localId")?.as_str()?;
     debug!(
         "Resolved reviewer '{}' to first match ID '{}'",
         reviewer, local_id
@@ -610,7 +607,7 @@ impl Executor for CreatePrResult {
         debug!("Source branch: {}", self.source_branch);
         debug!("Patch file: {}", self.patch_file);
 
-        let config: CreatePrConfig = ctx.get_tool_config("create-pull-request");
+        let config: CreatePrConfig = ctx.get_tool_config("create-pull-request")?;
         debug!("Target branch from config: {}", config.target_branch);
         debug!("Draft: {}", config.draft);
         debug!("Auto-complete: {}", config.auto_complete);
@@ -644,12 +641,11 @@ impl Executor for CreatePrResult {
             self.repository
         );
         let repository_alias =
-            crate::safe_outputs::canonical_repository_alias(&self.repository, ctx)
-                .or_else(|| {
-                    ctx.allowed_repositories
-                        .is_empty()
-                        .then(|| "self".to_string())
-                });
+            crate::safe_outputs::canonical_repository_alias(&self.repository, ctx).or_else(|| {
+                ctx.allowed_repositories
+                    .is_empty()
+                    .then(|| "self".to_string())
+            });
         let Some(repository_alias) = repository_alias else {
             warn!(
                 "Repository '{}' not in allowed list: {:?}",
@@ -1577,7 +1573,10 @@ async fn push_new_branch(
         if !retry_response.status().is_success() {
             let retry_status = retry_response.status();
             let retry_body_text = retry_response.text().await.unwrap_or_default();
-            warn!("Retry push also failed: {} - {}", retry_status, retry_body_text);
+            warn!(
+                "Retry push also failed: {} - {}",
+                retry_status, retry_body_text
+            );
             return Ok(Err(ExecutionResult::failure(format!(
                 "Failed to push changes after retry: {} - {}",
                 retry_status, retry_body_text
@@ -1631,7 +1630,10 @@ fn handle_no_changes(config: &CreatePrConfig, skipped_symlinks: &[String]) -> Ex
                 "No changes detected after applying patch (if-no-changes: ignore){}",
                 symlink_suffix
             );
-            ExecutionResult::success(format!("No changes detected — nothing to do{}", symlink_suffix))
+            ExecutionResult::success(format!(
+                "No changes detected — nothing to do{}",
+                symlink_suffix
+            ))
         }
         IfNoChanges::Warn => {
             warn!(
@@ -2576,8 +2578,7 @@ mod tests {
             )]),
             ..Default::default()
         };
-        let alias =
-            crate::safe_outputs::canonical_repository_alias("Project/tools", &ctx).unwrap();
+        let alias = crate::safe_outputs::canonical_repository_alias("Project/tools", &ctx).unwrap();
         let cfg = CreatePrConfig {
             infer_target_from_checkout_ref: true,
             ..Default::default()
@@ -3197,10 +3198,14 @@ index 0000000..abcdefg
             build_number: None,
             build_reason: None,
             definition_name: None,
+            definition_id: None,
             source_branch: None,
             source_branch_name: None,
             source_version: None,
             resolved_github_issues: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            resolved_work_items: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             triggered_by_build_id: None,
@@ -3217,7 +3222,6 @@ index 0000000..abcdefg
             uploaded_pipeline_artifact_keys: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
-            agent_last_author: None,
         };
         let outcome = result.execute_impl(&ctx).await.unwrap();
         assert!(!outcome.success);
