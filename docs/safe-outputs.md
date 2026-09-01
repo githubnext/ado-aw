@@ -958,6 +958,16 @@ Creates a pull request with code changes made by the agent. When invoked:
 
 During Stage 3 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
 
+> **Cross-organization repositories are not yet supported.** Every ADO Git
+> REST call the executor makes is composed from the pipeline's own
+> organization/project. A `repos:` alias checked out from a **different**
+> Azure DevOps organization (a `type: git` entry with an `endpoint:` service
+> connection — see [`docs/front-matter.md`](front-matter.md#repositories-repos))
+> cannot be targeted: the compiler warns when `create-pull-request` and such an
+> alias are both configured, and Stage 3 rejects the alias with a clear error
+> (including under `--dry-run`) instead of silently composing a request against
+> the wrong organization.
+
 **Shallow-clone agent pools (automatic):** The diff base is computed at agent
 time from the checked-out repository. For same-organization Azure Repos,
 `prepare-pr-base.js` asks the ADO Diffs API for the exact `commonCommit`,
