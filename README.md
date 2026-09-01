@@ -464,6 +464,39 @@ PR triggers active alongside a schedule or pipeline trigger.
 
 ---
 
+## Runtimes
+
+The `runtimes` field auto-installs language environments before the agent
+starts — unlike `tools:` (agent capabilities), runtimes are execution
+environments the compiler wires up via pipeline steps, network allowlist
+entries, and bash command allow-list additions.
+
+```yaml
+runtimes:
+  python:
+    version: "3.12"
+  node:
+    version: "22.x"
+  dotnet:
+    version: "8.0.x"
+  lean:
+    toolchain: "leanprover/lean4:v4.29.1"
+```
+
+| Runtime | Install mechanism | Notes |
+|---------|-------------------|-------|
+| `python` | `UsePythonVersion@0` (+ `PipAuthenticate@1` if `feed-url` is set) | Adds `python`, `pip`, `uv` to the bash allow-list |
+| `node` | `UseNode@1` (+ `npmAuthenticate@0` if `feed-url`/`config` is set) | Adds `node`, `npm`, `npx` to the bash allow-list |
+| `dotnet` | `UseDotNet@2` (+ `NuGetAuthenticate@1` if `feed-url`/`config` is set) | Adds `dotnet`; `version: "global.json"` auto-discovers SDKs from repo `global.json` files |
+| `lean` | elan toolchain install | Adds `lean`, `lake`, `elan`; auto-pins to a repo `lean-toolchain` file if present |
+
+Each runtime can be enabled with a bare `true` for defaults, or an object for
+version pinning and internal feed configuration. See
+[`docs/runtimes.md`](docs/runtimes.md) for the full field reference,
+including feed-authentication caveats and AWF mount/PATH details per runtime.
+
+---
+
 ## MCP Servers
 
 MCP (Model Context Protocol) servers give the agent access to external tools.
