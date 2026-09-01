@@ -209,41 +209,35 @@ pub(crate) fn neutralize_pipeline_commands(input: &str) -> String {
 /// Wrap @mentions in backticks to prevent unintended notifications.
 fn neutralize_mentions(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let mut chars = input.char_indices().peekable();
+    let mut chars = input.chars().peekable();
+    let mut inside_backticks = false;
 
-    while let Some((i, c)) = chars.next() {
-        if c == '@' {
-            // Don't neutralize if already inside backticks
-            let before = &input[..i];
-            let open_backticks = before.matches('`').count();
-            if open_backticks % 2 == 1 {
-                // Inside inline code – leave as is
+    while let Some(c) = chars.next() {
+        match c {
+            '`' => {
                 result.push(c);
-                continue;
+                inside_backticks = !inside_backticks;
             }
+            '@' if !inside_backticks => {
+                let mut mention = String::from("@");
+                while let Some(&next_c) = chars.peek() {
+                    if next_c.is_alphanumeric() || next_c == '_' || next_c == '-' || next_c == '.' {
+                        mention.push(next_c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
 
-            // Collect the mention word
-            let mut mention = String::from("@");
-            while let Some(&(_, next_c)) = chars.peek() {
-                if next_c.is_alphanumeric() || next_c == '_' || next_c == '-' || next_c == '.' {
-                    mention.push(next_c);
-                    chars.next();
+                if mention.len() > 1 {
+                    result.push('`');
+                    result.push_str(&mention);
+                    result.push('`');
                 } else {
-                    break;
+                    result.push('@');
                 }
             }
-
-            if mention.len() > 1 {
-                // Wrap in backticks
-                result.push('`');
-                result.push_str(&mention);
-                result.push('`');
-            } else {
-                // Bare '@' with no username – keep as-is
-                result.push('@');
-            }
-        } else {
-            result.push(c);
+            _ => result.push(c),
         }
     }
 
@@ -451,6 +445,21 @@ mod tests {
             neutralize_mentions("@alice and @bob"),
             "`@alice` and `@bob`"
         );
+    }
+
+    #[test]
+    fn test_neutralize_mentions_scales_at_content_limit() {
+        use std::time::{Duration, Instant};
+
+        let input = "@a ".repeat(MAX_CONTENT_BYTES / 3);
+        let started = Instant::now();
+        let output = neutralize_mentions(&input);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "mention neutralization exceeded the linear-time budget"
+        );
+        assert_eq!(output.matches("`@a`").count(), MAX_CONTENT_BYTES / 3);
     }
 
     // IS-05: Bot trigger / work item link protection

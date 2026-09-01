@@ -19,6 +19,10 @@ pr:
       - main
   paths:
     include:
+      - Cargo.toml
+      - Cargo.lock
+      - src/sanitize.rs
+      - src/sanitize/**
       - src/safe_outputs/**
       - scripts/ado-script/src/executor-e2e/**
       - tests/executor-e2e/**

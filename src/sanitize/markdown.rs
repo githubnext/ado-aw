@@ -803,12 +803,19 @@ fn regions(input: &str) -> Vec<Region> {
             ) {
                 regions.push(Region::Protected(range));
             }
-        } else if let Some(range) = locate_destination(
-            input,
-            &definition.span,
-            &definition.dest,
-            DEFINITION_LABEL_END,
-        ) {
+        } else {
+            // The parser decodes entity/backslash escapes in destinations, so
+            // the decoded value may not occur byte-for-byte in the source.
+            // Denied definitions must fail closed just like inline links:
+            // redact the complete definition when its destination cannot be
+            // located deterministically.
+            let range = locate_destination(
+                input,
+                &definition.span,
+                &definition.dest,
+                DEFINITION_LABEL_END,
+            )
+            .unwrap_or_else(|| definition.span.clone());
             regions.push(Region::Redact(range));
         }
     }
@@ -1045,6 +1052,26 @@ mod tests {
         let output = sanitize_markdown("See [the link][ref].\n\n[ref]: vbscript:msgbox(1)\n");
 
         assert!(!output.contains("vbscript:"), "{output}");
+        assert!(output.contains("(redacted)"), "{output}");
+        assert!(output.contains("the link"), "{output}");
+    }
+
+    #[test]
+    fn redacts_backslash_escaped_denied_reference_definition() {
+        let output = sanitize_markdown("See [the link][ref].\n\n[ref]: javascript\\:alert(1)\n");
+
+        assert!(!output.contains("javascript"), "{output}");
+        assert!(!output.contains("\\:"), "{output}");
+        assert!(output.contains("(redacted)"), "{output}");
+        assert!(output.contains("the link"), "{output}");
+    }
+
+    #[test]
+    fn redacts_entity_encoded_denied_reference_definition() {
+        let output = sanitize_markdown("See [the link][ref].\n\n[ref]: java&#115;cript:alert(1)\n");
+
+        assert!(!output.contains("&#115;"), "{output}");
+        assert!(!output.contains("alert(1)"), "{output}");
         assert!(output.contains("(redacted)"), "{output}");
         assert!(output.contains("the link"), "{output}");
     }
