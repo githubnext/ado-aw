@@ -805,14 +805,17 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
             .as_array()
             .expect("downloaded files");
         assert!(
-            files.iter().all(
-                |file| file["path"].as_str().is_some_and(|path| match filter {
-                    "agent" => path.starts_with("agent_outputs_"),
-                    "detection" => path.starts_with("analyzed_outputs_"),
-                    "safe-outputs" => path.starts_with("safe_outputs/"),
-                    _ => false,
+            files.iter().all(|file| {
+                file["path"].as_str().is_some_and(|path| {
+                    let path = path.replace('\\', "/");
+                    match filter {
+                        "agent" => path.starts_with("agent_outputs_"),
+                        "detection" => path.starts_with("analyzed_outputs_"),
+                        "safe-outputs" => path.starts_with("safe_outputs/"),
+                        _ => false,
+                    }
                 })
-            ),
+            }),
             "{filter} audit included an excluded artifact family: {files:?}"
         );
     }
