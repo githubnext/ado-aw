@@ -177,8 +177,9 @@ node import.js <prompt-file> --base "$(Build.SourcesDirectory)" \
   absolute. `import.js` rejects absolute and `..` paths.
 - `--var name=value` (repeatable) — a small, **compiler-owned allowlist** of
   non-secret ADO variables (currently `Build.BuildId`,
-  `Build.Repository.Name`, `Build.SourcesDirectory`, and
-  `System.CollectionUri`, defined by `PROMPT_ADO_VARS` in
+  `Build.Repository.ID`, `Build.Repository.Name`, `Build.SourcesDirectory`,
+  `System.CollectionUri`, `System.TeamProject`, and `System.TeamProjectId`,
+  defined by `PROMPT_ADO_VARS` in
   `src/compile/extensions/ado_script.rs`). ADO expands the `$(...)` macro into
   the bash arg at runtime, so `import.js` receives the concrete value and
   literally substitutes every `$(name)` occurrence in the **final** prompt

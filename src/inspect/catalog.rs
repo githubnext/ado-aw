@@ -274,10 +274,25 @@ fn safe_output_description(name: &str) -> &'static str {
     match name {
         "add-build-tag" => "Parameters for adding a tag to an Azure DevOps build",
         "add-pr-comment" => "Parameters for adding a comment thread on a pull request",
+        "assign-work-item" => "Assigns an Azure DevOps work item to an allowed identity",
         "comment-on-work-item" => "Parameters for commenting on a work item",
         "create-branch" => "Parameters for creating a branch",
         "create-git-tag" => "Parameters for creating a git tag (agent-provided)",
-        "create-github-issue" => "Files a GitHub issue against an operator-configured target repository.",
+        "create-github-issue" => {
+            "Files a GitHub issue against an operator-configured target repository."
+        }
+        "add-github-issue-labels" => "Adds operator-permitted labels to a GitHub issue",
+        "assign-github-issue-milestone" => {
+            "Assigns an operator-permitted milestone to a GitHub issue"
+        }
+        "assign-github-issue-to-user" => "Assigns operator-permitted GitHub users to an issue",
+        "close-github-issue" => "Closes a GitHub issue under configured state-reason policy",
+        "comment-on-github-issue" => "Posts a comment to a configured GitHub issue or pull request",
+        "hide-github-issue-comment" => {
+            "Minimizes a configured GitHub issue, pull-request, or discussion comment"
+        }
+        "link-github-sub-issue" => "Links two GitHub issues as parent and sub-issue",
+        "remove-github-issue-labels" => "Removes operator-permitted labels from a GitHub issue",
         "create-pull-request" => "Parameters for creating a pull request",
         "create-wiki-page" => "Parameters for creating a wiki page (agent-provided)",
         "create-work-item" => "Parameters for creating a work item",
@@ -292,8 +307,13 @@ fn safe_output_description(name: &str) -> &'static str {
         "report-incomplete" => "Parameters for reporting that a task could not be completed",
         "resolve-pr-thread" => "Parameters for resolving or reactivating a PR review thread",
         "set-github-issue-type" => "Sets or clears the native type on a GitHub issue",
+        "set-github-issue-field" => "Sets a repository-defined field on a GitHub issue",
         "submit-pr-review" => "Parameters for submitting a pull request review",
         "update-pr" => "Parameters for updating a pull request",
+        "unassign-github-issue-from-user" => {
+            "Removes operator-permitted GitHub users from an issue"
+        }
+        "update-github-issue" => "Updates operator-enabled fields on a GitHub issue",
         "update-wiki-page" => "Parameters for editing a wiki page (agent-provided)",
         "update-work-item" => "Parameters for updating a work item",
         "upload-build-attachment" => "Parameters for attaching a workspace file to an ADO build.",
@@ -421,6 +441,19 @@ mod tests {
     }
 
     #[test]
+    fn github_safe_outputs_have_catalog_descriptions() {
+        let catalog = catalog_kind("safe-outputs").unwrap();
+        for tool in crate::safe_outputs::CONFIGURED_ONLY_TOOLS {
+            let entry = catalog
+                .safe_outputs
+                .iter()
+                .find(|entry| entry.name == *tool)
+                .unwrap_or_else(|| panic!("safe-outputs catalog missing {tool}"));
+            assert_ne!(entry.description, "(no description)");
+        }
+    }
+
+    #[test]
     fn unknown_inspect_catalog_kind_returns_typed_error() {
         let err = catalog_kind("widgets").unwrap_err();
         assert_eq!(err.kind, "widgets");
@@ -433,6 +466,7 @@ mod tests {
         assert_eq!(versions.copilot_cli, COPILOT_CLI_VERSION);
         assert_eq!(versions.awf, AWF_VERSION);
         assert_eq!(versions.mcpg, MCPG_VERSION);
+        assert_eq!(versions.ado_mcp, ADO_MCP_VERSION);
         // Only the versions category is populated for --kind versions.
         assert!(catalog.safe_outputs.is_empty());
         assert!(catalog.models.is_empty());
@@ -451,6 +485,7 @@ mod tests {
         assert_eq!(value["versions"]["copilot_cli"], COPILOT_CLI_VERSION);
         assert_eq!(value["versions"]["awf"], AWF_VERSION);
         assert_eq!(value["versions"]["mcpg"], MCPG_VERSION);
+        assert_eq!(value["versions"]["ado_mcp"], ADO_MCP_VERSION);
     }
 
     #[test]

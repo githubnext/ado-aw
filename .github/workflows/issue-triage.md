@@ -13,6 +13,7 @@ permissions:
 network:
   allowed: [defaults, github]
 tools:
+  bash: false
   github:
     toolsets: [issues]
     min-integrity: none

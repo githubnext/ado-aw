@@ -36,7 +36,9 @@
 //! - [`AdoOrganization`] — an Azure DevOps Services organization name.
 //! - [`AdoProject`] — an Azure DevOps project name or GUID.
 //! - [`AdoRepository`] — an Azure DevOps repository name or GUID.
+//! - [`AdoWorkItemFieldRef`] — an Azure DevOps work item field reference name.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
+//! - [`SemanticVersion`] — an exact semantic version (`1.2.3`, `2.0.0-beta.1`).
 //!
 //! New safe-output tools that accept paths or identifiers should type those
 //! fields with these newtypes instead of raw `String` so the checks are applied
@@ -199,6 +201,11 @@ validated_string! {
 }
 
 validated_string! {
+    /// An Azure DevOps work item field reference name.
+    AdoWorkItemFieldRef, "work item field", validate::validate_ado_work_item_field_ref
+}
+
+validated_string! {
     /// A git ref name obeying `git check-ref-format`.
     GitRefName, "ref", validate::validate_git_ref_name
 }
@@ -267,32 +274,47 @@ validated_string! {
     }
 }
 
+fn validate_temporary_id(value: &str, label: &str) -> anyhow::Result<()> {
+    let bare = value.strip_prefix('#').unwrap_or(value);
+    let Some(suffix) = bare.strip_prefix("aw_") else {
+        anyhow::bail!(
+            "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+        );
+    };
+    if !(3..=12).contains(&suffix.len())
+        || !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        anyhow::bail!(
+            "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
+        );
+    }
+    Ok(())
+}
+
 validated_string! {
     /// A temporary GitHub issue identifier used to link safe outputs in one run.
-    ///
-    /// Accepts gh-aw's canonical `#aw_<id>` form and the bare `aw_<id>` alias,
-    /// where `<id>` is 3-12 ASCII alphanumeric/underscore characters.
-    GithubTemporaryId, "temporary_id", |value: &str, label: &str| {
-        let bare = value.strip_prefix('#').unwrap_or(value);
-        let Some(suffix) = bare.strip_prefix("aw_") else {
-            anyhow::bail!(
-                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
-            );
-        };
-        if !(3..=12).contains(&suffix.len())
-            || !suffix
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            anyhow::bail!(
-                "{label} must use `#aw_` followed by 3-12 ASCII alphanumeric/underscore characters"
-            );
-        }
-        Ok(())
-    }
+    GithubTemporaryId, "temporary_id", validate_temporary_id
+}
+
+validated_string! {
+    /// A temporary Azure DevOps work-item identifier used to link safe outputs in one run.
+    WorkItemTemporaryId, "temporary_id", validate_temporary_id
 }
 
 impl GithubTemporaryId {
+    /// Canonical map/reference form with the leading `#`.
+    pub fn canonical(&self) -> String {
+        if self.as_str().starts_with('#') {
+            self.as_str().to_string()
+        } else {
+            format!("#{}", self.as_str())
+        }
+    }
+}
+
+impl WorkItemTemporaryId {
     /// Canonical map/reference form with the leading `#`.
     pub fn canonical(&self) -> String {
         if self.as_str().starts_with('#') {
@@ -321,6 +343,20 @@ validated_string! {
             Ok(())
         } else {
             anyhow::bail!("{label} '{value}' must be non-empty and contain only [A-Za-z0-9._-]")
+        }
+    }
+}
+
+validated_string! {
+    /// An exact semantic version (e.g. `1.2.3`, `2.0.0-beta.1`).
+    SemanticVersion, "semantic version", |value: &str, label: &str| {
+        if semver::Version::parse(value).is_ok() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be an exact semantic version such as '2.8.1'; \
+                 npm tags and ranges are not allowed"
+            )
         }
     }
 }
@@ -586,6 +622,18 @@ mod tests {
         assert!(ArtifactName::parse(".hidden").is_err());
         assert!(ArtifactName::parse("has space").is_err());
         assert!(ArtifactName::parse("a".repeat(101).as_str()).is_err());
+    }
+
+    #[test]
+    fn semantic_version_requires_an_exact_semver() {
+        assert!(SemanticVersion::parse("2.8.1").is_ok());
+        assert!(SemanticVersion::parse("3.0.0-beta.1").is_ok());
+        assert!(SemanticVersion::parse("latest").is_err());
+        assert!(SemanticVersion::parse("next").is_err());
+        assert!(SemanticVersion::parse("^2.8.0").is_err());
+        assert!(SemanticVersion::parse("2.8").is_err());
+        assert!(SemanticVersion::parse("v2.8.1").is_err());
+        assert!(SemanticVersion::parse("2.8.1; echo bad").is_err());
     }
 
     #[test]

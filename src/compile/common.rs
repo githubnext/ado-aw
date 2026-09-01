@@ -8,6 +8,7 @@ use super::extensions::{
     CompilerExtension, ContainerRuntimeConfig, ContainerUser, Declarations, McpgConfig,
     McpgGatewayConfig, McpgServerConfig, Mount, Network, Tmpfs,
 };
+use super::shell::{Binding, ShellScript};
 use super::types::{
     CheckoutFetchOpts, CompileTarget, FrontMatter, PipelineParameter, PoolConfig, ReposItem,
     Repository, SELF_CHECKOUT_ALIAS,
@@ -18,6 +19,7 @@ use crate::compile::types::McpConfig;
 use crate::ecosystem_domains::{
     get_ecosystem_domains, is_ecosystem_identifier, is_known_ecosystem,
 };
+use crate::shell_script;
 use crate::validate;
 
 /// Atomically write `contents` to `path`.
@@ -69,10 +71,9 @@ fn test_validate_permissions_read_policy_requires_token_source_when_proxied() {
 
 #[test]
 fn test_validate_permissions_read_policy_ignores_explicitly_disabled_tool() {
-    let (disabled, _) = parse_markdown(
-        "---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n",
-    )
-    .unwrap();
+    let (disabled, _) =
+        parse_markdown("---\nname: test\ndescription: test\ntools:\n  azure-devops: false\n---\n")
+            .unwrap();
 
     validate_permissions_read_policy(&disabled).unwrap();
     assert!(!ado_proxy_enabled(&disabled));
@@ -102,6 +103,20 @@ fn test_ado_proxy_activation_follows_permissions_read_not_mcp_tool() {
             "unexpected activation for:\n{source}"
         );
     }
+}
+
+#[test]
+fn test_ado_mcp_version_uses_override_or_compiler_default() {
+    let (defaulted, _) =
+        parse_markdown("---\nname: t\ndescription: x\ntools:\n  azure-devops: true\n---\n")
+            .unwrap();
+    assert_eq!(ado_mcp_version(&defaulted), ADO_MCP_VERSION);
+
+    let (overridden, _) = parse_markdown(
+        "---\nname: t\ndescription: x\ntools:\n  azure-devops:\n    version: 2.9.0\n---\n",
+    )
+    .unwrap();
+    assert_eq!(ado_mcp_version(&overridden), "2.9.0");
 }
 
 /// Returns the directory in which the atomic tempfile should be created for a
@@ -312,8 +327,9 @@ pub(crate) fn parse_markdown_detailed_with_registry(
     };
 
     // Stage 2: run the codemod registry against the untyped mapping.
-    let report = super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
-        .context("Failed to apply codemods")?;
+    let report =
+        super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
+            .context("Failed to apply codemods")?;
 
     // Stage 3: deserialize the (possibly modified) mapping into the
     // typed FrontMatter. Errors here mean either the user wrote an
@@ -1239,9 +1255,7 @@ fn resolve_effective_workspace(
             let ws = ws.as_str();
             match ws {
                 "root" => Ok(("root".to_string(), false)),
-                "repo" | "self" if has_additional_checkouts => {
-                    Ok(("repo".to_string(), false))
-                }
+                "repo" | "self" if has_additional_checkouts => Ok(("repo".to_string(), false)),
                 "repo" | "self" => Ok(("root".to_string(), true)),
                 alias => {
                     // Defense in depth: even though aliases are constrained
@@ -1797,21 +1811,52 @@ pub const ADO_MCP_CA_MOUNT: &str = "/etc/ado-proxy/ca.pem";
 /// is. Getting this wrong is not cosmetic — in a policy document a wrong
 /// organization matches nothing, denying every request in a way that reads as
 /// a deliberate policy decision.
+///
+/// # Contract for consumers
+///
+/// This function returns raw shell text (no YAML wrapping). Callers that
+/// splice the text into a larger script must know it assigns two variables:
+/// `ADO_PROXY_COLLECTION` and `ADO_PROXY_ORGANIZATION`. See
+/// [`crate::compile::shell`] for the fragment convention (`# ado-aw:fragment`
+/// marker + `externals:` list) other producers use when embedding this
+/// fragment.
 pub fn resolve_ado_organization_bash() -> String {
-    "# $(System.CollectionUri) is expanded by ADO before bash runs. Two\n\
-     # shapes are in use: \"https://dev.azure.com/myorg/\" (organization in\n\
-     # the path) and the legacy \"https://myorg.visualstudio.com/\"\n\
-     # (organization in the host). Handle both — a fixed-prefix strip or a\n\
-     # bare last-segment rule is silently wrong for one of them.\n\
-     ADO_PROXY_COLLECTION=\"$(System.CollectionUri)\"\n\
-     ADO_PROXY_ORGANIZATION=$(printf '%s' \"$ADO_PROXY_COLLECTION\" \\\n\
-       | sed -e 's#^https\\?://##' -e 's#/*$##' \\\n\
-       | awk -F/ '{ if (NF>1) print $NF; else { sub(/\\..*$/, \"\", $1); print $1 } }')\n\
-     if [ -z \"$ADO_PROXY_ORGANIZATION\" ]; then\n\
-       echo \"##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri\"\n\
-       exit 1\n\
-     fi\n"
-        .to_string()
+    ShellScript::new(&RESOLVE_ADO_ORGANIZATION).render()
+}
+
+shell_script! {
+    /// Derive `$ADO_PROXY_ORGANIZATION` from `$(System.CollectionUri)`.
+    ///
+    /// Rendered as a standalone fragment (no bindings, no prelude) so it can
+    /// be spliced verbatim into a larger step body via
+    /// [`ShellScript::fragment`]. Every variable the body reads is assigned
+    /// by the body itself, so no bindings or externals are needed and the
+    /// splice contributes nothing to the parent's declared surface except
+    /// the two variables it assigns.
+    RESOLVE_ADO_ORGANIZATION {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        // Uses r###"..."### so the "##vso[...]" line inside the body cannot
+        // prematurely close the raw string literal (the sequence `"#` would
+        // otherwise terminate an r#"..."# body).
+        body: r###"
+# $(System.CollectionUri) is expanded by ADO before bash runs. Two
+# shapes are in use: "https://dev.azure.com/myorg/" (organization in
+# the path) and the legacy "https://myorg.visualstudio.com/"
+# (organization in the host). Handle both — a fixed-prefix strip or a
+# bare last-segment rule is silently wrong for one of them.
+ADO_PROXY_COLLECTION="$(System.CollectionUri)"
+ADO_PROXY_ORGANIZATION=$(printf '%s' "$ADO_PROXY_COLLECTION" \
+  | sed -e 's#^https\?://##' -e 's#/*$##' \
+  | awk -F/ '{ if (NF>1) print $NF; else { sub(/\..*$/, "", $1); print $1 } }')
+if [ -z "$ADO_PROXY_ORGANIZATION" ]; then
+  echo "##vso[task.complete result=Failed]cannot determine the Azure DevOps organization from System.CollectionUri"
+  exit 1
+fi
+"###,
+    }
 }
 
 /// Whether this workflow routes Azure DevOps access through the policy engine.
@@ -1839,6 +1884,20 @@ pub fn ado_mcp_enabled(front_matter: &FrontMatter) -> bool {
         .as_ref()
         .and_then(|tools| tools.azure_devops.as_ref())
         .is_some_and(crate::compile::types::AzureDevOpsToolConfig::is_enabled)
+}
+
+/// Effective Azure DevOps MCP package version for this workflow.
+///
+/// Workflows may override the compiler pin with an exact semantic version.
+/// The compiler-owned default remains deterministic and is exposed by
+/// `ado-aw catalog --kind versions`.
+pub fn ado_mcp_version(front_matter: &FrontMatter) -> &str {
+    front_matter
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.azure_devops.as_ref())
+        .and_then(crate::compile::types::AzureDevOpsToolConfig::version)
+        .unwrap_or(ADO_MCP_VERSION)
 }
 
 /// Directory the generated `az` wrapper is installed into inside the sandbox.
@@ -2010,14 +2069,56 @@ pub fn generate_integrity_check(skip: bool) -> String {
         return String::new();
     }
 
-    // Indentation is handled by replace_with_indent at the call site.
-    r#"- bash: |
-    AGENTIC_PIPELINES_PATH="$(Pipeline.Workspace)/agentic-pipeline-compiler/ado-aw"
-    chmod +x "$AGENTIC_PIPELINES_PATH"
-    $AGENTIC_PIPELINES_PATH check "{{ pipeline_path }}"
-  workingDirectory: {{ trigger_repo_directory }}
-  displayName: "Verify pipeline integrity""#
-        .to_string()
+    let script = ShellScript::new(&VERIFY_PIPELINE_INTEGRITY)
+        .bind(
+            "PIPELINE_WORKSPACE",
+            Binding::ado_macro("Pipeline.Workspace"),
+        )
+        .render();
+
+    // Indent every body line by 4 spaces to satisfy the `- bash: |` literal
+    // block scalar shape. `workingDirectory:` uses the `{{ trigger_repo_directory }}`
+    // template placeholder resolved by `replace_with_indent` at the call site.
+    let indented: String = script
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("    {line}\n")
+            }
+        })
+        .collect();
+    format!(
+        "- bash: |\n{indented}  workingDirectory: {{{{ trigger_repo_directory }}}}\n  displayName: \"Verify pipeline integrity\""
+    )
+    .trim_end_matches('\n')
+    .to_string()
+}
+
+shell_script! {
+    /// The bash body of the "Verify pipeline integrity" step: downloads the
+    /// pipelined `ado-aw` binary and re-runs `ado-aw check` against the
+    /// authored source path. Called with `--skip-integrity` returns an empty
+    /// string from [`generate_integrity_check`] and the step is omitted; the
+    /// registered body always describes the enabled case.
+    ///
+    /// `{{ pipeline_path }}` remains a compile-time template placeholder
+    /// resolved by `replace_with_indent` at the call site (it names the
+    /// authored `.md` source path relative to the trigger repo). It is inert
+    /// under shellcheck because it appears only inside a double-quoted string
+    /// argument.
+    VERIFY_PIPELINE_INTEGRITY {
+        interpreter: Bash,
+        bindings: [PIPELINE_WORKSPACE],
+        externals: [],
+        fragments: [],
+        body: r#"
+AGENTIC_PIPELINES_PATH="$PIPELINE_WORKSPACE/agentic-pipeline-compiler/ado-aw"
+chmod +x "$AGENTIC_PIPELINES_PATH"
+"$AGENTIC_PIPELINES_PATH" check "{{ pipeline_path }}"
+"#,
+    }
 }
 
 /// Validate the `ado-aw-debug:` section.
@@ -2056,15 +2157,134 @@ pub fn validate_ado_aw_debug_config(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
+fn require_same_approval_lane(
+    front_matter: &FrontMatter,
+    producer: &str,
+    consumer: &str,
+) -> Result<()> {
+    let producer_reviewed = front_matter.tool_requires_approval(producer).is_some();
+    let consumer_reviewed = front_matter.tool_requires_approval(consumer).is_some();
+    if producer_reviewed == consumer_reviewed {
+        return Ok(());
+    }
+    match producer {
+        "create-github-issue" => anyhow::bail!(
+            "safe-outputs.create-github-issue and safe-outputs.{consumer} must use the same \
+             effective require-approval value when {consumer} accepts temporary issue IDs"
+        ),
+        "create-work-item" => anyhow::bail!(
+            "safe-outputs.create-work-item and safe-outputs.{consumer} must have the same \
+             effective require-approval setting so temporary work-item IDs remain in one \
+             SafeOutputs job"
+        ),
+        _ => anyhow::bail!(
+            "safe-outputs.{producer} and safe-outputs.{consumer} must have the same effective \
+             require-approval setting"
+        ),
+    }
+}
+
 pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config) = front_matter.create_github_issue_config()? {
-        if let Some(target_repo) = config.target_repo.as_deref() {
-            crate::safe_outputs::validate_target_repo(target_repo)?;
-            crate::validate::reject_pipeline_injection(
-                target_repo,
-                "safe-outputs.create-github-issue.target-repo",
-            )?;
+    let github_tools = front_matter.github_issue_tool_names();
+    if front_matter
+        .safe_outputs
+        .contains_key("create-github-issue")
+    {
+        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+            if front_matter.safe_outputs.contains_key(*consumer) {
+                require_same_approval_lane(
+                    front_matter,
+                    "create-github-issue",
+                    consumer,
+                )?;
+            }
         }
+    }
+
+    for tool in &github_tools {
+        let Some(config) = front_matter.github_issue_compiler_config(tool)? else {
+            continue;
+        };
+        crate::safe_outputs::configured_github_repositories(
+            crate::safe_outputs::GithubRepositoryPolicy::new(
+                config.target_repo.as_deref(),
+                &config.allowed_repos,
+            ),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("safe-outputs.{tool} has invalid repository policy: {error}")
+        })?;
+        if tool != "create-github-issue" {
+            crate::safe_outputs::validate_github_mutation_filter_config(
+                crate::safe_outputs::GithubMutationFilters {
+                    required_labels: &config.required_labels,
+                    required_title_prefix: config.required_title_prefix.as_deref(),
+                },
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("safe-outputs.{tool} has invalid mutation filters: {error}")
+            })?;
+        }
+        match tool.as_str() {
+            "comment-on-github-issue" => {
+                if let Some(config) = front_matter.comment_on_github_issue_config()? {
+                    crate::safe_outputs::validate_comment_on_github_issue_config(&config)?;
+                }
+            }
+            "hide-github-issue-comment" => {
+                if let Some(config) = front_matter.hide_github_issue_comment_config()? {
+                    crate::safe_outputs::validate_hide_github_issue_comment_config(&config)?;
+                }
+            }
+            "add-github-issue-labels" => {
+                if let Some(config) = front_matter.add_github_issue_labels_config()? {
+                    crate::safe_outputs::validate_add_github_issue_labels_config(&config)?;
+                }
+            }
+            "remove-github-issue-labels" => {
+                if let Some(config) = front_matter.remove_github_issue_labels_config()? {
+                    crate::safe_outputs::validate_remove_github_issue_labels_config(&config)?;
+                }
+            }
+            "close-github-issue" => {
+                if let Some(config) = front_matter.close_github_issue_config()? {
+                    crate::safe_outputs::validate_close_github_issue_config(&config)?;
+                }
+            }
+            "update-github-issue" => {
+                if let Some(config) = front_matter.update_github_issue_config()? {
+                    crate::safe_outputs::validate_update_github_issue_config(&config)?;
+                }
+            }
+            "set-github-issue-field" => {
+                if let Some(config) = front_matter.set_github_issue_field_config()? {
+                    crate::safe_outputs::validate_set_github_issue_field_config(&config)?;
+                }
+            }
+            "assign-github-issue-milestone" => {
+                if let Some(config) = front_matter.assign_github_issue_milestone_config()? {
+                    crate::safe_outputs::validate_assign_github_issue_milestone_config(&config)?;
+                }
+            }
+            "assign-github-issue-to-user" => {
+                if let Some(config) = front_matter.assign_github_issue_to_user_config()? {
+                    crate::safe_outputs::validate_assign_github_issue_to_user_config(&config)?;
+                }
+            }
+            "unassign-github-issue-from-user" => {
+                if let Some(config) = front_matter.unassign_github_issue_from_user_config()? {
+                    crate::safe_outputs::validate_unassign_github_issue_from_user_config(&config)?;
+                }
+            }
+            "link-github-sub-issue" => {
+                if let Some(config) = front_matter.link_github_sub_issue_config()? {
+                    crate::safe_outputs::validate_link_github_sub_issue_config(&config)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(config) = front_matter.create_github_issue_config()? {
         if let Some(prefix) = config.title_prefix.as_deref() {
             crate::validate::reject_pipeline_injection(
                 prefix,
@@ -2092,13 +2312,6 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
     }
 
     if let Some(config) = front_matter.set_github_issue_type_config()? {
-        if let Some(target_repo) = config.target_repo.as_deref() {
-            crate::safe_outputs::validate_target_repo(target_repo)?;
-            crate::validate::reject_pipeline_injection(
-                target_repo,
-                "safe-outputs.set-github-issue-type.target-repo",
-            )?;
-        }
         for issue_type in &config.allowed {
             crate::validate::reject_pipeline_injection(
                 issue_type,
@@ -2107,25 +2320,72 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
         }
     }
 
-    if front_matter.safe_outputs.contains_key("create-github-issue")
-        && front_matter.safe_outputs.contains_key("set-github-issue-type")
+    let _ = front_matter.github_app_permissions_for_tools(&github_tools)?;
+    let _ = front_matter.github_safe_outputs_auth()?;
+    Ok(())
+}
+
+pub fn validate_work_item_assignment_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    if front_matter
+        .safe_outputs
+        .get("create-work-item")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|config| config.contains_key("require-temporary-id"))
     {
-        let create_reviewed = front_matter
-            .tool_requires_approval("create-github-issue")
-            .is_some();
-        let type_reviewed = front_matter
-            .tool_requires_approval("set-github-issue-type")
-            .is_some();
-        if create_reviewed != type_reviewed {
-            anyhow::bail!(
-                "safe-outputs.create-github-issue and safe-outputs.set-github-issue-type must have the \
-                 same effective require-approval setting so temporary issue IDs remain in \
-                 one SafeOutputs job"
+        anyhow::bail!(
+            "safe-outputs.create-work-item.require-temporary-id is not supported; \
+             create-work-item always generates and returns a temporary ID"
+        );
+    }
+
+    if let Some(config) = front_matter.create_work_item_config()?
+        && let Some(assignee) = config.assignee.as_deref()
+    {
+        crate::safe_outputs::normalize_work_item_assignee(
+            assignee,
+            "safe-outputs.create-work-item.assignee",
+        )?;
+    }
+
+    if let Some(config) = front_matter.assign_work_item_config()? {
+        if let Some(target) = &config.target {
+            match target {
+                crate::safe_outputs::TargetConfig::Id(id) if *id > 0 => {}
+                crate::safe_outputs::TargetConfig::Pattern(pattern) if pattern == "*" => {}
+                crate::safe_outputs::TargetConfig::Id(_) => {
+                    anyhow::bail!("safe-outputs.assign-work-item.target must be positive")
+                }
+                crate::safe_outputs::TargetConfig::Pattern(pattern) => anyhow::bail!(
+                    "safe-outputs.assign-work-item.target must be \"*\" or a positive work-item ID, got '{pattern}'"
+                ),
+            }
+        }
+        for assignee in &config.allowed {
+            crate::safe_outputs::normalize_work_item_assignee(
+                assignee,
+                "safe-outputs.assign-work-item.allowed",
+            )?;
+        }
+        for pattern in &config.blocked {
+            anyhow::ensure!(
+                !pattern.trim().is_empty(),
+                "safe-outputs.assign-work-item.blocked entries must not be empty"
             );
+            crate::validate::reject_pipeline_injection(
+                pattern.trim(),
+                "safe-outputs.assign-work-item.blocked",
+            )?;
         }
     }
 
-    let _ = front_matter.github_safe_outputs_auth()?;
+    if front_matter.safe_outputs.contains_key("create-work-item") {
+        for consumer in crate::compile::types::WORK_ITEM_TEMPORARY_ID_CONSUMERS {
+            if front_matter.safe_outputs.contains_key(*consumer) {
+                require_same_approval_lane(front_matter, "create-work-item", consumer)?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3369,22 +3629,50 @@ pub fn generate_awf_path_step(awf_paths: &[String]) -> String {
         return String::new();
     }
 
-    let path_lines = awf_paths
-        .iter()
-        .map(|p| format!("    {p}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let path_lines: String = awf_paths.join("\n");
 
+    let body = ShellScript::new(&GENERATE_GITHUB_PATH)
+        .bind("PATH_LINES", Binding::document(&path_lines))
+        .render();
+
+    // Wrap in a `- bash: |` YAML step. Each body line indented by 4 spaces
+    // so it survives the literal-block scalar shape emitted downstream.
+    let indented: String = body
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("    {line}\n")
+            }
+        })
+        .collect();
     format!(
-        "\
-- bash: |
-    AWF_PATH_FILE=\"/tmp/awf-tools/ado-path-entries\"
-    cat > \"$AWF_PATH_FILE\" << AWF_PATH_EOF
-{path_lines}
-    AWF_PATH_EOF
-    echo \"##vso[task.setvariable variable=GITHUB_PATH]$AWF_PATH_FILE\"
-  displayName: \"Generate GITHUB_PATH file\""
+        "- bash: |\n{indented}  displayName: \"Generate GITHUB_PATH file\""
     )
+}
+
+shell_script! {
+    /// Bash body of the "Generate GITHUB_PATH file" step.
+    ///
+    /// AWF reads `$GITHUB_PATH` as a file path at startup and merges its
+    /// entries into the chroot PATH. `PATH_LINES` arrives as a
+    /// [`Binding::document`] — a quoted heredoc — because the path list may
+    /// contain multiple lines; the heredoc keeps them literal without any
+    /// per-entry escaping. The rendered file is then advertised to AWF via
+    /// `##vso[task.setvariable]`.
+    GENERATE_GITHUB_PATH {
+        interpreter: Bash,
+        bindings: [PATH_LINES],
+        externals: [],
+        fragments: [],
+        // r###"..."### to protect against the "##vso sequence.
+        body: r###"
+AWF_PATH_FILE="/tmp/awf-tools/ado-path-entries"
+printf '%s\n' "$PATH_LINES" > "$AWF_PATH_FILE"
+echo "##vso[task.setvariable variable=GITHUB_PATH]$AWF_PATH_FILE"
+"###,
+    }
 }
 
 /// Generates the `env:` block entry that passes `GITHUB_PATH` to the AWF
@@ -4232,9 +4520,11 @@ mod tests {
         );
 
         fm.permissions = Some(crate::compile::types::PermissionsConfig {
-            read: Some(crate::compile::types::ReadPermissionConfig::ServiceConnection(
-                crate::secure::ServiceConnection::parse("read-sc").unwrap(),
-            )),
+            read: Some(
+                crate::compile::types::ReadPermissionConfig::ServiceConnection(
+                    crate::secure::ServiceConnection::parse("read-sc").unwrap(),
+                ),
+            ),
             write: None,
         });
         let params = engine_args_for(&fm).unwrap();
@@ -5003,11 +5293,12 @@ mod tests {
     #[test]
     fn test_generate_enabled_tools_args_with_configured_tools() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n  create-work-item:\n    work-item-type: Task\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n  create-work-item:\n    work-item-type: Task\n  assign-work-item:\n    target: \"*\"\n---\n"
         ).unwrap();
         let args = generate_enabled_tools_args(&fm);
         assert!(args.contains("--enabled-tools create-pull-request"));
         assert!(args.contains("--enabled-tools create-work-item"));
+        assert!(args.contains("--enabled-tools assign-work-item"));
         // Always-on tools should also be included
         assert!(args.contains("--enabled-tools noop"));
         assert!(args.contains("--enabled-tools missing-data"));
@@ -5144,6 +5435,21 @@ safe-outputs:
     }
 
     #[test]
+    fn test_generate_enabled_tools_args_supports_all_github_issue_tools() {
+        for tool in crate::compile::types::GITHUB_ISSUE_SAFE_OUTPUT_TOOLS {
+            let yaml = format!(
+                "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}:\n    target-repo: githubnext/ado-aw\n---\n"
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let args = generate_enabled_tools_args(&fm);
+            assert!(
+                args.contains(&format!("--enabled-tools {tool}")),
+                "configured GitHub tool {tool} missing from enabled-tools args: {args}"
+            );
+        }
+    }
+
+    #[test]
     fn test_generate_enabled_tools_args_create_github_issue_plus_other_output() {
         let yaml = r#"---
 name: test
@@ -5160,7 +5466,10 @@ safe-outputs:
         assert!(args.contains("--enabled-tools create-pull-request"));
         assert!(args.contains("--enabled-tools create-github-issue"));
         // No duplicate
-        assert_eq!(args.matches("--enabled-tools create-github-issue").count(), 1);
+        assert_eq!(
+            args.matches("--enabled-tools create-github-issue").count(),
+            1
+        );
     }
 
     #[test]
@@ -5240,6 +5549,42 @@ safe-outputs:
     }
 
     #[test]
+    fn test_validate_github_issue_outputs_rejects_non_exact_allowed_repo() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    allowed-repos: ["githubnext/*"]
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("allowed") || error.contains("owner/repo"));
+    }
+
+    #[test]
+    fn test_validate_github_issue_outputs_rejects_bad_mutation_filter() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  set-github-issue-type:
+    target-repo: githubnext/ado-aw
+    required-title-prefix: "$(UNSAFE)"
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mutation filters"));
+    }
+
+    #[test]
     fn test_validate_github_issue_outputs_rejects_pipeline_injection_in_label() {
         let yaml = r###"---
 name: test
@@ -5270,6 +5615,23 @@ safe-outputs:
         let (fm, _) = parse_markdown(yaml).unwrap();
         let result = validate_github_issue_outputs_config(&fm);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_github_issue_outputs_rejects_unknown_fields_for_all_tools() {
+        for tool in crate::compile::types::GITHUB_ISSUE_SAFE_OUTPUT_TOOLS {
+            let yaml = format!(
+                "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}:\n    target-repo: githubnext/ado-aw\n    unexpected-option: true\n---\n"
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_github_issue_outputs_config(&fm)
+                .expect_err("unknown GitHub tool config fields must fail compilation")
+                .to_string();
+            assert!(
+                error.contains(tool) && error.contains("unknown field"),
+                "unexpected strict-config error for {tool}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -5509,6 +5871,111 @@ safe-outputs:
     }
 
     #[test]
+    fn test_validate_accepts_linked_work_item_assignment_tools() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  require-approval: true
+  create-work-item: {}
+  assign-work-item:
+    target: "*"
+    allowed: [owner@example.com]
+    blocked: ["svc-*"]
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_work_item_assignment_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_create_work_item_require_temporary_id() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-temporary-id: true
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("always generates and returns a temporary ID"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_linked_work_item_tools() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-approval: true
+  assign-work-item:
+    require-approval: false
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_create_and_comment_work_item() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    require-approval: true
+  comment-on-work-item:
+    target: "*"
+    require-approval: false
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("same effective require-approval"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_reserved_work_item_assignees() {
+        for yaml in [
+            r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    assignee: Agency
+---
+"#,
+            r#"---
+name: test
+description: test
+safe-outputs:
+  assign-work-item:
+    allowed: ["GitHub Copilot"]
+---
+"#,
+        ] {
+            let (fm, _) = parse_markdown(yaml).unwrap();
+            let error = validate_work_item_assignment_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("reserved identity"), "error: {error}");
+        }
+    }
+
+    #[test]
     fn test_validate_rejects_mixed_approval_lanes_for_linked_issue_tools() {
         let yaml = r#"---
 name: test
@@ -5527,6 +5994,34 @@ safe-outputs:
             .unwrap_err()
             .to_string();
         assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_for_every_temporary_id_consumer() {
+        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    require-approval: true
+  {consumer}:
+    target-repo: githubnext/ado-aw
+    require-approval: false
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_github_issue_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(consumer) && error.contains("same"),
+                "unexpected error for {consumer}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -6528,10 +7023,9 @@ safe-outputs:
 
     #[test]
     fn test_generate_awf_mounts_includes_runtime_az_hook_with_read_permission() {
-        let (fm, _) = parse_markdown(
-            "---\nname: t\ndescription: d\npermissions:\n  read: read-sc\n---\n",
-        )
-        .unwrap();
+        let (fm, _) =
+            parse_markdown("---\nname: t\ndescription: d\npermissions:\n  read: read-sc\n---\n")
+                .unwrap();
         let exts = crate::compile::extensions::collect_extensions(&fm);
         let declarations = extension_declarations(&exts, &fm);
         let result = generate_awf_mounts(&exts, &declarations);
@@ -6582,9 +7076,12 @@ safe-outputs:
             result.contains("displayName"),
             "should be a complete pipeline step"
         );
+        // Paths flow through a `Binding::document` heredoc so multi-line
+        // content stays literal without per-entry escaping — the marker is
+        // the shell module's own document delimiter, not a caller-picked one.
         assert!(
-            result.contains("AWF_PATH_EOF"),
-            "should use heredoc markers"
+            result.contains("ADO_AW_SHELL_DOC_EOF"),
+            "should use the shell::Binding::document heredoc marker: {result}"
         );
     }
 
@@ -6801,11 +7298,10 @@ safe-outputs:
         );
         assert!(
             entrypoint_args.windows(2).any(|args| {
-                args
-                    == [
-                        "--self-repository-directory".to_string(),
-                        "$(Build.SourcesDirectory)".to_string(),
-                    ]
+                args == [
+                    "--self-repository-directory".to_string(),
+                    "$(Build.SourcesDirectory)".to_string(),
+                ]
             }),
             "SafeOutputs should receive the exact self checkout: {entrypoint_args:?}"
         );
@@ -7298,7 +7794,7 @@ safe-outputs:
     #[test]
     fn test_ado_tool_with_toolsets() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repos, wit, core]\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    toolsets: [repositories, work-items, core]\n---\n",
         )
         .unwrap();
         let extensions = collect_extensions(&fm);
@@ -7308,8 +7804,8 @@ safe-outputs:
         let ado = config.mcp_servers.get("azure-devops").unwrap();
         let args = ado.entrypoint_args.as_ref().unwrap();
         assert!(args.contains(&"-d".to_string()));
-        assert!(args.contains(&"repos".to_string()));
-        assert!(args.contains(&"wit".to_string()));
+        assert!(args.contains(&"repositories".to_string()));
+        assert!(args.contains(&"work-items".to_string()));
         assert!(args.contains(&"core".to_string()));
     }
 
@@ -7384,7 +7880,7 @@ safe-outputs:
     #[test]
     fn test_ado_tool_invalid_toolset_fails() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repos\", \"bad toolset\"]\n---\n",
+            "---\nname: test\ndescription: test\ntools:\n  azure-devops:\n    org: myorg\n    toolsets: [\"repositories\", \"bad toolset\"]\n---\n",
         )
         .unwrap();
         let extensions = collect_extensions(&fm);
@@ -7908,10 +8404,7 @@ safe-outputs:
             ReposItem::Shorthand("other-org/tools".to_string()),
         ];
         let err = lower_repos(&items).unwrap_err();
-        assert!(
-            err.to_string().contains("case-insensitively"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("case-insensitively"), "{err}");
     }
 
     #[test]

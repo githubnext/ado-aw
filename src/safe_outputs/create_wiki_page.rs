@@ -216,7 +216,7 @@ impl Executor for CreateWikiPageResult {
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
 
-        let config: CreateWikiPageConfig = ctx.get_tool_config("create-wiki-page");
+        let config: CreateWikiPageConfig = ctx.get_tool_config("create-wiki-page")?;
 
         let wiki_name = config
             .wiki_name
@@ -464,7 +464,10 @@ mod tests {
         let result: Result<CreateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("path must not be empty"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("path must not be empty"),
             "expected 'path must not be empty' in error"
         );
     }
@@ -505,7 +508,10 @@ mod tests {
         let result: Result<CreateWikiPageResult, _> = params.try_into();
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("at least 10 characters"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("at least 10 characters"),
             "expected 'at least 10 characters' in error"
         );
     }

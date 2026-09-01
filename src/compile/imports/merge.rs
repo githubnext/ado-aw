@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn tools_union_allow_arrays_and_consumer_scalars_win() {
         let mut consumer = ymap(
-            "tools:\n  edit: false\n  azure-devops:\n    allowed: [b, consumer]\n    org: consumer",
+            "tools:\n  edit: false\n  azure-devops:\n    version: 3.0.0\n    allowed: [b, consumer]\n    org: consumer",
         );
         merge_resolved(
             &mut consumer,
@@ -792,8 +792,9 @@ mod tests {
                     r#"tools:
   edit: true
   azure-devops:
+    version: 2.8.1
     allowed: [a, b]
-    toolsets: [repos]
+    toolsets: [repositories]
     org: first"#,
                     "",
                 ),
@@ -801,8 +802,9 @@ mod tests {
                     r#"tools:
   edit: true
   azure-devops:
+    version: 2.9.0
     allowed: [b, c]
-    toolsets: [wit]
+    toolsets: [work-items]
     org: second"#,
                     "",
                 ),
@@ -811,13 +813,14 @@ mod tests {
         .unwrap();
         assert_eq!(consumer["tools"]["edit"], false);
         assert_eq!(consumer["tools"]["azure-devops"]["org"], "consumer");
+        assert_eq!(consumer["tools"]["azure-devops"]["version"], "3.0.0");
         assert_eq!(
             consumer["tools"]["azure-devops"]["allowed"],
             serde_yaml::from_str::<Value>("[a, b, c, consumer]").unwrap()
         );
         assert_eq!(
             consumer["tools"]["azure-devops"]["toolsets"],
-            serde_yaml::from_str::<Value>("[repos, wit]").unwrap()
+            serde_yaml::from_str::<Value>("[repositories, work-items]").unwrap()
         );
     }
 

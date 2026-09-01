@@ -103,13 +103,19 @@ export async function runScenario<S>(
     // Prior entries are prerequisites, not the thing under test: surface a
     // broken one as its own execute-phase failure so it can never be mistaken
     // for an assertion failure in the primary tool.
+    const priorRecordOffsets = new Map<string, number>();
     for (const prior of priorEntries ?? []) {
-      const priorRecord = result.records.find((r) => r.name === prior.tool.replaceAll("-", "_"));
+      const priorName = prior.tool.replaceAll("-", "_");
+      const offset = priorRecordOffsets.get(priorName) ?? 0;
+      const matchingRecords = result.records.filter((r) => r.name === priorName);
+      const priorRecord = matchingRecords[offset];
+      priorRecordOffsets.set(priorName, offset + 1);
       if (!priorRecord) {
         return finish({
           ok: false,
           phase: "execute",
-          message: `prior entry '${prior.tool}' produced no executed record`,
+          message:
+            `prior entry '${prior.tool}' occurrence ${offset + 1} produced no executed record`,
         });
       }
       if (priorRecord.status !== "succeeded") {

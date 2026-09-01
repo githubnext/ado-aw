@@ -364,7 +364,7 @@ impl Executor for SubmitPrReviewResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: SubmitPrReviewConfig = ctx.get_tool_config("submit-pr-review");
+        let config: SubmitPrReviewConfig = ctx.get_tool_config("submit-pr-review")?;
         debug!("Config: {:?}", config);
 
         // Validate event against allowed-events — REQUIRED.
@@ -438,13 +438,17 @@ impl Executor for SubmitPrReviewResult {
             pull_request_id: self.pull_request_id,
             token,
         };
-        if let Some(failure) = check_self_approval(&vote_ctx, &user_id, &self.event, vote_value).await? {
+        if let Some(failure) =
+            check_self_approval(&vote_ctx, &user_id, &self.event, vote_value).await?
+        {
             return Ok(failure);
         }
 
         // PUT vote to reviewers endpoint
         let encoded_user_id = utf8_percent_encode(&user_id, PATH_SEGMENT).to_string();
-        if let Some(failure) = submit_vote(&vote_ctx, &encoded_user_id, &self.event, vote_value).await? {
+        if let Some(failure) =
+            submit_vote(&vote_ctx, &encoded_user_id, &self.event, vote_value).await?
+        {
             return Ok(failure);
         }
 
@@ -538,7 +542,8 @@ mod tests {
         };
         let err = <SubmitPrReviewResult as TryFrom<_>>::try_from(params).unwrap_err();
         assert!(
-            err.to_string().contains("pull_request_id must be a positive integer"),
+            err.to_string()
+                .contains("pull_request_id must be a positive integer"),
             "unexpected error: {err}"
         );
     }
@@ -568,7 +573,8 @@ mod tests {
         };
         let err = <SubmitPrReviewResult as TryFrom<_>>::try_from(params).unwrap_err();
         assert!(
-            err.to_string().contains("body is required when event is 'request-changes'"),
+            err.to_string()
+                .contains("body is required when event is 'request-changes'"),
             "unexpected error: {err}"
         );
     }

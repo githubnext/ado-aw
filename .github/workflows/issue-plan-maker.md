@@ -11,6 +11,7 @@ permissions:
   pull-requests: read
   copilot-requests: write
 tools:
+  bash: false
   github:
     toolsets: [default]
     min-integrity: none

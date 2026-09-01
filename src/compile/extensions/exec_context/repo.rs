@@ -17,10 +17,27 @@ use crate::compile::extensions::CompileContext;
 use crate::compile::extensions::ado_script::EXEC_CONTEXT_REPO_PATH;
 use crate::compile::ir::condition::Condition;
 use crate::compile::ir::env::EnvValue;
-use crate::compile::ir::step::{BashStep, Step};
+use crate::compile::ir::step::Step;
+use crate::compile::shell::ShellScript;
 use crate::compile::types::RepoContextConfig;
+use crate::shell_script;
 
 use super::contributor::ContextContributor;
+
+shell_script! {
+    /// Invoke the exec-context-repo node bundle. Repo is always-on: no
+    /// runtime `Build.Reason` gate, the config toggles activation.
+    EXEC_CONTEXT_REPO {
+        interpreter: Bash,
+        bindings: [BUNDLE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+node "$BUNDLE"
+"#,
+    }
+}
 
 pub(super) struct RepoContextContributor {
     config: RepoContextConfig,
@@ -52,12 +69,14 @@ impl ContextContributor for RepoContextContributor {
         if !self.should_activate(ctx) {
             return Ok(None);
         }
-        let script = format!("set -euo pipefail\nnode '{EXEC_CONTEXT_REPO_PATH}'\n");
+        let script =
+            ShellScript::new(&EXEC_CONTEXT_REPO).bind_text("BUNDLE", EXEC_CONTEXT_REPO_PATH);
         // ADO auto-injects BUILD_SOURCESDIRECTORY / BUILD_SOURCEVERSION /
         // BUILD_SOURCEBRANCH into the step env, so the git-only bundle reads
         // them directly; only the compile-time AW_REPO_CONVENTIONS toggle is a
         // genuine step input. Repo has no bearer (BundleAuth::None).
-        let step = BashStep::new("Stage repo execution context (aw-context/repo/*)", script)
+        let step = script
+            .into_step("Stage repo execution context (aw-context/repo/*)")
             // Always-on (no Build.Reason gate). The compile-time
             // activation flag is the only gate.
             .with_condition(Condition::Succeeded)

@@ -160,12 +160,35 @@ New `CompilerExtension` implementations must be registered in
 `collect_extensions()`, and new runtimes/tools documented in
 `docs/runtimes.md` / `docs/tools.md` per `docs/extending.md`.
 
-### Generated bash
+### Generated shell
 
-Any new literal `bash:` body in generated pipeline YAML must survive
-`cargo test --test bash_lint_tests` (shellcheck). Watch for `cd "$X"` without
-`|| exit`, tilde inside double quotes, and masked return codes in assignments —
-ADO's "fail on last command" default hides all three.
+Compiler-generated shell must go through `ShellScript` (`src/compile/shell/`,
+documented in `docs/extending.md` under *Generated shell scripts*). Findings:
+
+- **Shell built with `format!`.** A `\n\` continuation, a doubled `{{` brace or
+  an escaped `\"` inside a shell body means the script is not registered, so
+  neither the registry lint nor `export-bash-scripts` can see it — and the
+  escaping is what made these bodies unreviewable in the first place.
+- **An interpolated value that is not a `Binding`.** Substitution must be a
+  `Binding::text` / `::number` / `::boolean` / `::words` / `::ado_macro` /
+  `::document`. Those land in exactly one position — the right-hand side of a
+  prelude assignment — and therefore cannot alter the structure of the script.
+  A value spliced anywhere else is an injection surface.
+- **A credential in a binding.** The prelude is written verbatim into the
+  committed `*.lock.yml`. Credentials belong on
+  `.with_env(…, EnvValue::secret(…))`, which ADO masks.
+- **An undeclared variable.** Everything a body reads must be declared in
+  `bindings:` or `externals:`. A missing `externals:` entry hides an
+  undocumented runtime coupling.
+- **A `fragment` carrying control flow that the outline body depends on.** The
+  outline must remain valid shell without the fragment, or it cannot be linted.
+
+Any body must survive both `ENFORCE_BASH_LINT=1 cargo test --bin ado-aw
+compile::shell` (every registered script, in isolation) and
+`ENFORCE_BASH_LINT=1 cargo test --test bash_lint_tests` (every body that
+reaches emitted YAML). Watch for `cd "$X"` without `|| exit`, tilde inside
+double quotes, and masked return codes in assignments — ADO's "fail on last
+command" default hides all three.
 
 ## Step 4 — Documentation sync
 

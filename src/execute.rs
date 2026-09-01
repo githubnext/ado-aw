@@ -16,13 +16,17 @@ use tokio::io::AsyncWriteExt;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagResult, AddPrCommentResult, CommentOnWorkItemResult, CreateBranchResult,
-    CreateGitTagResult, CreateGithubIssueResult, CreatePrResult, CreateWikiPageResult,
-    CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor, LinkWorkItemsResult,
-    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, ReplyToPrCommentResult,
-    ReportIncompleteResult, ResolvePrThreadResult, SetGithubIssueTypeResult, SubmitPrReviewResult,
-    ToolResult,
-    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    AddBuildTagResult, AddGithubIssueLabelsResult, AddPrCommentResult,
+    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserResult, AssignWorkItemResult,
+    CloseGithubIssueResult, CommentOnGithubIssueResult, CommentOnWorkItemResult,
+    CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult, CreatePrResult,
+    CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor,
+    HideGithubIssueCommentResult, LinkGithubSubIssueResult, LinkWorkItemsResult, MissingDataResult,
+    MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
+    ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
+    SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
+    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
+    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::sanitize::neutralize_pipeline_commands;
@@ -130,7 +134,9 @@ pub async fn prepare_custom_agent_output(
             &definition.input_schema,
             sanitized.as_object().cloned(),
         )
-        .with_context(|| format!("Sanitized custom safe-output item '{name}' is no longer valid"))?;
+        .with_context(|| {
+            format!("Sanitized custom safe-output item '{name}' is no longer valid")
+        })?;
         let count = custom_counts.entry(name.clone()).or_default();
         *count += 1;
         anyhow::ensure!(
@@ -227,6 +233,7 @@ pub async fn execute_safe_outputs(
     }
     register_budgets!(
         CreateWorkItemResult,
+        AssignWorkItemResult,
         CreatePrResult,
         UpdateWorkItemResult,
         CommentOnWorkItemResult,
@@ -247,6 +254,17 @@ pub async fn execute_safe_outputs(
         ResolvePrThreadResult,
         CreateGithubIssueResult,
         SetGithubIssueTypeResult,
+        CommentOnGithubIssueResult,
+        HideGithubIssueCommentResult,
+        AddGithubIssueLabelsResult,
+        RemoveGithubIssueLabelsResult,
+        CloseGithubIssueResult,
+        UpdateGithubIssueResult,
+        SetGithubIssueFieldResult,
+        AssignGithubIssueMilestoneResult,
+        AssignGithubIssueToUserResult,
+        UnassignGithubIssueFromUserResult,
+        LinkGithubSubIssueResult,
     );
 
     let mut results = Vec::new();
@@ -703,6 +721,7 @@ async fn dispatch_work_item_tools(
 ) -> Result<Option<ExecutionResult>> {
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-work-item" => CreateWorkItemResult,
+        "assign-work-item" => AssignWorkItemResult,
         "comment-on-work-item" => CommentOnWorkItemResult,
         "update-work-item" => UpdateWorkItemResult,
         "link-work-items" => LinkWorkItemsResult,
@@ -753,6 +772,17 @@ async fn dispatch_github_tools(
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-github-issue" => CreateGithubIssueResult,
         "set-github-issue-type" => SetGithubIssueTypeResult,
+        "comment-on-github-issue" => CommentOnGithubIssueResult,
+        "hide-github-issue-comment" => HideGithubIssueCommentResult,
+        "add-github-issue-labels" => AddGithubIssueLabelsResult,
+        "remove-github-issue-labels" => RemoveGithubIssueLabelsResult,
+        "close-github-issue" => CloseGithubIssueResult,
+        "update-github-issue" => UpdateGithubIssueResult,
+        "set-github-issue-field" => SetGithubIssueFieldResult,
+        "assign-github-issue-milestone" => AssignGithubIssueMilestoneResult,
+        "assign-github-issue-to-user" => AssignGithubIssueToUserResult,
+        "unassign-github-issue-from-user" => UnassignGithubIssueFromUserResult,
+        "link-github-sub-issue" => LinkGithubSubIssueResult,
     })
 }
 
@@ -771,6 +801,22 @@ fn resolve_max(ctx: &ExecutionContext, tool_name: &str, default_max: u32) -> usi
 /// Called before sanitization, so all string values are stripped of control characters
 /// and ADO pipeline commands are neutralized to prevent log injection via stdout.
 fn extract_entry_context(entry: &Value) -> String {
+    if let Some(issue) = entry.get("issue_number") {
+        return format!(" (GitHub issue {})", safe_json_identifier(issue));
+    }
+    if let (Some(parent), Some(sub_issue)) = (
+        entry.get("parent_issue_number"),
+        entry.get("sub_issue_number"),
+    ) {
+        return format!(
+            " (GitHub issue {} -> {})",
+            safe_json_identifier(parent),
+            safe_json_identifier(sub_issue)
+        );
+    }
+    if let Some(comment) = entry.get("comment_id") {
+        return format!(" (GitHub comment {})", safe_json_identifier(comment));
+    }
     if let Some(id) = entry.get("id").and_then(|v| v.as_u64()) {
         return format!(" (work item #{})", id);
     }
@@ -797,6 +843,18 @@ fn extract_entry_context(entry: &Value) -> String {
         return format!(" (path: {})", clean);
     }
     String::new()
+}
+
+fn safe_json_identifier(value: &Value) -> String {
+    let raw = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string());
+    let clean: String = raw
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    neutralize_pipeline_commands(&clean)
 }
 
 /// Returns `Some(result)` when the budget for `tool_name` is exhausted so the caller can push the
@@ -988,6 +1046,7 @@ mod tests {
                     "name": "create-work-item",
                     "title": "SENSITIVE-WORK-ITEM",
                     "description": "confidential remediation plan",
+                    "temporary_id": "#aw_secret1",
                 }),
                 serde_json::json!({"name": "send-notification", "title": "Outage"}),
             ),
@@ -1059,10 +1118,7 @@ mod tests {
         assert!(!rendered.contains("##vso[task"), "{rendered}");
         assert!(!rendered.contains("##[error]"), "{rendered}");
         // External-system payload text is preserved verbatim.
-        assert_eq!(
-            value["keep"],
-            "https://notify.example/@team <b>hello</b>"
-        );
+        assert_eq!(value["keep"], "https://notify.example/@team <b>hello</b>");
         assert_eq!(value["nested"]["`##[`error]key"][0], "normal");
     }
 
@@ -1177,7 +1233,8 @@ mod tests {
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item",
-            "description": "A description that is definitely longer than thirty characters."
+            "description": "A description that is definitely longer than thirty characters.",
+            "temporary_id": "#aw_context1"
         });
 
         // Context without required fields
@@ -1411,7 +1468,24 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse create-work-item"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse create-work-item"),
+            "err: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_create_work_item_requires_internal_temporary_id() {
+        let entry = serde_json::json!({
+            "name": "create-work-item",
+            "title": "Fix a real bug",
+            "description": "A description that is definitely longer than thirty characters."
+        });
+        let error = execute_safe_output(&entry, &ExecutionContext::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing field `temporary_id`"), "{error}");
     }
 
     #[tokio::test]
@@ -1432,7 +1506,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse update-wiki-page"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse update-wiki-page"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1479,7 +1556,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse create-wiki-page"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse create-wiki-page"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1490,7 +1570,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse upload-pipeline-artifact"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse upload-pipeline-artifact"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1537,7 +1620,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse comment-on-work-item"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse comment-on-work-item"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1548,7 +1634,10 @@ mod tests {
 
         let result = execute_safe_output(&entry, &ctx).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to parse upload-workitem-attachment"), "err: {err}");
+        assert!(
+            err.contains("Failed to parse upload-workitem-attachment"),
+            "err: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1969,11 +2058,11 @@ mod tests {
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
 
         // Write 3 create-work-item entries + 1 noop; max set to 2
-        let ndjson = r#"{"name":"create-work-item","title":"First item","description":"A description that is definitely longer than thirty characters."}
-{"name":"create-work-item","title":"Second item","description":"A description that is definitely longer than thirty characters."}
-{"name":"create-work-item","title":"Third item","description":"A description that is definitely longer than thirty characters."}
+        let ndjson = r##"{"name":"create-work-item","title":"First item","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_budget1"}
+{"name":"create-work-item","title":"Second item","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_budget2"}
+{"name":"create-work-item","title":"Third item","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_budget3"}
 {"name":"noop","context":"still runs"}
-"#;
+"##;
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let mut tool_configs = HashMap::new();
@@ -2040,12 +2129,12 @@ mod tests {
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
 
         // Mix of tools: each has max=1 (default), so only the first of each type should pass budget
-        let ndjson = r#"{"name":"create-work-item","title":"WI 1","description":"A description that is definitely longer than thirty characters."}
-{"name":"create-work-item","title":"WI 2","description":"A description that is definitely longer than thirty characters."}
+        let ndjson = r##"{"name":"create-work-item","title":"WI 1","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_mixed1"}
+{"name":"create-work-item","title":"WI 2","description":"A description that is definitely longer than thirty characters.","temporary_id":"#aw_mixed2"}
 {"name":"create-wiki-page","path":"/Page1","content":"Some valid wiki content here."}
 {"name":"create-wiki-page","path":"/Page2","content":"Some valid wiki content here."}
 {"name":"noop","context":"always runs"}
-"#;
+"##;
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext {
@@ -2095,7 +2184,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
 
-        let ndjson = r#"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks"}"#;
+        let ndjson = r##"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks","temporary_id":"#aw_dryrun1"}"##;
         tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
 
         let ctx = ExecutionContext {
@@ -2125,7 +2214,8 @@ mod tests {
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item title",
-            "description": "This is a test description that is long enough to pass validation checks"
+            "description": "This is a test description that is long enough to pass validation checks",
+            "temporary_id": "#aw_staged1"
         });
         let ctx = ExecutionContext {
             tool_configs: HashMap::from([(
@@ -2146,7 +2236,7 @@ mod tests {
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
 
         let ndjson = [
-            r#"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks"}"#,
+            r##"{"name":"create-work-item","title":"Test work item title","description":"This is a test description that is long enough to pass validation checks","temporary_id":"#aw_multi1"}"##,
             r#"{"name":"noop","context":"nothing to do"}"#,
         ]
         .join("\n");
@@ -2180,7 +2270,8 @@ mod tests {
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item",
-            "description": "A description that is definitely longer than thirty characters."
+            "description": "A description that is definitely longer than thirty characters.",
+            "temporary_id": "#aw_normal1"
         });
 
         let ctx = ExecutionContext {
@@ -2214,7 +2305,8 @@ mod tests {
         let entry = serde_json::json!({
             "name": "create-work-item",
             "title": "Test work item",
-            "description": "A description that is definitely longer than thirty characters."
+            "description": "A description that is definitely longer than thirty characters.",
+            "temporary_id": "#aw_dryctx1"
         });
 
         let ctx = ExecutionContext {

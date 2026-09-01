@@ -37,10 +37,11 @@ pool:
 variables:
   # Keep YAML defaults under private names so same-named pipeline/definition UI
   # variables (EXECUTOR_E2E_ADO_REPO, E2E_QUEUE_PIPELINE_ID, E2E_WIKI_NAME,
-  # CRATES_IO_FEED) are not shadowed by this block.
+  # E2E_WORK_ITEM_ASSIGNEE, CRATES_IO_FEED) are not shadowed by this block.
   EFFECTIVE_EXECUTOR_E2E_ADO_REPO: $[ coalesce(variables['EXECUTOR_E2E_ADO_REPO'], 'agent-definitions') ]
   EFFECTIVE_E2E_QUEUE_PIPELINE_ID: $[ coalesce(variables['E2E_QUEUE_PIPELINE_ID'], '') ]
   EFFECTIVE_E2E_WIKI_NAME: $[ coalesce(variables['E2E_WIKI_NAME'], '') ]
+  EFFECTIVE_E2E_WORK_ITEM_ASSIGNEE: $[ coalesce(variables['E2E_WORK_ITEM_ASSIGNEE'], variables['Build.RequestedForEmail'], '') ]
   # GitHub issue scenarios: optional scratch-repo override and forced issue-type
   # name. Both empty by default so the scenarios skip gracefully rather than
   # filing scratch issues into an unintended repository.
@@ -143,6 +144,7 @@ steps:
       # Optional-precondition scenarios (skipped when unset):
       E2E_QUEUE_PIPELINE_ID: $(EFFECTIVE_E2E_QUEUE_PIPELINE_ID)
       E2E_WIKI_NAME: $(EFFECTIVE_E2E_WIKI_NAME)
+      E2E_WORK_ITEM_ASSIGNEE: $(EFFECTIVE_E2E_WORK_ITEM_ASSIGNEE)
       # GitHub issue scenarios. They reuse EXECUTOR_E2E_GITHUB_TOKEN above,
       # which must carry Issues:write on the scratch repo. When
       # EXECUTOR_E2E_SCENARIO_ISSUE_REPO is unset they fall back to

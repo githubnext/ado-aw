@@ -57,7 +57,8 @@ tools:                         # optional tool configuration
   #   allowed-extensions: [.md, .json]
   azure-devops: true           # first-class ADO MCP integration (see docs/tools.md)
   # azure-devops:              # Alternative object format (with scoping)
-  #   toolsets: [repos, wit]
+  #   version: "2.8.1"         # Optional exact-semver override; defaults to compiler pin
+  #   toolsets: [repositories, work-items]
   #   allowed: [wit_get_work_item]
   #   org: myorg
 runtimes:                      # optional runtime configuration (language environments)
@@ -104,13 +105,17 @@ safe-outputs:                  # optional per-tool configuration for safe output
   staged: false               # cooperative preview default; per-tool override supported
   create-work-item:
     work-item-type: Task
-    assignee: "user@example.com"
+    description-field: System.Description
     tags:
       - automated
       - agent-created
     artifact-link:             # optional: link work item to repository branch
       enabled: true
       branch: main
+  assign-work-item:
+    target: "*"               # required only for numeric pre-existing IDs
+    allowed: ["user@example.com"]
+    blocked: ["svc-*"]
   jobs:                       # custom Agent-callable jobs (see docs/safe-outputs.md)
     send-notification:
       description: Notify release operators.
@@ -267,6 +272,11 @@ permissions:                   # optional ADO access token configuration (see do
                                  # Default: executor uses $(System.AccessToken).
                                  # Set this only for cross-org writes or
                                  # named-identity attribution.
+# permissions-required:          # optional abstract capability requirements (usually set by an
+#   read: true                   # imported component rather than authored directly); see
+#   write: true                  # docs/imports.md#permissions-required. Unioned across all
+#                                 # imports and the consumer; `read: true` must be satisfied by a
+#                                 # concrete `permissions.read` connection above.
 supply-chain:                  # optional internal supply-chain mirror (see docs/supply-chain.md)
   feed:                          # mirror binaries (compiler, AWF, ado-script) from an ADO Artifacts feed
     name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works
