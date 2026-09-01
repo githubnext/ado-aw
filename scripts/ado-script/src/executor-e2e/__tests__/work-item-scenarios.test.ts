@@ -215,6 +215,28 @@ describe("create-work-item rendering fidelity", () => {
     },
   );
 
+  it("logs and continues when ADO omits the Markdown format metadata", async () => {
+    const log = vi.fn();
+    const ctx = {
+      ...renderingCtx({
+        id: 42,
+        fields: { "System.Description": adoExpected },
+      }),
+      log,
+    };
+
+    await createWorkItemRendering.assert(
+      ctx,
+      { title: "t" },
+      record,
+      [record],
+    );
+
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("ADO did not surface multilineFieldsFormat"),
+    );
+  });
+
   it("records the created id before failing an ADO golden mismatch", async () => {
     const state: { title: string; createdId?: number } = { title: "t" };
     await expect(
