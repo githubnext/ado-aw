@@ -840,10 +840,10 @@ relationship is handled idempotently; a child already linked to a different
 parent fails without changing either issue.
 
 ### comment-on-work-item
-Adds a comment to an existing Azure DevOps work item. This is the ADO equivalent of gh-aw's `add-comment` tool.
+Adds a comment to an Azure DevOps work item. This is the ADO equivalent of gh-aw's `add-comment` tool.
 
 **Agent parameters:**
-- `work_item_id` - The work item ID to comment on (required, must be positive)
+- `work_item_id` - A positive numeric work-item ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run (required)
 - `body` - Comment text in markdown format (required, must be at least 10 characters)
 
 **Configuration options (front matter):**
@@ -864,6 +864,21 @@ safe-outputs:
 ```
 
 **Note:** The `target` field is required. If omitted, compilation fails with an error. This ensures operators are intentional about which work items agents can comment on.
+
+`target` scopes numeric, pre-existing work-item IDs only, and is still required
+in front matter. Temporary IDs are resolved at Stage 3 against the
+`create-work-item` proposals that already succeeded in the same SafeOutputs
+job — that create is scoped by its own configuration — so they are not checked
+against `target`. A temporary ID that cannot be traced to such a create is
+rejected before any request is sent. When both tools are configured they must
+have the same effective `require-approval` setting, so temporary-ID state stays
+within a single SafeOutputs job.
+
+```json
+{"title":"Investigate build failure","description":"Detailed failure report long enough for validation."}
+{"temporary_id":"#aw_a1b2c3d4"}
+{"work_item_id":"#aw_a1b2c3d4","body":"Root cause analysis for the failure above."}
+```
 
 ### create-work-item
 Creates an Azure DevOps work item. The agent-provided description is written as
@@ -945,7 +960,7 @@ resolution, so ado-aw does not require an email-shaped value.
 Updates an existing Azure DevOps work item. Each field that can be modified requires explicit opt-in via configuration to prevent unintended updates.
 
 **Agent parameters:**
-- `id` - Work item ID to update (required, must be a positive integer)
+- `id` - Work item ID to update (required) - a positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run
 - `title` - New title for the work item (optional, requires `title: true` in config)
 - `body` - New description in markdown format (optional, requires `body: true` in config)
 - `state` - New state (e.g., `"Active"`, `"Resolved"`, `"Closed"`; optional, requires `status: true` in config)
@@ -1256,8 +1271,8 @@ safe-outputs:
 Links two Azure DevOps work items together.
 
 **Agent parameters:**
-- `source_id` - Source work item ID (required, must be positive)
-- `target_id` - Target work item ID (required, must differ from source)
+- `source_id` - Source work item ID (required) - a positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run
+- `target_id` - Target work item ID (required, must differ from source) - a positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run
 - `link_type` - Relationship type: `parent`, `child`, `related`, `predecessor`, `successor`, `duplicate`, `duplicate-of` (required)
 - `comment` *(optional)* - Description of the relationship
 
@@ -1351,7 +1366,7 @@ safe-outputs:
 Uploads a workspace file as an attachment to an Azure DevOps work item.
 
 **Agent parameters:**
-- `work_item_id` - Work item ID to attach the file to (required, must be positive)
+- `work_item_id` - Work item ID to attach the file to (required) - a positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-work-item` call in the same run
 - `file_path` - Relative path to the file in the workspace (no directory traversal)
 - `comment` *(optional)* - Description of the attachment (at least 3 characters)
 

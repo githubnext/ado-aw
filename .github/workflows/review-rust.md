@@ -79,10 +79,13 @@ Sub-agent contract:
 - Start `rust-critic` exactly once, immediately, and let it work while you do
   your own pass in Step 2.
 - It must return strict JSONL, one finding per line.
-- Collect its output before Step 3. Make **one** attempt to read its result; if
-  it has not answered, carry on without it.
-- If its output is unparseable, discard it, continue with your own findings, and
-  note the discard in the review body.
+- Collect its output before Step 3, and **wait for it** rather than polling: make
+  a single blocking read that waits for the sub-agent to finish. Only give up
+  once that blocking wait itself times out — a sub-agent that is still running is
+  not a sub-agent that declined to answer.
+- If it still has not answered after the blocking wait, or if its output is
+  unparseable, discard it, continue with your own findings, and say so in one
+  line of the review body.
 - Its findings are advisory, never authoritative.
 
 ## Step 2 — Your own pass
@@ -124,7 +127,8 @@ a lock guard.
 
 ## Step 3 — Adjudicate
 
-Collect `rust-critic`'s JSONL. Parse it, discarding malformed lines and anything
+Collect `rust-critic`'s JSONL — using the blocking wait described in Step 1, not
+a single non-blocking peek. Parse it, discarding malformed lines and anything
 outside the changed lines. Then triage every candidate — its findings and your
 own — as:
 
