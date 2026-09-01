@@ -146,7 +146,7 @@ describe("assign-work-item temporary-ID handoff", () => {
 });
 
 describe("create-work-item rendering fidelity", () => {
-  const expected = renderingCorpus.expected.join("\n");
+  const adoExpected = renderingCorpus.ado_expected.join("\n");
 
   function renderingCtx(
     payload: {
@@ -197,13 +197,13 @@ describe("create-work-item rendering fidelity", () => {
     ).rejects.toThrow(SkipError);
   });
 
-  it("accepts a work item whose description round-trips the golden", async () => {
+  it("accepts a work item whose description matches ADO normalization", async () => {
     const state: { title: string; createdId?: number } = { title: "t" };
     await createWorkItemRendering.assert(
       renderingCtx({
         id: 42,
-        fields: { "System.Description": expected },
-        multilineFieldsFormat: { "System.Description": "Markdown" },
+        fields: { "System.Description": adoExpected },
+        multilineFieldsFormat: { "System.Description": "markdown" },
       }),
       state,
       record,
@@ -212,20 +212,20 @@ describe("create-work-item rendering fidelity", () => {
     expect(state.createdId).toBe(42);
   });
 
-  it("records the created id before failing a golden mismatch", async () => {
+  it("records the created id before failing an ADO golden mismatch", async () => {
     const state: { title: string; createdId?: number } = { title: "t" };
     await expect(
       createWorkItemRendering.assert(
-        // Security-clean but not byte-identical: only the golden catches it.
+        // Security-clean but not byte-identical: only the ADO golden catches it.
         renderingCtx({
           id: 42,
-          fields: { "System.Description": expected.replace("**bold**", "bold") },
+          fields: { "System.Description": adoExpected.replace("**bold**", "bold") },
         }),
         state,
         record,
         [record],
       ),
-    ).rejects.toThrow(/does not match the sanitized golden/);
+    ).rejects.toThrow(/does not match the ADO rendering golden/);
     expect(state.createdId).toBe(42);
   });
 
@@ -234,7 +234,7 @@ describe("create-work-item rendering fidelity", () => {
       createWorkItemRendering.assert(
         renderingCtx({
           id: 42,
-          fields: { "System.Description": expected },
+          fields: { "System.Description": adoExpected },
           multilineFieldsFormat: { "System.Description": "Html" },
         }),
         { title: "t" },
@@ -244,8 +244,8 @@ describe("create-work-item rendering fidelity", () => {
     ).rejects.toThrow(/expected "Markdown"/);
   });
 
-  it("fails when a denied construct survives outside fenced code", async () => {
-    const leaked = `${expected}\n<script>alert(1)</script>`;
+  it("fails when a denied construct survives ADO storage", async () => {
+    const leaked = `${adoExpected}\n<script>alert(1)</script>`;
     await expect(
       createWorkItemRendering.assert(
         renderingCtx({ id: 42, fields: { "System.Description": leaked } }),
@@ -253,28 +253,13 @@ describe("create-work-item rendering fidelity", () => {
         record,
         [record],
       ),
-    ).rejects.toThrow(/still contains '<script' outside code/);
-  });
-
-  it("fails when fenced code was mangled", async () => {
-    const mangled = expected.replace(
-      '<script>alert("fenced code is verbatim")</script>',
-      "",
-    );
-    await expect(
-      createWorkItemRendering.assert(
-        renderingCtx({ id: 42, fields: { "System.Description": mangled } }),
-        { title: "t" },
-        record,
-        [record],
-      ),
-    ).rejects.toThrow(/lost fenced code line/);
+    ).rejects.toThrow(/still contains '<script'/);
   });
 
   it("asserts the Bug repro-steps field", async () => {
     await expect(
       createBugWorkItemRendering.assert(
-        renderingCtx({ id: 42, fields: { "System.Description": expected } }),
+        renderingCtx({ id: 42, fields: { "System.Description": adoExpected } }),
         { title: "t" },
         record,
         [record],

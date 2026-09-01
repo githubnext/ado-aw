@@ -16,29 +16,18 @@ const ASSIGN_TEMPORARY_ID = "#aw_wiassign";
 /**
  * Rendering-fidelity corpus shared with the Rust golden test in
  * `src/sanitize/markdown.rs` (which `include_str!`s the same JSON). The Rust
- * test proves the sanitizer produces `RENDERING_EXPECTED`; these scenarios
- * prove Azure DevOps stores it back byte-for-byte, so the two together pin
- * what a human actually sees in a work item.
+ * test proves the sanitizer produces `expected`; these scenarios prove Azure
+ * DevOps applies the separately pinned `ado_expected` normalization, so the
+ * two boundaries cannot be confused.
  */
 const RENDERING_INPUT = renderingCorpus.input.join("\n");
-const RENDERING_EXPECTED = renderingCorpus.expected.join("\n");
+const ADO_RENDERING_EXPECTED = renderingCorpus.ado_expected.join("\n");
 
 /**
  * Constructs the sanitizer must never let reach a rendered work item.
  * Compared case-insensitively, so a folded `<SCRIPT >` is covered too.
  */
 const DENIED_CONSTRUCTS = ["<script", "onerror=", "<iframe"];
-
-/**
- * Fenced-code lines that must survive verbatim. They contain the same
- * constructs as `DENIED_CONSTRUCTS`, so an over-eager "strip it everywhere"
- * regression fails here rather than silently mangling documentation.
- */
-const FENCED_VERBATIM = [
-  '<script>alert("fenced code is verbatim")</script>',
-  '<a href="javascript:alert(1)">fenced javascript link</a>',
-];
-
 
 function usableEnvValue(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -282,22 +271,6 @@ export const uploadWorkitemAttachment: Scenario<{ id: number }> = {
   cleanup: async (ctx, state) => ctx.rest.deleteWorkItem(state.id),
 };
 
-/** Strip fenced code blocks so denied constructs are only checked in prose. */
-function outsideFencedCode(text: string): string {
-  const lines = text.split("\n");
-  const kept: string[] = [];
-  let inFence = false;
-  for (const line of lines) {
-    const trimmed = line.trimStart();
-    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
-      inFence = !inFence;
-      continue;
-    }
-    if (!inFence) kept.push(line);
-  }
-  return kept.join("\n");
-}
-
 /** First line that differs, to make a golden mismatch debuggable. */
 function firstDifference(actual: string, expected: string): string {
   const a = actual.split("\n");
@@ -331,8 +304,8 @@ function renderingScenario(options: {
     config: () => ({
       "work-item-type": workItemType,
       max: 1,
-      // Appended agent stats would change the stored text and defeat the
-      // byte-for-byte golden comparison.
+      // Appended agent stats would change the stored text and defeat the ADO
+      // server-normalization golden comparison.
       "include-stats": false,
     }),
     setup: async (ctx) => {
@@ -360,28 +333,22 @@ function renderingScenario(options: {
         );
       }
 
-      // 1. Security: denied constructs must not survive in prose, while their
-      //    fenced-code twins must survive untouched. Checked before the golden
-      //    so a leak is reported as a leak rather than as a generic mismatch.
-      const prose = outsideFencedCode(stored).toLowerCase();
+      // 1. Security: ADO applies its own sanitizer after the executor, including
+      //    inside fenced code, so no denied construct may survive anywhere in
+      //    the stored value. Checked before the golden so a leak is reported as
+      //    a leak rather than as a generic mismatch.
+      const normalized = stored.toLowerCase();
       for (const construct of DENIED_CONSTRUCTS) {
-        if (prose.includes(construct.toLowerCase())) {
+        if (normalized.includes(construct.toLowerCase())) {
           throw new Error(
-            `work item #${id} '${descriptionField}' still contains '${construct}' outside code`,
+            `work item #${id} '${descriptionField}' still contains '${construct}'`,
           );
         }
       }
-      if (prose.includes("javascript:")) {
+      if (normalized.includes("javascript:")) {
         throw new Error(
-          `work item #${id} '${descriptionField}' still contains a javascript: URL outside code`,
+          `work item #${id} '${descriptionField}' still contains a javascript: URL`,
         );
-      }
-      for (const line of FENCED_VERBATIM) {
-        if (!stored.includes(line)) {
-          throw new Error(
-            `work item #${id} '${descriptionField}' lost fenced code line ${JSON.stringify(line)}`,
-          );
-        }
       }
 
       // 2. Format: stored as Markdown, otherwise the body renders as literal
@@ -394,20 +361,19 @@ function renderingScenario(options: {
           `[${scenarioId}] note: ADO did not surface multilineFieldsFormat for ` +
             `'${descriptionField}'; format is covered by the executor unit tests`,
         );
-      } else if (format !== "Markdown") {
+      } else if (typeof format !== "string" || format.toLowerCase() !== "markdown") {
         throw new Error(
           `work item #${id} stores '${descriptionField}' as ${JSON.stringify(format)}, expected "Markdown"`,
         );
       }
 
-      // 3. Golden round-trip: what ADO stored must equal what the sanitizer
-      //    produced, byte for byte. This is the decisive check — any change in
-      //    what the allowlist keeps, drops or rewrites moves the golden, as
-      //    does ADO normalising the payload on the way in.
-      if (stored !== RENDERING_EXPECTED) {
+      // 3. ADO round-trip: what the service returns must equal the separately
+      //    observed server-normalization golden byte for byte. The Rust golden
+      //    pins what the executor sends; this one pins what ADO stores.
+      if (stored !== ADO_RENDERING_EXPECTED) {
         throw new Error(
-          `work item #${id} '${descriptionField}' does not match the sanitized golden ` +
-            `(${firstDifference(stored, RENDERING_EXPECTED)})`,
+          `work item #${id} '${descriptionField}' does not match the ADO rendering golden ` +
+            `(${firstDifference(stored, ADO_RENDERING_EXPECTED)})`,
         );
       }
     },

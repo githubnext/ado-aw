@@ -915,8 +915,9 @@ fn clean_html(input: &str) -> String {
 /// Shared work-item rendering-fidelity corpus.
 ///
 /// The same JSON is imported by the `create-work-item-rendering` executor E2E
-/// scenarios, so the fast local golden and the against-ADO assertion can never
-/// disagree about what a human is supposed to see in a work item.
+/// scenarios. Its `expected` value pins this sanitizer's output, while
+/// `ado_expected` separately pins Azure DevOps' additional server-side
+/// normalization.
 #[cfg(test)]
 pub(crate) mod rendering_corpus {
     const CORPUS: &str = include_str!(
@@ -939,7 +940,7 @@ pub(crate) mod rendering_corpus {
         lines("input")
     }
 
-    /// The sanitized Markdown that must be stored in the work item.
+    /// The sanitized Markdown sent to Azure DevOps before server normalization.
     pub(crate) fn expected() -> String {
         lines("expected")
     }

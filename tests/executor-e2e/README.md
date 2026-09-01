@@ -97,20 +97,21 @@ human actually reads in the work item. Two scenarios pin that rendering:
 Both propose the same **unsanitized** corpus and assert, in order, that the
 stored field:
 
-1. contains no denied construct (`<script`, `onerror=`, `<iframe`, a
-   `javascript:` URL) outside fenced code, while the fenced-code copies of those
-   same strings survive verbatim;
+1. contains no denied construct (`<script`, `onerror=`, `<iframe`, or a
+   `javascript:` URL) after Azure DevOps applies its own server-side
+   sanitization, including inside fenced code;
 2. is recorded with `multilineFieldsFormat: Markdown` — when the organization
    does not surface that on read, the scenario logs a note and the patch stays
    pinned by the executor unit tests in `src/safe_outputs/create_work_item.rs`;
-3. equals the sanitized golden **byte for byte**.
+3. equals the observed Azure DevOps normalization golden **byte for byte**.
 
-The corpus and its golden live in one place —
+The corpus and both goldens live in one place —
 [`scripts/ado-script/src/executor-e2e/scenarios/markdown-rendering-corpus.json`](../../scripts/ado-script/src/executor-e2e/scenarios/markdown-rendering-corpus.json)
 — imported by the harness and `include_str!`d by the Rust golden test in
-`src/sanitize/markdown.rs`, so the sub-second local test and the against-ADO
-test cannot drift. A deliberate rendering change means updating `expected` in
-that one file; an accidental one fails `cargo test` before it ever reaches ADO.
+`src/sanitize/markdown.rs`. `expected` pins what the ado-aw sanitizer sends;
+`ado_expected` pins what Azure DevOps returns after its additional
+normalization. A deliberate change to either boundary is explicit in the same
+fixture.
 
 The Bug scenario skips (rather than fails) when the project does not define the
 `Bug` work item type.

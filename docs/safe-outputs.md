@@ -278,6 +278,12 @@ an implied `<tbody>`, a mid-line `>` is stored as `&gt;`, and the content of a
 removed raw-text element such as `<noscript>` is escaped rather than kept as
 markup.
 
+Azure DevOps then applies its own server-side Markdown sanitization when the
+work item is stored. That service-side pass may further normalize safe HTML and
+remove dangerous HTML even when it appeared inside a code fence. The compiler
+tests pin ado-aw's pre-storage output separately from the executor E2E fixture
+that pins the representation returned by Azure DevOps.
+
 ### Executor authentication
 
 All write-bearing safe outputs (e.g. `create-pull-request`,
