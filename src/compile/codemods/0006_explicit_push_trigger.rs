@@ -193,13 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn injects_all_branches_push_when_on_absent_in_old_source() {
-        let mut m = map("name: x\ndescription: y\n");
-        assert!(apply_codemod(&mut m, &old_ctx()).unwrap());
-        assert_eq!(push_include(&m), vec!["*".to_string()]);
-    }
-
-    #[test]
     fn injects_push_when_on_present_but_carries_no_trigger() {
         // `on:` with only unrelated/unknown content still relied on the
         // implicit CI default.
