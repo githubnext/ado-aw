@@ -294,39 +294,35 @@ fn render_mcp_server_health_section(health: Option<&model::MCPServerHealth>) -> 
     Some(render_lines_section("MCP Server Health", lines, false))
 }
 
-fn render_ado_proxy_analysis_section(analysis: Option<&model::AdoProxyAnalysis>) -> Option<String> {
-    let analysis = analysis?;
-    let mut lines = Vec::new();
-
-    if let Some(schema_version) = analysis.schema_version.as_deref() {
-        lines.push(format!("- schema: {schema_version}"));
+/// Pushes the "lifecycle" summary line(s) for the ADO proxy sidecar, if present.
+fn push_ado_proxy_lifecycle_lines(lines: &mut Vec<String>, lifecycle: &model::AdoProxyLifecycle) {
+    let mut lifecycle_line = format!(
+        "- lifecycle: {} (state before teardown: {}, listening: {})",
+        if lifecycle.healthy_before_teardown {
+            "healthy"
+        } else {
+            "unhealthy"
+        },
+        lifecycle
+            .state_before_teardown
+            .as_deref()
+            .unwrap_or("unknown"),
+        if lifecycle.listening { "yes" } else { "no" },
+    );
+    if let Some(exit_code) = lifecycle.exit_code_before_teardown {
+        lifecycle_line.push_str(&format!(", exit code: {exit_code}"));
     }
-    if let Some(lifecycle) = &analysis.lifecycle {
-        let mut lifecycle_line = format!(
-            "- lifecycle: {} (state before teardown: {}, listening: {})",
-            if lifecycle.healthy_before_teardown {
-                "healthy"
-            } else {
-                "unhealthy"
-            },
-            lifecycle
-                .state_before_teardown
-                .as_deref()
-                .unwrap_or("unknown"),
-            if lifecycle.listening { "yes" } else { "no" },
-        );
-        if let Some(exit_code) = lifecycle.exit_code_before_teardown {
-            lifecycle_line.push_str(&format!(", exit code: {exit_code}"));
-        }
-        lines.push(lifecycle_line);
-        for diagnostic in &lifecycle.diagnostics {
-            lines.push(format!("- lifecycle diagnostic: {diagnostic}"));
-        }
-        if let Some(error) = &lifecycle.docker_error {
-            lines.push(format!("- Docker error: {error}"));
-        }
+    lines.push(lifecycle_line);
+    for diagnostic in &lifecycle.diagnostics {
+        lines.push(format!("- lifecycle diagnostic: {diagnostic}"));
     }
+    if let Some(error) = &lifecycle.docker_error {
+        lines.push(format!("- Docker error: {error}"));
+    }
+}
 
+/// Pushes request-count, latency, byte, and malformed/credential-stripping stat lines.
+fn push_ado_proxy_stats_lines(lines: &mut Vec<String>, analysis: &model::AdoProxyAnalysis) {
     if analysis.total_requests > 0
         || analysis.allow_count > 0
         || analysis.deny_count > 0
@@ -382,53 +378,85 @@ fn render_ado_proxy_analysis_section(analysis: Option<&model::AdoProxyAnalysis>)
                 .join(", ")
         ));
     }
+}
 
-    if !analysis.operations.is_empty() {
-        lines.push(String::from("Operations"));
-        lines.extend(analysis.operations.iter().map(|operation| {
-            format!(
-                "- {}  {} requests ({} allow, {} deny, {} error)",
-                operation.operation.as_deref().unwrap_or("(unmatched)"),
-                format_number(operation.request_count),
-                format_number(operation.allow_count),
-                format_number(operation.deny_count),
-                format_number(operation.error_count),
-            )
-        }));
+/// Pushes the per-operation request/allow/deny/error breakdown, if any operations were seen.
+fn push_ado_proxy_operations_lines(lines: &mut Vec<String>, analysis: &model::AdoProxyAnalysis) {
+    if analysis.operations.is_empty() {
+        return;
+    }
+    lines.push(String::from("Operations"));
+    lines.extend(analysis.operations.iter().map(|operation| {
+        format!(
+            "- {}  {} requests ({} allow, {} deny, {} error)",
+            operation.operation.as_deref().unwrap_or("(unmatched)"),
+            format_number(operation.request_count),
+            format_number(operation.allow_count),
+            format_number(operation.deny_count),
+            format_number(operation.error_count),
+        )
+    }));
+}
+
+/// Pushes the per-decision/reason breakdown, if any reasons were recorded.
+fn push_ado_proxy_reasons_lines(lines: &mut Vec<String>, analysis: &model::AdoProxyAnalysis) {
+    if analysis.reasons.is_empty() {
+        return;
+    }
+    lines.push(String::from("Reasons"));
+    lines.extend(analysis.reasons.iter().map(|reason| {
+        format!(
+            "- {}/{}  {}",
+            reason.decision,
+            reason.reason,
+            format_number(reason.count)
+        )
+    }));
+}
+
+/// Pushes the recent denied/error request listing, if any were recorded.
+fn push_ado_proxy_recent_problem_events_lines(
+    lines: &mut Vec<String>,
+    analysis: &model::AdoProxyAnalysis,
+) {
+    if analysis.recent_problem_events.is_empty() {
+        return;
+    }
+    lines.push(String::from("Recent denied/error requests"));
+    lines.extend(analysis.recent_problem_events.iter().map(|event| {
+        let mut fields = vec![
+            event.timestamp.as_deref().unwrap_or("(unknown time)"),
+            event.method.as_deref().unwrap_or("(unknown method)"),
+            event.host.as_deref().unwrap_or("(unknown host)"),
+            event.operation.as_deref().unwrap_or("(unmatched)"),
+        ];
+        if let Some(reason) = event.reason.as_deref() {
+            fields.push(reason);
+        }
+        let mut line = format!("- {}", fields.join(" "));
+        if let Some(detail) = event.detail.as_deref() {
+            line.push_str(": ");
+            line.push_str(detail);
+        }
+        line
+    }));
+}
+
+fn render_ado_proxy_analysis_section(analysis: Option<&model::AdoProxyAnalysis>) -> Option<String> {
+    let analysis = analysis?;
+    let mut lines = Vec::new();
+
+    if let Some(schema_version) = analysis.schema_version.as_deref() {
+        lines.push(format!("- schema: {schema_version}"));
+    }
+    if let Some(lifecycle) = &analysis.lifecycle {
+        push_ado_proxy_lifecycle_lines(&mut lines, lifecycle);
     }
 
-    if !analysis.reasons.is_empty() {
-        lines.push(String::from("Reasons"));
-        lines.extend(analysis.reasons.iter().map(|reason| {
-            format!(
-                "- {}/{}  {}",
-                reason.decision,
-                reason.reason,
-                format_number(reason.count)
-            )
-        }));
-    }
-
-    if !analysis.recent_problem_events.is_empty() {
-        lines.push(String::from("Recent denied/error requests"));
-        lines.extend(analysis.recent_problem_events.iter().map(|event| {
-            let mut fields = vec![
-                event.timestamp.as_deref().unwrap_or("(unknown time)"),
-                event.method.as_deref().unwrap_or("(unknown method)"),
-                event.host.as_deref().unwrap_or("(unknown host)"),
-                event.operation.as_deref().unwrap_or("(unmatched)"),
-            ];
-            if let Some(reason) = event.reason.as_deref() {
-                fields.push(reason);
-            }
-            let mut line = format!("- {}", fields.join(" "));
-            if let Some(detail) = event.detail.as_deref() {
-                line.push_str(": ");
-                line.push_str(detail);
-            }
-            line
-        }));
-    }
+    push_ado_proxy_stats_lines(&mut lines, analysis);
+    push_ado_proxy_operations_lines(&mut lines, analysis);
+    push_ado_proxy_reasons_lines(&mut lines, analysis);
+    push_ado_proxy_recent_problem_events_lines(&mut lines, analysis);
 
     (!lines.is_empty()).then(|| render_lines_section("ADO Proxy Analysis", lines, false))
 }
