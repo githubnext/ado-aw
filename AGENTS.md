@@ -110,6 +110,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   │   ├── schedule.rs # ScheduleContextContributor — scheduled-run context facts
 │   │   │   │   └── workitem.rs # WorkItemContextContributor — linked work-item context facts
 │   │   │   ├── azure_cli.rs # permissions.read-gated Azure CLI extension (runtime detection, wrapper, AWF mounts, az policy prompt)
+│   │   │   ├── container_runtime.rs # Typed Docker runtime configuration shared by MCPG stdio servers (ContainerRuntimeConfig, Mount, Network, Tmpfs, ContainerUser, AddHost)
 │   │   │   └── tests.rs  # Extension integration tests
 │   │   ├── codemods/     # Front-matter codemods (one file per transformation)
 │   │   │   ├── mod.rs    # Codemod struct, CODEMODS registry, runner
