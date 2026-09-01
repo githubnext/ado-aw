@@ -66,7 +66,13 @@ System extensions run first, runtimes run before tools, and definition order is 
 - `SafeOutputsExtension` — SafeOutputs MCP plumbing.
 - `AdoScriptExtension` — gate evaluator, runtime-import resolver, and synthetic PR helpers.
 - `ExecContextExtension` — `aw-context/` precompute contributors.
-- `AzureCliExtension` — Azure CLI mounts, allowlist entries, and PATH setup.
+
+`AzureCliExtension` (Azure CLI mounts, allowlist entries, and PATH setup) is
+**conditionally** pushed after the always-on list, only when `permissions.read`
+is configured (`ado_proxy_enabled()`). The pinned AWF agent image ships no
+built-in `az`, so omitting `permissions.read` makes the command unavailable
+rather than exposing an unproxied fallback — see
+[`docs/network.md`](network.md#proxy-gated-azure-cli-az).
 
 User-configured runtimes and tools are appended after those always-on extensions, then sorted by phase.
 
