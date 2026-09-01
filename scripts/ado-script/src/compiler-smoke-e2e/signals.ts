@@ -123,7 +123,10 @@ export async function verifyCandidateAudit(
           overview?: { build_id?: number };
           downloaded_files?: { path?: string }[];
         };
-        const paths = audit.downloaded_files?.flatMap((file) => file.path ?? []) ?? [];
+        const paths =
+          audit.downloaded_files
+            ?.flatMap((file) => file.path ?? [])
+            .map((path) => path.replaceAll("\\", "/")) ?? [];
         const expectedRoots = [
           `agent_outputs_${target.buildId}/`,
           `analyzed_outputs_${target.buildId}/`,

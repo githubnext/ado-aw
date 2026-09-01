@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import type { FixtureBuildResult } from "../runner.js";
 
 const mockCalls: string[] = [];
 const compiledCasePaths: string[] = [];
@@ -148,6 +149,17 @@ vi.mock("../compile-cli.js", () => ({
     return { ok: true, stdout: "", stderr: "" };
   }),
 }));
+
+vi.mock("../signals.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../signals.js")>();
+  return {
+    ...actual,
+    verifyCandidateAudit: vi.fn(async (results: readonly FixtureBuildResult[]) => ({
+      ok: true,
+      results: results.map((result) => ({ ...result })),
+    })),
+  };
+});
 
 vi.mock("../runner.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../runner.js")>();
