@@ -249,6 +249,18 @@ pub fn catalog() -> Catalog {
 }
 
 pub fn operations() -> Vec<Operation> {
+    let mut ops = discovery_operations();
+    ops.extend(core_operations());
+    ops.extend(repos_operations());
+    ops.extend(pipelines_operations());
+    ops.extend(boards_operations());
+    ops
+}
+
+/// `discovery.*` operations: service-topology lookups every client performs
+/// before its first real call (host/area OPTIONS probes, resource-area
+/// discovery, connection data).
+fn discovery_operations() -> Vec<Operation> {
     vec![
         Operation {
             id: "discovery.host-options",
@@ -325,6 +337,12 @@ pub fn operations() -> Vec<Operation> {
             Json,
             &["connectOptions", "lastChangeId", "lastChangeId64"]
         ),
+    ]
+}
+
+/// `core.*` operations: project lookup and validation.
+fn core_operations() -> Vec<Operation> {
+    vec![
         get!(
             "core.project-get",
             Core,
@@ -352,6 +370,13 @@ pub fn operations() -> Vec<Operation> {
                 "getDefaultTeamImageUrl",
             ]
         ),
+    ]
+}
+
+/// `repos.*` operations: repository metadata, refs, items, commits, pull
+/// requests.
+fn repos_operations() -> Vec<Operation> {
+    vec![
         get!(
             "repos.repository-get",
             Repos,
@@ -498,6 +523,13 @@ pub fn operations() -> Vec<Operation> {
             Json,
             NO_QUERY
         ),
+    ]
+}
+
+/// `pipelines.*` operations: build/release definitions, builds, timelines,
+/// and modern YAML pipeline runs.
+fn pipelines_operations() -> Vec<Operation> {
+    vec![
         get!(
             "pipelines.definitions-list",
             Pipelines,
@@ -601,6 +633,12 @@ pub fn operations() -> Vec<Operation> {
             Json,
             NO_QUERY
         ),
+    ]
+}
+
+/// `boards.*` operations: work item lookup, comments, updates, and revisions.
+fn boards_operations() -> Vec<Operation> {
+    vec![
         get!(
             "boards.work-item-get",
             Boards,
