@@ -49,7 +49,9 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
 - **Signals:** `noop`, `missing-tool`, `missing-data`, `report-incomplete`
   (no ADO write path; assert that the executor emits the expected status)
 - **Work items:** `create-work-item`, `assign-work-item`, `update-work-item`,
-  `comment-on-work-item`, `link-work-items`, `upload-workitem-attachment`
+  `comment-on-work-item`, `link-work-items`, `upload-workitem-attachment`, plus
+  two rendering-fidelity scenarios (see [Rendering
+  fidelity](#rendering-fidelity) below)
 - **Wiki:** `create-wiki-page`, `update-wiki-page`
 - **PR:** `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`,
   `submit-pr-review`, `update-pr`
@@ -80,6 +82,39 @@ handoff verifies `System.AssignedTo` and deletes the scratch item. It uses
 `E2E_WORK_ITEM_ASSIGNEE` when configured,
 otherwise `BUILD_REQUESTEDFOREMAIL`; it skips when neither provides an
 assignable identity.
+
+### Rendering fidelity
+
+`create-work-item` is the only safe output whose body goes through the Markdown
+sanitizer (`src/sanitize/markdown.rs`), and its stored description is what a
+human actually reads in the work item. Two scenarios pin that rendering:
+
+| Scenario id | Work item type | Field |
+| --- | --- | --- |
+| `create-work-item-rendering` | `Task` | `System.Description` |
+| `create-work-item-rendering-bug` | `Bug` | `Microsoft.VSTS.TCM.ReproSteps` |
+
+Both propose the same **unsanitized** corpus and assert, in order, that the
+stored field:
+
+1. contains no denied construct (`<script`, `onerror=`, `<iframe`, or a
+   `javascript:` URL) after Azure DevOps applies its own server-side
+   sanitization, including inside fenced code;
+2. is recorded with `multilineFieldsFormat: Markdown` — when the organization
+   does not surface that on read, the scenario logs a note and the patch stays
+   pinned by the executor unit tests in `src/safe_outputs/create_work_item.rs`;
+3. equals the observed Azure DevOps normalization golden **byte for byte**.
+
+The corpus and both goldens live in one place —
+[`scripts/ado-script/src/executor-e2e/scenarios/markdown-rendering-corpus.json`](../../scripts/ado-script/src/executor-e2e/scenarios/markdown-rendering-corpus.json)
+— imported by the harness and `include_str!`d by the Rust golden test in
+`src/sanitize/markdown.rs`. `expected` pins what the ado-aw sanitizer sends;
+`ado_expected` pins what Azure DevOps returns after its additional
+normalization. A deliberate change to either boundary is explicit in the same
+fixture.
+
+The Bug scenario skips (rather than fails) when the project does not define the
+`Bug` work item type.
 
 The checked-in pipeline resolves `E2E_WORK_ITEM_ASSIGNEE` from a same-named
 definition/queue-time variable first, then falls back to

@@ -2,9 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ExecutedRecord, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
+import renderingCorpus from "../scenarios/markdown-rendering-corpus.json" with { type: "json" };
 import {
   assignWorkItemTemporaryIdHandoff,
+  createBugWorkItemRendering,
   createWorkItem,
+  createWorkItemRendering,
   resolveWorkItemAssignee,
   workItemScenarios,
 } from "../scenarios/work-item.js";
@@ -139,5 +142,179 @@ describe("assign-work-item temporary-ID handoff", () => {
     await assignWorkItemTemporaryIdHandoff.cleanup(ctx, state);
     expect(findWorkItemByTitle).toHaveBeenCalledWith(state.title);
     expect(deleteWorkItem).toHaveBeenCalledWith(42);
+  });
+});
+
+describe("create-work-item rendering fidelity", () => {
+  const adoExpected = renderingCorpus.ado_expected.join("\n");
+
+  function renderingCtx(
+    payload: {
+      id: number;
+      fields: Record<string, unknown>;
+      multilineFieldsFormat?: Record<string, unknown>;
+    },
+    typeExists = true,
+  ): ScenarioContext {
+    return {
+      ...fakeCtx(),
+      rest: {
+        getWorkItem: vi.fn(async () => payload),
+        workItemTypeExists: vi.fn(async () => typeExists),
+      } as unknown as ScenarioContext["rest"],
+    };
+  }
+
+  const record: ExecutedRecord = {
+    name: "create_work_item",
+    status: "succeeded",
+    result: { id: 42 },
+  };
+
+  it("registers both description-field scenarios", () => {
+    const ids = workItemScenarios.map((scenario) => scenario.id ?? scenario.tool);
+    expect(ids).toContain("create-work-item-rendering");
+    expect(ids).toContain("create-work-item-rendering-bug");
+  });
+
+  it("proposes the raw (unsanitized) corpus so the executor does the sanitizing", async () => {
+    const entry = await createWorkItemRendering.ndjson(fakeCtx(), {
+      title: "ado-aw-det-77-create-work-item-rendering",
+    });
+    expect(entry.description).toBe(renderingCorpus.input.join("\n"));
+    expect(createWorkItemRendering.config(fakeCtx(), { title: "t" })).toMatchObject({
+      "work-item-type": "Task",
+      "include-stats": false,
+    });
+    expect(createBugWorkItemRendering.config(fakeCtx(), { title: "t" })).toMatchObject({
+      "work-item-type": "Bug",
+    });
+  });
+
+  it("skips when the project does not define the work item type", async () => {
+    await expect(
+      createBugWorkItemRendering.setup(renderingCtx({ id: 42, fields: {} }, false)),
+    ).rejects.toThrow(SkipError);
+  });
+
+  it.each(["Markdown", "markdown"])(
+    "accepts the work-item Markdown format with %s casing",
+    async (format) => {
+      const state: { title: string; createdId?: number } = { title: "t" };
+      await createWorkItemRendering.assert(
+        renderingCtx({
+          id: 42,
+          fields: { "System.Description": adoExpected },
+          multilineFieldsFormat: { "System.Description": format },
+        }),
+        state,
+        record,
+        [record],
+      );
+      expect(state.createdId).toBe(42);
+    },
+  );
+
+  it("logs and continues when ADO omits the Markdown format metadata", async () => {
+    const log = vi.fn();
+    const ctx = {
+      ...renderingCtx({
+        id: 42,
+        fields: { "System.Description": adoExpected },
+      }),
+      log,
+    };
+
+    await createWorkItemRendering.assert(
+      ctx,
+      { title: "t" },
+      record,
+      [record],
+    );
+
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("ADO did not surface multilineFieldsFormat"),
+    );
+  });
+
+  it("records the created id before failing an ADO golden mismatch", async () => {
+    const state: { title: string; createdId?: number } = { title: "t" };
+    await expect(
+      createWorkItemRendering.assert(
+        // Security-clean but not byte-identical: only the ADO golden catches it.
+        renderingCtx({
+          id: 42,
+          fields: { "System.Description": adoExpected.replace("**bold**", "bold") },
+        }),
+        state,
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(/does not match the ADO rendering golden/);
+    expect(state.createdId).toBe(42);
+  });
+
+  it("fails when the field is not stored as Markdown", async () => {
+    await expect(
+      createWorkItemRendering.assert(
+        renderingCtx({
+          id: 42,
+          fields: { "System.Description": adoExpected },
+          multilineFieldsFormat: { "System.Description": "Html" },
+        }),
+        { title: "t" },
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(/expected "Markdown"/);
+  });
+
+  it.each([
+    ["script", "<script>alert(1)</script>", /still contains '<script'/],
+    ["event handler", '<img src="x" onerror="alert(1)">', /still contains 'onerror='/],
+    ["iframe", '<iframe src="https://example.test"></iframe>', /still contains '<iframe'/],
+    ["javascript URL", "[click](javascript:alert(1))", /still contains a javascript: URL/],
+  ])("fails when a denied %s survives ADO storage", async (_name, leaked, error) => {
+    await expect(
+      createWorkItemRendering.assert(
+        renderingCtx({
+          id: 42,
+          fields: { "System.Description": `${adoExpected}\n${leaked}` },
+        }),
+        { title: "t" },
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(error);
+  });
+
+  it("accepts the Bug repro-steps rendering path", async () => {
+    const state: { title: string; createdId?: number } = { title: "t" };
+
+    await createBugWorkItemRendering.assert(
+      renderingCtx({
+        id: 42,
+        fields: { "Microsoft.VSTS.TCM.ReproSteps": adoExpected },
+        multilineFieldsFormat: {
+          "Microsoft.VSTS.TCM.ReproSteps": "markdown",
+        },
+      }),
+      state,
+      record,
+      [record],
+    );
+
+    expect(state.createdId).toBe(42);
+  });
+
+  it("rejects a Bug response that omits the repro-steps field", async () => {
+    await expect(
+      createBugWorkItemRendering.assert(
+        renderingCtx({ id: 42, fields: { "System.Description": adoExpected } }),
+        { title: "t" },
+        record,
+        [record],
+      ),
+    ).rejects.toThrow(/has no string 'Microsoft\.VSTS\.TCM\.ReproSteps'/);
   });
 });

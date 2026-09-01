@@ -7,10 +7,27 @@
 import type { ExecutedRecord, PriorEntry, Scenario, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
 import { detBody, numResult, strResult, Teardown } from "./common.js";
+import renderingCorpus from "./markdown-rendering-corpus.json" with { type: "json" };
 
 const WORK_ITEM_TYPE = "Task";
 const CREATE_TEMPORARY_ID = "#aw_wicreate";
 const ASSIGN_TEMPORARY_ID = "#aw_wiassign";
+
+/**
+ * Rendering-fidelity corpus shared with the Rust golden test in
+ * `src/sanitize/markdown.rs` (which `include_str!`s the same JSON). The Rust
+ * test proves the sanitizer produces `expected`; these scenarios prove Azure
+ * DevOps applies the separately pinned `ado_expected` normalization, so the
+ * two boundaries cannot be confused.
+ */
+const RENDERING_INPUT = renderingCorpus.input.join("\n");
+const ADO_RENDERING_EXPECTED = renderingCorpus.ado_expected.join("\n");
+
+/**
+ * Constructs the sanitizer must never let reach a rendered work item.
+ * Compared case-insensitively, so a folded `<SCRIPT >` is covered too.
+ */
+const DENIED_CONSTRUCTS = ["<script", "onerror=", "<iframe"];
 
 function usableEnvValue(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -254,8 +271,137 @@ export const uploadWorkitemAttachment: Scenario<{ id: number }> = {
   cleanup: async (ctx, state) => ctx.rest.deleteWorkItem(state.id),
 };
 
+/** First line that differs, to make a golden mismatch debuggable. */
+function firstDifference(actual: string, expected: string): string {
+  const a = actual.split("\n");
+  const e = expected.split("\n");
+  for (let i = 0; i < Math.max(a.length, e.length); i++) {
+    if (a[i] !== e[i]) {
+      return `line ${i + 1}: expected ${JSON.stringify(e[i])}, got ${JSON.stringify(a[i])}`;
+    }
+  }
+  return "no line differs (trailing content mismatch)";
+}
+
+/**
+ * Build a rendering-fidelity scenario for one description field.
+ *
+ * `create-work-item` is the only safe output whose body goes through the
+ * Markdown sanitizer, and it writes either `System.Description` (default) or
+ * `Microsoft.VSTS.TCM.ReproSteps` (Bug) with a
+ * `/multilineFieldsFormat/<field>` = `Markdown` patch. One scenario per field
+ * therefore covers every path a sanitizer change can break.
+ */
+function renderingScenario(options: {
+  readonly id: string;
+  readonly workItemType: string;
+  readonly descriptionField: string;
+}): Scenario<{ title: string; createdId?: number }> {
+  const { id: scenarioId, workItemType, descriptionField } = options;
+  return {
+    id: scenarioId,
+    tool: "create-work-item",
+    config: () => ({
+      "work-item-type": workItemType,
+      max: 1,
+      // Appended agent stats would change the stored text and defeat the ADO
+      // server-normalization golden comparison.
+      "include-stats": false,
+    }),
+    setup: async (ctx) => {
+      if (!(await ctx.rest.workItemTypeExists(workItemType))) {
+        throw new SkipError(`project does not define the '${workItemType}' work item type`);
+      }
+      return { title: ctx.prefix(scenarioId) };
+    },
+    ndjson: async (_ctx, state) => ({
+      title: state.title,
+      description: RENDERING_INPUT,
+      tags: [],
+      temporary_id: CREATE_TEMPORARY_ID,
+    }),
+    assert: async (ctx, state, record: ExecutedRecord) => {
+      // Record the id before any fallible check so cleanup can still delete it.
+      const id = numResult(record, "id");
+      state.createdId = id;
+
+      const wi = await ctx.rest.getWorkItem(id);
+      const stored = wi.fields[descriptionField];
+      if (typeof stored !== "string") {
+        throw new Error(
+          `work item #${id} has no string '${descriptionField}' (got ${JSON.stringify(stored)})`,
+        );
+      }
+
+      // 1. Security: ADO applies its own sanitizer after the executor, including
+      //    inside fenced code, so no denied construct may survive anywhere in
+      //    the stored value. Checked before the golden so a leak is reported as
+      //    a leak rather than as a generic mismatch.
+      const normalized = stored.toLowerCase();
+      for (const construct of DENIED_CONSTRUCTS) {
+        if (normalized.includes(construct.toLowerCase())) {
+          throw new Error(
+            `work item #${id} '${descriptionField}' still contains '${construct}'`,
+          );
+        }
+      }
+      if (normalized.includes("javascript:")) {
+        throw new Error(
+          `work item #${id} '${descriptionField}' still contains a javascript: URL`,
+        );
+      }
+
+      // 2. Format: stored as Markdown, otherwise the body renders as literal
+      //    text. Not every organization surfaces this on read — when it is
+      //    absent the executor-side patch is pinned by the Rust unit tests in
+      //    src/safe_outputs/create_work_item.rs instead.
+      const format = wi.multilineFieldsFormat?.[descriptionField];
+      if (format === undefined) {
+        ctx.log(
+          `[${scenarioId}] note: ADO did not surface multilineFieldsFormat for ` +
+            `'${descriptionField}'; format is covered by the executor unit tests`,
+        );
+      } else if (typeof format !== "string" || format.toLowerCase() !== "markdown") {
+        throw new Error(
+          `work item #${id} stores '${descriptionField}' as ${JSON.stringify(format)}, expected "Markdown"`,
+        );
+      }
+
+      // 3. ADO round-trip: what the service returns must equal the separately
+      //    observed server-normalization golden byte for byte. The Rust golden
+      //    pins what the executor sends; this one pins what ADO stores.
+      if (stored !== ADO_RENDERING_EXPECTED) {
+        throw new Error(
+          `work item #${id} '${descriptionField}' does not match the ADO rendering golden ` +
+            `(${firstDifference(stored, ADO_RENDERING_EXPECTED)})`,
+        );
+      }
+    },
+    cleanup: async (ctx, state) => {
+      const id = state.createdId ?? (await ctx.rest.findWorkItemByTitle(state.title));
+      if (id !== undefined) await ctx.rest.deleteWorkItem(id);
+    },
+  };
+}
+
+/** Task / `System.Description` rendering fidelity. */
+export const createWorkItemRendering = renderingScenario({
+  id: "create-work-item-rendering",
+  workItemType: WORK_ITEM_TYPE,
+  descriptionField: "System.Description",
+});
+
+/** Bug / `Microsoft.VSTS.TCM.ReproSteps` rendering fidelity. */
+export const createBugWorkItemRendering = renderingScenario({
+  id: "create-work-item-rendering-bug",
+  workItemType: "Bug",
+  descriptionField: "Microsoft.VSTS.TCM.ReproSteps",
+});
+
 export const workItemScenarios: Scenario<unknown>[] = [
   createWorkItem,
+  createWorkItemRendering,
+  createBugWorkItemRendering,
   assignWorkItemTemporaryIdHandoff,
   updateWorkItem,
   commentOnWorkItem,

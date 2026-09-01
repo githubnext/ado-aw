@@ -200,6 +200,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── version.rs        # Semver parsing/comparison shared across the CLI (pipeline header versions, release tags, codemod cutovers)
 │   ├── ndjson.rs         # NDJSON parsing utilities
 │   ├── sanitize.rs       # Input sanitization for safe outputs
+│   ├── sanitize/
+│   │   └── markdown.rs   # Markdown structure parsing plus HTML/URL allowlisting
 │   ├── secure.rs         # Validated newtype value objects (parse-don't-validate path/identifier types)
 │   ├── validate.rs       # Structural input validators (char allowlists, format checks, injection detectors)
 │   ├── agent_stats.rs    # OTel-based agent statistics parsing (token usage, duration, turns)

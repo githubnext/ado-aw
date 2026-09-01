@@ -233,6 +233,57 @@ section). It is additive and build-scoped: it appears as one extra section
 alongside any `task.uploadsummary` tabs your own steps publish (including under
 `target: job` / `target: stage`), and never collides with them.
 
+### Markdown body sanitization
+
+Safe outputs whose body is stored as Markdown (today: `create-work-item`'s
+`description`) go through a Markdown-aware sanitizer rather than blanket HTML
+escaping, so headings, lists, tables and code fences survive.
+
+The policy is:
+
+- **Transport sanitization applies to the whole document.** Control characters
+  and ANSI escapes are removed, Azure DevOps logging commands (`##vso[`, `##[`)
+  are wrapped in backticks, HTML comments are removed, and the content size and
+  line count caps are enforced.
+- **Code is left alone.** [pulldown-cmark](https://docs.rs/pulldown-cmark)
+  identifies code spans, fenced and indented code blocks; no rendering
+  transformation is applied inside them, so a fence showing `<script>` or
+  `@mention` stays readable.
+- **Inline HTML is allowlisted, not blocklisted.**
+  [ammonia](https://docs.rs/ammonia) keeps a small set of formatting tags that
+  have a Markdown equivalent (`a`, `b`/`strong`, `i`/`em`, `code`, `pre`,
+  headings, lists, tables, `img`, `blockquote`, …) with a small attribute
+  allowlist (`href`, `src`, `alt`, `title`, `width`, `height`, `colspan`,
+  `rowspan`, `align`). Everything else — `script`, `style`, `iframe`, `form`,
+  SVG/MathML, `on*` handlers, `style`/`class`/`id` attributes — is dropped;
+  `script` and `style` also lose their contents.
+- **URLs are scheme-allowlisted.** `http`, `https`, `mailto` and relative
+  destinations are allowed everywhere (HTML attributes, Markdown links and
+  images, autolinks and reference definitions). Any other scheme is dropped from
+  HTML attributes and replaced with `(redacted)` in Markdown destinations.
+- **Mentions and bot triggers are neutralized outside code.** `@name`,
+  `fixes #123` and `AB#123` are wrapped in backticks so they cannot notify
+  people or link work items.
+
+Text that only looks like markup is escaped rather than deleted: `Vec<String>`
+in prose is stored as `Vec&lt;String&gt;`, which Markdown renders as the author
+wrote it, and that escaping is also what stops dropped markup from being
+re-parsed. Markup a browser really would parse as a tag still goes to the
+allowlist and is dropped there, so a dangerous payload never reappears as
+visible text.
+
+Cleaning normalizes HTML, so a few inputs come back rendering the same but
+written differently: `\r\n` becomes `\n`, `<br />` becomes `<br>`, a table gains
+an implied `<tbody>`, a mid-line `>` is stored as `&gt;`, and the content of a
+removed raw-text element such as `<noscript>` is escaped rather than kept as
+markup.
+
+Azure DevOps then applies its own server-side Markdown sanitization when the
+work item is stored. That service-side pass may further normalize safe HTML and
+remove dangerous HTML even when it appeared inside a code fence. The compiler
+tests pin ado-aw's pre-storage output separately from the executor E2E fixture
+that pins the representation returned by Azure DevOps.
+
 ### Executor authentication
 
 All write-bearing safe outputs (e.g. `create-pull-request`,
@@ -842,7 +893,7 @@ field that receives the body.
 
 **Agent parameters:**
 - `title` - A concise title for the work item (required, must be more than 5 characters)
-- `description` - Work item description in Markdown format (required, must be more than 30 characters). Inline HTML is preserved for Azure DevOps to render/sanitize.
+- `description` - Work item description in Markdown format (required, must be more than 30 characters). Markdown is preserved; see [Markdown body sanitization](#markdown-body-sanitization) for the HTML and URL policy applied to it.
 - `tags` - Tags to apply to the work item (optional list; each tag must not contain a semicolon). May be subject to the `allowed-tags` allowlist. Merged with any static `tags` configured in front matter.
 
 On success, the MCP tool returns a generated gh-aw-compatible `#aw_...`

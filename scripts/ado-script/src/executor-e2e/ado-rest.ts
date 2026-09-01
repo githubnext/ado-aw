@@ -132,11 +132,33 @@ export class AdoRest {
     return res;
   }
 
-  async getWorkItem(id: number): Promise<{ id: number; fields: Record<string, unknown> }> {
+  async getWorkItem(id: number): Promise<{
+    id: number;
+    fields: Record<string, unknown>;
+    /**
+     * Per-field rendering format (`Markdown` | `Html`). Only present on
+     * organizations where the work-item Markdown feature is enabled, so
+     * callers must treat it as optional.
+     */
+    multilineFieldsFormat?: Record<string, unknown>;
+  }> {
     const path = this.projPath(`_apis/wit/workitems/${id}?api-version=7.1`);
-    const res = await this.request<{ id: number; fields: Record<string, unknown> }>(path);
+    const res = await this.request<{
+      id: number;
+      fields: Record<string, unknown>;
+      multilineFieldsFormat?: Record<string, unknown>;
+    }>(path);
     if (!res) throw new Error(`getWorkItem(${id}) returned no body`);
     return res;
+  }
+
+  /** True when the project defines the given work item type (e.g. `Bug`). */
+  async workItemTypeExists(type: string): Promise<boolean> {
+    const path = this.projPath(
+      `_apis/wit/workitemtypes/${AdoRest.seg(type)}?api-version=7.1`,
+    );
+    const res = await this.request<{ name?: string }>(path, { allow404: true });
+    return res !== undefined;
   }
 
   /** Find the newest live work item with an exact title. Used for cleanup recovery. */

@@ -1203,6 +1203,72 @@ custom-fields:
     }
 
     #[tokio::test]
+    async fn test_execute_task_patches_sanitized_markdown_description() {
+        use crate::sanitize::markdown::rendering_corpus;
+        use std::collections::HashMap;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Pins the two things the executor controls for work item rendering:
+        // the description is the sanitized corpus (byte-for-byte the golden the
+        // executor E2E asserts against a real work item), and the default
+        // System.Description path carries the Markdown format patch. Without
+        // the format patch ADO renders the body as literal text.
+        let server = MockServer::start().await;
+        let expected_patch = serde_json::json!([
+            {
+                "op": "add",
+                "path": "/fields/System.Title",
+                "value": "Rendering corpus"
+            },
+            {
+                "op": "add",
+                "path": "/fields/System.Description",
+                "value": rendering_corpus::expected()
+            },
+            {
+                "op": "add",
+                "path": "/multilineFieldsFormat/System.Description",
+                "value": "Markdown"
+            }
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/Project/_apis/wit/workitems/$Task"))
+            .and(body_json(expected_patch))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 7,
+                "_links": { "html": { "href": "https://example.test/workitems/7" } }
+            })))
+            .mount(&server)
+            .await;
+
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            tool_configs: HashMap::from([(
+                "create-work-item".to_string(),
+                serde_json::json!({
+                    "work-item-type": "Task",
+                    "include-stats": false
+                }),
+            )]),
+            ..Default::default()
+        };
+        let mut result = CreateWorkItemResult {
+            name: CreateWorkItemResult::NAME.to_string(),
+            title: "Rendering corpus".to_string(),
+            description: rendering_corpus::input(),
+            tags: Vec::new(),
+            temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(execution.success, "{}", execution.message);
+    }
+
+    #[tokio::test]
     async fn test_execute_rejects_duplicate_description_custom_field() {
         use std::collections::HashMap;
 

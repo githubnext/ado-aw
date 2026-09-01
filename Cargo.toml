@@ -36,6 +36,8 @@ indexmap = "2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 semver = "1.0.28"
 inventory = "0.3.24"
+ammonia = "4.1.4"
+pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["blocking"] }
