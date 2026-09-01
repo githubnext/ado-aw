@@ -288,7 +288,26 @@ describe("create-work-item rendering fidelity", () => {
     ).rejects.toThrow(error);
   });
 
-  it("asserts the Bug repro-steps field", async () => {
+  it("accepts the Bug repro-steps rendering path", async () => {
+    const state: { title: string; createdId?: number } = { title: "t" };
+
+    await createBugWorkItemRendering.assert(
+      renderingCtx({
+        id: 42,
+        fields: { "Microsoft.VSTS.TCM.ReproSteps": adoExpected },
+        multilineFieldsFormat: {
+          "Microsoft.VSTS.TCM.ReproSteps": "markdown",
+        },
+      }),
+      state,
+      record,
+      [record],
+    );
+
+    expect(state.createdId).toBe(42);
+  });
+
+  it("rejects a Bug response that omits the repro-steps field", async () => {
     await expect(
       createBugWorkItemRendering.assert(
         renderingCtx({ id: 42, fields: { "System.Description": adoExpected } }),
