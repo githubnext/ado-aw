@@ -317,6 +317,196 @@ pub(crate) fn canonical_repository_alias(
     lookup_allowed_repository_alias(repository, &ctx.allowed_repositories).cloned()
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RepositoryTargetSpec {
+    pub alias: String,
+    pub repo_type: String,
+    pub name: String,
+    pub organization: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+pub(crate) fn repository_write_scope_key(
+    organization: &str,
+    project: &str,
+    repository: &str,
+) -> String {
+    format!("{organization}/{project}/{repository}").to_ascii_lowercase()
+}
+
+pub(crate) fn configure_repository_write_context(
+    ctx: &mut ExecutionContext,
+    checkout: &[String],
+    repositories: Vec<RepositoryTargetSpec>,
+    write_connection_type: Option<crate::compile::types::WriteConnectionType>,
+    write_allow: &[crate::compile::types::AdoOrganizationScope],
+) {
+    ctx.allowed_repositories.clear();
+    ctx.repository_targets.clear();
+    ctx.cross_organization_repositories.clear();
+    for alias in checkout {
+        let Some(repository) = repositories
+            .iter()
+            .find(|repository| &repository.alias == alias)
+        else {
+            continue;
+        };
+        ctx.allowed_repositories
+            .insert(alias.clone(), repository.name.clone());
+        ctx.repository_targets.insert(
+            alias.clone(),
+            crate::safe_outputs::result::AdoRepositoryTargetConfig {
+                name: repository.name.clone(),
+                organization: repository.organization.clone(),
+                endpoint: repository.endpoint.clone(),
+            },
+        );
+        if repository.repo_type.eq_ignore_ascii_case("git")
+            && repository.endpoint.is_some()
+            && repository.organization.is_none()
+        {
+            ctx.cross_organization_repositories.insert(alias.clone());
+        }
+    }
+
+    ctx.write_connection_type = write_connection_type;
+    ctx.write_allowed_repositories = write_allow
+        .iter()
+        .flat_map(|organization| {
+            organization.projects.iter().flat_map(move |project| {
+                project.repositories.iter().map(move |repository| {
+                    repository_write_scope_key(
+                        organization.organization.as_str(),
+                        project.project.as_str(),
+                        repository.as_str(),
+                    )
+                })
+            })
+        })
+        .collect();
+}
+
+fn split_repository_target_name(
+    name: &str,
+    current_project: &str,
+) -> Result<(String, String), ExecutionResult> {
+    match name.split_once('/') {
+        Some((project, repository)) if !repository.contains('/') => {
+            Ok((project.to_string(), repository.to_string()))
+        }
+        None => Ok((current_project.to_string(), name.to_string())),
+        _ => Err(ExecutionResult::failure(format!(
+            "Repository '{name}' must be a repository name or project/repository"
+        ))),
+    }
+}
+
+/// Resolve a repository selector to an exact organization/project/repository
+/// destination and enforce the additional cross-organization write policy.
+pub(crate) fn resolve_repository_write_target(
+    repository: Option<&str>,
+    ctx: &ExecutionContext,
+) -> Result<crate::safe_outputs::result::AdoRepositoryTarget, ExecutionResult> {
+    let selector = repository.unwrap_or("self");
+    let Some(alias) = canonical_repository_alias(selector, ctx) else {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{selector}' is not in the allowed repository list"
+        )));
+    };
+    let current_org_url = ctx.ado_org_url.as_deref().ok_or_else(|| {
+        ExecutionResult::failure("Azure DevOps organization URL not configured")
+    })?;
+    let current_organization = ctx.ado_organization.as_deref().ok_or_else(|| {
+        ExecutionResult::failure("Azure DevOps organization name not configured")
+    })?;
+    let current_project = ctx
+        .ado_project
+        .as_deref()
+        .ok_or_else(|| ExecutionResult::failure("Azure DevOps project not configured"))?;
+
+    if alias == "self" {
+        let name = ctx
+            .repository_name
+            .as_deref()
+            .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"))?;
+        let (_, repository) = split_repository_target_name(name, current_project)?;
+        return Ok(crate::safe_outputs::result::AdoRepositoryTarget {
+            alias,
+            organization: current_organization.to_string(),
+            organization_url: current_org_url.trim_end_matches('/').to_string(),
+            project: current_project.to_string(),
+            repository,
+            repository_id: ctx.repository_id.clone(),
+            cross_organization: false,
+        });
+    }
+
+    let config = ctx.repository_targets.get(&alias).cloned().or_else(|| {
+        ctx.allowed_repositories.get(&alias).map(|name| {
+            crate::safe_outputs::result::AdoRepositoryTargetConfig {
+                name: name.clone(),
+                organization: None,
+                endpoint: None,
+            }
+        })
+    });
+    let Some(config) = config else {
+        return Err(ExecutionResult::failure(format!(
+            "Repository alias '{alias}' has no configured target metadata"
+        )));
+    };
+    if config.organization.is_none()
+        && (config.endpoint.is_some() || ctx.cross_organization_repositories.contains(&alias))
+    {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{selector}' (checkout alias '{alias}') uses an endpoint-backed \
+             Azure Repos checkout but has no `repos.organization`; the target organization \
+             cannot be resolved safely."
+        )));
+    }
+
+    let (project, repository_name) =
+        split_repository_target_name(&config.name, current_project)?;
+    let organization = config
+        .organization
+        .as_deref()
+        .unwrap_or(current_organization);
+    let cross_organization = !organization.eq_ignore_ascii_case(current_organization);
+    if cross_organization {
+        if ctx.write_connection_type
+            != Some(crate::compile::types::WriteConnectionType::AzureDevOps)
+        {
+            return Err(ExecutionResult::failure(format!(
+                "Repository '{selector}' resolves to cross-organization target \
+                 '{organization}/{project}/{repository_name}', but permissions.write must use \
+                 `connection-type: azureDevOps`."
+            )));
+        }
+        let scope = repository_write_scope_key(organization, &project, &repository_name);
+        if !ctx.write_allowed_repositories.contains(&scope) {
+            return Err(ExecutionResult::failure(format!(
+                "Repository '{selector}' resolves to cross-organization target \
+                 '{organization}/{project}/{repository_name}', which is not listed in \
+                 permissions.write.allow."
+            )));
+        }
+    }
+
+    Ok(crate::safe_outputs::result::AdoRepositoryTarget {
+        alias,
+        organization: organization.to_string(),
+        organization_url: if cross_organization {
+            format!("https://dev.azure.com/{organization}")
+        } else {
+            current_org_url.trim_end_matches('/').to_string()
+        },
+        project,
+        repository: repository_name,
+        repository_id: None,
+        cross_organization,
+    })
+}
+
 /// Resolve a repository selector to its checkout directory.
 ///
 /// The checkout root and `self` directory differ in multi-checkout jobs.
@@ -1063,6 +1253,133 @@ mod tests {
             allowed_repositories: allowed,
             repo_refs: std::collections::HashMap::new(),
             ..Default::default()
+        }
+    }
+
+    fn repository_target_ctx() -> ExecutionContext {
+        ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/current-org/".to_string()),
+            ado_organization: Some("current-org".to_string()),
+            ado_project: Some("Current Project".to_string()),
+            repository_id: Some("self-id".to_string()),
+            repository_name: Some("Current Project/self-repo".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn cross_org_allow() -> Vec<crate::compile::types::AdoOrganizationScope> {
+        vec![crate::compile::types::AdoOrganizationScope {
+            organization: crate::secure::AdoOrganization::parse("other-org").unwrap(),
+            projects: vec![crate::compile::types::AdoProjectScope {
+                project: crate::secure::AdoProject::parse("Other Project").unwrap(),
+                project_id: None,
+                repositories: vec![crate::secure::AdoRepository::parse("target-repo").unwrap()],
+            }],
+        }]
+    }
+
+    #[test]
+    fn repository_write_target_resolves_self_with_repository_id() {
+        let ctx = repository_target_ctx();
+
+        let target = resolve_repository_write_target(Some("self"), &ctx).unwrap();
+
+        assert_eq!(target.organization, "current-org");
+        assert_eq!(target.project, "Current Project");
+        assert_eq!(target.repository, "self-repo");
+        assert_eq!(target.repository_locator(), "self-id");
+        assert!(!target.cross_organization);
+    }
+
+    #[test]
+    fn repository_write_target_resolves_same_org_checkout_project() {
+        let mut ctx = repository_target_ctx();
+        configure_repository_write_context(
+            &mut ctx,
+            &["tools".to_string()],
+            vec![RepositoryTargetSpec {
+                alias: "tools".to_string(),
+                repo_type: "git".to_string(),
+                name: "Tools Project/tooling".to_string(),
+                organization: None,
+                endpoint: None,
+            }],
+            None,
+            &[],
+        );
+
+        let target = resolve_repository_write_target(Some("tooling"), &ctx).unwrap();
+
+        assert_eq!(target.organization, "current-org");
+        assert_eq!(target.project, "Tools Project");
+        assert_eq!(target.repository, "tooling");
+        assert!(!target.cross_organization);
+    }
+
+    #[test]
+    fn repository_write_target_resolves_allowed_cross_org_checkout() {
+        let mut ctx = repository_target_ctx();
+        configure_repository_write_context(
+            &mut ctx,
+            &["target".to_string()],
+            vec![RepositoryTargetSpec {
+                alias: "target".to_string(),
+                repo_type: "git".to_string(),
+                name: "Other Project/target-repo".to_string(),
+                organization: Some("other-org".to_string()),
+                endpoint: Some("cross-org-checkout".to_string()),
+            }],
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+            &cross_org_allow(),
+        );
+
+        let target = resolve_repository_write_target(Some("target"), &ctx).unwrap();
+
+        assert_eq!(target.organization_url, "https://dev.azure.com/other-org");
+        assert_eq!(target.project, "Other Project");
+        assert_eq!(target.repository, "target-repo");
+        assert!(target.cross_organization);
+    }
+
+    #[test]
+    fn repository_write_target_rejects_incomplete_or_unauthorized_cross_org() {
+        for (organization, connection_type, allow, expected) in [
+            (
+                None,
+                Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+                cross_org_allow(),
+                "no `repos.organization`",
+            ),
+            (
+                Some("other-org".to_string()),
+                Some(crate::compile::types::WriteConnectionType::AzureRm),
+                cross_org_allow(),
+                "connection-type: azureDevOps",
+            ),
+            (
+                Some("other-org".to_string()),
+                Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+                Vec::new(),
+                "not listed in permissions.write.allow",
+            ),
+        ] {
+            let mut ctx = repository_target_ctx();
+            configure_repository_write_context(
+                &mut ctx,
+                &["target".to_string()],
+                vec![RepositoryTargetSpec {
+                    alias: "target".to_string(),
+                    repo_type: "git".to_string(),
+                    name: "Other Project/target-repo".to_string(),
+                    organization,
+                    endpoint: Some("cross-org-checkout".to_string()),
+                }],
+                connection_type,
+                &allow,
+            );
+
+            let error = resolve_repository_write_target(Some("target"), &ctx).unwrap_err();
+            assert!(error.message.contains(expected), "{}", error.message);
         }
     }
 

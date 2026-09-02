@@ -2650,11 +2650,17 @@ mod tests {
     fn cross_org_ctx() -> ExecutionContext {
         ExecutionContext {
             allowed_repositories: std::collections::HashMap::from([
-                ("cross-org-repo".to_string(), "OtherProj/cross-org-repo".to_string()),
-                ("same-org-repo".to_string(), "Proj/same-org-repo".to_string()),
+                (
+                    "cross-org-repo".to_string(),
+                    "OtherProj/cross-org-repo".to_string(),
+                ),
+                (
+                    "same-org-repo".to_string(),
+                    "Proj/same-org-repo".to_string(),
+                ),
             ]),
             cross_organization_repositories: std::collections::HashSet::from([
-                "cross-org-repo".to_string(),
+                "cross-org-repo".to_string()
             ]),
             ..Default::default()
         }
@@ -2686,9 +2692,7 @@ mod tests {
         let ctx = cross_org_ctx();
         // Matches through `lookup_allowed_repository_alias`'s trailing-name fallback.
         assert!(reject_cross_organization_repository("cross-org-repo", &ctx).is_some());
-        assert!(
-            reject_cross_organization_repository("OtherProj/cross-org-repo", &ctx).is_some()
-        );
+        assert!(reject_cross_organization_repository("OtherProj/cross-org-repo", &ctx).is_some());
     }
 
     #[tokio::test]
@@ -3312,6 +3316,9 @@ index 0000000..abcdefg
             repository_provider: Some("TfsGit".to_string()),
             github_api_url: "https://api.github.com".to_string(),
             allowed_repositories: std::collections::HashMap::new(),
+            repository_targets: std::collections::HashMap::new(),
+            write_connection_type: None,
+            write_allowed_repositories: std::collections::HashSet::new(),
             repo_refs: std::collections::HashMap::new(),
             cross_organization_repositories: std::collections::HashSet::new(),
             agent_stats: None,

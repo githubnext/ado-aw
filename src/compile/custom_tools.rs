@@ -291,6 +291,7 @@ pub fn resolved_execution_config_json(
                 "name": repository.name,
                 "ref": repository.repo_ref,
                 "endpoint": repository.endpoint,
+                "organization": repository.organization,
             })
         })
         .collect();
@@ -304,6 +305,19 @@ pub fn resolved_execution_config_json(
                 "allowedExtensions": config.allowed_extensions(),
             })
         });
+    let write_permissions = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.write.as_ref())
+        .map(|write| {
+            json!({
+                "connectionType": write.connection_type().as_ado_str(),
+                "allow": write
+                    .options()
+                    .map(|options| options.allow.as_slice())
+                    .unwrap_or(&[]),
+            })
+        });
     serde_json::to_string_pretty(&json!({
         "name": front_matter.name,
         "toolConfigs": tool_configs,
@@ -311,6 +325,7 @@ pub fn resolved_execution_config_json(
         "repositories": repositories,
         "checkout": front_matter.checkout,
         "repoRefs": front_matter.checkout_repo_refs(),
+        "writePermissions": write_permissions,
         "cacheMemory": cache_memory,
     }))
     .context("failed to serialize resolved safe-output configuration")
@@ -412,8 +427,10 @@ fn validate_tool_name(tool_name: &str) -> Result<()> {
          safe-output tool"
     );
     ensure!(
-        !matches!(tool_name, "scripts" | "jobs" | "require-approval" | "staged")
-            && !CUSTOM_JOB_SYSTEM_NEEDS.contains(&tool_name),
+        !matches!(
+            tool_name,
+            "scripts" | "jobs" | "require-approval" | "staged"
+        ) && !CUSTOM_JOB_SYSTEM_NEEDS.contains(&tool_name),
         "safe-outputs.jobs.{tool_name}: custom tool name is reserved"
     );
     Ok(())
@@ -1103,6 +1120,48 @@ safe-outputs:
         assert_eq!(config["toolConfigs"]["noop"]["staged"], true);
         assert_eq!(config["toolConfigs"]["notify"]["staged"], true);
         assert_eq!(config["customTools"][0]["name"], "notify");
+    }
+
+    #[test]
+    fn resolved_execution_config_carries_repository_write_targets() {
+        let mut fm = parse_front_matter(
+            r#"
+name: Test
+description: Test
+permissions:
+  write:
+    service-connection: ado-write
+    connection-type: azureDevOps
+    allow:
+      - organization: other-org
+        projects:
+          - project: Other Project
+            repositories: [target-repo]
+repos:
+  - name: Other Project/target-repo
+    alias: target
+    organization: other-org
+    endpoint: cross-org-checkout
+safe-outputs:
+  create-branch: {}
+"#,
+        );
+        let (repositories, checkout, checkout_fetch) =
+            crate::compile::common::resolve_repos(&fm).unwrap();
+        fm.repositories = repositories;
+        fm.checkout = checkout;
+        fm.checkout_fetch = checkout_fetch;
+
+        let config: Value =
+            serde_json::from_str(&resolved_execution_config_json(&fm, &[]).unwrap()).unwrap();
+
+        assert_eq!(config["repositories"][0]["organization"], "other-org");
+        assert_eq!(config["repositories"][0]["endpoint"], "cross-org-checkout");
+        assert_eq!(config["writePermissions"]["connectionType"], "azureDevOps");
+        assert_eq!(
+            config["writePermissions"]["allow"][0]["projects"][0]["repositories"][0],
+            "target-repo"
+        );
     }
 
     #[test]

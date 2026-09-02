@@ -3074,13 +3074,22 @@ pub struct PermissionsConfig {
 ///
 /// The serialized values deliberately match AzureCLI@3's `connectionType`
 /// input so front matter and generated YAML use one vocabulary.
-#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WriteConnectionType {
     #[default]
     #[serde(rename = "azureRM")]
     AzureRm,
     #[serde(rename = "azureDevOps")]
     AzureDevOps,
+}
+
+impl WriteConnectionType {
+    pub const fn as_ado_str(self) -> &'static str {
+        match self {
+            Self::AzureRm => "azureRM",
+            Self::AzureDevOps => "azureDevOps",
+        }
+    }
 }
 
 /// Stage 3 Azure DevOps credential and additional write-scope policy.
@@ -3285,7 +3294,7 @@ impl AdoReadCapability {
 }
 
 /// Explicit Azure DevOps organization scope.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AdoOrganizationScope {
     pub organization: crate::secure::AdoOrganization,
@@ -3297,7 +3306,7 @@ pub struct AdoOrganizationScope {
 }
 
 /// Explicit project and optional repository scope within an organization.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AdoProjectScope {
     pub project: crate::secure::AdoProject,
