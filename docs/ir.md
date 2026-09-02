@@ -24,6 +24,11 @@ Those wrappers are the only place per-target shape (top-level `PipelineShape`, t
 - `job.rs` — `Job`, `Pool`, job variables, 1ES `templateContext` support, and target-job external `dependsOn` / `condition` wrapping.
 - `stage.rs` — `Stage` plus target-stage external `dependsOn` / `condition` wrapping.
 - `env.rs` — typed environment values (`EnvValue`) including ADO macros, pipeline variables, secrets, `OutputRef`s, `Coalesce`, macro-form `Concat`, and `RuntimeExpression` (a `$[ ... ]` ADO runtime expression that the lowering pass auto-hoists to a job-level `variables:` entry — ADO does not evaluate `$[ ... ]` inside step `env:`). `RuntimeExpression` is only valid at the top level of a step `env:` value: nesting it inside `Concat` or `Coalesce` is rejected at lower time (the hoist pass walks only the top level, so a nested occurrence would emit a dangling `$(AwRtExpr_…)` macro). A `Literal` or `RawYamlScalar(String)` smuggling a raw `$[ ... ]` into a step `env:` value (whether at the top level or nested inside a `Concat`) is likewise rejected at lower time — ADO passes such scalars verbatim, so the typed `RuntimeExpression` variant must be used instead.
+- `../mcpg.rs` — the typed MCPG host-launch environment. It maps validated
+  destination env names to `EnvValue`s once, then the canonical MCPG
+  `BashStep` uses the same map for ADO step env and Docker passthrough names.
+  User `pipeline-variable` sources lower through `EnvValue::PipelineVar`; they
+  are never converted to compiler-generated YAML env strings.
 - `condition.rs` — the `Condition` / `Expr` AST and code generation to ADO condition syntax.
 - `output.rs` — `OutputDecl`, `OutputRef`, and the output-reference lowering rules.
 - `graph.rs` — graph construction, `dependsOn` derivation, output validation, `isOutput=true` promotion, and cycle detection.

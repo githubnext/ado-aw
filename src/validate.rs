@@ -556,7 +556,7 @@ pub fn validate_mcp_url(url: &str, mcp_name: &str) -> Vec<String> {
 }
 
 /// Warn when env values or headers look like they contain inline secrets.
-/// Secrets should use pipeline variables and passthrough ("") instead.
+/// MCP secrets should use explicit `pipeline-variable` references instead.
 pub fn warn_potential_secrets(
     mcp_name: &str,
     env: &HashMap<String, String>,

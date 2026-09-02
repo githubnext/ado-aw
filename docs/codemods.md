@@ -137,7 +137,8 @@ src/compile/codemods/
 ├── 0004_legacy_path_markers.rs # {{ workspace }} / {{ working_directory }} / {{ trigger_repo_directory }} → explicit ADO path exprs
 ├── 0005_drop_build_attachment_allowed_build_ids.rs # remove no-op upload-build-attachment.allowed-build-ids
 ├── 0006_explicit_push_trigger.rs # pin legacy implicit all-branches push trigger for pre-0.49.0 sources
-└── 0007_promote_debug_create_github_issue.rs # move debug GitHub issue filing to regular safe-outputs
+├── 0007_promote_debug_create_github_issue.rs # move debug GitHub issue filing to regular safe-outputs
+└── 0008_explicit_mcp_pipeline_env.rs # replace empty MCP env passthrough with pipeline-variable objects
 ```
 
 (New codemods are appended as `<NNNN>_<id>.rs` files.)
@@ -491,6 +492,28 @@ legacy `ado-aw-debug.create-issue` and the new
 `safe-outputs.create-github-issue` keys exist, the codemod fails with a
 manual-migration error rather than overwriting either value.
 
+## Explicit MCP pipeline variables (`0008_explicit_mcp_pipeline_env`)
+
+Custom container MCP env values previously used an empty string as an implicit
+same-name pipeline-variable passthrough:
+
+```yaml
+env:
+  MCP_TOKEN: ""
+```
+
+The codemod rewrites that unambiguous legacy shape to:
+
+```yaml
+env:
+  MCP_TOKEN:
+    pipeline-variable: MCP_TOKEN
+```
+
+Non-empty literals and already-explicit mappings are unchanged. The new object
+form also supports remapping a container variable from a differently named ADO
+pipeline or variable-group variable.
+
 ## Tests
 
 The codemod framework is covered by three layers of tests:
@@ -504,9 +527,8 @@ The codemod framework is covered by three layers of tests:
   rewrite → lock-file write) using a stub codemod registry
   injected via the crate-private `compile_pipeline_with_registry`
   and `parse_markdown_detailed_with_registry` hooks. They live
-  inside `src/` because the production registry is empty and
-  integration tests in `tests/` cannot link against crate
-  internals.
+  inside `src/` because integration tests in `tests/` cannot link
+  against crate internals or inject a custom registry.
 - **Black-box CLI tests** in `tests/codemod_tests.rs` spawn the
   compiled `ado-aw` binary as a subprocess and assert on the
   user-visible behavior of `compile` and `check`.

@@ -5,11 +5,10 @@
 //! assert on the user-visible behavior of `compile` and `check` for
 //! sources with various front-matter shapes.
 //!
-//! The codemod registry shipped with this binary is intentionally
-//! empty; the rewrite path is exercised by the white-box tests in
+//! White-box rewrite mechanics are exercised in
 //! `src/compile/codemod_integration_test.rs`, which can inject a
-//! stub registry. These tests cover the user-facing CLI behaviors
-//! that don't require codemod registration:
+//! stub registry. These tests cover shipped codemods and user-facing
+//! CLI behavior:
 //!
 //! - Healthy current sources compile and `check` cleanly without
 //!   rewriting the source.
@@ -152,6 +151,30 @@ fn compile_migrates_debug_create_issue_to_public_safe_output() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("promote_debug_create_github_issue")
     );
+}
+
+#[test]
+fn compile_migrates_empty_mcp_env_to_explicit_pipeline_variable() {
+    let dir = fresh_temp_dir();
+    let original = "---\nname: mcp-env-migration\ndescription: d\nmcp-servers:\n  custom:\n    container: node:20-slim\n    env:\n      TOKEN: \"\"\n      STATIC: value\n---\nbody\n";
+    let source = write_source(dir.path(), original);
+    let output = run_compile(&source);
+    assert!(
+        output.status.success(),
+        "compile should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = fs::read_to_string(&source).expect("re-read source");
+    assert!(after.contains("TOKEN:"));
+    assert!(after.contains("pipeline-variable: TOKEN"));
+    assert!(after.contains("STATIC: value"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("explicit_mcp_pipeline_env")
+    );
+
+    let lock = source.with_extension("lock.yml");
+    let compiled = fs::read_to_string(lock).expect("read lock");
+    assert!(compiled.contains("TOKEN: $(TOKEN)"));
 }
 
 // ─── Healthy compile (no codemods needed) ──────────────────────────────────

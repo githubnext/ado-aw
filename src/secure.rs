@@ -31,6 +31,7 @@
 //! - [`AzureDevOpsOrgUrl`] — an HTTPS Azure DevOps organization collection URL.
 //! - [`ArtifactName`] — an ADO artifact / attachment name.
 //! - [`Identifier`] — an engine agent/model identifier.
+//! - [`AdoVariableName`] — an Azure DevOps pipeline or variable-group variable name.
 //! - [`HostName`] — a DNS-style hostname.
 //! - [`RegistryRef`] — a container-registry host or base path.
 //! - [`AdoOrganization`] — an Azure DevOps Services organization name.
@@ -321,6 +322,23 @@ impl WorkItemTemporaryId {
             self.as_str().to_string()
         } else {
             format!("#{}", self.as_str())
+        }
+    }
+}
+
+validated_string! {
+    /// An Azure DevOps pipeline or variable-group variable name.
+    ///
+    /// Allows the alphanumeric, dot, underscore, and hyphen form accepted by
+    /// Azure DevOps macro references while rejecting expression syntax,
+    /// whitespace, control characters, and logging-command injection.
+    AdoVariableName, "Azure DevOps variable name", |value: &str, label: &str| {
+        if validate::is_valid_ado_variable_name(value) {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must start with an ASCII alphanumeric or '_' and contain only [A-Za-z0-9._-]"
+            )
         }
     }
 }
