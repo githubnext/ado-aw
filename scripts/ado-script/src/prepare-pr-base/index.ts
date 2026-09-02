@@ -39,6 +39,9 @@ export interface RepoTarget {
   dir: string;
   target: string;
   sourceRef?: string;
+  organization?: string;
+  project?: string;
+  repository?: string;
 }
 
 export interface PrepareArgs {
@@ -56,6 +59,7 @@ export interface PrepareDependencies {
     repository: string,
     targetBranch: string,
     sourceCommit: string,
+    organizationUrl?: string,
   ) => Promise<CommitDiffMetadata>;
 }
 
@@ -77,6 +81,10 @@ function oneLine(value: unknown, maxLength = 500): string {
   return text.length <= maxLength ? text : `${text.slice(0, maxLength)}...`;
 }
 
+function sameAdoName(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
 function flushPending(
   repos: RepoTarget[],
   pending: Partial<RepoTarget> | null,
@@ -84,10 +92,24 @@ function flushPending(
   fallbackSourceRef?: string,
 ): void {
   if (!pending?.dir) return;
+  const targetIdentity = [
+    pending.organization,
+    pending.project,
+    pending.repository,
+  ];
+  if (targetIdentity.some((value) => value !== undefined) &&
+      targetIdentity.some((value) => value === undefined)) {
+    throw new Error(
+      `Repository '${pending.dir}' must set --organization, --project, and --repository together.`,
+    );
+  }
   repos.push({
     dir: pending.dir,
     target: pending.target ?? fallbackTarget,
     sourceRef: pending.sourceRef ?? fallbackSourceRef,
+    organization: pending.organization,
+    project: pending.project,
+    repository: pending.repository,
   });
 }
 
@@ -119,6 +141,15 @@ export function parseArgs(argv: string[]): PrepareArgs {
       const target = shortTargetBranch(value || "main");
       if (pending?.dir) pending.target = target;
       else fallbackTarget = target;
+      i++;
+    } else if (flag === "--organization") {
+      if (pending?.dir) pending.organization = value;
+      i++;
+    } else if (flag === "--project") {
+      if (pending?.dir) pending.project = value;
+      i++;
+    } else if (flag === "--repository") {
+      if (pending?.dir) pending.repository = value;
       i++;
     }
   }
@@ -167,18 +198,55 @@ async function preparePatchBase(
 
   const remote = runners.gitOk(["remote", "get-url", "origin"]) ?? "";
   const identity = parseAdoRepoUrl(remote);
+  const explicitIdentity =
+    repo.organization && repo.project && repo.repository
+      ? {
+          collectionUri: `https://dev.azure.com/${repo.organization}/`,
+          organization: repo.organization.toLowerCase(),
+          project: repo.project,
+          repository: repo.repository,
+        }
+      : null;
+  const identityMatchesExplicit =
+    identity !== null &&
+    explicitIdentity !== null &&
+    identity.organization === explicitIdentity.organization &&
+    sameAdoName(identity.project, explicitIdentity.project) &&
+    sameAdoName(identity.repository, explicitIdentity.repository);
   const sameOrgAdo = identity !== null && isCurrentAdoOrganization(identity, env);
-  const repoFetchEnv = sameOrgAdo ? fetchEnv : {};
+  const eligibleIdentity = identityMatchesExplicit
+    ? explicitIdentity
+    : sameOrgAdo
+      ? identity
+      : null;
+  const repoFetchEnv = eligibleIdentity ? fetchEnv : {};
+  if (explicitIdentity && sameOrgAdo) {
+    warnRepo(
+      repo.dir,
+      repo.target,
+      "compiler-resolved cross-organization target points at the current Azure DevOps organization",
+    );
+    return false;
+  }
+  if (explicitIdentity && !identityMatchesExplicit) {
+    warnRepo(
+      repo.dir,
+      repo.target,
+      "checkout remote does not match the compiler-resolved Azure DevOps target",
+    );
+    return false;
+  }
   const restDisabled = env.ADO_AW_PREPARE_PR_BASE_DISABLE_REST === "1";
   if (restDisabled) {
     restReason = "ADO REST disabled for deterministic fallback testing";
-  } else if (identity && sameOrgAdo) {
+  } else if (eligibleIdentity) {
     try {
       const metadata = await deps.getCommitDiffMetadata(
-        identity.project,
-        identity.repository,
+        eligibleIdentity.project,
+        eligibleIdentity.repository,
         repo.target,
         headSha,
+        eligibleIdentity.collectionUri,
       );
       const exact = ensureExactMergeBaseFetched(
         repo.target,
@@ -227,8 +295,38 @@ function prepareTargetWorktree(
 ): boolean {
   const remote = deps.runners.gitOk(["remote", "get-url", "origin"]) ?? "";
   const identity = parseAdoRepoUrl(remote);
+  const explicitMatches =
+    identity !== null &&
+    repo.organization !== undefined &&
+    repo.project !== undefined &&
+    repo.repository !== undefined &&
+    identity.organization === repo.organization.toLowerCase() &&
+    sameAdoName(identity.project, repo.project) &&
+    sameAdoName(identity.repository, repo.repository);
+  if (
+    repo.organization &&
+    identity &&
+    isCurrentAdoOrganization(identity, env)
+  ) {
+    warnRepo(
+      repo.dir,
+      repo.target,
+      "compiler-resolved cross-organization target points at the current Azure DevOps organization",
+    );
+    return false;
+  }
+  if (repo.organization && !explicitMatches) {
+    warnRepo(
+      repo.dir,
+      repo.target,
+      "checkout remote does not match the compiler-resolved Azure DevOps target",
+    );
+    return false;
+  }
   const repoFetchEnv =
-    identity && isCurrentAdoOrganization(identity, env) ? fetchEnv : {};
+    identity && (isCurrentAdoOrganization(identity, env) || explicitMatches)
+      ? fetchEnv
+      : {};
   const fetched = ensureTargetTipFetched(repo.target, repoFetchEnv, deps.runners);
   if (!fetched.ok) {
     warnRepo(repo.dir, repo.target, fetched.reason);
@@ -258,21 +356,25 @@ export async function main(
     ];
   }
   const fetchEnv = bearerEnv(env.SYSTEM_ACCESSTOKEN);
+  let requiredTargetFailed = false;
 
   for (const repo of repos) {
     try {
       deps.chdir(repo.dir);
     } catch (err) {
       warnRepo(repo.dir, repo.target, `could not enter checkout: ${oneLine(err)}`);
+      if (repo.organization) requiredTargetFailed = true;
       continue;
     }
+    let prepared: boolean;
     if (args.mode === "target-worktree") {
-      prepareTargetWorktree(repo, env, fetchEnv, deps);
+      prepared = prepareTargetWorktree(repo, env, fetchEnv, deps);
     } else {
-      await preparePatchBase(repo, env, fetchEnv, deps);
+      prepared = await preparePatchBase(repo, env, fetchEnv, deps);
     }
+    if (!prepared && repo.organization) requiredTargetFailed = true;
   }
-  return 0;
+  return requiredTargetFailed ? 1 : 0;
 }
 
 if (

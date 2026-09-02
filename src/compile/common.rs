@@ -2535,7 +2535,7 @@ fn find_git_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
 // ==================== Permission helpers ====================
 
 /// ADO resource ID for minting ADO-scoped tokens via Azure CLI.
-const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
+pub(crate) const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
 
 shell_script! {
     /// Mint the Stage 1 Azure DevOps bearer inside an authenticated AzureCLI@3

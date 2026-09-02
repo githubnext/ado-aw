@@ -1310,10 +1310,25 @@ fn build_agent_job(
         // the SafeOutputs job (issue #1453).
         warn_create_pr_target_inference(front_matter);
         let repos = create_pr_prepare_repos(front_matter, &cfg.trigger_repo_directory);
-        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-            super::extensions::ado_script::PreparePrBaseMode::PatchBase,
-            &repos,
-        ));
+        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+        if !local_repos.is_empty() {
+            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+                super::extensions::ado_script::PreparePrBaseMode::PatchBase,
+                &local_repos,
+                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+            ));
+        }
+        if let Some(service_connection) =
+            cross_org_prepare_service_connection(front_matter, &cross_org_repos)
+        {
+            steps.push(
+                super::extensions::ado_script::prepare_pr_base_azure_devops_step_typed(
+                    super::extensions::ado_script::PreparePrBaseMode::PatchBase,
+                    &cross_org_repos,
+                    service_connection,
+                ),
+            );
+        }
     }
     //     When GitHub App auth is configured, mint the installation token
     //     immediately before the Copilot run; `copilot_env` sources
@@ -2357,15 +2372,70 @@ fn create_pr_prepare_repos(
         // ref characters subject to shell command substitution.
         source_ref: None,
         target_branch: pr_cfg.resolve_target_branch("self", &repo_refs),
+        organization: None,
+        project: None,
+        repository: None,
     }];
     for alias in &front_matter.checkout {
+        let repository = front_matter
+            .repositories
+            .iter()
+            .find(|repository| &repository.repository == alias);
+        let explicit_target = repository.and_then(|repository| {
+            let organization = repository.organization.as_ref()?;
+            let (project, name) = repository.name.split_once('/')?;
+            let write = front_matter
+                .permissions
+                .as_ref()
+                .and_then(|permissions| permissions.write.as_ref())?;
+            (write.supports_cross_organization_writes()
+                && write.allows_repository(organization.as_str(), project, name))
+            .then(|| {
+                (
+                    organization.as_str().to_string(),
+                    project.to_string(),
+                    name.to_string(),
+                )
+            })
+        });
         repos.push(PreparePrBaseRepo {
             dir: format!("$(Build.SourcesDirectory)/{alias}"),
             source_ref: repo_refs.get(alias).cloned(),
             target_branch: pr_cfg.resolve_target_branch(alias, &repo_refs),
+            organization: explicit_target.as_ref().map(|target| target.0.clone()),
+            project: explicit_target.as_ref().map(|target| target.1.clone()),
+            repository: explicit_target.map(|target| target.2),
         });
     }
     repos
+}
+
+fn cross_org_prepare_service_connection<'a>(
+    front_matter: &'a FrontMatter,
+    repos: &[super::extensions::ado_script::PreparePrBaseRepo],
+) -> Option<&'a str> {
+    if !repos.iter().any(|repo| repo.organization.is_some()) {
+        return None;
+    }
+    front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.write.as_ref())
+        .filter(|write| {
+            write.connection_type() == crate::compile::types::WriteConnectionType::AzureDevOps
+        })
+        .map(crate::compile::types::WritePermissionConfig::service_connection)
+}
+
+fn partition_prepare_repos(
+    repos: Vec<super::extensions::ado_script::PreparePrBaseRepo>,
+) -> (
+    Vec<super::extensions::ado_script::PreparePrBaseRepo>,
+    Vec<super::extensions::ado_script::PreparePrBaseRepo>,
+) {
+    repos
+        .into_iter()
+        .partition(|repo| repo.organization.is_none())
 }
 
 /// Emit the compile-time advisory when `create-pull-request`'s
@@ -2497,10 +2567,21 @@ fn build_safeoutputs_job(
     }
     if variant.runs_create_pull_request {
         let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
-        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
-            &repos,
-        ));
+        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+        if !local_repos.is_empty() {
+            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+                &local_repos,
+                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+            ));
+        }
+        if !cross_org_repos.is_empty() {
+            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+                &cross_org_repos,
+                crate::compile::ado_bundle::TokenSource::WriteServiceConnection,
+            ));
+        }
     }
     if let Some(app) = github_app {
         let permissions =

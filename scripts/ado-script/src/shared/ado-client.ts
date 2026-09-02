@@ -130,10 +130,11 @@ export async function getCommitDiffMetadata(
   repositoryId: string,
   targetBranch: string,
   sourceCommit: string,
+  organizationUrl?: string,
 ): Promise<CommitDiffMetadata> {
   const sourceSha = requireSha("sourceCommit", sourceCommit);
   return withRetry("getCommitDiffMetadata", async () => {
-    const git = await (await getWebApi()).getGitApi();
+    const git = await (await getWebApi(organizationUrl)).getGitApi();
     const branch = await git.getBranch(repositoryId, targetBranch, project);
     const targetSha = requireSha("target branch commit", branch.commit?.commitId);
     const result = await git.getCommitDiffs(

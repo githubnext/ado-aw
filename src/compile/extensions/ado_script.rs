@@ -177,6 +177,32 @@ node "$PREPARE_PR_BASE_PATH" --mode "$MODE" \
 }
 
 shell_script! {
+    /// Run cross-organization create-pull-request preparation inside an
+    /// authenticated AzureCLI@3 task. The short-lived bearer remains a
+    /// shell-local variable and is projected only into the bundle child.
+    PREPARE_PR_BASE_AZURE_DEVOPS {
+        interpreter: Bash,
+        bindings: [PREPARE_PR_BASE_PATH, MODE, ADO_RESOURCE],
+        externals: [],
+        fragments: [repo_flags],
+        body: r#"
+set -eo pipefail
+ADO_TOKEN=$(az account get-access-token \
+  --resource "$ADO_RESOURCE" \
+  --query accessToken -o tsv)
+if [ -z "$ADO_TOKEN" ]; then
+  echo "Azure CLI returned an empty Azure DevOps access token" >&2
+  exit 1
+fi
+ADO_AW_ACCESS_TOKEN_KIND=bearer SYSTEM_ACCESSTOKEN="$ADO_TOKEN" \
+  node "$PREPARE_PR_BASE_PATH" --mode "$MODE" \
+# ado-aw:fragment repo_flags
+unset ADO_TOKEN
+"#,
+    }
+}
+
+shell_script! {
     /// The Setup-job synthetic-PR context resolver. Runs the
     /// `exec-context-pr-synth` bundle; its outputs are declared on the
     /// step so downstream consumers reach them via `OutputRef`.
@@ -734,10 +760,7 @@ pub fn github_app_token_step_typed_for(
         format!("--owner {}", sh_single_quote(&cfg.owner)),
         // Pin the output variable name (a compiler constant) as argv so no
         // pipeline variable can redirect the minted token.
-        format!(
-            "--output-var {}",
-            sh_single_quote(output_var)
-        ),
+        format!("--output-var {}", sh_single_quote(output_var)),
     ];
     if !cfg.repositories.is_empty() {
         args.push(format!(
@@ -753,8 +776,8 @@ pub fn github_app_token_step_typed_for(
             .iter()
             .map(|(name, level)| (name.replace('-', "_"), level.as_str().to_string()))
             .collect();
-        let json = serde_json::to_string(&normalized)
-            .context("serialize GitHub App token permissions")?;
+        let json =
+            serde_json::to_string(&normalized).context("serialize GitHub App token permissions")?;
         args.push(format!("--permissions-json {}", sh_single_quote(&json)));
     }
     let script = ShellScript::new(&MINT_GITHUB_APP_TOKEN)
@@ -808,12 +831,15 @@ pub struct PreparePrBaseRepo {
     pub dir: String,
     pub source_ref: Option<String>,
     pub target_branch: String,
+    pub organization: Option<String>,
+    pub project: Option<String>,
+    pub repository: Option<String>,
 }
 
 /// Emit one of the two create-pull-request preparation modes. The Agent job
 /// uses `PatchBase` to recover and verify the merge-base; SafeOutputs uses
 /// `TargetWorktree` to fetch only the target tip required by `git worktree add`.
-pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBaseRepo]) -> Step {
+fn prepare_pr_base_repo_flags(mode: PreparePrBaseMode, repos: &[PreparePrBaseRepo]) -> String {
     let repo_flags: String = repos
         .iter()
         .map(|repo| {
@@ -823,29 +849,82 @@ pub fn prepare_pr_base_step_typed(mode: PreparePrBaseMode, repos: &[PreparePrBas
                 }
                 _ => String::new(),
             };
+            let target_flags = match (
+                repo.organization.as_deref(),
+                repo.project.as_deref(),
+                repo.repository.as_deref(),
+            ) {
+                (Some(organization), Some(project), Some(repository)) => format!(
+                    " --organization {} --project {} --repository {}",
+                    sh_single_quote(organization),
+                    sh_single_quote(project),
+                    sh_single_quote(repository)
+                ),
+                _ => String::new(),
+            };
             format!(
-                " --repo-dir \"{}\"{} --target-branch {}",
+                " --repo-dir \"{}\"{}{} --target-branch {}",
                 repo.dir,
                 source_flag,
+                target_flags,
                 sh_single_quote(&repo.target_branch)
             )
         })
         .collect();
+    repo_flags.trim_start().to_string()
+}
+
+pub fn prepare_pr_base_step_typed(
+    mode: PreparePrBaseMode,
+    repos: &[PreparePrBaseRepo],
+    token_source: crate::compile::ado_bundle::TokenSource,
+) -> Step {
+    let repo_flags = prepare_pr_base_repo_flags(mode, repos);
     let script = ShellScript::new(&PREPARE_PR_BASE)
         .bind_text("PREPARE_PR_BASE_PATH", PREPARE_PR_BASE_PATH)
         .bind_text("MODE", mode.as_arg())
-        .fragment("repo_flags", repo_flags.trim_start().to_string())
+        .fragment("repo_flags", repo_flags)
         .render();
     let step = crate::compile::ado_bundle::apply_bundle_auth(
         BashStep::new(mode.display_name(), script).with_condition(Condition::Succeeded),
         crate::compile::ado_bundle::Bundle::PreparePrBase,
-        crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        token_source,
     )
     .with_env(
         "ADO_AW_SELF_REPOSITORY_REF",
         EnvValue::runtime_expression("resources.repositories['self'].ref"),
-    );
+    )
+    .with_env("ADO_AW_ACCESS_TOKEN_KIND", EnvValue::literal("bearer"));
     Step::Bash(step)
+}
+
+pub fn prepare_pr_base_azure_devops_step_typed(
+    mode: PreparePrBaseMode,
+    repos: &[PreparePrBaseRepo],
+    service_connection: &str,
+) -> Step {
+    let script = ShellScript::new(&PREPARE_PR_BASE_AZURE_DEVOPS)
+        .bind_text("PREPARE_PR_BASE_PATH", PREPARE_PR_BASE_PATH)
+        .bind_text("MODE", mode.as_arg())
+        .bind_text("ADO_RESOURCE", crate::compile::common::ADO_RESOURCE_ID)
+        .fragment("repo_flags", prepare_pr_base_repo_flags(mode, repos))
+        .render();
+    let mut task = crate::compile::ir::tasks::azure_cli::AzureCliV3::new(
+        crate::compile::ir::tasks::azure_cli::AzureCliV3Connection::AzureDevOps(
+            service_connection.to_string(),
+        ),
+        crate::compile::ir::tasks::azure_cli::ScriptType::Bash,
+        crate::compile::ir::tasks::azure_cli::ScriptLocation::Inline(script),
+    )
+    .visible_az_login(false)
+    .with_display_name(format!("Cross-org {}", mode.display_name()))
+    .into_step();
+    task.condition = Some(Condition::Succeeded);
+    task.env.insert(
+        "ADO_AW_SELF_REPOSITORY_REF".to_string(),
+        EnvValue::runtime_expression("resources.repositories['self'].ref"),
+    );
+    Step::Task(task)
 }
 
 /// (`DELETE /installation/token`) so it does not remain valid for its full
@@ -888,10 +967,7 @@ pub fn github_app_token_revoke_step_typed_for(
     let step = BashStep::new(display_name, script)
         .with_condition(Condition::Always)
         .with_continue_on_error(true)
-        .with_env(
-            "GH_APP_TOKEN",
-            EnvValue::secret(token_var),
-        );
+        .with_env("GH_APP_TOKEN", EnvValue::secret(token_var));
     Ok(Step::Bash(step))
 }
 
@@ -1588,19 +1664,15 @@ mod tests {
             skip_token_revocation: false,
             permissions: std::collections::BTreeMap::from([
                 ("issues".to_string(), GithubAppPermissionLevel::Read),
-                (
-                    "pull-requests".to_string(),
-                    GithubAppPermissionLevel::Read,
-                ),
+                ("pull-requests".to_string(), GithubAppPermissionLevel::Read),
             ]),
         };
         let Step::Bash(step) = github_app_token_step_typed(&cfg).unwrap() else {
             panic!("expected bash step");
         };
         assert!(
-            step.script.contains(
-                "--permissions-json '{\"issues\":\"read\",\"pull_requests\":\"read\"}'"
-            ),
+            step.script
+                .contains("--permissions-json '{\"issues\":\"read\",\"pull_requests\":\"read\"}'"),
             "permissions must be deterministic normalized JSON:\n{}",
             step.script
         );
@@ -1786,9 +1858,15 @@ mod tests {
             dir: "$(Build.SourcesDirectory)".to_string(),
             source_ref: None,
             target_branch: "main".to_string(),
+            organization: None,
+            project: None,
+            repository: None,
         }];
-        let Step::Bash(step) = prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
-        else {
+        let Step::Bash(step) = prepare_pr_base_step_typed(
+            PreparePrBaseMode::PatchBase,
+            &repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ) else {
             panic!("expected a bash step");
         };
         assert_eq!(step.display_name, "Prepare create-pull-request patch base");
@@ -1805,16 +1883,16 @@ mod tests {
             step.script
         );
         assert!(
-            step.script.contains("node \"$PREPARE_PR_BASE_PATH\" --mode \"$MODE\""),
+            step.script
+                .contains("node \"$PREPARE_PR_BASE_PATH\" --mode \"$MODE\""),
             "the body must invoke the bundle through the bound path and mode:\n{}",
             step.script
         );
         // The repo dir (== MCP server bounding_directory) is a double-quoted argv
         // flag (ADO-macro path convention); its target is a single-quoted literal.
         assert!(
-            step.script.contains(
-                "--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"
-            ),
+            step.script
+                .contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
             "must emit typed source/target flags:\n{}",
             step.script
         );
@@ -1837,9 +1915,15 @@ mod tests {
             dir: "$(Build.SourcesDirectory)".to_string(),
             source_ref: Some("refs/heads/feature".to_string()),
             target_branch: "release/2.x".to_string(),
+            organization: None,
+            project: None,
+            repository: None,
         }];
-        let Step::Bash(step) = prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
-        else {
+        let Step::Bash(step) = prepare_pr_base_step_typed(
+            PreparePrBaseMode::PatchBase,
+            &repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ) else {
             panic!("expected a bash step");
         };
         assert!(
@@ -1859,20 +1943,32 @@ mod tests {
                 dir: "$(Build.SourcesDirectory)".to_string(),
                 source_ref: None,
                 target_branch: "main".to_string(),
+                organization: None,
+                project: None,
+                repository: None,
             },
             PreparePrBaseRepo {
                 dir: "$(Build.SourcesDirectory)/tools".to_string(),
                 source_ref: Some("refs/heads/release".to_string()),
                 target_branch: "release".to_string(),
+                organization: None,
+                project: None,
+                repository: None,
             },
             PreparePrBaseRepo {
                 dir: "$(Build.SourcesDirectory)/docs".to_string(),
                 source_ref: Some("refs/heads/main".to_string()),
                 target_branch: "gh-pages".to_string(),
+                organization: None,
+                project: None,
+                repository: None,
             },
         ];
-        let Step::Bash(step) = prepare_pr_base_step_typed(PreparePrBaseMode::PatchBase, &repos)
-        else {
+        let Step::Bash(step) = prepare_pr_base_step_typed(
+            PreparePrBaseMode::PatchBase,
+            &repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ) else {
             panic!("expected a bash step");
         };
         assert_eq!(
@@ -1903,10 +1999,15 @@ mod tests {
             dir: "$(Build.SourcesDirectory)".to_string(),
             source_ref: None,
             target_branch: "main".to_string(),
+            organization: None,
+            project: None,
+            repository: None,
         }];
-        let Step::Bash(step) =
-            prepare_pr_base_step_typed(PreparePrBaseMode::TargetWorktree, &repos)
-        else {
+        let Step::Bash(step) = prepare_pr_base_step_typed(
+            PreparePrBaseMode::TargetWorktree,
+            &repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ) else {
             panic!("expected a bash step");
         };
         assert_eq!(
@@ -1919,6 +2020,49 @@ mod tests {
             step.script
         );
         assert!(!step.script.contains("--source-ref"));
+    }
+
+    #[test]
+    fn cross_org_prepare_task_keeps_bearer_shell_local() {
+        let repos = vec![PreparePrBaseRepo {
+            dir: "$(Build.SourcesDirectory)/target".to_string(),
+            source_ref: Some("refs/heads/feature".to_string()),
+            target_branch: "main".to_string(),
+            organization: Some("other-org".to_string()),
+            project: Some("Other Project".to_string()),
+            repository: Some("target-repo".to_string()),
+        }];
+
+        let Step::Task(step) = prepare_pr_base_azure_devops_step_typed(
+            PreparePrBaseMode::PatchBase,
+            &repos,
+            "ado-write",
+        ) else {
+            panic!("expected an AzureCLI task");
+        };
+
+        assert_eq!(step.task, "AzureCLI@3");
+        assert_eq!(
+            step.inputs.get("connectionType").map(String::as_str),
+            Some("azureDevOps")
+        );
+        assert_eq!(
+            step.inputs
+                .get("azureDevOpsServiceConnection")
+                .map(String::as_str),
+            Some("ado-write")
+        );
+        let script = step.inputs.get("inlineScript").unwrap();
+        assert!(
+            script.contains("ADO_AW_ACCESS_TOKEN_KIND=bearer SYSTEM_ACCESSTOKEN=\"$ADO_TOKEN\"")
+        );
+        assert!(script.contains("node \"$PREPARE_PR_BASE_PATH\""));
+        assert!(script.contains("--organization 'other-org'"));
+        assert!(script.contains("--project 'Other Project'"));
+        assert!(script.contains("--repository 'target-repo'"));
+        assert!(!script.contains("task.setvariable"));
+        assert!(!script.contains("SC_WRITE_TOKEN"));
+        assert!(!step.env.contains_key("SYSTEM_ACCESSTOKEN"));
     }
 
     #[test]
@@ -1984,9 +2128,7 @@ mod tests {
         // closes the quoting exposure the old inline form carried: a
         // single-quoted assignment cannot break argument parsing.
         assert!(
-            resolver
-                .script
-                .contains("BASE='$(Build.SourcesDirectory)'")
+            resolver.script.contains("BASE='$(Build.SourcesDirectory)'")
                 && resolver.script.contains("--base \"$BASE\""),
             "resolver step must pass --base so trigger-repo-relative markers resolve correctly: {}",
             resolver.script

@@ -9785,6 +9785,68 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
     );
 }
 
+#[test]
+fn test_cross_org_create_pull_request_preparation_is_credential_isolated() {
+    let compiled = compile_inline_agent(
+        "prepare-pr-base-cross-org",
+        r#"---
+name: "Cross-org PR Agent"
+description: "opens a cross-org PR"
+permissions:
+  write:
+    service-connection: ado-write
+    connection-type: azureDevOps
+    allow:
+      - organization: other-org
+        projects:
+          - project: Other Project
+            repositories: [target-repo]
+repos:
+  - name: Other Project/target-repo
+    alias: target
+    organization: other-org
+    endpoint: cross-org-checkout
+safe-outputs:
+  create-pull-request:
+    target-branch: main
+---
+
+Create a pull request in target.
+"#,
+    );
+    let agent = job_block(&compiled, "Agent");
+    let safeoutputs = job_block(&compiled, "SafeOutputs");
+
+    assert!(agent.contains("task: AzureCLI@3"), "{agent}");
+    assert!(agent.contains("connectionType: azureDevOps"), "{agent}");
+    assert!(
+        agent.contains("azureDevOpsServiceConnection: ado-write"),
+        "{agent}"
+    );
+    assert!(
+        agent.contains("ADO_AW_ACCESS_TOKEN_KIND=bearer SYSTEM_ACCESSTOKEN=\"$ADO_TOKEN\""),
+        "{agent}"
+    );
+    assert!(agent.contains("--organization 'other-org'"), "{agent}");
+    assert!(agent.contains("--project 'Other Project'"), "{agent}");
+    assert!(agent.contains("--repository 'target-repo'"), "{agent}");
+    assert!(!agent.contains("SC_WRITE_TOKEN"), "{agent}");
+
+    assert!(
+        safeoutputs.contains("variable=SC_WRITE_TOKEN;issecret=true"),
+        "{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"),
+        "{safeoutputs}"
+    );
+    assert!(
+        safeoutputs.contains("--organization 'other-org'"),
+        "{safeoutputs}"
+    );
+    assert!(!compiled.contains("persistCredentials: true"), "{compiled}");
+}
+
 /// The SafeOutputs-job prepare step honours per-repo targets identically to the
 /// Agent-job step (shared `create_pr_prepare_repos` resolver), so the branch it
 /// deepens always matches the branch the executor opens the PR into.
