@@ -98,8 +98,8 @@ pub enum TokenSource {
     /// The pipeline's built-in OAuth token (`$(System.AccessToken)`), scoped
     /// by the pipeline's job-authorization settings.
     SystemAccessToken,
-    /// A write-capable ADO token minted from an ARM service connection into
-    /// the `SC_WRITE_TOKEN` pipeline variable (Stage 3 executor / Conclusion).
+    /// A write-capable ADO token minted from a configured AzureCLI@3 service
+    /// connection into `SC_WRITE_TOKEN` (Stage 3 executor / Conclusion).
     WriteServiceConnection,
 }
 

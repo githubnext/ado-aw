@@ -23,7 +23,7 @@ pub trait ToolResult: Serialize {
     /// ADO-backed tools receive a write-capable token via
     /// `SYSTEM_ACCESSTOKEN`: by default the pipeline's built-in
     /// `$(System.AccessToken)` (scoped by pipeline settings), or
-    /// `$(SC_WRITE_TOKEN)` minted from an ARM service connection when
+    /// `$(SC_WRITE_TOKEN)` minted from a configured service connection when
     /// `permissions.write` is configured. GitHub-backed tools use the separate
     /// Stage 3 GitHub credential.
     ///
@@ -65,9 +65,7 @@ fn register_resolved_reference<T>(
     value: T,
     lock_error: &'static str,
 ) -> anyhow::Result<()> {
-    let mut registry = registry
-        .lock()
-        .map_err(|_| anyhow::anyhow!(lock_error))?;
+    let mut registry = registry.lock().map_err(|_| anyhow::anyhow!(lock_error))?;
     if registry.contains_key(&id) {
         anyhow::bail!("temporary_id '{id}' was already used in this run");
     }
@@ -88,7 +86,7 @@ pub struct ExecutionContext {
     pub ado_project_id: Option<String>,
     /// Write-capable ADO access token used by Stage 3 executors. Populated
     /// from the `SYSTEM_ACCESSTOKEN` env var, which the compiler maps to
-    /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)` (ARM-minted)
+    /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)`
     /// when `permissions.write` is configured.
     pub access_token: Option<String>,
     /// GitHub credential used by GitHub safe outputs in Stage 3.

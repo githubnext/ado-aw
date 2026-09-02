@@ -490,20 +490,24 @@ pub(crate) fn build_pipeline_context(
     let pipeline_path = common::generate_pipeline_path(output_path);
 
     // Read / write tokens
-    let acquire_read_token = common::generate_acquire_ado_token(
+    let acquire_read_token = common::acquire_ado_token_step(
         front_matter
             .permissions
             .as_ref()
             .and_then(|p| p.read.as_ref())
             .map(crate::compile::types::ReadPermissionConfig::service_connection),
+        crate::compile::types::WriteConnectionType::AzureRm,
         "SC_READ_TOKEN",
     );
-    let acquire_write_token = common::generate_acquire_ado_token(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.write.as_ref())
-            .map(crate::compile::types::WritePermissionConfig::service_connection),
+    let write_permission = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_ref());
+    let acquire_write_token = common::acquire_ado_token_step(
+        write_permission.map(crate::compile::types::WritePermissionConfig::service_connection),
+        write_permission
+            .map(crate::compile::types::WritePermissionConfig::connection_type)
+            .unwrap_or_default(),
         "SC_WRITE_TOKEN",
     );
     // Skip integrity check resolution
@@ -835,9 +839,9 @@ pub(crate) struct StandaloneCtx {
     /// SafeOutputs variants combine this with their job-local checkout layout.
     pub(crate) source_relative_path: String,
     pub(crate) pipeline_path: String,
-    /// `AzureCLI@2` task YAML body (or empty when no read service connection).
-    pub(crate) acquire_read_token: String,
-    pub(crate) acquire_write_token: String,
+    /// Typed AzureCLI@3 token-acquisition steps, when configured.
+    pub(crate) acquire_read_token: Option<Step>,
+    pub(crate) acquire_write_token: Option<Step>,
     /// `Verify pipeline integrity` step YAML (or empty when skipped).
     pub(crate) integrity_check_yaml: String,
     /// Agent prompt body (either inlined imports or
@@ -1189,8 +1193,10 @@ fn build_agent_job(
         }));
     }
 
-    // 3. acquire ADO read token (AzureCLI@2 task) — only when configured.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_read_token)?;
+    // 3. acquire ADO read token (AzureCLI@3 task) — only when configured.
+    if let Some(step) = &cfg.acquire_read_token {
+        steps.push(step.clone());
+    }
 
     // 4. engine install steps (Copilot CLI install). YAML string from
     //    `Engine::install_steps`; lowered through `Step::RawYaml`
@@ -2443,7 +2449,9 @@ fn build_safeoutputs_job(
         }
     }
     // Acquire write token (when configured)
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
+    if let Some(step) = &cfg.acquire_write_token {
+        steps.push(step.clone());
+    }
     // Download analyzed outputs
     steps.push(Step::Download(DownloadStep {
         source: "current".to_string(),
@@ -3023,7 +3031,9 @@ fn build_conclusion_job(
     // Azure Pipelines task.setvariable variables are job-scoped and NOT propagated
     // to downstream jobs without isOutput=true + dependsOn mapping. The SafeOutputs
     // job mints its own SC_WRITE_TOKEN copy; Conclusion must do the same.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
+    if let Some(step) = &cfg.acquire_write_token {
+        steps.push(step.clone());
+    }
 
     let mut download_artifact = TaskStep::new(
         "DownloadPipelineArtifact@2",
@@ -6524,8 +6534,8 @@ mod tests {
             source_path: "$(Build.SourcesDirectory)/agents/test.md".to_string(),
             source_relative_path: "agents/test.md".to_string(),
             pipeline_path: "$(Build.SourcesDirectory)/agents/test.lock.yml".to_string(),
-            acquire_read_token: String::new(),
-            acquire_write_token: String::new(),
+            acquire_read_token: None,
+            acquire_write_token: None,
             integrity_check_yaml: String::new(),
             agent_content_value: "Test prompt".to_string(),
             debug_pipeline: false,
@@ -7652,8 +7662,8 @@ safe-outputs:
             source_path: "source.md".to_string(),
             source_relative_path: "source.md".to_string(),
             pipeline_path: "source.lock.yml".to_string(),
-            acquire_read_token: String::new(),
-            acquire_write_token: String::new(),
+            acquire_read_token: None,
+            acquire_write_token: None,
             integrity_check_yaml: String::new(),
             agent_content_value: String::new(),
             debug_pipeline: false,

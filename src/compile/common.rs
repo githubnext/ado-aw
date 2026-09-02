@@ -2537,42 +2537,87 @@ fn find_git_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
 /// ADO resource ID for minting ADO-scoped tokens via Azure CLI.
 const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
 
-/// Generate an AzureCLI@2 step to acquire an ADO-scoped token from an ARM service connection.
-/// The `variable_name` parameter controls which pipeline variable the token is stored in
-/// (e.g. "SC_READ_TOKEN" for the agent, "SC_WRITE_TOKEN" for the executor).
-/// Returns empty string if no service connection is provided.
-pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_name: &str) -> String {
-    match service_connection {
-        Some(sc) => {
-            let mut lines = Vec::new();
-            lines.push("- task: AzureCLI@2".to_string());
-            lines.push(format!(
-                r#"  displayName: "Acquire ADO token ({variable_name})""#
-            ));
-            lines.push("  inputs:".to_string());
-            lines.push(format!(
-                "    azureSubscription: '{}'",
-                sc.replace('\'', "''")
-            ));
-            lines.push("    scriptType: 'bash'".to_string());
-            lines.push("    scriptLocation: 'inlineScript'".to_string());
-            lines.push("    addSpnToEnvironment: true".to_string());
-            lines.push("    inlineScript: |".to_string());
-            lines.push("      ADO_TOKEN=$(az account get-access-token \\".to_string());
-            lines.push(format!("        --resource {} \\", ADO_RESOURCE_ID));
-            lines.push("        --query accessToken -o tsv)".to_string());
-            lines.push(format!(
-                "      echo \"##vso[task.setvariable variable={variable_name};issecret=true]$ADO_TOKEN\""
-            ));
-            // Trailing newline ensures the inlineScript block scalar value
-            // preserves its terminating newline through round-trip parse/emit;
-            // without it serde_yaml strips the newline and switches to the
-            // `|-` chomping indicator (semantically identical, but produces
-            // a textual diff against the committed lock files).
-            format!("{}\n", lines.join("\n"))
-        }
-        None => String::new(),
+shell_script! {
+    /// Mint the Stage 1 Azure DevOps bearer inside an authenticated AzureCLI@3
+    /// task and publish it as a masked, same-job pipeline variable.
+    ACQUIRE_ADO_READ_TOKEN {
+        interpreter: Bash,
+        bindings: [ADO_RESOURCE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -eo pipefail
+ADO_TOKEN=$(az account get-access-token \
+  --resource "$ADO_RESOURCE" \
+  --query accessToken -o tsv)
+if [ -z "$ADO_TOKEN" ]; then
+  echo "Azure CLI returned an empty Azure DevOps access token" >&2
+  exit 1
+fi
+printf '##vso[task.setvariable variable=SC_READ_TOKEN;issecret=true]%s\n' "$ADO_TOKEN"
+"#,
     }
+}
+
+shell_script! {
+    /// Mint the Stage 3 Azure DevOps bearer inside an authenticated AzureCLI@3
+    /// task and publish it as a masked, same-job pipeline variable.
+    ACQUIRE_ADO_WRITE_TOKEN {
+        interpreter: Bash,
+        bindings: [ADO_RESOURCE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -eo pipefail
+ADO_TOKEN=$(az account get-access-token \
+  --resource "$ADO_RESOURCE" \
+  --query accessToken -o tsv)
+if [ -z "$ADO_TOKEN" ]; then
+  echo "Azure CLI returned an empty Azure DevOps access token" >&2
+  exit 1
+fi
+printf '##vso[task.setvariable variable=SC_WRITE_TOKEN;issecret=true]%s\n' "$ADO_TOKEN"
+"#,
+    }
+}
+
+/// Generate a typed AzureCLI@3 step that mints an ADO-scoped token.
+pub fn acquire_ado_token_step(
+    service_connection: Option<&str>,
+    connection_type: crate::compile::types::WriteConnectionType,
+    variable_name: &str,
+) -> Option<crate::compile::ir::step::Step> {
+    let service_connection = service_connection?;
+    let script_def = match variable_name {
+        "SC_READ_TOKEN" => &ACQUIRE_ADO_READ_TOKEN,
+        "SC_WRITE_TOKEN" => &ACQUIRE_ADO_WRITE_TOKEN,
+        _ => panic!("unsupported compiler-owned ADO token variable {variable_name:?}"),
+    };
+    let connection = match connection_type {
+        crate::compile::types::WriteConnectionType::AzureRm => {
+            crate::compile::ir::tasks::azure_cli::AzureCliV3Connection::AzureRm(
+                service_connection.to_string(),
+            )
+        }
+        crate::compile::types::WriteConnectionType::AzureDevOps => {
+            crate::compile::ir::tasks::azure_cli::AzureCliV3Connection::AzureDevOps(
+                service_connection.to_string(),
+            )
+        }
+    };
+    let script = ShellScript::new(script_def)
+        .bind_text("ADO_RESOURCE", ADO_RESOURCE_ID)
+        .render();
+    Some(crate::compile::ir::step::Step::Task(
+        crate::compile::ir::tasks::azure_cli::AzureCliV3::new(
+            connection,
+            crate::compile::ir::tasks::azure_cli::ScriptType::Bash,
+            crate::compile::ir::tasks::azure_cli::ScriptLocation::Inline(script),
+        )
+        .visible_az_login(false)
+        .with_display_name(format!("Acquire ADO token ({variable_name})"))
+        .into_step(),
+    ))
 }
 
 /// Generate the env block entries for the executor step (Stage 3 Execution).
@@ -2584,7 +2629,8 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 ///
 /// Sources:
 /// * `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` when `write_service_connection`
-///   is `Some` — write-capable ADO token minted via an ARM service connection.
+///   is `Some` — write-capable ADO token minted via the configured AzureCLI@3
+///   service connection.
 ///   Use this for cross-org / cross-project writes or when you need
 ///   named-identity attribution instead of the default
 ///   `Project Collection Build Service` identity.
@@ -6241,36 +6287,61 @@ safe-outputs:
 
     #[test]
     fn test_generate_acquire_ado_token_with_sc() {
-        let result = generate_acquire_ado_token(Some("my-arm-sc"), "SC_READ_TOKEN");
-        assert!(result.contains("AzureCLI@2"), "Should use AzureCLI@2 task");
-        assert!(
-            result.contains("azureSubscription: 'my-arm-sc'"),
-            "Should embed service connection name"
+        let Some(crate::compile::ir::step::Step::Task(task)) = acquire_ado_token_step(
+            Some("my-arm-sc"),
+            crate::compile::types::WriteConnectionType::AzureRm,
+            "SC_READ_TOKEN",
+        ) else {
+            panic!("expected token task");
+        };
+        assert_eq!(task.task, "AzureCLI@3");
+        assert_eq!(
+            task.inputs.get("connectionType").map(String::as_str),
+            Some("azureRM")
         );
-        assert!(
-            result.contains("variable=SC_READ_TOKEN;issecret=true"),
-            "Should set correct pipeline variable as secret"
+        assert_eq!(
+            task.inputs.get("azureSubscription").map(String::as_str),
+            Some("my-arm-sc")
         );
-        assert!(
-            result.contains("az account get-access-token"),
-            "Should call az CLI to get access token"
-        );
+        let script = task.inputs.get("inlineScript").unwrap();
+        assert!(script.contains("SC_READ_TOKEN"));
+        assert!(script.contains("az account get-access-token"));
     }
 
     #[test]
     fn test_generate_acquire_ado_token_none_returns_empty() {
-        let result = generate_acquire_ado_token(None, "SC_READ_TOKEN");
         assert!(
-            result.is_empty(),
-            "None service connection should return empty string"
+            acquire_ado_token_step(
+                None,
+                crate::compile::types::WriteConnectionType::AzureRm,
+                "SC_READ_TOKEN"
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn test_generate_acquire_ado_token_write_token_variable() {
-        let result = generate_acquire_ado_token(Some("write-sc"), "SC_WRITE_TOKEN");
-        assert!(result.contains("variable=SC_WRITE_TOKEN;issecret=true"));
-        assert!(!result.contains("SC_READ_TOKEN"));
+        let Some(crate::compile::ir::step::Step::Task(task)) = acquire_ado_token_step(
+            Some("write-sc"),
+            crate::compile::types::WriteConnectionType::AzureDevOps,
+            "SC_WRITE_TOKEN",
+        ) else {
+            panic!("expected token task");
+        };
+        assert_eq!(
+            task.inputs.get("connectionType").map(String::as_str),
+            Some("azureDevOps")
+        );
+        assert_eq!(
+            task.inputs
+                .get("azureDevOpsServiceConnection")
+                .map(String::as_str),
+            Some("write-sc")
+        );
+        let script = task.inputs.get("inlineScript").unwrap();
+        assert!(script.contains("SC_WRITE_TOKEN"));
+        assert!(!script.contains("SC_READ_TOKEN"));
     }
 
     // ─── engine env / generate_executor_ado_env ────────────────────────────

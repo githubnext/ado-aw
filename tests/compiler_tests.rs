@@ -499,6 +499,12 @@ Do something.
         compiled.contains("my-read-sc"),
         "Compiled output should contain the read service connection name"
     );
+    assert!(
+        compiled.contains("task: AzureCLI@3")
+            && compiled.contains("connectionType: azureRM")
+            && compiled.contains("azureSubscription: my-read-sc"),
+        "scalar permissions.read must use AzureCLI@3 azureRM inputs: {compiled}"
+    );
     let document = parse_compiled_yaml(&compiled);
     assert_job_execution_env_excludes_ado_credentials(
         &document,
@@ -515,6 +521,14 @@ Do something.
     assert!(
         compiled.contains("my-write-sc"),
         "Compiled output should contain the write service connection name"
+    );
+    assert!(
+        compiled.contains("azureSubscription: my-write-sc"),
+        "scalar permissions.write must retain Azure Resource Manager connection semantics"
+    );
+    assert!(
+        !compiled.contains("addSpnToEnvironment"),
+        "ADO token acquisition must not expose service-principal material"
     );
 
     // Should NOT contain System.AccessToken in executor env
@@ -587,7 +601,7 @@ Do something.
         "Compiled output should not contain SC_WRITE_TOKEN when permissions are omitted"
     );
     assert!(
-        !compiled.contains("AzureCLI@2"),
+        !compiled.contains("Acquire ADO token"),
         "Compiled output should not contain AzureCLI task when permissions are omitted"
     );
 
@@ -602,6 +616,70 @@ Do something.
     }
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_permissions_write_azure_devops_connection_compiled_output() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-permissions-ado-write-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+    let test_input = temp_dir.join("perms-ado-agent.md");
+    fs::write(
+        &test_input,
+        r#"---
+name: "Azure DevOps Connection Test"
+description: "Expanded write connection"
+permissions:
+  write:
+    service-connection: ado-write-sc
+    connection-type: azureDevOps
+    allow:
+      - organization: other-org
+        projects:
+          - project: Other Project
+            repositories: [target-repo]
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+---
+
+Create a work item.
+"#,
+    )
+    .unwrap();
+    let output_path = temp_dir.join("perms-ado-agent.yml");
+    let output = std::process::Command::new(PathBuf::from(env!("CARGO_BIN_EXE_ado-aw")))
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let compiled = fs::read_to_string(&output_path).unwrap();
+    assert!(compiled.contains("task: AzureCLI@3"), "{compiled}");
+    assert!(
+        compiled.contains("connectionType: azureDevOps"),
+        "{compiled}"
+    );
+    assert!(
+        compiled.contains("azureDevOpsServiceConnection: ado-write-sc"),
+        "{compiled}"
+    );
+    assert!(
+        !compiled.contains("azureSubscription: ado-write-sc"),
+        "{compiled}"
+    );
+    assert!(!compiled.contains("addSpnToEnvironment"), "{compiled}");
+    let _ = fs::remove_dir_all(temp_dir);
 }
 
 /// Test that write-requiring safe-outputs compile successfully without an ARM write SC.
@@ -4029,7 +4107,7 @@ fn test_conclusion_job_is_not_emitted_without_safe_outputs() {
 }
 
 /// When `permissions.write` is configured the Conclusion job must mint its own
-/// `SC_WRITE_TOKEN` via an `AzureCLI@2` step. Azure Pipelines `task.setvariable`
+/// `SC_WRITE_TOKEN` via an `AzureCLI@3` step. Azure Pipelines `task.setvariable`
 /// variables are job-scoped; the token minted in SafeOutputs is NOT available to
 /// the separate Conclusion job (issue #1688).
 #[test]
@@ -4040,7 +4118,7 @@ fn test_conclusion_job_acquires_write_token_locally() {
     let conclusion_job =
         find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
 
-    // The Conclusion job must contain an AzureCLI@2 step that mints SC_WRITE_TOKEN.
+    // The Conclusion job must contain an AzureCLI@3 step that mints SC_WRITE_TOKEN.
     let steps = conclusion_job
         .get(yaml_key("steps"))
         .and_then(|v| v.as_sequence())
@@ -4068,7 +4146,7 @@ fn test_conclusion_job_acquires_write_token_locally() {
     });
     assert!(
         has_acquire_step,
-        "Conclusion job must contain an AzureCLI@2 step that mints SC_WRITE_TOKEN locally \
+        "Conclusion job must contain an AzureCLI@3 step that mints SC_WRITE_TOKEN locally \
          (job-scoped task.setvariable variables from SafeOutputs are not available here)"
     );
 
@@ -4088,7 +4166,7 @@ fn test_conclusion_job_acquires_write_token_locally() {
 }
 
 /// When no `permissions.write` is configured the Conclusion job must use the
-/// built-in `$(System.AccessToken)` and must NOT emit an AzureCLI@2 token-mint
+/// built-in `$(System.AccessToken)` and must NOT emit an AzureCLI@3 token-mint
 /// step (no-write-SC path regression guard).
 #[test]
 fn test_conclusion_job_no_write_sc_uses_system_access_token() {
@@ -4098,7 +4176,7 @@ fn test_conclusion_job_no_write_sc_uses_system_access_token() {
     let conclusion_job =
         find_job_mapping(&doc, "Conclusion").expect("compiled YAML should contain Conclusion job");
 
-    // No AzureCLI@2 step that mentions SC_WRITE_TOKEN.
+    // No AzureCLI@3 step that mentions SC_WRITE_TOKEN.
     let steps = conclusion_job
         .get(yaml_key("steps"))
         .and_then(|v| v.as_sequence())
@@ -5921,7 +5999,9 @@ fn test_byom_provider_env_compiles_and_merges() {
         "BYOK must bind the api-proxy image in both the Agent and Detection jobs: {compiled}"
     );
     assert_eq!(
-        compiled.matches(r#"docker pull "$API_PROXY_IMAGE""#).count(),
+        compiled
+            .matches(r#"docker pull "$API_PROXY_IMAGE""#)
+            .count(),
         2,
         "BYOK must pre-pull the api-proxy container image in both the Agent and Detection jobs: {compiled}"
     );
@@ -6010,7 +6090,9 @@ fn test_non_byom_agent_uses_always_on_api_proxy() {
         "Agent and Detection must bind the api-proxy image for pre-pull: {compiled}"
     );
     assert_eq!(
-        compiled.matches(r#"docker pull "$API_PROXY_IMAGE""#).count(),
+        compiled
+            .matches(r#"docker pull "$API_PROXY_IMAGE""#)
+            .count(),
         2,
         "Agent and Detection must pre-pull the always-on api-proxy image: {compiled}"
     );
@@ -9116,9 +9198,7 @@ fn assert_github_app_token_wiring(compiled: &str) {
     // (Agent + Detection) = 4. Both mint and revoke read the bundle path
     // through the bound `$GITHUB_APP_TOKEN_PATH`; only revoke follows it
     // with the literal `revoke` word.
-    let total_bundle = compiled
-        .matches("node \"$GITHUB_APP_TOKEN_PATH\"")
-        .count();
+    let total_bundle = compiled.matches("node \"$GITHUB_APP_TOKEN_PATH\"").count();
     let revoke_hits = compiled
         .matches("node \"$GITHUB_APP_TOKEN_PATH\" revoke")
         .count();
@@ -9243,9 +9323,7 @@ fn test_github_app_token_skip_revocation() {
     let compiled = compile_inline_agent("ghapp-norevoke", content);
     // Mint step still present in Agent + Detection.
     assert_eq!(
-        compiled
-            .matches("node \"$GITHUB_APP_TOKEN_PATH\"")
-            .count()
+        compiled.matches("node \"$GITHUB_APP_TOKEN_PATH\"").count()
             - compiled
                 .matches("node \"$GITHUB_APP_TOKEN_PATH\" revoke")
                 .count(),
@@ -9672,9 +9750,8 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");
     assert!(
-        safeoutputs.contains(
-            "PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"
-        ),
+        safeoutputs
+            .contains("PREPARE_PR_BASE_PATH='/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js'"),
         "SafeOutputs job must project the bundle path through the prelude:\n{safeoutputs}"
     );
     assert!(
@@ -9682,9 +9759,7 @@ fn test_create_pull_request_emits_prepare_pr_base_step_in_safeoutputs() {
         "SafeOutputs job must project the target-worktree mode through the prelude:\n{safeoutputs}"
     );
     assert!(
-        safeoutputs.contains(
-            "--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"
-        ),
+        safeoutputs.contains("--repo-dir \"$(Build.SourcesDirectory)\" --target-branch 'main'"),
         "SafeOutputs job must invoke prepare-pr-base with the self dir/target pair:\n{safeoutputs}"
     );
     assert!(
@@ -9922,8 +9997,7 @@ fn test_issue_1731_safeoutputs_executor_source_path_uses_multi_checkout_layout()
     // `--source "$ADO_AW_SOURCE_PATH"`.
     assert!(
         safeoutputs.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
-            && safeoutputs
-                .contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
+            && safeoutputs.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "SafeOutputs executor --source must use the multi-checkout layout path:\n{safeoutputs}"
     );
     assert!(
@@ -10025,9 +10099,8 @@ fn test_issue_1731_split_approval_additional_checkouts_only_in_pr_variant() {
     );
     assert!(
         reviewed.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
-            && reviewed.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            )
+            && reviewed
+                .contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self")
             && reviewed.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#),
         "PR-capable reviewed job must use its multi-checkout self path:\n{reviewed}"
     );
@@ -10060,9 +10133,7 @@ fn test_issue_1731_split_approval_additional_checkouts_in_auto_when_sibling_gate
     assert!(
         auto.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)/self/")
             && auto.contains(r#"ado-aw execute --source "$ADO_AW_SOURCE_PATH""#)
-            && auto.contains(
-                "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"
-            ),
+            && auto.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)/self"),
         "PR-capable automatic job must use its multi-checkout self path:\n{auto}"
     );
     assert!(
@@ -10107,9 +10178,7 @@ fn test_issue_1731_split_checkout_layout_compiles_for_every_target() {
         );
         assert!(
             compiled.contains("ADO_AW_SOURCE_PATH: $(Build.SourcesDirectory)")
-                && compiled.contains(
-                    "ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"
-                ),
+                && compiled.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY: $(Build.SourcesDirectory)"),
             "{target}: self-only Stage 3 sibling must use single-checkout layout:\n{compiled}"
         );
     }
