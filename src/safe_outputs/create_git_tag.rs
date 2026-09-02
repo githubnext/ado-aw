@@ -177,17 +177,17 @@ async fn resolve_head_commit(
 
     // Now resolve the HEAD commit of the default branch
     let url = format!(
-        "{}/{}/_apis/git/repositories/{}/refs?filter={}&api-version=7.1",
+        "{}/{}/_apis/git/repositories/{}/refs",
         org_url.trim_end_matches('/'),
         utf8_percent_encode(project, PATH_SEGMENT),
         utf8_percent_encode(repo_name, PATH_SEGMENT),
-        branch_filter,
     );
 
     debug!("Resolving HEAD commit via: {}", url);
 
     let response = client
         .get(&url)
+        .query(&[("filter", branch_filter), ("api-version", "7.1")])
         .basic_auth("", Some(token))
         .send()
         .await
@@ -227,31 +227,12 @@ impl Executor for CreateGitTagResult {
         ctx: &ExecutionContext,
     ) -> anyhow::Result<ExecutionResult> {
         self.sanitize_content_fields();
-        let target = match crate::safe_outputs::resolve_repository_write_target(
-            self.repository.as_deref(),
-            ctx,
-        ) {
-            Ok(target) => target,
-            Err(failure) => return Ok(failure),
-        };
-        if ctx.dry_run {
-            return Ok(ExecutionResult::success(format!(
-                "[DRY-RUN] Would execute: create git tag '{}' in {}",
-                self.tag_name,
-                target.display_name()
-            )));
-        }
         self.execute_impl(ctx).await
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating git tag: '{}'", self.tag_name);
         debug!("create-git-tag: tag_name='{}'", self.tag_name);
-
-        let token = ctx
-            .access_token
-            .as_ref()
-            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
 
         let config: CreateGitTagConfig = ctx.get_tool_config("create-git-tag")?;
         debug!("Tag pattern: {:?}", config.tag_pattern);
@@ -294,6 +275,18 @@ impl Executor for CreateGitTagResult {
         let repo_name = target.qualified_repository();
         debug!("Resolved repository target: {}", target.display_name());
 
+        if ctx.dry_run {
+            return Ok(ExecutionResult::success(format!(
+                "[DRY-RUN] Would execute: create git tag '{}' in {}",
+                self.tag_name,
+                target.display_name()
+            )));
+        }
+
+        let token = ctx
+            .access_token
+            .as_ref()
+            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         let client = reqwest::Client::new();
 
         // Resolve commit SHA — use provided value or look up HEAD
@@ -601,6 +594,38 @@ message-prefix: "[release] "
                 .contains("other-org/Other Project/target-repo"),
             "{}",
             execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_enforces_tag_pattern() {
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
+            ado_organization: Some("current-org".to_string()),
+            ado_project: Some("Current Project".to_string()),
+            repository_name: Some("self-repo".to_string()),
+            dry_run: true,
+            ..Default::default()
+        };
+        ctx.tool_configs.insert(
+            "create-git-tag".to_string(),
+            serde_json::json!({"tag-pattern": "^release-"}),
+        );
+        let mut result = CreateGitTagResult {
+            name: CreateGitTagResult::NAME.to_string(),
+            tag_name: "version-1".to_string(),
+            commit: None,
+            message: Some("Version one".to_string()),
+            repository: None,
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!execution.success);
+        assert!(
+            execution
+                .message
+                .contains("does not match required pattern")
         );
     }
 }

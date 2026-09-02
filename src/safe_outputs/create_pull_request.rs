@@ -613,19 +613,6 @@ impl Executor for CreatePrResult {
         ctx: &ExecutionContext,
     ) -> anyhow::Result<ExecutionResult> {
         self.sanitize_content_fields();
-        let target =
-            match crate::safe_outputs::resolve_repository_write_target(Some(&self.repository), ctx)
-            {
-                Ok(target) => target,
-                Err(failure) => return Ok(failure),
-            };
-        if ctx.dry_run {
-            return Ok(ExecutionResult::success(format!(
-                "[DRY-RUN] Would execute: create PR: '{}' in {}",
-                self.title,
-                target.display_name()
-            )));
-        }
         self.execute_impl(ctx).await
     }
 
@@ -705,6 +692,21 @@ impl Executor for CreatePrResult {
             Err(failure) => return Ok(failure),
         };
         debug!("Resolved repository ID: {}", target.repository_locator());
+
+        let resolved_target_branch =
+            config.resolve_target_branch(&repository_alias, &ctx.repo_refs);
+        let all_labels = match validate_and_build_labels(&config, &self.agent_labels) {
+            Ok(labels) => labels,
+            Err(result) => return Ok(result),
+        };
+        if ctx.dry_run {
+            return Ok(ExecutionResult::success(format!(
+                "[DRY-RUN] Would execute: create PR: '{}' in {} targeting '{}'",
+                self.title,
+                target.display_name(),
+                resolved_target_branch
+            )));
+        }
 
         let token = ctx
             .access_token
@@ -836,8 +838,7 @@ impl Executor for CreatePrResult {
         // literal `target-branch`. Resolution is shared with the compiler's
         // prepare-pr-base deepening, so the branch we PR into is the branch that
         // was fetched/deepened.
-        let target_branch = config.resolve_target_branch(&repository_alias, &ctx.repo_refs);
-        let target_branch = target_branch.as_str();
+        let target_branch = resolved_target_branch.as_str();
         let mut source_branch = self.source_branch.clone();
         let mut source_ref = format!("refs/heads/{}", source_branch);
         let target_ref = format!("refs/heads/{}", target_branch);
@@ -1044,11 +1045,7 @@ impl Executor for CreatePrResult {
 
         // Get the target branch ref to find the base commit
         debug!("Getting target branch ref from ADO");
-        let refs_url = format!(
-            "{}/refs?filter=heads/{}&api-version=7.1",
-            repository_api_base(&target),
-            target_branch
-        );
+        let refs_url = format!("{}/refs", repository_api_base(&target));
         debug!("Refs URL: {}", refs_url);
 
         // Resolve the base commit for the push.
@@ -1070,6 +1067,10 @@ impl Executor for CreatePrResult {
             debug!("No recorded base_commit — resolving from ADO refs API");
             let refs_response = client
                 .get(&refs_url)
+                .query(&[
+                    ("filter", format!("heads/{target_branch}")),
+                    ("api-version", "7.1".to_string()),
+                ])
                 .basic_auth("", Some(token))
                 .send()
                 .await
@@ -1101,11 +1102,7 @@ impl Executor for CreatePrResult {
         // Check if the source branch already exists (e.g. from a retry or previous run).
         // Retry with new random suffixes up to 3 times.
         for attempt in 0..3 {
-            let check_ref_url = format!(
-                "{}/refs?filter=heads/{}&api-version=7.1",
-                repository_api_base(&target),
-                source_branch
-            );
+            let check_ref_url = format!("{}/refs", repository_api_base(&target));
             debug!(
                 "Checking if source branch exists (attempt {}): {}",
                 attempt + 1,
@@ -1114,6 +1111,10 @@ impl Executor for CreatePrResult {
 
             let check_ref_response = client
                 .get(&check_ref_url)
+                .query(&[
+                    ("filter", format!("heads/{source_branch}")),
+                    ("api-version", "7.1".to_string()),
+                ])
                 .basic_auth("", Some(token))
                 .send()
                 .await
@@ -1202,12 +1203,6 @@ impl Executor for CreatePrResult {
                     .collect::<Vec<_>>()
             );
         }
-
-        // Validate and add labels (merge operator labels + validated agent labels)
-        let all_labels = match validate_and_build_labels(&config, &self.agent_labels) {
-            Ok(labels) => labels,
-            Err(result) => return Ok(result),
-        };
 
         if !all_labels.is_empty() {
             debug!("Adding {} labels", all_labels.len());
@@ -2714,6 +2709,32 @@ mod tests {
 
         assert!(!execution.success);
         assert!(execution.message.contains("repos.organization"));
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_enforces_agent_label_policy() {
+        let mut ctx = cross_org_ctx(Some("other-org"), true);
+        ctx.dry_run = true;
+        ctx.tool_configs.insert(
+            "create-pull-request".to_string(),
+            serde_json::json!({"allowed-labels": ["approved"]}),
+        );
+        let mut result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: "Fix bug in parser".to_string(),
+            description: "This PR fixes a critical bug in the parser module.".to_string(),
+            source_branch: "agent/fix".to_string(),
+            patch_file: "patch.diff".to_string(),
+            repository: "cross-org-repo".to_string(),
+            agent_labels: vec!["unapproved".to_string()],
+            base_commit: None,
+            patch_sha256: "deadbeef".to_string(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!execution.success);
+        assert!(execution.message.contains("not in allowed-labels"));
     }
 
     #[test]

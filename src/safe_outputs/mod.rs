@@ -9,7 +9,8 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 /// `#` (fragment), `?` (query), `/` (path separator), and space.
 /// This hardens operator-controlled values (project names, wiki names, work item
 /// types) against accidental corruption of the URL structure.
-pub(crate) const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b'#').add(b'?').add(b'/').add(b' ');
+pub(crate) const PATH_SEGMENT: &AsciiSet =
+    &CONTROLS.add(b'#').add(b'?').add(b'/').add(b'%').add(b' ');
 
 /// Safe output tools that are always available regardless of filtering.
 /// These are diagnostic/transparency tools that agents should always have access to.
@@ -304,17 +305,33 @@ pub(crate) fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool 
 /// exact-key arm of [`lookup_allowed_repository_alias`]), so callers may
 /// canonicalize defensively without changing the result.
 ///
-/// **Precedence**: self-identity wins over the alias map. A selector matching
-/// the pipeline repository's name resolves to `"self"` even if an alias of the
-/// same name is configured for a different repository.
+/// **Precedence**: literal `"self"`/empty selects self; an exact checkout alias
+/// selects that alias; name-based matches are accepted only when they identify
+/// exactly one of self or the configured repositories.
 pub(crate) fn canonical_repository_alias(
     repository: &str,
     ctx: &ExecutionContext,
 ) -> Option<String> {
-    if input_refers_to_self(repository, ctx) {
+    if repository == "self" || repository.is_empty() {
         return Some("self".to_string());
     }
-    lookup_allowed_repository_alias(repository, &ctx.allowed_repositories).cloned()
+    if ctx.allowed_repositories.contains_key(repository) {
+        return Some(repository.to_string());
+    }
+
+    let mut matches = Vec::new();
+    if input_refers_to_self(repository, ctx) {
+        matches.push("self".to_string());
+    }
+    for (alias, value) in &ctx.allowed_repositories {
+        let trailing = value.rsplit('/').next().unwrap_or(value);
+        if value.eq_ignore_ascii_case(repository) || trailing.eq_ignore_ascii_case(repository) {
+            matches.push(alias.clone());
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    (matches.len() == 1).then(|| matches.remove(0))
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +479,19 @@ pub(crate) fn resolve_repository_write_target(
             "Repository '{selector}' (checkout alias '{alias}') uses an endpoint-backed \
              Azure Repos checkout but has no `repos.organization`; the target organization \
              cannot be resolved safely."
+        )));
+    }
+    if config.endpoint.is_some()
+        && config
+            .organization
+            .as_deref()
+            .is_some_and(|organization| organization.eq_ignore_ascii_case(current_organization))
+    {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{selector}' (checkout alias '{alias}') uses an endpoint-backed \
+             Azure Repos checkout but declares the pipeline's current organization \
+             '{current_organization}'. Remove the unnecessary endpoint for a same-organization \
+             repository or set `repos.organization` to the actual target organization."
         )));
     }
 
@@ -1342,6 +1372,51 @@ mod tests {
     }
 
     #[test]
+    fn exact_cross_org_alias_wins_over_self_repository_name() {
+        let mut ctx = repository_target_ctx();
+        ctx.repository_name = Some("Current Project/target".to_string());
+        configure_repository_write_context(
+            &mut ctx,
+            &["target".to_string()],
+            vec![RepositoryTargetSpec {
+                alias: "target".to_string(),
+                repo_type: "git".to_string(),
+                name: "Other Project/target-repo".to_string(),
+                organization: Some("other-org".to_string()),
+                endpoint: Some("cross-org-checkout".to_string()),
+            }],
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+            &cross_org_allow(),
+        );
+
+        let target = resolve_repository_write_target(Some("target"), &ctx).unwrap();
+
+        assert_eq!(target.organization, "other-org");
+        assert_eq!(target.repository, "target-repo");
+    }
+
+    #[test]
+    fn repository_name_collision_between_self_and_alias_is_ambiguous() {
+        let mut ctx = repository_target_ctx();
+        ctx.repository_name = Some("Current Project/shared".to_string());
+        configure_repository_write_context(
+            &mut ctx,
+            &["other".to_string()],
+            vec![RepositoryTargetSpec {
+                alias: "other".to_string(),
+                repo_type: "git".to_string(),
+                name: "Other Project/shared".to_string(),
+                organization: None,
+                endpoint: None,
+            }],
+            None,
+            &[],
+        );
+
+        assert!(canonical_repository_alias("shared", &ctx).is_none());
+    }
+
+    #[test]
     fn repository_write_target_rejects_incomplete_or_unauthorized_cross_org() {
         for (organization, connection_type, allow, expected) in [
             (
@@ -1381,6 +1456,40 @@ mod tests {
             let error = resolve_repository_write_target(Some("target"), &ctx).unwrap_err();
             assert!(error.message.contains(expected), "{}", error.message);
         }
+    }
+
+    #[test]
+    fn repository_write_target_rejects_endpoint_declared_as_current_org() {
+        let mut ctx = repository_target_ctx();
+        configure_repository_write_context(
+            &mut ctx,
+            &["target".to_string()],
+            vec![RepositoryTargetSpec {
+                alias: "target".to_string(),
+                repo_type: "git".to_string(),
+                name: "Other Project/target-repo".to_string(),
+                organization: Some("current-org".to_string()),
+                endpoint: Some("cross-org-checkout".to_string()),
+            }],
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+            &cross_org_allow(),
+        );
+
+        let error = resolve_repository_write_target(Some("target"), &ctx).unwrap_err();
+
+        assert!(error.message.contains("declares the pipeline's current organization"));
+    }
+
+    #[test]
+    fn path_segment_encodes_literal_percent_sequences() {
+        assert_eq!(
+            utf8_percent_encode("Project%2FArchive", PATH_SEGMENT).to_string(),
+            "Project%252FArchive"
+        );
+        assert_eq!(
+            utf8_percent_encode("Repo%23Name%3F", PATH_SEGMENT).to_string(),
+            "Repo%2523Name%253F"
+        );
     }
 
     #[test]

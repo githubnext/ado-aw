@@ -199,31 +199,12 @@ impl Executor for CreateBranchResult {
         ctx: &ExecutionContext,
     ) -> anyhow::Result<ExecutionResult> {
         self.sanitize_content_fields();
-        let target = match crate::safe_outputs::resolve_repository_write_target(
-            self.repository.as_deref(),
-            ctx,
-        ) {
-            Ok(target) => target,
-            Err(failure) => return Ok(failure),
-        };
-        if ctx.dry_run {
-            return Ok(ExecutionResult::success(format!(
-                "[DRY-RUN] Would execute: create branch '{}' in {}",
-                self.branch_name,
-                target.display_name()
-            )));
-        }
         self.execute_impl(ctx).await
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating branch: '{}'", self.branch_name);
         debug!("create-branch: branch_name='{}'", self.branch_name);
-
-        let token = ctx
-            .access_token
-            .as_ref()
-            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
 
         let config: CreateBranchConfig = ctx.get_tool_config("create-branch")?;
         debug!("Branch pattern: {:?}", config.branch_pattern);
@@ -285,6 +266,18 @@ impl Executor for CreateBranchResult {
             )));
         }
 
+        if ctx.dry_run {
+            return Ok(ExecutionResult::success(format!(
+                "[DRY-RUN] Would execute: create branch '{}' in {}",
+                self.branch_name,
+                target.display_name()
+            )));
+        }
+
+        let token = ctx
+            .access_token
+            .as_ref()
+            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         let client = reqwest::Client::new();
 
         // Resolve the source commit SHA
@@ -662,6 +655,38 @@ allowed-source-branches:
                 .contains("other-org/Other Project/target-repo"),
             "{}",
             execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_enforces_branch_pattern() {
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
+            ado_organization: Some("current-org".to_string()),
+            ado_project: Some("Current Project".to_string()),
+            repository_name: Some("self-repo".to_string()),
+            dry_run: true,
+            ..Default::default()
+        };
+        ctx.tool_configs.insert(
+            "create-branch".to_string(),
+            serde_json::json!({"branch-pattern": "^release/"}),
+        );
+        let mut result = CreateBranchResult {
+            name: CreateBranchResult::NAME.to_string(),
+            branch_name: "feature/not-allowed".to_string(),
+            source_branch: Some("main".to_string()),
+            source_commit: None,
+            repository: None,
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!execution.success);
+        assert!(
+            execution
+                .message
+                .contains("does not match required pattern")
         );
     }
 }
