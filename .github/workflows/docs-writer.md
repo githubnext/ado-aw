@@ -121,6 +121,12 @@ Prioritize opportunities such as:
 
 Reject trivial churn (pure wording nitpicks, cosmetic edits with no reader value).
 
+After selecting a candidate improvement, search all open pull requests for one
+that already materially addresses the same documentation gap. Compare its title,
+body, changed files, and diff as needed; overlapping files alone do not make it a
+duplicate. If such a PR exists, make no changes and emit `noop` citing its PR
+number.
+
 ## Step 3 — Make One Focused Improvement
 
 Choose exactly one cohesive change set per run:
