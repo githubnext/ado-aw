@@ -71,8 +71,9 @@ describe("renderSourceMarkdown", () => {
 
     expect(md).toContain("permissions:");
     expect(md).toContain('"connection-type":"azureDevOps"');
-    expect(md).toContain('"organization":"other-org"');
-    expect(md).toContain('"endpoint":"ado-write"');
+    expect(md).toContain(
+      '  - {"name":"Other Project/target-repo","alias":"target","organization":"other-org","endpoint":"ado-write"}',
+    );
   });
 });
 
