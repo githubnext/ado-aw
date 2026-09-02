@@ -82,7 +82,9 @@ function oneLine(value: unknown, maxLength = 500): string {
 }
 
 function sameAdoName(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
+  const foldAscii = (value: string): string =>
+    value.replace(/[A-Z]/g, (character) => character.toLowerCase());
+  return foldAscii(left) === foldAscii(right);
 }
 
 function flushPending(

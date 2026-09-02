@@ -223,6 +223,7 @@ describe("prepare-pr-base main", () => {
       { SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/" },
       deps,
     );
+    expect(rc).toBe(0);
     const fetches = calls.filter((call) => call.args[0] === "fetch");
     expect(fetches).toHaveLength(1);
     expect(fetches[0]!.args).toContain("--depth=200");
@@ -339,6 +340,32 @@ describe("prepare-pr-base main", () => {
           organization: "other-org",
           project: "Other Project",
           repository: "repo",
+        }],
+        fallbackTarget: "main",
+      },
+      { SYSTEM_ACCESSTOKEN: "must-not-leak" },
+      deps,
+    );
+
+    expect(getCommitDiffMetadata).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.args[0] === "fetch")).toBe(false);
+    expect(rc).toBe(1);
+  });
+
+  it("rejects Unicode names that JavaScript lowercases to an ASCII identifier", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls, getCommitDiffMetadata } = dependencies({
+      remote: "https://dev.azure.com/other-org/Other%20Project/_git/%E2%84%AAepo",
+    });
+    const rc = await main(
+      {
+        mode: "patch-base",
+        repos: [{
+          dir: "/src",
+          target: "main",
+          organization: "other-org",
+          project: "Other Project",
+          repository: "kepo",
         }],
         fallbackTarget: "main",
       },

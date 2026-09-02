@@ -267,7 +267,7 @@ verify the first certificate`.
 
 ### Credential delivery
 
-`generate_acquire_ado_token` emits an `AzureCLI@2`
+`acquire_ado_token_step` emits an `AzureCLI@3`
 step that mints an ADO-audience token from the ARM service connection and stores
 it as the secret pipeline variable `SC_READ_TOKEN`.
 

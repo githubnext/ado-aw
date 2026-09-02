@@ -497,7 +497,7 @@ pub(crate) fn build_pipeline_context(
             .and_then(|p| p.read.as_ref())
             .map(crate::compile::types::ReadPermissionConfig::service_connection),
         crate::compile::types::WriteConnectionType::AzureRm,
-        "SC_READ_TOKEN",
+        common::AdoTokenVariable::Read,
     );
     let write_permission = front_matter
         .permissions
@@ -508,7 +508,7 @@ pub(crate) fn build_pipeline_context(
         write_permission
             .map(crate::compile::types::WritePermissionConfig::connection_type)
             .unwrap_or_default(),
-        "SC_WRITE_TOKEN",
+        common::AdoTokenVariable::Write,
     );
     // Skip integrity check resolution
     let skip_integrity = skip_integrity

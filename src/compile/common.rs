@@ -2694,16 +2694,21 @@ printf '##vso[task.setvariable variable=SC_WRITE_TOKEN;issecret=true]%s\n' "$ADO
 }
 
 /// Generate a typed AzureCLI@3 step that mints an ADO-scoped token.
+#[derive(Clone, Copy)]
+pub enum AdoTokenVariable {
+    Read,
+    Write,
+}
+
 pub fn acquire_ado_token_step(
     service_connection: Option<&str>,
     connection_type: crate::compile::types::WriteConnectionType,
-    variable_name: &str,
+    variable: AdoTokenVariable,
 ) -> Option<crate::compile::ir::step::Step> {
     let service_connection = service_connection?;
-    let script_def = match variable_name {
-        "SC_READ_TOKEN" => &ACQUIRE_ADO_READ_TOKEN,
-        "SC_WRITE_TOKEN" => &ACQUIRE_ADO_WRITE_TOKEN,
-        _ => panic!("unsupported compiler-owned ADO token variable {variable_name:?}"),
+    let (script_def, variable_name) = match variable {
+        AdoTokenVariable::Read => (&ACQUIRE_ADO_READ_TOKEN, "SC_READ_TOKEN"),
+        AdoTokenVariable::Write => (&ACQUIRE_ADO_WRITE_TOKEN, "SC_WRITE_TOKEN"),
     };
     let connection = match connection_type {
         crate::compile::types::WriteConnectionType::AzureRm => {
@@ -6405,14 +6410,14 @@ safe-outputs:
 
     // ─── format_step_yaml / format_step_yaml_indented ────────────────────────
 
-    // ─── generate_acquire_ado_token ──────────────────────────────────────────
+    // ─── acquire_ado_token_step ──────────────────────────────────────────────
 
     #[test]
     fn test_generate_acquire_ado_token_with_sc() {
         let Some(crate::compile::ir::step::Step::Task(task)) = acquire_ado_token_step(
             Some("my-arm-sc"),
             crate::compile::types::WriteConnectionType::AzureRm,
-            "SC_READ_TOKEN",
+            AdoTokenVariable::Read,
         ) else {
             panic!("expected token task");
         };
@@ -6436,7 +6441,7 @@ safe-outputs:
             acquire_ado_token_step(
                 None,
                 crate::compile::types::WriteConnectionType::AzureRm,
-                "SC_READ_TOKEN"
+                AdoTokenVariable::Read
             )
             .is_none()
         );
@@ -6447,7 +6452,7 @@ safe-outputs:
         let Some(crate::compile::ir::step::Step::Task(task)) = acquire_ado_token_step(
             Some("write-sc"),
             crate::compile::types::WriteConnectionType::AzureDevOps,
-            "SC_WRITE_TOKEN",
+            AdoTokenVariable::Write,
         ) else {
             panic!("expected token task");
         };

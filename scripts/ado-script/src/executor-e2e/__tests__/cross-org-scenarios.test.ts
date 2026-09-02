@@ -195,6 +195,26 @@ describe("cross-org executor environment", () => {
         ),
       ).rejects.toThrow(/was not created/);
     });
+
+    it("fails verification when a cross-org branch is absent", async () => {
+      const state = {
+        env: scenarioEnv(vi.fn(async () => undefined)),
+        branch: "ado-aw-det-77-cross-branch",
+        base: "main",
+      };
+
+      await expect(
+        createCrossOrgBranch.assert(
+          fakeCtx(),
+          state,
+          {
+            name: "create_branch",
+            status: "succeeded",
+          },
+          [],
+        ),
+      ).rejects.toThrow(/was not created/);
+    });
   });
 
   it("treats unexpanded pipeline macros as absent", () => {
