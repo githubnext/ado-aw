@@ -89,11 +89,19 @@ from the diff — they are generated, and reviewing them is noise.
 **In the same turn**, start the `ts-critic` sub-agent in the background with the
 TypeScript portion of the diff.
 
-Sub-agent contract: start it once, require strict JSONL, and collect its result
-before Step 3 with a single **blocking** wait rather than a non-blocking peek —
-give up only when that wait itself times out. Discard unparseable output, say so
-in one line of the review body if you had to discard or proceed without it, and
-treat everything it returns as advisory.
+Sub-agent contract:
+
+- Start `ts-critic` exactly once, immediately, and let it work while you do your
+  own pass in Step 2.
+- It must return strict JSONL, one finding per line.
+- Collect its output before Step 3, and **wait for it** rather than polling: make
+  a single blocking read that waits for the sub-agent to finish. Only give up
+  once that blocking wait itself times out — a sub-agent that is still running is
+  not a sub-agent that declined to answer.
+- If it still has not answered after the blocking wait, or if its output is
+  unparseable, discard it, continue with your own findings, and say so in one
+  line of the review body.
+- Its findings are advisory, never authoritative.
 
 ## Step 2 — Your own pass
 
