@@ -56,7 +56,7 @@ The toggle exists in three places (most specific wins):
   Settings.
 
 If `permissions.write:` is set in the agent's front matter, Stage 3
-uses the **ARM service connection's identity** instead, and none of
+uses the configured **service connection's identity** instead, and none of
 the above applies — see [Option 1](#option-1-wire-a-write-service-connection-recommended).
 
 ## Decoding the permission bitmask
@@ -180,9 +180,7 @@ Pick exactly one — they are alternatives.
 
 ### Option 1: Wire a write service connection (recommended)
 
-Add an ARM service connection whose backing identity has the
-required permission on the target repository, and reference it in
-the agent's front matter:
+Use scalar `permissions.write` for an Azure Resource Manager connection:
 
 ```yaml
 permissions:
@@ -190,12 +188,27 @@ permissions:
   write: ado-aw-write      # used by Stage 3
 ```
 
+For cross-organization repository writes, use an Azure DevOps WIF connection
+and explicit scope:
+
+```yaml
+permissions:
+  write:
+    service-connection: ado-repository-writer
+    connection-type: azureDevOps
+    allow:
+      - organization: other-org
+        projects:
+          - project: Other Project
+            repositories: [target-repo]
+```
+
 Stage 3 mints its token via the connection instead of using
 `$(System.AccessToken)`, so the build-service ACEs become
 irrelevant. Audit logs attribute every write to the named service
 principal; the least-privilege grant lives entirely on that
-principal. This is the only option that works for **cross-org**
-writes.
+principal. The expanded Azure DevOps form is the supported option for
+**cross-org repository** writes.
 
 See [Service Connections](/ado-aw/setup/service-connections/) for
 the full setup steps.
@@ -243,7 +256,7 @@ deliberate; broadening it should be a conscious decision.
 
 | HTTP | Body fragment | Most likely cause |
 |---|---|---|
-| 401 | `TF400813: ... is not authorized` | Token mint failed (check the AzureCLI@2 step), or token is malformed |
+| 401 | `TF400813: ... is not authorized` | Token mint failed (check the AzureCLI@3 step), connection type is wrong, or token is malformed |
 | 403 | `TF401027: ... 'PullRequestContribute'` | This page |
 | 403 | `TF401027: ... 'GenericContribute'` | Same; need `Contribute` (e.g. `create-pull-request` / `create-branch`) |
 | 403 | `VS800075: The project ... does not exist` | Cross-project request blocked because the auth-scope toggle is ON. Use Option 1 with a cross-project-capable service connection |

@@ -79,10 +79,13 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   shallow source/target ranges and verifies the base locally. Ineligible or
   unavailable REST falls back to bounded dual-ref depths 200/500/2000, never an
   automatic full-history fetch. SafeOutputs `target-worktree` mode fetches only
-  the target tip at depth 1. Each allowed repo is passed as a typed
-  `--repo-dir` / `--source-ref` / `--target-branch` tuple; per-dir failures are
-  isolated and surfaced as ADO warnings. The bearer
-  (`SYSTEM_ACCESSTOKEN`) remains in masked env and spawned-git
+  the target tip at depth 1. Cross-org repositories are partitioned into a
+  separate trusted credential scope and passed with validated
+  organization/project/repository coordinates. The checkout remote must match
+  those coordinates exactly before the Bearer reaches REST or git; mismatch or
+  preparation failure stops the trusted task before Agent/executor execution.
+  Same-org per-dir failures remain isolated warnings. The bearer remains
+  shell-local or in masked `SYSTEM_ACCESSTOKEN` env and spawned-git
   `GIT_CONFIG_*`, never argv or `.git/config`. Runs outside AWF. See
   [`safe-outputs.md`](safe-outputs.md#create-pull-request).
 

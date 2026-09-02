@@ -111,7 +111,11 @@ network:
 
 ## Permissions (ADO Access Tokens)
 
-ADO does not support fine-grained permissions -- there are two access levels: blanket read and blanket write. ARM service connections are used to mint scoped tokens for the agent (`permissions.read`) and optionally for the executor (`permissions.write`). The Stage 3 executor also uses the pipeline's built-in `$(System.AccessToken)` as its default write token when no `permissions.write` override is configured.
+Service connections mint ADO-audience tokens for trusted pipeline roles.
+Scalar permission values refer to Azure Resource Manager connections;
+expanded `permissions.write` can select an Azure DevOps connection for scoped
+cross-organization repository writes. Stage 3 uses
+`$(System.AccessToken)` when no write override is configured.
 
 **Note:** The trigger filter gate step (Setup job) uses `System.AccessToken`
 for two purposes: (1) self-cancelling the build when filters don't match
@@ -131,7 +135,11 @@ permissions:
 ### Security Model
 
 - **`permissions.read`**: Mints a read-only ADO-scoped token given to the agent inside the AWF sandbox (Stage 1). The agent can query ADO APIs but cannot write.
-- **`permissions.write`** *(optional)*: Overrides the Stage 3 executor's default `$(System.AccessToken)` with an ARM-minted write token (`SC_WRITE_TOKEN`). Use this for cross-org or cross-project writes, or when you need the action attributed to a named service principal rather than the pipeline's build service identity.
+- **`permissions.write`** *(optional)*: Overrides Stage 3's
+  `$(System.AccessToken)` with `SC_WRITE_TOKEN`. Scalar form uses
+  `connectionType: azureRM`. Expanded form supports
+  `connection-type: azureDevOps` plus a deny-by-default
+  organization/project/repository allow tree for cross-org repository writes.
 - **Both omitted**: The agent has no ADO API access. Stage 3 still uses `$(System.AccessToken)` for write operations (sufficient for most same-project safe outputs).
 
 ### Examples
@@ -149,4 +157,15 @@ permissions:
 # No ADO API read for agent; executor writes via named ARM identity
 permissions:
   write: my-write-sc
+
+# Cross-org PR, branch, or tag writes through an Azure DevOps WIF connection
+permissions:
+  write:
+    service-connection: ado-repository-writer
+    connection-type: azureDevOps
+    allow:
+      - organization: other-org
+        projects:
+          - project: Other Project
+            repositories: [target-repo]
 ```
