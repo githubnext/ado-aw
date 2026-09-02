@@ -154,6 +154,7 @@ async fn resolve_reviewer_identity(
     client: &reqwest::Client,
     organization: &str,
     token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
     reviewer: &str,
 ) -> Option<String> {
     if is_reviewer_guid(reviewer) {
@@ -178,12 +179,14 @@ async fn resolve_reviewer_identity(
         }
     });
 
-    let resp = match client
-        .post(&identity_url)
-        .basic_auth("", Some(token))
-        .json(&query_body)
-        .send()
-        .await
+    let resp = match crate::safe_outputs::authenticate_ado_request(
+        client.post(&identity_url),
+        token,
+        connection_type,
+    )
+    .json(&query_body)
+    .send()
+    .await
     {
         Ok(resp) => resp,
         Err(e) => {
@@ -1065,16 +1068,17 @@ impl Executor for CreatePrResult {
             recorded.clone()
         } else {
             debug!("No recorded base_commit — resolving from ADO refs API");
-            let refs_response = client
-                .get(&refs_url)
-                .query(&[
+            let refs_response = crate::safe_outputs::authenticate_ado_request(
+                client.get(&refs_url).query(&[
                     ("filter", format!("heads/{target_branch}")),
                     ("api-version", "7.1".to_string()),
-                ])
-                .basic_auth("", Some(token))
-                .send()
-                .await
-                .context("Failed to get target branch ref")?;
+                ]),
+                token,
+                ctx.write_connection_type,
+            )
+            .send()
+            .await
+            .context("Failed to get target branch ref")?;
 
             if !refs_response.status().is_success() {
                 let status = refs_response.status();
@@ -1109,16 +1113,17 @@ impl Executor for CreatePrResult {
                 check_ref_url
             );
 
-            let check_ref_response = client
-                .get(&check_ref_url)
-                .query(&[
+            let check_ref_response = crate::safe_outputs::authenticate_ado_request(
+                client.get(&check_ref_url).query(&[
                     ("filter", format!("heads/{source_branch}")),
                     ("api-version", "7.1".to_string()),
-                ])
-                .basic_auth("", Some(token))
-                .send()
-                .await
-                .context("Failed to check source branch existence")?;
+                ]),
+                token,
+                ctx.write_connection_type,
+            )
+            .send()
+            .await
+            .context("Failed to check source branch existence")?;
 
             if check_ref_response.status().is_success() {
                 let check_data: serde_json::Value = check_ref_response.json().await?;
@@ -1147,6 +1152,7 @@ impl Executor for CreatePrResult {
             client: &client,
             push_url: &push_url,
             token,
+            connection_type: ctx.write_connection_type,
             source_branch,
             source_ref,
             changes: &changes,
@@ -1214,13 +1220,15 @@ impl Executor for CreatePrResult {
             );
         }
 
-        let pr_response = client
-            .post(&pr_url)
-            .basic_auth("", Some(token))
-            .json(&pr_body)
-            .send()
-            .await
-            .context("Failed to create pull request")?;
+        let pr_response = crate::safe_outputs::authenticate_ado_request(
+            client.post(&pr_url),
+            token,
+            ctx.write_connection_type,
+        )
+        .json(&pr_body)
+        .send()
+        .await
+        .context("Failed to create pull request")?;
 
         if !pr_response.status().is_success() {
             let status = pr_response.status();
@@ -1286,6 +1294,7 @@ impl Executor for CreatePrResult {
             target: &target,
             pr_id,
             token,
+            connection_type: ctx.write_connection_type,
         };
         set_pr_completion_options(&pr_ctx, pr_data["createdBy"]["id"].as_str()).await;
         add_reviewers_to_pr(&pr_ctx).await;
@@ -1500,6 +1509,7 @@ struct PushBranchParams<'a> {
     client: &'a reqwest::Client,
     push_url: &'a str,
     token: &'a str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
     source_branch: String,
     source_ref: String,
     changes: &'a [serde_json::Value],
@@ -1518,6 +1528,7 @@ async fn push_new_branch(
         client,
         push_url,
         token,
+        connection_type,
         mut source_branch,
         mut source_ref,
         changes,
@@ -1530,13 +1541,15 @@ async fn push_new_branch(
         serde_json::to_string_pretty(&push_body).unwrap_or_default()
     );
 
-    let push_response = client
-        .post(push_url)
-        .basic_auth("", Some(token))
-        .json(&push_body)
-        .send()
-        .await
-        .context("Failed to push changes")?;
+    let push_response = crate::safe_outputs::authenticate_ado_request(
+        client.post(push_url),
+        token,
+        connection_type,
+    )
+    .json(&push_body)
+    .send()
+    .await
+    .context("Failed to push changes")?;
 
     if push_response.status().is_success() {
         return Ok(Ok((source_branch, source_ref)));
@@ -1556,13 +1569,15 @@ async fn push_new_branch(
         info!("Retrying push with branch '{}'", source_branch);
 
         let retry_body = build_push_payload(&source_ref, effective_title, changes, base_commit);
-        let retry_response = client
-            .post(push_url)
-            .basic_auth("", Some(token))
-            .json(&retry_body)
-            .send()
-            .await
-            .context("Failed to push changes (retry)")?;
+        let retry_response = crate::safe_outputs::authenticate_ado_request(
+            client.post(push_url),
+            token,
+            connection_type,
+        )
+        .json(&retry_body)
+        .send()
+        .await
+        .context("Failed to push changes (retry)")?;
 
         if !retry_response.status().is_success() {
             let retry_status = retry_response.status();
@@ -1698,6 +1713,7 @@ struct PrContext<'a> {
     target: &'a crate::safe_outputs::result::AdoRepositoryTarget,
     pr_id: i64,
     token: &'a str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
 }
 
 /// Set PR completion options (delete-source-branch, squash-merge) and optionally
@@ -1733,13 +1749,14 @@ async fn set_pr_completion_options(ctx: &PrContext<'_>, pr_created_by_id: Option
         }
     }
 
-    match ctx
-        .client
-        .patch(&pr_update_url)
-        .basic_auth("", Some(ctx.token))
-        .json(&update_body)
-        .send()
-        .await
+    match crate::safe_outputs::authenticate_ado_request(
+        ctx.client.patch(&pr_update_url),
+        ctx.token,
+        ctx.connection_type,
+    )
+    .json(&update_body)
+    .send()
+    .await
     {
         Ok(resp) if resp.status().is_success() => {
             debug!("PR completion options set successfully");
@@ -1771,6 +1788,7 @@ async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
             ctx.client,
             &ctx.target.organization,
             ctx.token,
+            ctx.connection_type,
             reviewer,
         )
         .await
@@ -1793,13 +1811,14 @@ async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
         );
         let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
 
-        match ctx
-            .client
-            .put(&reviewer_url)
-            .basic_auth("", Some(ctx.token))
-            .json(&reviewer_body)
-            .send()
-            .await
+        match crate::safe_outputs::authenticate_ado_request(
+            ctx.client.put(&reviewer_url),
+            ctx.token,
+            ctx.connection_type,
+        )
+        .json(&reviewer_body)
+        .send()
+        .await
         {
             Ok(resp) if resp.status().is_success() => {
                 debug!(

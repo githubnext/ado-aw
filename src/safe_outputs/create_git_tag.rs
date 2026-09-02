@@ -132,6 +132,7 @@ async fn resolve_head_commit(
     org_url: &str,
     project: &str,
     token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
     repo_name: &str,
 ) -> anyhow::Result<String> {
     // First, discover the default branch from the repository metadata
@@ -143,12 +144,14 @@ async fn resolve_head_commit(
     );
     debug!("Fetching repository metadata: {}", repo_url);
 
-    let repo_response = client
-        .get(&repo_url)
-        .basic_auth("", Some(token))
-        .send()
-        .await
-        .context("Failed to query repository metadata")?;
+    let repo_response = crate::safe_outputs::authenticate_ado_request(
+        client.get(&repo_url),
+        token,
+        connection_type,
+    )
+    .send()
+    .await
+    .context("Failed to query repository metadata")?;
 
     ensure!(
         repo_response.status().is_success(),
@@ -185,13 +188,16 @@ async fn resolve_head_commit(
 
     debug!("Resolving HEAD commit via: {}", url);
 
-    let response = client
-        .get(&url)
-        .query(&[("filter", branch_filter), ("api-version", "7.1")])
-        .basic_auth("", Some(token))
-        .send()
-        .await
-        .context("Failed to query refs for HEAD resolution")?;
+    let response = crate::safe_outputs::authenticate_ado_request(
+        client
+            .get(&url)
+            .query(&[("filter", branch_filter), ("api-version", "7.1")]),
+        token,
+        connection_type,
+    )
+    .send()
+    .await
+    .context("Failed to query refs for HEAD resolution")?;
 
     ensure!(
         response.status().is_success(),
@@ -299,6 +305,7 @@ impl Executor for CreateGitTagResult {
                     &target.organization_url,
                     &target.project,
                     token,
+                    ctx.write_connection_type,
                     target.repository_locator(),
                 )
                 .await?
@@ -332,14 +339,15 @@ impl Executor for CreateGitTagResult {
         });
 
         info!("Sending annotated tag creation request to ADO");
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send request to Azure DevOps")?;
+        let response = crate::safe_outputs::authenticate_ado_request(
+            client.post(&url).header("Content-Type", "application/json"),
+            token,
+            ctx.write_connection_type,
+        )
+        .json(&body)
+        .send()
+        .await
+        .context("Failed to send request to Azure DevOps")?;
 
         if response.status().is_success() {
             let resp_body: serde_json::Value = response

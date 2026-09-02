@@ -351,6 +351,18 @@ pub(crate) fn repository_write_scope_key(
     format!("{organization}/{project}/{repository}").to_ascii_lowercase()
 }
 
+pub(crate) fn authenticate_ado_request(
+    request: reqwest::RequestBuilder,
+    token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
+) -> reqwest::RequestBuilder {
+    if connection_type == Some(crate::compile::types::WriteConnectionType::AzureDevOps) {
+        request.bearer_auth(token)
+    } else {
+        request.basic_auth("", Some(token))
+    }
+}
+
 pub(crate) fn configure_repository_write_context(
     ctx: &mut ExecutionContext,
     checkout: &[String],
@@ -1493,6 +1505,40 @@ mod tests {
     }
 
     #[test]
+    fn ado_request_auth_matches_connection_type() {
+        let client = reqwest::Client::new();
+        let bearer = authenticate_ado_request(
+            client.get("https://example.test"),
+            "entra-token",
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            bearer
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer entra-token")
+        );
+
+        let basic = authenticate_ado_request(
+            client.get("https://example.test"),
+            "pat-token",
+            Some(crate::compile::types::WriteConnectionType::AzureRm),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            basic
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Basic OnBhdC10b2tlbg==")
+        );
+    }
+
+    #[test]
     fn test_resolve_repository_checkout_dir_distinguishes_root_and_self() {
         let mut ctx = ctx_with(Some("4x4/current-repo"), sample_allowed());
         ctx.source_directory = std::path::PathBuf::from("checkout-root");
@@ -1542,20 +1588,23 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_repo_name_self_by_repository_name() {
+    fn test_resolve_repo_name_rejects_self_alias_name_collision() {
         let ctx = ctx_with(Some("4x4/sdk-FtdiDeviceControl"), sample_allowed());
-        // Trailing-name match on ctx.repository_name (case-insensitive)
+        for selector in [
+            "sdk-FtdiDeviceControl",
+            "sdk-ftdidevicecontrol",
+            "4X4/sdk-ftdidevicecontrol",
+        ] {
+            let error = resolve_repo_name(Some(selector), &ctx).unwrap_err();
+            assert!(
+                error.message.contains("not in the allowed repository list"),
+                "{}",
+                error.message
+            );
+        }
+        // Exact checkout aliases still win over name-based ambiguity.
         assert_eq!(
-            resolve_repo_name(Some("sdk-FtdiDeviceControl"), &ctx).unwrap(),
-            "4x4/sdk-FtdiDeviceControl"
-        );
-        assert_eq!(
-            resolve_repo_name(Some("sdk-ftdidevicecontrol"), &ctx).unwrap(),
-            "4x4/sdk-FtdiDeviceControl"
-        );
-        // Full-value match on ctx.repository_name (case-insensitive)
-        assert_eq!(
-            resolve_repo_name(Some("4X4/sdk-ftdidevicecontrol"), &ctx).unwrap(),
+            resolve_repo_name(Some("repo-sdk-ftdidevicecontrol"), &ctx).unwrap(),
             "4x4/sdk-FtdiDeviceControl"
         );
     }

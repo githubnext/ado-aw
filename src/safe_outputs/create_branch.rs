@@ -135,6 +135,7 @@ async fn resolve_branch_to_commit(
     org_url: &str,
     project: &str,
     token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
     repo_name: &str,
     branch: &str,
 ) -> anyhow::Result<String> {
@@ -146,16 +147,17 @@ async fn resolve_branch_to_commit(
     );
     debug!("Resolving branch '{}' via: {}", branch, url);
 
-    let response = client
-        .get(&url)
-        .query(&[
+    let response = crate::safe_outputs::authenticate_ado_request(
+        client.get(&url).query(&[
             ("filter", format!("heads/{}", branch).as_str()),
             ("api-version", "7.1"),
-        ])
-        .basic_auth("", Some(token))
-        .send()
-        .await
-        .context("Failed to query refs API")?;
+        ]),
+        token,
+        connection_type,
+    )
+    .send()
+    .await
+    .context("Failed to query refs API")?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -291,6 +293,7 @@ impl Executor for CreateBranchResult {
                 &target.organization_url,
                 &target.project,
                 token,
+                ctx.write_connection_type,
                 target.repository_locator(),
                 source_branch,
             )
@@ -321,14 +324,15 @@ impl Executor for CreateBranchResult {
         }]);
 
         info!("Creating branch '{}' from commit {}", ref_name, source_sha);
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&ref_updates)
-            .send()
-            .await
-            .context("Failed to send request to Azure DevOps")?;
+        let response = crate::safe_outputs::authenticate_ado_request(
+            client.post(&url).header("Content-Type", "application/json"),
+            token,
+            ctx.write_connection_type,
+        )
+        .json(&ref_updates)
+        .send()
+        .await
+        .context("Failed to send request to Azure DevOps")?;
 
         if response.status().is_success() {
             let body: serde_json::Value = response
