@@ -194,23 +194,36 @@ impl Executor for CreateBranchResult {
         format!("create branch '{}'", self.branch_name)
     }
 
+    async fn execute_sanitized(
+        &mut self,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<ExecutionResult> {
+        self.sanitize_content_fields();
+        let target = match crate::safe_outputs::resolve_repository_write_target(
+            self.repository.as_deref(),
+            ctx,
+        ) {
+            Ok(target) => target,
+            Err(failure) => return Ok(failure),
+        };
+        if ctx.dry_run {
+            return Ok(ExecutionResult::success(format!(
+                "[DRY-RUN] Would execute: create branch '{}' in {}",
+                self.branch_name,
+                target.display_name()
+            )));
+        }
+        self.execute_impl(ctx).await
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating branch: '{}'", self.branch_name);
         debug!("create-branch: branch_name='{}'", self.branch_name);
 
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
         let token = ctx
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        debug!("ADO org: {}, project: {}", org_url, project);
 
         let config: CreateBranchConfig = ctx.get_tool_config("create-branch")?;
         debug!("Branch pattern: {:?}", config.branch_pattern);
@@ -250,20 +263,13 @@ impl Executor for CreateBranchResult {
             )));
         }
 
-        // Resolve the alias to the actual ADO repo name
-        let repo_name = if repo_alias == "self" {
-            ctx.repository_name
-                .as_deref()
-                .context("BUILD_REPOSITORY_NAME not set")?
-                .to_string()
-        } else {
-            crate::safe_outputs::lookup_allowed_repository(repo_alias, &ctx.allowed_repositories)
-                .cloned()
-                .context(format!(
-                    "Repository alias '{}' is not in the allowed checkout list",
-                    repo_alias
-                ))?
-        };
+        let target =
+            match crate::safe_outputs::resolve_repository_write_target(Some(repo_alias), ctx) {
+                Ok(target) => target,
+                Err(failure) => return Ok(failure),
+            };
+        let repo_name = target.qualified_repository();
+        debug!("Resolved repository target: {}", target.display_name());
         debug!("Resolved repository: {}", repo_name);
 
         // Validate source_branch against allowed-source-branches (if configured)
@@ -287,17 +293,24 @@ impl Executor for CreateBranchResult {
             commit.clone()
         } else {
             debug!("Resolving source branch '{}' to commit", source_branch);
-            resolve_branch_to_commit(&client, org_url, project, token, &repo_name, source_branch)
-                .await?
+            resolve_branch_to_commit(
+                &client,
+                &target.organization_url,
+                &target.project,
+                token,
+                target.repository_locator(),
+                source_branch,
+            )
+            .await?
         };
         debug!("Source commit SHA: {}", source_sha);
 
         // Build the refs update URL
         let url = format!(
             "{}/{}/_apis/git/repositories/{}/refs?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            utf8_percent_encode(&repo_name, PATH_SEGMENT),
+            target.organization_url,
+            utf8_percent_encode(&target.project, PATH_SEGMENT),
+            utf8_percent_encode(target.repository_locator(), PATH_SEGMENT),
         );
         debug!("API URL: {}", url);
 
@@ -368,7 +381,8 @@ impl Executor for CreateBranchResult {
                     "ref": ref_name,
                     "repository": repo_name,
                     "source_commit": source_sha,
-                    "project": project,
+                    "project": target.project,
+                    "organization": target.organization,
                 }),
             ))
         } else {
@@ -598,6 +612,56 @@ allowed-source-branches:
             repository.contains("`##vso[`"),
             "repository pipeline command should be neutralized with backticks: {}",
             repository
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_resolves_cross_org_target() {
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
+            ado_organization: Some("current-org".to_string()),
+            ado_project: Some("Current Project".to_string()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let allow = vec![crate::compile::types::AdoOrganizationScope {
+            organization: crate::secure::AdoOrganization::parse("other-org").unwrap(),
+            projects: vec![crate::compile::types::AdoProjectScope {
+                project: crate::secure::AdoProject::parse("Other Project").unwrap(),
+                project_id: None,
+                repositories: vec![crate::secure::AdoRepository::parse("target-repo").unwrap()],
+            }],
+        }];
+        crate::safe_outputs::configure_repository_write_context(
+            &mut ctx,
+            &["target".to_string()],
+            vec![crate::safe_outputs::RepositoryTargetSpec {
+                alias: "target".to_string(),
+                repo_type: "git".to_string(),
+                name: "Other Project/target-repo".to_string(),
+                organization: Some("other-org".to_string()),
+                endpoint: Some("cross-org-checkout".to_string()),
+            }],
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+            &allow,
+        );
+        let mut result = CreateBranchResult {
+            name: CreateBranchResult::NAME.to_string(),
+            branch_name: "feature/cross-org".to_string(),
+            source_branch: Some("main".to_string()),
+            source_commit: None,
+            repository: Some("target".to_string()),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(execution.success, "{}", execution.message);
+        assert!(
+            execution
+                .message
+                .contains("other-org/Other Project/target-repo"),
+            "{}",
+            execution.message
         );
     }
 }
