@@ -292,7 +292,8 @@ Stage 3 `SafeOutputs` job and authenticate to Azure DevOps using
 `SYSTEM_ACCESSTOKEN`. By default this is `$(System.AccessToken)` — the
 pipeline's built-in OAuth token running as the *Project Collection Build
 Service* identity. Set `permissions.write` to override this with an
-ARM-minted token, e.g. for cross-org writes or named-identity attribution.
+AzureCLI@3-minted token, e.g. for cross-org writes or named-identity
+attribution.
 See [`docs/network.md`](network.md) and
 [`docs/ir.md`](ir.md) for the typed SafeOutputs job wiring.
 
@@ -1014,25 +1015,31 @@ Creates a pull request with code changes made by the agent. When invoked:
 2. Saves the patch to the safe outputs directory
 3. Creates a JSON record with PR metadata (title, description, source branch, repository)
 
-During Stage 3 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
+During Stage 3 execution, the repository is validated against the allowed list
+(from `checkout:` + "self"), resolved to an exact
+organization/project/repository target, then the patch is applied and a PR is
+created in Azure DevOps.
 
-> **Cross-organization repositories are not yet supported.** Every ADO Git
-> REST call the executor makes is composed from the pipeline's own
-> organization/project. A `repos:` alias checked out from a **different**
-> Azure DevOps organization (a `type: git` entry with an `endpoint:` service
-> connection — see [`docs/front-matter.md`](front-matter.md#repositories-repos))
-> cannot be targeted: the compiler warns when `create-pull-request` and such an
-> alias are both configured, and Stage 3 rejects the alias with a clear error
-> (including under `--dry-run`) instead of silently composing a request against
-> the wrong organization.
+> **Cross-organization repositories.** `create-pull-request`,
+> `create-branch`, and `create-git-tag` can target a checked-out Azure Repos
+> repository in another organization when its `repos:` object declares
+> `organization:` plus `endpoint:`, and expanded `permissions.write` uses
+> `connection-type: azureDevOps` with an exact organization/project/repository
+> allow scope. The Stage 3 token is never exposed to the Agent. Missing routing,
+> connection type, or scope produces a compile warning and a target-time
+> rejection, including under `--dry-run`; it never falls back to the pipeline
+> organization.
 
 **Shallow-clone agent pools (automatic):** The diff base is computed at agent
-time from the checked-out repository. For same-organization Azure Repos,
+time from the checked-out repository. For Azure Repos,
 `prepare-pr-base.js` asks the ADO Diffs API for the exact `commonCommit`,
 `aheadCount`, and `behindCount`, then fetches only the source and target ranges
-needed to make that base locally reachable. It verifies the server result with
+needed to make that base locally reachable. Cross-org preparation runs in a
+trusted AzureCLI@3 task and passes its short-lived bearer only to the bundle
+child process; the credential is not persisted or exposed to the Agent. It
+verifies the server result with
 `git merge-base --all` before the containerized SafeOutputs MCP server can
-generate a patch. Non-Azure/cross-organization/unavailable-REST cases use bounded
+generate a patch. Non-Azure/unavailable-REST cases use bounded
 dual-ref depths 200/500/2000 and fail clearly rather than silently fetching full
 history.
 
@@ -1349,6 +1356,10 @@ safe-outputs:
     max: 1                                  # Maximum per run (default: 1)
 ```
 
+Cross-organization tag creation uses the same `repos.organization` and
+expanded `permissions.write` contract described under
+[`create-pull-request`](#create-pull-request).
+
 ### add-build-tag
 Adds a tag to an Azure DevOps build.
 
@@ -1384,6 +1395,10 @@ safe-outputs:
     allowed-source-branches: []        # Optional — restrict which source branches can be branched from
     max: 1                             # Maximum per run (default: 1)
 ```
+
+Cross-organization branch creation uses the same `repos.organization` and
+expanded `permissions.write` contract described under
+[`create-pull-request`](#create-pull-request).
 
 ### upload-workitem-attachment
 Uploads a workspace file as an attachment to an Azure DevOps work item.
@@ -1539,7 +1554,7 @@ multiple uploads.
 **Notes:**
 - Single-file only; directory uploads are not supported.
 - When `build_id` is omitted and `allowed-build-ids` is configured, the allow-list check is skipped — the current build is implicitly trusted.
-- Requires `BUILD_CONTAINERID`, `BUILD_BUILDID`, and `SYSTEM_TEAMPROJECTID` (all set automatically inside an Azure DevOps pipeline job) and `vso.build_execute` scope on the executor's token (granted to `$(System.AccessToken)` by default, and to the ARM-minted token when `permissions.write` is set).
+- Requires `BUILD_CONTAINERID`, `BUILD_BUILDID`, and `SYSTEM_TEAMPROJECTID` (all set automatically inside an Azure DevOps pipeline job) and `vso.build_execute` scope on the executor's token (granted to `$(System.AccessToken)` by default, and to the configured service-connection token when `permissions.write` is set).
 
 ### cache-memory (moved to `tools:`)
 Memory is now configured as a first-class tool under `tools: cache-memory:` instead of `safe-outputs: memory:`. See the [Cache Memory section](./tools.md#cache-memory-cache-memory) in `docs/tools.md` for details.

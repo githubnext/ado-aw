@@ -260,7 +260,7 @@ network:                       # optional network policy (standalone target only
 # variable-groups:              # optional: import ADO Library variable groups (standalone/1es only)
 #   - My Variable Group         # each entry must be the exact ADO Library group name (see "Variable Groups" section)
 permissions:                   # optional ADO access token configuration (see docs/network.md#permissions-ado-access-tokens)
-  read: my-read-arm-connection   # shorthand: proxy gets the ARM SC token; Agent/MCP/az get no real token
+  read: my-read-arm-connection   # shorthand: AzureCLI@3 connectionType azureRM
   # read:                        # object form: narrow capabilities / add cross-org or project scope
   #   service-connection: my-read-arm-connection
   #   capabilities: [core, repos] # discovery is always enabled
@@ -270,10 +270,15 @@ permissions:                   # optional ADO access token configuration (see do
   #         - project: Shared
   #           project-id: 33333333-3333-3333-3333-333333333333 # optional GUID-form calls
   #           repositories: [shared-api] # empty/omitted => project reads only
-  write: my-write-arm-connection # OPTIONAL ARM SC for Stage 3 executor writes.
-                                 # Default: executor uses $(System.AccessToken).
-                                 # Set this only for cross-org writes or
-                                 # named-identity attribution.
+  write: my-write-arm-connection # shorthand: AzureCLI@3 connectionType azureRM
+  # write:                       # expanded form for scoped cross-org repo writes
+  #   service-connection: ado-repository-writer
+  #   connection-type: azureDevOps
+  #   allow:
+  #     - organization: partner-org
+  #       projects:
+  #         - project: Shared
+  #           repositories: [shared-api]
 # permissions-required:          # optional abstract capability requirements (usually set by an
 #   read: true                   # imported component rather than authored directly); see
 #   write: true                  # docs/imports.md#permissions-required. Unioned across all
@@ -541,19 +546,20 @@ Each entry can be:
 
 | Form | Syntax | Description |
 |------|--------|-------------|
-| **Shorthand** | `- org/repo` | Alias derived from last segment, type=git, ref=refs/heads/main, checkout=true |
-| **Shorthand with alias** | `- alias=org/repo` | Explicit alias before `=` |
-| **Object** | `- name: org/repo` | Full control over all fields |
+| **Shorthand** | `- project/repo` | Alias derived from last segment, type=git, ref=refs/heads/main, checkout=true |
+| **Shorthand with alias** | `- alias=project/repo` | Explicit alias before `=` |
+| **Object** | `- name: project/repo` | Full control over all fields |
 
 Object fields:
 
 | Field         | Default                | Description |
 |---------------|------------------------|-------------|
-| `name`        | *(required)*           | Full `org/repo` name (maps to ADO `name:`) |
+| `name`        | *(required)*           | Azure Repos `project/repository` name (maps to ADO `name:`) |
 | `alias`       | last segment of `name` | Repository alias (maps to ADO `repository:`) |
 | `type`        | `git`                  | ADO repository resource type |
 | `ref`         | `refs/heads/main`      | Branch or tag reference |
-| `endpoint`    | *(none)*               | Azure DevOps service connection. Required for `type: github`, `githubenterprise`, or `bitbucket`; not needed for same-org Azure Repos `git`. |
+| `endpoint`    | *(none)*               | Checkout service connection. Required for external providers and cross-organization Azure Repos `git`. |
+| `organization` | *(current organization)* | Target Azure DevOps organization for cross-org `type: git`; requires object form and `endpoint`. |
 | `checkout`    | `true`                 | Whether the agent job clones this repo |
 | `fetch-depth` | *(ADO default)*        | Shallow-clone depth for this repo's checkout (ADO `fetchDepth`). `0` = full history |
 | `fetch-tags`  | *(ADO default)*        | Whether to fetch git tags during checkout (ADO `fetchTags`) |
@@ -562,12 +568,13 @@ Aliases must be unique case-insensitively because they become checkout
 directory names on Windows agents. `root`, `repo`, and `self` are reserved in
 every casing; `self` is the compiler-owned path for the pipeline repository.
 
-> **Cross-organization `type: git` repositories.** A `type: git` entry with an
-> `endpoint:` set (used for a repository outside the pipeline's own Azure
-> DevOps organization) checks out correctly, but `create-pull-request` cannot
-> yet target it: Stage 3 composes every ADO Git REST call from the pipeline's
-> own organization/project. See the limitation note under
-> [`create-pull-request`](safe-outputs.md#create-pull-request).
+> **Cross-organization `type: git` repositories.** Use object form with both
+> `organization:` and `endpoint:`. Checkout authorization and Stage 3 writes
+> are separate: `endpoint` authenticates the repository resource, while
+> expanded `permissions.write` with `connection-type: azureDevOps` and an exact
+> organization/project/repository `allow` scope authorizes `create-pull-request`,
+> `create-branch`, and `create-git-tag`. Incomplete entries compile with a
+> warning and are rejected if targeted, including under `--dry-run`.
 
 ### Tuning checkout fetch behavior (`fetch-depth` / `fetch-tags`)
 

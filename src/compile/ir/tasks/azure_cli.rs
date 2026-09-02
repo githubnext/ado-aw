@@ -207,6 +207,97 @@ pub struct AzureCli {
     display_name: Option<String>,
 }
 
+/// Service-connection input for AzureCLI@3.
+///
+/// Each variant emits only the input valid for its `connectionType`, making a
+/// mixed `azureSubscription`/`azureDevOpsServiceConnection` task
+/// unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AzureCliV3Connection {
+    AzureRm(String),
+    AzureDevOps(String),
+}
+
+impl AzureCliV3Connection {
+    fn connection_type(&self) -> &'static str {
+        match self {
+            Self::AzureRm(_) => "azureRM",
+            Self::AzureDevOps(_) => "azureDevOps",
+        }
+    }
+
+    fn apply(self, task: TaskStep) -> TaskStep {
+        match self {
+            Self::AzureRm(connection) => task.with_input("azureSubscription", connection),
+            Self::AzureDevOps(connection) => {
+                task.with_input("azureDevOpsServiceConnection", connection)
+            }
+        }
+    }
+}
+
+/// Typed AzureCLI@3 builder used for Azure DevOps token acquisition.
+#[derive(Debug, Clone)]
+pub struct AzureCliV3 {
+    connection: AzureCliV3Connection,
+    script_type: ScriptType,
+    location: ScriptLocation,
+    visible_az_login: Option<bool>,
+    display_name: Option<String>,
+}
+
+impl AzureCliV3 {
+    pub fn new(
+        connection: AzureCliV3Connection,
+        script_type: ScriptType,
+        location: ScriptLocation,
+    ) -> Self {
+        Self {
+            connection,
+            script_type,
+            location,
+            visible_az_login: None,
+            display_name: None,
+        }
+    }
+
+    pub fn visible_az_login(mut self, value: bool) -> Self {
+        self.visible_az_login = Some(value);
+        self
+    }
+
+    pub fn with_display_name(mut self, value: impl Into<String>) -> Self {
+        self.display_name = Some(value.into());
+        self
+    }
+
+    pub fn into_step(self) -> TaskStep {
+        let connection_type = self.connection.connection_type();
+        let mut task = TaskStep::new(
+            "AzureCLI@3",
+            self.display_name.unwrap_or_else(|| "Azure CLI".into()),
+        )
+        .with_input("connectionType", connection_type)
+        .with_input("scriptType", self.script_type.as_ado_str());
+        task = self.connection.apply(task);
+
+        match self.location {
+            ScriptLocation::Inline(script) => {
+                task = task
+                    .with_input("scriptLocation", "inlineScript")
+                    .with_input("inlineScript", script);
+            }
+            ScriptLocation::ScriptPath(path) => {
+                task = task
+                    .with_input("scriptLocation", "scriptPath")
+                    .with_input("scriptPath", path);
+            }
+        }
+        push_bool(&mut task, "visibleAzLogin", self.visible_az_login);
+        task
+    }
+}
+
 impl AzureCli {
     /// Create a new builder.
     ///
@@ -390,6 +481,55 @@ mod tests {
             Some("scripts/deploy.ps1")
         );
         assert!(t.inputs.get("inlineScript").is_none());
+    }
+
+    #[test]
+    fn v3_azure_rm_uses_only_arm_connection_input() {
+        let task = AzureCliV3::new(
+            AzureCliV3Connection::AzureRm("arm-connection".to_string()),
+            ScriptType::Bash,
+            ScriptLocation::Inline("echo token\n".to_string()),
+        )
+        .visible_az_login(false)
+        .into_step();
+
+        assert_eq!(task.task, "AzureCLI@3");
+        assert_eq!(
+            task.inputs.get("connectionType").map(String::as_str),
+            Some("azureRM")
+        );
+        assert_eq!(
+            task.inputs.get("azureSubscription").map(String::as_str),
+            Some("arm-connection")
+        );
+        assert!(!task.inputs.contains_key("azureDevOpsServiceConnection"));
+        assert_eq!(
+            task.inputs.get("visibleAzLogin").map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn v3_azure_devops_uses_only_devops_connection_input() {
+        let task = AzureCliV3::new(
+            AzureCliV3Connection::AzureDevOps("ado-connection".to_string()),
+            ScriptType::Bash,
+            ScriptLocation::Inline("echo token\n".to_string()),
+        )
+        .into_step();
+
+        assert_eq!(task.task, "AzureCLI@3");
+        assert_eq!(
+            task.inputs.get("connectionType").map(String::as_str),
+            Some("azureDevOps")
+        );
+        assert_eq!(
+            task.inputs
+                .get("azureDevOpsServiceConnection")
+                .map(String::as_str),
+            Some("ado-connection")
+        );
+        assert!(!task.inputs.contains_key("azureSubscription"));
     }
 
     #[test]

@@ -812,6 +812,8 @@ struct ResolvedExecutionConfig {
     #[serde(default)]
     repo_refs: std::collections::HashMap<String, String>,
     #[serde(default)]
+    write_permissions: Option<ResolvedWritePermissions>,
+    #[serde(default)]
     cache_memory: Option<ResolvedCacheMemory>,
 }
 
@@ -823,15 +825,23 @@ struct ResolvedExecutionRepository {
     /// `"git"` for resolved-config JSON emitted before this field existed.
     #[serde(default = "default_resolved_repo_type", rename = "type")]
     repo_type: String,
-    /// Service connection name, when set. Present alongside `type: git` only
-    /// for a repository in a different Azure DevOps organization — see
-    /// `FrontMatter::checkout_cross_organization_repo_aliases`.
+    /// Checkout service connection name, when set.
     #[serde(default)]
     endpoint: Option<String>,
+    #[serde(default)]
+    organization: Option<String>,
 }
 
 fn default_resolved_repo_type() -> String {
     "git".to_string()
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedWritePermissions {
+    connection_type: crate::compile::types::WriteConnectionType,
+    #[serde(default)]
+    allow: Vec<crate::compile::types::AdoOrganizationScope>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -870,30 +880,6 @@ async fn build_execution_context_from_resolved(
     ado_project: Option<String>,
     dry_run: bool,
 ) -> crate::safe_outputs::ExecutionContext {
-    let allowed_repositories = config
-        .checkout
-        .iter()
-        .filter_map(|alias| {
-            config
-                .repositories
-                .iter()
-                .find(|repository| &repository.repository == alias)
-                .map(|repository| (alias.clone(), repository.name.clone()))
-        })
-        .collect();
-    let cross_organization_repositories = config
-        .checkout
-        .iter()
-        .filter(|alias| {
-            config.repositories.iter().any(|repository| {
-                &repository.repository == *alias
-                    && repository.repo_type == "git"
-                    && repository.endpoint.is_some()
-            })
-        })
-        .cloned()
-        .collect();
-
     let mut ctx = crate::safe_outputs::ExecutionContext::default();
     if let Some(url) = ado_org_url {
         ctx.ado_organization = crate::safe_outputs::org_from_url(&url);
@@ -904,9 +890,31 @@ async fn build_execution_context_from_resolved(
     }
     ctx.working_directory = safe_output_dir.to_path_buf();
     ctx.tool_configs = config.tool_configs.clone();
-    ctx.allowed_repositories = allowed_repositories;
+    crate::safe_outputs::configure_repository_write_context(
+        &mut ctx,
+        &config.checkout,
+        config
+            .repositories
+            .iter()
+            .map(|repository| crate::safe_outputs::RepositoryTargetSpec {
+                alias: repository.repository.clone(),
+                repo_type: repository.repo_type.clone(),
+                name: repository.name.clone(),
+                organization: repository.organization.clone(),
+                endpoint: repository.endpoint.clone(),
+            })
+            .collect(),
+        config
+            .write_permissions
+            .as_ref()
+            .map(|permissions| permissions.connection_type),
+        config
+            .write_permissions
+            .as_ref()
+            .map(|permissions| permissions.allow.as_slice())
+            .unwrap_or(&[]),
+    );
     ctx.repo_refs = config.repo_refs.clone();
-    ctx.cross_organization_repositories = cross_organization_repositories;
     ctx.dry_run = dry_run;
 
     let otel_path = safe_output_dir.join(agent_stats::OTEL_FILENAME);
@@ -1056,19 +1064,6 @@ async fn build_execution_context(
     ado_project: Option<String>,
     dry_run: bool,
 ) -> crate::safe_outputs::ExecutionContext {
-    // Map checkout aliases to ADO repo names from the repositories list
-    let allowed_repositories = front_matter
-        .checkout
-        .iter()
-        .filter_map(|alias| {
-            front_matter
-                .repositories
-                .iter()
-                .find(|r| &r.repository == alias)
-                .map(|repo| (alias.clone(), repo.name.clone()))
-        })
-        .collect();
-
     let mut ctx = crate::safe_outputs::ExecutionContext::default();
     // Only override env-derived values when CLI args are explicitly provided;
     // otherwise keep the defaults from SYSTEM_TEAMFOUNDATIONCOLLECTIONURI /
@@ -1102,14 +1097,41 @@ async fn build_execution_context(
         ctx.tool_configs
             .insert(tool, serde_json::Value::Object(config));
     }
-    ctx.allowed_repositories = allowed_repositories;
+    crate::safe_outputs::configure_repository_write_context(
+        &mut ctx,
+        &front_matter.checkout,
+        front_matter
+            .repositories
+            .iter()
+            .map(|repository| crate::safe_outputs::RepositoryTargetSpec {
+                alias: repository.repository.clone(),
+                repo_type: repository.repo_type.clone(),
+                name: repository.name.clone(),
+                organization: repository
+                    .organization
+                    .as_ref()
+                    .map(|value| value.as_str().to_string()),
+                endpoint: repository.endpoint.clone(),
+            })
+            .collect(),
+        front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.write.as_ref())
+            .map(crate::compile::types::WritePermissionConfig::connection_type),
+        front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.write.as_ref())
+            .and_then(crate::compile::types::WritePermissionConfig::options)
+            .map(|options| options.allow.as_slice())
+            .unwrap_or(&[]),
+    );
     // Per-checkout-alias git refs, so Stage 3 can resolve a per-repo
     // create-pull-request target branch (infer-target-from-checkout-ref). Uses
     // the same helper the compiler uses at build time, so the two paths cannot
     // diverge.
     ctx.repo_refs = front_matter.checkout_repo_refs();
-    ctx.cross_organization_repositories =
-        front_matter.checkout_cross_organization_repo_aliases();
     ctx.dry_run = dry_run;
 
     // Load agent stats from OTel JSONL if available

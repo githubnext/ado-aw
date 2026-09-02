@@ -409,9 +409,23 @@ Creates a pull request with code changes made by the agent. When invoked:
 2. Saves the patch to the safe outputs directory
 3. Creates a JSON record with PR metadata (title, description, source branch, repository)
 
-During Stage 3 execution, the repository is validated against the allowed list (from `checkout:` + "self"), then the patch is applied and a PR is created in Azure DevOps.
+During Stage 3 execution, the repository is validated against the allowed list
+(from `checkout:` + "self"), resolved to an exact
+organization/project/repository target, then the patch is applied and a PR is
+created in Azure DevOps. Cross-org PR, branch, and tag writes require
+`repos.organization`, a checkout `endpoint`, and expanded
+`permissions.write` with `connection-type: azureDevOps` plus an exact allow
+scope.
 
-**Shallow-clone agent pools (automatic):** For same-organization Azure Repos, `prepare-pr-base.js` asks the ADO Diffs API for the exact `commonCommit`, `aheadCount`, and `behindCount`, fetches only the source/target ranges required to make that base locally reachable, and verifies it with `git merge-base --all`. Other remotes or unavailable REST use bounded dual-ref depths 200/500/2000 and fail clearly rather than fetching full history. The Agent job runs `patch-base`; the isolated SafeOutputs job runs `target-worktree`, which fetches only `origin/<target>` at depth 1 for `git worktree add` (issue #1453). No `--unshallow` fallback is forced. Authors can explicitly use `repos: [{ name: self, fetch-depth: 0 }]` if they accept the full-history cost. See [ado-script](/ado-aw/reference/ado-script/) (`prepare-pr-base.js`).
+**Shallow-clone agent pools (automatic):** For Azure Repos,
+`prepare-pr-base.js` asks the ADO Diffs API for the exact `commonCommit`,
+`aheadCount`, and `behindCount`, fetches only the source/target ranges required
+to make that base locally reachable, and verifies it with
+`git merge-base --all`. Cross-org targets run separately in a trusted
+AzureCLI@3 task whose short-lived bearer is passed only to the bundle child.
+Other remotes or unavailable REST use bounded dual-ref depths 200/500/2000.
+The Agent job runs `patch-base`; SafeOutputs runs `target-worktree`, which
+fetches only `origin/<target>` at depth 1 (issue #1453).
 
 **Stage 3 SafeOutputs Architecture (Hybrid Git + ADO API):**
 

@@ -132,6 +132,7 @@ async fn resolve_head_commit(
     org_url: &str,
     project: &str,
     token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
     repo_name: &str,
 ) -> anyhow::Result<String> {
     // First, discover the default branch from the repository metadata
@@ -143,12 +144,14 @@ async fn resolve_head_commit(
     );
     debug!("Fetching repository metadata: {}", repo_url);
 
-    let repo_response = client
-        .get(&repo_url)
-        .basic_auth("", Some(token))
-        .send()
-        .await
-        .context("Failed to query repository metadata")?;
+    let repo_response = crate::safe_outputs::authenticate_ado_request(
+        client.get(&repo_url),
+        token,
+        connection_type,
+    )
+    .send()
+    .await
+    .context("Failed to query repository metadata")?;
 
     ensure!(
         repo_response.status().is_success(),
@@ -177,21 +180,24 @@ async fn resolve_head_commit(
 
     // Now resolve the HEAD commit of the default branch
     let url = format!(
-        "{}/{}/_apis/git/repositories/{}/refs?filter={}&api-version=7.1",
+        "{}/{}/_apis/git/repositories/{}/refs",
         org_url.trim_end_matches('/'),
         utf8_percent_encode(project, PATH_SEGMENT),
         utf8_percent_encode(repo_name, PATH_SEGMENT),
-        branch_filter,
     );
 
     debug!("Resolving HEAD commit via: {}", url);
 
-    let response = client
-        .get(&url)
-        .basic_auth("", Some(token))
-        .send()
-        .await
-        .context("Failed to query refs for HEAD resolution")?;
+    let response = crate::safe_outputs::authenticate_ado_request(
+        client
+            .get(&url)
+            .query(&[("filter", branch_filter), ("api-version", "7.1")]),
+        token,
+        connection_type,
+    )
+    .send()
+    .await
+    .context("Failed to query refs for HEAD resolution")?;
 
     ensure!(
         response.status().is_success(),
@@ -222,23 +228,17 @@ impl Executor for CreateGitTagResult {
         format!("create git tag '{}'", self.tag_name)
     }
 
+    async fn execute_sanitized(
+        &mut self,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<ExecutionResult> {
+        self.sanitize_content_fields();
+        self.execute_impl(ctx).await
+    }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!("Creating git tag: '{}'", self.tag_name);
         debug!("create-git-tag: tag_name='{}'", self.tag_name);
-
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
-        let token = ctx
-            .access_token
-            .as_ref()
-            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        debug!("ADO org: {}, project: {}", org_url, project);
 
         let config: CreateGitTagConfig = ctx.get_tool_config("create-git-tag")?;
         debug!("Tag pattern: {:?}", config.tag_pattern);
@@ -273,20 +273,26 @@ impl Executor for CreateGitTagResult {
             )));
         }
 
-        let repo_name = if repo_alias == "self" {
-            ctx.repository_name
-                .as_deref()
-                .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
-                .to_string()
-        } else {
-            crate::safe_outputs::lookup_allowed_repository(repo_alias, &ctx.allowed_repositories)
-                .cloned()
-                .context(format!(
-                    "Repository alias '{}' not found in allowed repositories",
-                    repo_alias
-                ))?
-        };
+        let target =
+            match crate::safe_outputs::resolve_repository_write_target(Some(repo_alias), ctx) {
+                Ok(target) => target,
+                Err(failure) => return Ok(failure),
+            };
+        let repo_name = target.qualified_repository();
+        debug!("Resolved repository target: {}", target.display_name());
 
+        if ctx.dry_run {
+            return Ok(ExecutionResult::success(format!(
+                "[DRY-RUN] Would execute: create git tag '{}' in {}",
+                self.tag_name,
+                target.display_name()
+            )));
+        }
+
+        let token = ctx
+            .access_token
+            .as_ref()
+            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         let client = reqwest::Client::new();
 
         // Resolve commit SHA — use provided value or look up HEAD
@@ -294,7 +300,15 @@ impl Executor for CreateGitTagResult {
             Some(sha) => sha.clone(),
             None => {
                 info!("No commit specified, resolving HEAD of default branch");
-                resolve_head_commit(&client, org_url, project, token, &repo_name).await?
+                resolve_head_commit(
+                    &client,
+                    &target.organization_url,
+                    &target.project,
+                    token,
+                    ctx.write_connection_type,
+                    target.repository_locator(),
+                )
+                .await?
             }
         };
         debug!("Tagging commit: {}", commit_sha);
@@ -310,9 +324,9 @@ impl Executor for CreateGitTagResult {
         // POST annotated tag
         let url = format!(
             "{}/{}/_apis/git/repositories/{}/annotatedtags?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            utf8_percent_encode(&repo_name, PATH_SEGMENT),
+            target.organization_url,
+            utf8_percent_encode(&target.project, PATH_SEGMENT),
+            utf8_percent_encode(target.repository_locator(), PATH_SEGMENT),
         );
         debug!("API URL: {}", url);
 
@@ -325,14 +339,15 @@ impl Executor for CreateGitTagResult {
         });
 
         info!("Sending annotated tag creation request to ADO");
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send request to Azure DevOps")?;
+        let response = crate::safe_outputs::authenticate_ado_request(
+            client.post(&url).header("Content-Type", "application/json"),
+            token,
+            ctx.write_connection_type,
+        )
+        .json(&body)
+        .send()
+        .await
+        .context("Failed to send request to Azure DevOps")?;
 
         if response.status().is_success() {
             let resp_body: serde_json::Value = response
@@ -374,6 +389,7 @@ impl Executor for CreateGitTagResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safe_outputs::ToolResult;
 
     #[test]
     fn test_params_deserializes() {
@@ -536,6 +552,88 @@ message-prefix: "[release] "
             repository.contains("`##vso[`"),
             "repository pipeline command should be neutralized with backticks: {}",
             repository
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_resolves_cross_org_target() {
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
+            ado_organization: Some("current-org".to_string()),
+            ado_project: Some("Current Project".to_string()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let allow = vec![crate::compile::types::AdoOrganizationScope {
+            organization: crate::secure::AdoOrganization::parse("other-org").unwrap(),
+            projects: vec![crate::compile::types::AdoProjectScope {
+                project: crate::secure::AdoProject::parse("Other Project").unwrap(),
+                project_id: None,
+                repositories: vec![crate::secure::AdoRepository::parse("target-repo").unwrap()],
+            }],
+        }];
+        crate::safe_outputs::configure_repository_write_context(
+            &mut ctx,
+            &["target".to_string()],
+            vec![crate::safe_outputs::RepositoryTargetSpec {
+                alias: "target".to_string(),
+                repo_type: "git".to_string(),
+                name: "Other Project/target-repo".to_string(),
+                organization: Some("other-org".to_string()),
+                endpoint: Some("cross-org-checkout".to_string()),
+            }],
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+            &allow,
+        );
+        let mut result = CreateGitTagResult {
+            name: CreateGitTagResult::NAME.to_string(),
+            tag_name: "cross-org-v1".to_string(),
+            commit: None,
+            message: Some("Cross organization tag".to_string()),
+            repository: Some("target".to_string()),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(execution.success, "{}", execution.message);
+        assert!(
+            execution
+                .message
+                .contains("other-org/Other Project/target-repo"),
+            "{}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_enforces_tag_pattern() {
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
+            ado_organization: Some("current-org".to_string()),
+            ado_project: Some("Current Project".to_string()),
+            repository_name: Some("self-repo".to_string()),
+            dry_run: true,
+            ..Default::default()
+        };
+        ctx.tool_configs.insert(
+            "create-git-tag".to_string(),
+            serde_json::json!({"tag-pattern": "^release-"}),
+        );
+        let mut result = CreateGitTagResult {
+            name: CreateGitTagResult::NAME.to_string(),
+            tag_name: "version-1".to_string(),
+            commit: None,
+            message: Some("Version one".to_string()),
+            repository: None,
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!execution.success);
+        assert!(
+            execution
+                .message
+                .contains("does not match required pattern")
         );
     }
 }

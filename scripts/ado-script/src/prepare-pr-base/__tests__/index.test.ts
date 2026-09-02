@@ -37,6 +37,7 @@ function dependencies(opts: {
   deps: PrepareDependencies;
   calls: Array<{ args: string[]; env?: Record<string, string> }>;
   dirs: string[];
+  getCommitDiffMetadata: ReturnType<typeof vi.fn>;
 } {
   const calls: Array<{ args: string[]; env?: Record<string, string> }> = [];
   const dirs: string[] = [];
@@ -79,6 +80,7 @@ function dependencies(opts: {
     deps: { runners, chdir, getCommitDiffMetadata },
     calls,
     dirs,
+    getCommitDiffMetadata,
   };
 }
 
@@ -132,6 +134,50 @@ describe("parseArgs", () => {
     });
   });
 
+  it("parses complete cross-organization repository coordinates", () => {
+    expect(
+      parseArgs([
+        "--mode",
+        "patch-base",
+        "--repo-dir",
+        "/src",
+        "--organization",
+        "other-org",
+        "--project",
+        "Other Project",
+        "--repository",
+        "target-repo",
+        "--target-branch",
+        "main",
+      ]),
+    ).toEqual({
+      mode: "patch-base",
+      repos: [{
+        dir: "/src",
+        organization: "other-org",
+        project: "Other Project",
+        repository: "target-repo",
+        sourceRef: undefined,
+        target: "main",
+      }],
+      fallbackTarget: "main",
+      fallbackSourceRef: undefined,
+    });
+  });
+
+  it("rejects partial cross-organization repository coordinates", () => {
+    expect(() =>
+      parseArgs([
+        "--repo-dir",
+        "/src",
+        "--organization",
+        "other-org",
+        "--target-branch",
+        "main",
+      ]),
+    ).toThrow(/must set --organization, --project, and --repository together/);
+  });
+
   it("rejects unknown modes", () => {
     expect(() => parseArgs(["--mode", "everything"])).toThrow(/Unsupported/);
   });
@@ -172,11 +218,12 @@ describe("prepare-pr-base main", () => {
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const error = Object.assign(new Error("forbidden"), { statusCode: 403 });
     const { deps, calls } = dependencies({ metadataError: error });
-    await main(
+    const rc = await main(
       patchArgs(),
       { SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/" },
       deps,
     );
+    expect(rc).toBe(0);
     const fetches = calls.filter((call) => call.args[0] === "fetch");
     expect(fetches).toHaveLength(1);
     expect(fetches[0]!.args).toContain("--depth=200");
@@ -186,6 +233,149 @@ describe("prepare-pr-base main", () => {
     expect(fetches[0]!.args).toContain(
       "+refs/heads/main:refs/remotes/origin/main",
     );
+  });
+
+  it("uses explicit cross-org coordinates and bearer for REST and fetch", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls, getCommitDiffMetadata } = dependencies({
+      remote: "https://dev.azure.com/other-org/Other%20Project/_git/target-repo",
+    });
+    const rc = await main(
+      {
+        mode: "patch-base",
+        repos: [{
+          dir: "/src",
+          target: "main",
+          sourceRef: "refs/heads/feature",
+          organization: "other-org",
+          project: "Other Project",
+          repository: "target-repo",
+        }],
+        fallbackTarget: "main",
+      },
+      { SYSTEM_ACCESSTOKEN: "cross-token" },
+      deps,
+    );
+
+    expect(getCommitDiffMetadata).toHaveBeenCalledWith(
+      "Other Project",
+      "target-repo",
+      "main",
+      HEAD,
+      "https://dev.azure.com/other-org/",
+    );
+    const fetches = calls.filter((call) => call.args[0] === "fetch");
+    expect(fetches[0]!.env).toMatchObject({
+      GIT_CONFIG_VALUE_0: "Authorization: bearer cross-token",
+    });
+  });
+
+  it("does not send the bearer when explicit coordinates mismatch the remote", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls, getCommitDiffMetadata } = dependencies({
+      remote: "https://dev.azure.com/unexpected/Other%20Project/_git/target-repo",
+    });
+    const rc = await main(
+      {
+        mode: "patch-base",
+        repos: [{
+          dir: "/src",
+          target: "main",
+          sourceRef: "refs/heads/feature",
+          organization: "other-org",
+          project: "Other Project",
+          repository: "target-repo",
+        }],
+        fallbackTarget: "main",
+      },
+      { SYSTEM_ACCESSTOKEN: "must-not-leak" },
+      deps,
+    );
+
+    expect(getCommitDiffMetadata).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.args[0] === "fetch")).toBe(false);
+    expect(rc).toBe(1);
+  });
+
+  it("rejects explicit coordinates that point at the current organization", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls, getCommitDiffMetadata } = dependencies({
+      remote: "https://dev.azure.com/org/Project/_git/repo",
+    });
+    const rc = await main(
+      {
+        mode: "patch-base",
+        repos: [{
+          dir: "/src",
+          target: "main",
+          organization: "org",
+          project: "Project",
+          repository: "repo",
+        }],
+        fallbackTarget: "main",
+      },
+      {
+        SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
+        SYSTEM_ACCESSTOKEN: "must-not-leak",
+      },
+      deps,
+    );
+
+    expect(getCommitDiffMetadata).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.args[0] === "fetch")).toBe(false);
+    expect(rc).toBe(1);
+  });
+
+  it("rejects locale-equivalent but code-point-distinct repository names", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls, getCommitDiffMetadata } = dependencies({
+      remote: "https://dev.azure.com/other-org/Other%20Project/_git/%EF%BD%92%EF%BD%85%EF%BD%90%EF%BD%8F",
+    });
+    const rc = await main(
+      {
+        mode: "patch-base",
+        repos: [{
+          dir: "/src",
+          target: "main",
+          organization: "other-org",
+          project: "Other Project",
+          repository: "repo",
+        }],
+        fallbackTarget: "main",
+      },
+      { SYSTEM_ACCESSTOKEN: "must-not-leak" },
+      deps,
+    );
+
+    expect(getCommitDiffMetadata).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.args[0] === "fetch")).toBe(false);
+    expect(rc).toBe(1);
+  });
+
+  it("rejects Unicode names that JavaScript lowercases to an ASCII identifier", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls, getCommitDiffMetadata } = dependencies({
+      remote: "https://dev.azure.com/other-org/Other%20Project/_git/%E2%84%AAepo",
+    });
+    const rc = await main(
+      {
+        mode: "patch-base",
+        repos: [{
+          dir: "/src",
+          target: "main",
+          organization: "other-org",
+          project: "Other Project",
+          repository: "kepo",
+        }],
+        fallbackTarget: "main",
+      },
+      { SYSTEM_ACCESSTOKEN: "must-not-leak" },
+      deps,
+    );
+
+    expect(getCommitDiffMetadata).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.args[0] === "fetch")).toBe(false);
+    expect(rc).toBe(1);
   });
 
   it("prefers the self resource ref over the triggering repository branch", async () => {
@@ -238,6 +428,33 @@ describe("prepare-pr-base main", () => {
     ]);
   });
 
+  it("target-worktree sends the bearer to a matching explicit cross-org remote", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const { deps, calls } = dependencies({
+      remote: "https://dev.azure.com/other-org/Other%20Project/_git/target-repo",
+    });
+    await main(
+      {
+        mode: "target-worktree",
+        repos: [{
+          dir: "/src",
+          target: "main",
+          organization: "other-org",
+          project: "Other Project",
+          repository: "target-repo",
+        }],
+        fallbackTarget: "main",
+      },
+      { SYSTEM_ACCESSTOKEN: "cross-token" },
+      deps,
+    );
+
+    const fetch = calls.find((call) => call.args[0] === "fetch");
+    expect(fetch?.env).toMatchObject({
+      GIT_CONFIG_VALUE_0: "Authorization: bearer cross-token",
+    });
+  });
+
   it("does not send the ADO bearer to a non-Azure origin", async () => {
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const { deps, calls } = dependencies({
@@ -278,6 +495,40 @@ describe("prepare-pr-base main", () => {
       deps,
     );
     expect(visited).toEqual(["/broken", "/good"]);
+    expect(calls.filter((call) => call.args[0] === "fetch")).toHaveLength(1);
+  });
+
+  it("returns failure after processing later repos when a required target fails", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const visited: string[] = [];
+    const { deps, calls } = dependencies({
+      remote: "https://dev.azure.com/org/project/_git/repo",
+      chdir: (dir) => void visited.push(dir),
+    });
+    const rc = await main(
+      {
+        mode: "target-worktree",
+        repos: [
+          {
+            dir: "/required-cross-org",
+            target: "main",
+            organization: "other-org",
+            project: "Other Project",
+            repository: "target-repo",
+          },
+          { dir: "/same-org", target: "main" },
+        ],
+        fallbackTarget: "main",
+      },
+      {
+        SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
+        SYSTEM_ACCESSTOKEN: "cross-token",
+      },
+      deps,
+    );
+
+    expect(rc).toBe(1);
+    expect(visited).toEqual(["/required-cross-org", "/same-org"]);
     expect(calls.filter((call) => call.args[0] === "fetch")).toHaveLength(1);
   });
 

@@ -74,7 +74,7 @@ The toggle lives in three places (most-specific wins):
 > which carries `PullRequestContribute` by default.
 
 If `permissions.write:` is set in the agent's front matter, Stage 3
-uses the **ARM service connection's identity** instead, and none of
+uses the configured **service connection's identity** instead, and none of
 the above applies — see [Option 1](#option-1-wire-a-write-service-connection-recommended).
 
 ---
@@ -230,14 +230,28 @@ complementary.
 
 ### Option 1: Wire a write service connection (recommended)
 
-Add an ARM service connection whose backing identity has the
-permission you need on the target repository, and reference it from
-the agent front matter:
+For same-organization or same-organization cross-project writes, the scalar
+form keeps the Azure Resource Manager connection behavior:
 
 ```yaml
 permissions:
   read:  ado-aw-read              # optional, used by Stage 1
   write: ado-aw-write             # used by Stage 3
+```
+
+For cross-organization repository writes, use an Azure DevOps service
+connection backed by Entra workload identity federation:
+
+```yaml
+permissions:
+  write:
+    service-connection: ado-aw-repository-writer
+    connection-type: azureDevOps
+    allow:
+      - organization: other-org
+        projects:
+          - project: Other Project
+            repositories: [target-repo]
 ```
 
 Stage 3 will mint its token via that connection instead of using
@@ -246,8 +260,9 @@ Stage 3 will mint its token via that connection instead of using
 This is the most explicit option: the identity used for writes is
 named in the front matter, audit logs attribute every action to that
 named principal, and the least-privilege grant lives entirely on the
-service connection's identity. It also works unchanged for
-cross-organization writes.
+service connection's identity. The same identity can write in multiple
+same-tenant organizations after it is added to each organization and granted
+the repository permissions listed above.
 
 See [`docs/network.md`](network.md) (Permissions section) and the
 "Service Connections" page on the documentation site for the full
@@ -306,7 +321,7 @@ Option 2 unless you have a specific reason to broaden the grant.
 
 | HTTP status | Body fragment | Most likely cause |
 |---|---|---|
-| 401 Unauthorized | `TF400813: The user '...' is not authorized to access this resource` | Token is malformed or missing — usually a misconfigured service-connection step; check that the AzureCLI@2 mint succeeded. |
+| 401 Unauthorized | `TF400813: The user '...' is not authorized to access this resource` | Token is malformed or missing — usually a misconfigured service-connection step; check that the AzureCLI@3 mint succeeded. |
 | 403 Forbidden | `TF401027: You need the Git 'PullRequestContribute' permission` | This page — Stage 3 identity lacks PR-contribute on the target repo. |
 | 403 Forbidden | `TF401027: You need the Git 'GenericContribute' permission` | Same diagnosis; need `Contribute` on the repo (typically because of `create-pull-request` or `create-branch`). |
 | 403 Forbidden | `VS800075: The project ... does not exist, or you do not have permission to access it.` | Cross-project request blocked because "Limit job authorization scope to current project" is ON. Use Option 1 with a write service connection that has cross-project rights, or move the resource into the calling project. |

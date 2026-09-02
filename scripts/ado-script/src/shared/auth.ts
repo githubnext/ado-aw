@@ -19,6 +19,8 @@
  *
  * Env-var contract:
  *   - `SYSTEM_ACCESSTOKEN` ← `$(System.AccessToken)`
+ *   - `ADO_AW_ACCESS_TOKEN_KIND=bearer` for compiler-minted OAuth/Entra tokens;
+ *     omitted for local/manual PAT usage
  *   - collection URI ← ADO's auto-injected `SYSTEM_COLLECTIONURI`
  *     (falls back to `SYSTEM_TEAMFOUNDATIONCOLLECTIONURI`). Both are
  *     predefined ADO variables auto-mapped into the env of every script
@@ -30,17 +32,16 @@ import * as azdev from "azure-devops-node-api";
 import type { WebApi } from "azure-devops-node-api";
 import { logError } from "./vso-logger.js";
 
-let cached: WebApi | undefined;
+const cached = new Map<string, { token: string; client: WebApi }>();
 
 /** For tests only: clear the cached WebApi. */
 export function _resetCacheForTesting(): void {
-  cached = undefined;
+  cached.clear();
 }
 
-export async function getWebApi(): Promise<WebApi> {
-  if (cached) return cached;
-
+export async function getWebApi(organizationUrl?: string): Promise<WebApi> {
   const orgUrl =
+    organizationUrl ||
     process.env.SYSTEM_COLLECTIONURI ||
     process.env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI;
   const token = process.env.SYSTEM_ACCESSTOKEN;
@@ -55,8 +56,17 @@ export async function getWebApi(): Promise<WebApi> {
     logError(msg);
     throw new Error(msg);
   }
+  const tokenKind =
+    process.env.ADO_AW_ACCESS_TOKEN_KIND === "bearer" ? "bearer" : "pat";
+  const cacheKey = `${tokenKind}:${orgUrl}`;
+  const existing = cached.get(cacheKey);
+  if (existing?.token === token) return existing.client;
 
-  const handler = azdev.getPersonalAccessTokenHandler(token);
-  cached = new azdev.WebApi(orgUrl, handler);
-  return cached;
+  const handler =
+    tokenKind === "bearer"
+      ? azdev.getBearerHandler(token)
+      : azdev.getPersonalAccessTokenHandler(token);
+  const client = new azdev.WebApi(orgUrl, handler);
+  cached.set(cacheKey, { token, client });
+  return client;
 }

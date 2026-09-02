@@ -100,11 +100,26 @@ The fastest way to create an agentic pipeline is to let Copilot do the heavy lif
    - The **GitHub Personal Access Token (PAT)** value -- used by the Copilot CLI at runtime (see [required permissions](#github-pat-permissions) below)
    - For Azure DevOps authentication, the commands first try the **Azure CLI** (`az` login session). If the Azure CLI is not available or not logged in, they fall back to prompting for an **Azure DevOps PAT**.
 
-   **Service connections for ADO access**: If your agent uses safe outputs that write to Azure DevOps (creating PRs, work items, comments, etc.), you need an **ARM service connection** referenced in your agent file's `permissions.write` field. This connection is used to mint short-lived ADO tokens for the executor stage.
+   **Service connections for ADO access**: Safe outputs use
+   `$(System.AccessToken)` by default. Scalar `permissions.write` selects an
+   Azure Resource Manager connection; scoped cross-organization repository
+   writes use expanded `permissions.write` with `connection-type: azureDevOps`.
 
    ```yaml
    permissions:
      write: my-write-connection  # ARM service connection name
+   ```
+
+   ```yaml
+   permissions:
+     write:
+       service-connection: ado-repository-writer
+       connection-type: azureDevOps
+       allow:
+         - organization: other-org
+           projects:
+             - project: Other Project
+               repositories: [target-repo]
    ```
 
    See [Service Connections](/ado-aw/setup/service-connections/) for step-by-step creation instructions. You can use an existing connection if one is already configured in your project.

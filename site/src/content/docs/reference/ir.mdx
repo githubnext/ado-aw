@@ -175,6 +175,7 @@ This eliminates hand-crafted `TaskStep::new(…)` + raw string inputs at every c
 | Builder | ADO task | Constructor |
 |---------|----------|-------------|
 | `AzureCli::new(azure_subscription, ScriptType, ScriptLocation)` | `AzureCLI@2` | ARM service connection; `ScriptType::Bash \| Ps \| PsCore \| Batch` enum; `ScriptLocation::Inline(script) \| ScriptPath(path)` enum |
+| `AzureCliV3::new(connection, ScriptType, ScriptLocation)` | `AzureCLI@3` | Typed `AzureRm` / `AzureDevOps` connection variants emit mutually exclusive task inputs; used for ADO token acquisition |
 | `AzurePowerShell::file(connection, script_path)` / `::inline(connection, script)` | `AzurePowerShell@5` | Azure RM service connection; `.ps1` path or inline script |
 | `CmdLine::new(script)` | `CmdLine@2` | inline script text |
 | `PowerShell::file(file_path)` / `::inline(script)` | `PowerShell@2` | `.ps1` path or inline script body |

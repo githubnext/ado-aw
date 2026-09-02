@@ -169,6 +169,7 @@ fn validate_pipeline_front_matter(
 ) -> Result<()> {
     common::validate_front_matter_identity(front_matter)?;
     common::validate_permissions_read_policy(front_matter)?;
+    common::validate_permissions_write_policy(front_matter)?;
     if let Some(minutes) = front_matter.engine.timeout_minutes() {
         common::validate_proxied_timeout(front_matter, minutes)?;
     }
@@ -488,20 +489,25 @@ pub(crate) fn build_pipeline_context(
     let pipeline_path = common::generate_pipeline_path(output_path);
 
     // Read / write tokens
-    let acquire_read_token = common::generate_acquire_ado_token(
+    let acquire_read_token = common::acquire_ado_token_step(
         front_matter
             .permissions
             .as_ref()
             .and_then(|p| p.read.as_ref())
             .map(crate::compile::types::ReadPermissionConfig::service_connection),
-        "SC_READ_TOKEN",
+        crate::compile::types::WriteConnectionType::AzureRm,
+        common::AdoTokenVariable::Read,
     );
-    let acquire_write_token = common::generate_acquire_ado_token(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.write.as_deref()),
-        "SC_WRITE_TOKEN",
+    let write_permission = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_ref());
+    let acquire_write_token = common::acquire_ado_token_step(
+        write_permission.map(crate::compile::types::WritePermissionConfig::service_connection),
+        write_permission
+            .map(crate::compile::types::WritePermissionConfig::connection_type)
+            .unwrap_or_default(),
+        common::AdoTokenVariable::Write,
     );
     // Skip integrity check resolution
     let skip_integrity = skip_integrity
@@ -830,9 +836,9 @@ pub(crate) struct StandaloneCtx {
     /// SafeOutputs variants combine this with their job-local checkout layout.
     pub(crate) source_relative_path: String,
     pub(crate) pipeline_path: String,
-    /// `AzureCLI@2` task YAML body (or empty when no read service connection).
-    pub(crate) acquire_read_token: String,
-    pub(crate) acquire_write_token: String,
+    /// Typed AzureCLI@3 token-acquisition steps, when configured.
+    pub(crate) acquire_read_token: Option<Step>,
+    pub(crate) acquire_write_token: Option<Step>,
     /// `Verify pipeline integrity` step YAML (or empty when skipped).
     pub(crate) integrity_check_yaml: String,
     /// Agent prompt body (either inlined imports or
@@ -1184,8 +1190,10 @@ fn build_agent_job(
         }));
     }
 
-    // 3. acquire ADO read token (AzureCLI@2 task) — only when configured.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_read_token)?;
+    // 3. acquire ADO read token (AzureCLI@3 task) — only when configured.
+    if let Some(step) = &cfg.acquire_read_token {
+        steps.push(step.clone());
+    }
 
     // 4. engine install steps (Copilot CLI install). YAML string from
     //    `Engine::install_steps`; lowered through `Step::RawYaml`
@@ -1297,10 +1305,25 @@ fn build_agent_job(
         // the SafeOutputs job (issue #1453).
         warn_create_pr_target_inference(front_matter);
         let repos = create_pr_prepare_repos(front_matter, &cfg.trigger_repo_directory);
-        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-            super::extensions::ado_script::PreparePrBaseMode::PatchBase,
-            &repos,
-        ));
+        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+        if !local_repos.is_empty() {
+            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+                super::extensions::ado_script::PreparePrBaseMode::PatchBase,
+                &local_repos,
+                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+            ));
+        }
+        if let Some(service_connection) =
+            cross_org_prepare_service_connection(front_matter, &cross_org_repos)
+        {
+            steps.push(
+                super::extensions::ado_script::prepare_pr_base_azure_devops_step_typed(
+                    super::extensions::ado_script::PreparePrBaseMode::PatchBase,
+                    &cross_org_repos,
+                    service_connection,
+                ),
+            );
+        }
     }
     //     When GitHub App auth is configured, mint the installation token
     //     immediately before the Copilot run; `copilot_env` sources
@@ -2344,15 +2367,70 @@ fn create_pr_prepare_repos(
         // ref characters subject to shell command substitution.
         source_ref: None,
         target_branch: pr_cfg.resolve_target_branch("self", &repo_refs),
+        organization: None,
+        project: None,
+        repository: None,
     }];
     for alias in &front_matter.checkout {
+        let repository = front_matter
+            .repositories
+            .iter()
+            .find(|repository| &repository.repository == alias);
+        let explicit_target = repository.and_then(|repository| {
+            let organization = repository.organization.as_ref()?;
+            let (project, name) = repository.name.split_once('/')?;
+            let write = front_matter
+                .permissions
+                .as_ref()
+                .and_then(|permissions| permissions.write.as_ref())?;
+            (write.supports_cross_organization_writes()
+                && write.allows_repository(organization.as_str(), project, name))
+            .then(|| {
+                (
+                    organization.as_str().to_string(),
+                    project.to_string(),
+                    name.to_string(),
+                )
+            })
+        });
         repos.push(PreparePrBaseRepo {
             dir: format!("$(Build.SourcesDirectory)/{alias}"),
             source_ref: repo_refs.get(alias).cloned(),
             target_branch: pr_cfg.resolve_target_branch(alias, &repo_refs),
+            organization: explicit_target.as_ref().map(|target| target.0.clone()),
+            project: explicit_target.as_ref().map(|target| target.1.clone()),
+            repository: explicit_target.map(|target| target.2),
         });
     }
     repos
+}
+
+fn cross_org_prepare_service_connection<'a>(
+    front_matter: &'a FrontMatter,
+    repos: &[super::extensions::ado_script::PreparePrBaseRepo],
+) -> Option<&'a str> {
+    if !repos.iter().any(|repo| repo.organization.is_some()) {
+        return None;
+    }
+    front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.write.as_ref())
+        .filter(|write| {
+            write.connection_type() == crate::compile::types::WriteConnectionType::AzureDevOps
+        })
+        .map(crate::compile::types::WritePermissionConfig::service_connection)
+}
+
+fn partition_prepare_repos(
+    repos: Vec<super::extensions::ado_script::PreparePrBaseRepo>,
+) -> (
+    Vec<super::extensions::ado_script::PreparePrBaseRepo>,
+    Vec<super::extensions::ado_script::PreparePrBaseRepo>,
+) {
+    repos
+        .into_iter()
+        .partition(|repo| repo.organization.is_none())
 }
 
 /// Emit the compile-time advisory when `create-pull-request`'s
@@ -2436,7 +2514,9 @@ fn build_safeoutputs_job(
         }
     }
     // Acquire write token (when configured)
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
+    if let Some(step) = &cfg.acquire_write_token {
+        steps.push(step.clone());
+    }
     // Download analyzed outputs
     steps.push(Step::Download(DownloadStep {
         source: "current".to_string(),
@@ -2482,10 +2562,21 @@ fn build_safeoutputs_job(
     }
     if variant.runs_create_pull_request {
         let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
-        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
-            &repos,
-        ));
+        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+        if !local_repos.is_empty() {
+            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+                &local_repos,
+                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+            ));
+        }
+        if !cross_org_repos.is_empty() {
+            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+                &cross_org_repos,
+                crate::compile::ado_bundle::TokenSource::WriteServiceConnection,
+            ));
+        }
     }
     let github_actor_required = variant
         .github_issue_tools
@@ -2516,7 +2607,8 @@ fn build_safeoutputs_job(
         front_matter
             .permissions
             .as_ref()
-            .and_then(|permissions| permissions.write.as_deref()),
+            .and_then(|permissions| permissions.write.as_ref())
+            .map(crate::compile::types::WritePermissionConfig::service_connection),
         github_auth.as_ref(),
         github_actor_required,
     );
@@ -3029,7 +3121,9 @@ fn build_conclusion_job(
     // Azure Pipelines task.setvariable variables are job-scoped and NOT propagated
     // to downstream jobs without isOutput=true + dependsOn mapping. The SafeOutputs
     // job mints its own SC_WRITE_TOKEN copy; Conclusion must do the same.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.acquire_write_token)?;
+    if let Some(step) = &cfg.acquire_write_token {
+        steps.push(step.clone());
+    }
 
     let mut download_artifact = TaskStep::new(
         "DownloadPipelineArtifact@2",
@@ -3088,7 +3182,8 @@ fn build_conclusion_job(
     let write_sc = front_matter
         .permissions
         .as_ref()
-        .and_then(|p| p.write.as_deref());
+        .and_then(|p| p.write.as_ref())
+        .map(crate::compile::types::WritePermissionConfig::service_connection);
     conclusion_step = apply_bundle_auth(
         conclusion_step,
         Bundle::Conclusion,
@@ -6510,8 +6605,8 @@ mod tests {
             source_path: "$(Build.SourcesDirectory)/agents/test.md".to_string(),
             source_relative_path: "agents/test.md".to_string(),
             pipeline_path: "$(Build.SourcesDirectory)/agents/test.lock.yml".to_string(),
-            acquire_read_token: String::new(),
-            acquire_write_token: String::new(),
+            acquire_read_token: None,
+            acquire_write_token: None,
             integrity_check_yaml: String::new(),
             agent_content_value: "Test prompt".to_string(),
             debug_pipeline: false,
@@ -7663,8 +7758,8 @@ safe-outputs:
             source_path: "source.md".to_string(),
             source_relative_path: "source.md".to_string(),
             pipeline_path: "source.lock.yml".to_string(),
-            acquire_read_token: String::new(),
-            acquire_write_token: String::new(),
+            acquire_read_token: None,
+            acquire_write_token: None,
             integrity_check_yaml: String::new(),
             agent_content_value: String::new(),
             debug_pipeline: false,

@@ -51,4 +51,38 @@ describe("getWebApi", () => {
     const b = await getWebApi();
     expect(a).toBe(b);
   });
+
+  it("uses a bearer handler for compiler-minted access tokens", async () => {
+    process.env.SYSTEM_COLLECTIONURI = "https://example.visualstudio.com/";
+    process.env.SYSTEM_ACCESSTOKEN = "entra-token";
+    process.env.ADO_AW_ACCESS_TOKEN_KIND = "bearer";
+
+    const api = await getWebApi();
+
+    expect(api.authHandler.constructor.name).toBe("BearerCredentialHandler");
+  });
+
+  it("retains PAT handling for local/manual tokens", async () => {
+    process.env.SYSTEM_COLLECTIONURI = "https://example.visualstudio.com/";
+    process.env.SYSTEM_ACCESSTOKEN = "pat-token";
+    delete process.env.ADO_AW_ACCESS_TOKEN_KIND;
+
+    const api = await getWebApi();
+
+    expect(api.authHandler.constructor.name).toBe(
+      "PersonalAccessTokenCredentialHandler",
+    );
+  });
+
+  it("replaces a cached client when the short-lived token rotates", async () => {
+    process.env.SYSTEM_COLLECTIONURI = "https://example.visualstudio.com/";
+    process.env.ADO_AW_ACCESS_TOKEN_KIND = "bearer";
+    process.env.SYSTEM_ACCESSTOKEN = "first-token";
+    const first = await getWebApi();
+
+    process.env.SYSTEM_ACCESSTOKEN = "second-token";
+    const second = await getWebApi();
+
+    expect(second).not.toBe(first);
+  });
 });

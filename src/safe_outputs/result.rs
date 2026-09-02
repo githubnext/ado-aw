@@ -23,7 +23,7 @@ pub trait ToolResult: Serialize {
     /// ADO-backed tools receive a write-capable token via
     /// `SYSTEM_ACCESSTOKEN`: by default the pipeline's built-in
     /// `$(System.AccessToken)` (scoped by pipeline settings), or
-    /// `$(SC_WRITE_TOKEN)` minted from an ARM service connection when
+    /// `$(SC_WRITE_TOKEN)` minted from a configured service connection when
     /// `permissions.write` is configured. GitHub-backed tools use the separate
     /// Stage 3 GitHub credential.
     ///
@@ -59,15 +59,47 @@ pub struct ResolvedWorkItem {
     pub url: String,
 }
 
+/// Trusted compiler/source metadata for one checked-out repository alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoRepositoryTargetConfig {
+    pub name: String,
+    pub organization: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+/// Fully resolved Azure DevOps destination for a repository write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoRepositoryTarget {
+    pub alias: String,
+    pub organization: String,
+    pub organization_url: String,
+    pub project: String,
+    pub repository: String,
+    pub repository_id: Option<String>,
+    pub cross_organization: bool,
+}
+
+impl AdoRepositoryTarget {
+    pub fn repository_locator(&self) -> &str {
+        self.repository_id.as_deref().unwrap_or(&self.repository)
+    }
+
+    pub fn qualified_repository(&self) -> String {
+        format!("{}/{}", self.project, self.repository)
+    }
+
+    pub fn display_name(&self) -> String {
+        format!("{}/{}/{}", self.organization, self.project, self.repository)
+    }
+}
+
 fn register_resolved_reference<T>(
     registry: &Mutex<HashMap<String, T>>,
     id: String,
     value: T,
     lock_error: &'static str,
 ) -> anyhow::Result<()> {
-    let mut registry = registry
-        .lock()
-        .map_err(|_| anyhow::anyhow!(lock_error))?;
+    let mut registry = registry.lock().map_err(|_| anyhow::anyhow!(lock_error))?;
     if registry.contains_key(&id) {
         anyhow::bail!("temporary_id '{id}' was already used in this run");
     }
@@ -88,7 +120,7 @@ pub struct ExecutionContext {
     pub ado_project_id: Option<String>,
     /// Write-capable ADO access token used by Stage 3 executors. Populated
     /// from the `SYSTEM_ACCESSTOKEN` env var, which the compiler maps to
-    /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)` (ARM-minted)
+    /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)`
     /// when `permissions.write` is configured.
     pub access_token: Option<String>,
     /// GitHub credential used by GitHub safe outputs in Stage 3.
@@ -129,6 +161,12 @@ pub struct ExecutionContext {
     /// Allowed repositories for PRs: "self" + checkout list aliases
     /// Maps alias to ADO repo name (e.g., "other-repo" -> "org/other-repo")
     pub allowed_repositories: HashMap<String, String>,
+    /// Trusted per-alias repository routing metadata.
+    pub repository_targets: HashMap<String, AdoRepositoryTargetConfig>,
+    /// Service-connection type used to mint `SC_WRITE_TOKEN`, when configured.
+    pub write_connection_type: Option<crate::compile::types::WriteConnectionType>,
+    /// Normalized additional write scopes (`organization/project/repository`).
+    pub write_allowed_repositories: HashSet<String>,
     /// Per-checkout-alias git ref (from `repos: ref`), used to resolve a
     /// per-repo `create-pull-request` target branch when
     /// `infer-target-from-checkout-ref` is set. Maps a checkout alias to its
@@ -421,6 +459,9 @@ impl ExecutionContext {
             repository_name,
             repository_provider: env("BUILD_REPOSITORY_PROVIDER"),
             allowed_repositories: HashMap::new(),
+            repository_targets: HashMap::new(),
+            write_connection_type: None,
+            write_allowed_repositories: HashSet::new(),
             repo_refs: HashMap::new(),
             cross_organization_repositories: HashSet::new(),
             agent_stats: None,

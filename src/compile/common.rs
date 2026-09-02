@@ -691,6 +691,131 @@ pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()
     options.validate()
 }
 
+/// Validate the expanded Stage 3 write credential and its additional scopes.
+pub fn validate_permissions_write_policy(front_matter: &FrontMatter) -> Result<()> {
+    let Some(options) = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.write.as_ref())
+        .and_then(crate::compile::types::WritePermissionConfig::options)
+    else {
+        return Ok(());
+    };
+    options.validate()
+}
+
+pub fn repository_write_readiness_warnings(front_matter: &FrontMatter) -> Vec<String> {
+    let configured_tools: Vec<&str> = ["create-pull-request", "create-branch", "create-git-tag"]
+        .into_iter()
+        .filter(|tool| front_matter.safe_outputs.contains_key(*tool))
+        .collect();
+    if configured_tools.is_empty() {
+        return Vec::new();
+    }
+    let write = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.write.as_ref());
+    let mut warnings = Vec::new();
+    for repository in front_matter.repositories.iter().filter(|repository| {
+        repository.repo_type.eq_ignore_ascii_case("git")
+            && repository.endpoint.is_some()
+            && front_matter
+                .checkout
+                .iter()
+                .any(|alias| alias == &repository.repository)
+    }) {
+        let alias = &repository.repository;
+        let tools = configured_tools.join(", ");
+        let Some(organization) = repository.organization.as_ref() else {
+            warnings.push(format!(
+                "repository-write safe output(s) {tools} may target checkout alias '{alias}', \
+                 but its endpoint-backed Azure Repos entry has no `organization:`. Add the \
+                 target Azure DevOps organization; dry-run and runtime reject this alias."
+            ));
+            continue;
+        };
+        let Some(write) = write else {
+            warnings.push(format!(
+                "repository-write safe output(s) {tools} may target cross-organization alias \
+                 '{alias}', but `permissions.write` is not configured. Add expanded \
+                 `permissions.write` with `connection-type: azureDevOps` and an explicit allow \
+                 scope; dry-run and runtime reject this alias."
+            ));
+            continue;
+        };
+        if !write.supports_cross_organization_writes() {
+            warnings.push(format!(
+                "repository-write safe output(s) {tools} may target cross-organization alias \
+                 '{alias}', but `permissions.write` uses `connection-type: {}`. Cross-organization \
+                 writes require `connection-type: azureDevOps`; dry-run and runtime reject this alias.",
+                write.connection_type().as_ado_str()
+            ));
+            continue;
+        }
+        let Some((project, name)) = repository.name.split_once('/') else {
+            continue;
+        };
+        if !write.allows_repository(organization.as_str(), project, name) {
+            warnings.push(format!(
+                "repository-write safe output(s) {tools} may target \
+                 '{}/{}/{}' (alias '{alias}'), but that repository is not listed in \
+                 `permissions.write.allow`; dry-run and runtime reject this alias.",
+                organization.as_str(),
+                project,
+                name
+            ));
+        }
+    }
+    warnings.sort();
+    warnings
+}
+
+#[cfg(test)]
+fn readiness_warnings(source: &str) -> Vec<String> {
+    let (mut front_matter, _) = parse_markdown(source).unwrap();
+    let (repositories, checkout, checkout_fetch) = resolve_repos(&front_matter).unwrap();
+    front_matter.repositories = repositories;
+    front_matter.checkout = checkout;
+    front_matter.checkout_fetch = checkout_fetch;
+    repository_write_readiness_warnings(&front_matter)
+}
+
+#[test]
+fn repository_write_readiness_warning_matrix() {
+    let prefix = "---\nname: test\ndescription: test\n";
+    let repo_without_org = "repos:\n  - name: Other Project/target-repo\n    alias: target\n    endpoint: checkout\nsafe-outputs:\n  create-branch: {}\n---\n";
+    let warnings = readiness_warnings(&format!("{prefix}{repo_without_org}"));
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("no `organization:`"), "{warnings:?}");
+
+    let cross_repo = "repos:\n  - name: Other Project/target-repo\n    alias: target\n    organization: other-org\n    endpoint: checkout\nsafe-outputs:\n  create-pull-request: {}\n  create-branch: {}\n  create-git-tag: {}\n---\n";
+    let warnings = readiness_warnings(&format!("{prefix}{cross_repo}"));
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].contains("permissions.write") && warnings[0].contains("create-git-tag"),
+        "{warnings:?}"
+    );
+
+    let arm =
+        "permissions:\n  write:\n    service-connection: write\n    connection-type: azureRM\n";
+    let warnings = readiness_warnings(&format!("{prefix}{arm}{cross_repo}"));
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].contains("connection-type: azureRM"),
+        "{warnings:?}"
+    );
+
+    let missing_scope =
+        "permissions:\n  write:\n    service-connection: write\n    connection-type: azureDevOps\n";
+    let warnings = readiness_warnings(&format!("{prefix}{missing_scope}{cross_repo}"));
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("not listed"), "{warnings:?}");
+
+    let ready = "permissions:\n  write:\n    service-connection: write\n    connection-type: azureDevOps\n    allow:\n      - organization: other-org\n        projects:\n          - project: Other Project\n            repositories: [target-repo]\n";
+    assert!(readiness_warnings(&format!("{prefix}{ready}{cross_repo}")).is_empty());
+}
+
 /// Validate the `variable-groups:` front-matter block (issue #1385).
 ///
 /// Enforces two rules before the pipeline is built:
@@ -897,6 +1022,45 @@ pub fn validate_repo_endpoint(
     Ok(())
 }
 
+fn validate_repo_organization(
+    repo_type: &str,
+    endpoint: &Option<String>,
+    organization: Option<&crate::secure::AdoOrganization>,
+    name: &str,
+) -> Result<()> {
+    let Some(organization) = organization else {
+        return Ok(());
+    };
+    if !repo_type.eq_ignore_ascii_case("git") {
+        anyhow::bail!(
+            "Repository '{name}' sets `organization: {organization}`, but `organization` \
+             is supported only for Azure Repos `type: git` entries."
+        );
+    }
+    if endpoint.as_deref().is_none_or(str::is_empty) {
+        anyhow::bail!(
+            "Cross-organization repository '{name}' sets `organization: {organization}` \
+             but has no `endpoint:` service connection for checkout."
+        );
+    }
+    let Some((project, repository)) = name.split_once('/') else {
+        anyhow::bail!(
+            "Cross-organization repository '{name}' must use `name: project/repository`."
+        );
+    };
+    if repository.contains('/') {
+        anyhow::bail!(
+            "Cross-organization repository '{name}' must contain exactly one '/' between \
+             the project and repository names."
+        );
+    }
+    crate::secure::AdoProject::parse(project)
+        .with_context(|| format!("invalid project in cross-organization repository '{name}'"))?;
+    crate::secure::AdoRepository::parse(repository)
+        .with_context(|| format!("invalid repository in cross-organization repository '{name}'"))?;
+    Ok(())
+}
+
 /// Lower a `repos:` list into the internal [`LoweredRepos`] triple consumed by
 /// the rest of the compiler. A reserved `self` entry (an entry whose *name* is
 /// exactly `self`) contributes only fetch tuning under the
@@ -927,38 +1091,41 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             continue;
         }
 
-        let (name, alias, repo_type, repo_ref, endpoint, do_checkout, fetch_opts) = match item {
-            ReposItem::Shorthand(s) => {
-                let (alias, name) = parse_shorthand(s)?;
-                (
-                    name,
-                    alias,
-                    "git".to_string(),
-                    "refs/heads/main".to_string(),
-                    None,
-                    true,
-                    CheckoutFetchOpts::default(),
-                )
-            }
-            ReposItem::Full(entry) => {
-                let alias = match &entry.alias {
-                    Some(a) => a.clone(),
-                    None => derive_alias(&entry.name)?,
-                };
-                (
-                    entry.name.clone(),
-                    alias,
-                    entry.repo_type.clone(),
-                    entry.repo_ref.clone(),
-                    entry.endpoint.clone(),
-                    entry.checkout,
-                    CheckoutFetchOpts {
-                        fetch_depth: entry.fetch_depth,
-                        fetch_tags: entry.fetch_tags,
-                    },
-                )
-            }
-        };
+        let (name, alias, repo_type, repo_ref, endpoint, organization, do_checkout, fetch_opts) =
+            match item {
+                ReposItem::Shorthand(s) => {
+                    let (alias, name) = parse_shorthand(s)?;
+                    (
+                        name,
+                        alias,
+                        "git".to_string(),
+                        "refs/heads/main".to_string(),
+                        None,
+                        None,
+                        true,
+                        CheckoutFetchOpts::default(),
+                    )
+                }
+                ReposItem::Full(entry) => {
+                    let alias = match &entry.alias {
+                        Some(a) => a.clone(),
+                        None => derive_alias(&entry.name)?,
+                    };
+                    (
+                        entry.name.clone(),
+                        alias,
+                        entry.repo_type.clone(),
+                        entry.repo_ref.clone(),
+                        entry.endpoint.clone(),
+                        entry.organization.clone(),
+                        entry.checkout,
+                        CheckoutFetchOpts {
+                            fetch_depth: entry.fetch_depth,
+                            fetch_tags: entry.fetch_tags,
+                        },
+                    )
+                }
+            };
 
         // Reject aliases that aren't safe as a single path segment. The alias
         // is used unquoted as an ADO `checkout:` value / repository resource
@@ -1015,6 +1182,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
         }
 
         validate_repo_endpoint(&repo_type, &endpoint, &name)?;
+        validate_repo_organization(&repo_type, &endpoint, organization.as_ref(), &name)?;
 
         repositories.push(Repository {
             repository: alias.clone(),
@@ -1022,6 +1190,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             name,
             repo_ref,
             endpoint,
+            organization,
         });
 
         if do_checkout {
@@ -1064,6 +1233,12 @@ fn self_entry_fetch_opts(item: &ReposItem) -> Result<Option<CheckoutFetchOpts>> 
             let mut unsupported = Vec::new();
             if entry.alias.is_some() {
                 unsupported.push("alias");
+            }
+            if entry.endpoint.is_some() {
+                unsupported.push("endpoint");
+            }
+            if entry.organization.is_some() {
+                unsupported.push("organization");
             }
             if entry.repo_type != "git" {
                 unsupported.push("type");
@@ -2192,11 +2367,7 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
     {
         for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
             if front_matter.safe_outputs.contains_key(*consumer) {
-                require_same_approval_lane(
-                    front_matter,
-                    "create-github-issue",
-                    consumer,
-                )?;
+                require_same_approval_lane(front_matter, "create-github-issue", consumer)?;
             }
         }
     }
@@ -2476,44 +2647,94 @@ fn find_git_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
 // ==================== Permission helpers ====================
 
 /// ADO resource ID for minting ADO-scoped tokens via Azure CLI.
-const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
+pub(crate) const ADO_RESOURCE_ID: &str = "499b84ac-1321-427f-aa17-267ca6975798";
 
-/// Generate an AzureCLI@2 step to acquire an ADO-scoped token from an ARM service connection.
-/// The `variable_name` parameter controls which pipeline variable the token is stored in
-/// (e.g. "SC_READ_TOKEN" for the agent, "SC_WRITE_TOKEN" for the executor).
-/// Returns empty string if no service connection is provided.
-pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_name: &str) -> String {
-    match service_connection {
-        Some(sc) => {
-            let mut lines = Vec::new();
-            lines.push("- task: AzureCLI@2".to_string());
-            lines.push(format!(
-                r#"  displayName: "Acquire ADO token ({variable_name})""#
-            ));
-            lines.push("  inputs:".to_string());
-            lines.push(format!(
-                "    azureSubscription: '{}'",
-                sc.replace('\'', "''")
-            ));
-            lines.push("    scriptType: 'bash'".to_string());
-            lines.push("    scriptLocation: 'inlineScript'".to_string());
-            lines.push("    addSpnToEnvironment: true".to_string());
-            lines.push("    inlineScript: |".to_string());
-            lines.push("      ADO_TOKEN=$(az account get-access-token \\".to_string());
-            lines.push(format!("        --resource {} \\", ADO_RESOURCE_ID));
-            lines.push("        --query accessToken -o tsv)".to_string());
-            lines.push(format!(
-                "      echo \"##vso[task.setvariable variable={variable_name};issecret=true]$ADO_TOKEN\""
-            ));
-            // Trailing newline ensures the inlineScript block scalar value
-            // preserves its terminating newline through round-trip parse/emit;
-            // without it serde_yaml strips the newline and switches to the
-            // `|-` chomping indicator (semantically identical, but produces
-            // a textual diff against the committed lock files).
-            format!("{}\n", lines.join("\n"))
-        }
-        None => String::new(),
+shell_script! {
+    /// Mint the Stage 1 Azure DevOps bearer inside an authenticated AzureCLI@3
+    /// task and publish it as a masked, same-job pipeline variable.
+    ACQUIRE_ADO_READ_TOKEN {
+        interpreter: Bash,
+        bindings: [ADO_RESOURCE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -eo pipefail
+ADO_TOKEN=$(az account get-access-token \
+  --resource "$ADO_RESOURCE" \
+  --query accessToken -o tsv)
+if [ -z "$ADO_TOKEN" ]; then
+  echo "Azure CLI returned an empty Azure DevOps access token" >&2
+  exit 1
+fi
+printf '##vso[task.setvariable variable=SC_READ_TOKEN;issecret=true]%s\n' "$ADO_TOKEN"
+"#,
     }
+}
+
+shell_script! {
+    /// Mint the Stage 3 Azure DevOps bearer inside an authenticated AzureCLI@3
+    /// task and publish it as a masked, same-job pipeline variable.
+    ACQUIRE_ADO_WRITE_TOKEN {
+        interpreter: Bash,
+        bindings: [ADO_RESOURCE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -eo pipefail
+ADO_TOKEN=$(az account get-access-token \
+  --resource "$ADO_RESOURCE" \
+  --query accessToken -o tsv)
+if [ -z "$ADO_TOKEN" ]; then
+  echo "Azure CLI returned an empty Azure DevOps access token" >&2
+  exit 1
+fi
+printf '##vso[task.setvariable variable=SC_WRITE_TOKEN;issecret=true]%s\n' "$ADO_TOKEN"
+"#,
+    }
+}
+
+/// Generate a typed AzureCLI@3 step that mints an ADO-scoped token.
+#[derive(Clone, Copy)]
+pub enum AdoTokenVariable {
+    Read,
+    Write,
+}
+
+pub fn acquire_ado_token_step(
+    service_connection: Option<&str>,
+    connection_type: crate::compile::types::WriteConnectionType,
+    variable: AdoTokenVariable,
+) -> Option<crate::compile::ir::step::Step> {
+    let service_connection = service_connection?;
+    let (script_def, variable_name) = match variable {
+        AdoTokenVariable::Read => (&ACQUIRE_ADO_READ_TOKEN, "SC_READ_TOKEN"),
+        AdoTokenVariable::Write => (&ACQUIRE_ADO_WRITE_TOKEN, "SC_WRITE_TOKEN"),
+    };
+    let connection = match connection_type {
+        crate::compile::types::WriteConnectionType::AzureRm => {
+            crate::compile::ir::tasks::azure_cli::AzureCliV3Connection::AzureRm(
+                service_connection.to_string(),
+            )
+        }
+        crate::compile::types::WriteConnectionType::AzureDevOps => {
+            crate::compile::ir::tasks::azure_cli::AzureCliV3Connection::AzureDevOps(
+                service_connection.to_string(),
+            )
+        }
+    };
+    let script = ShellScript::new(script_def)
+        .bind_text("ADO_RESOURCE", ADO_RESOURCE_ID)
+        .render();
+    Some(crate::compile::ir::step::Step::Task(
+        crate::compile::ir::tasks::azure_cli::AzureCliV3::new(
+            connection,
+            crate::compile::ir::tasks::azure_cli::ScriptType::Bash,
+            crate::compile::ir::tasks::azure_cli::ScriptLocation::Inline(script),
+        )
+        .visible_az_login(false)
+        .with_display_name(format!("Acquire ADO token ({variable_name})"))
+        .into_step(),
+    ))
 }
 
 /// Generate the env block entries for the executor step (Stage 3 Execution).
@@ -2525,7 +2746,8 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 ///
 /// Sources:
 /// * `SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)` when `write_service_connection`
-///   is `Some` — write-capable ADO token minted via an ARM service connection.
+///   is `Some` — write-capable ADO token minted via the configured AzureCLI@3
+///   service connection.
 ///   Use this for cross-org / cross-project writes or when you need
 ///   named-identity attribution instead of the default
 ///   `Project Collection Build Service` identity.
@@ -3617,9 +3839,7 @@ pub fn generate_awf_path_step(awf_paths: &[String]) -> String {
             }
         })
         .collect();
-    format!(
-        "- bash: |\n{indented}  displayName: \"Generate GITHUB_PATH file\""
-    )
+    format!("- bash: |\n{indented}  displayName: \"Generate GITHUB_PATH file\"")
 }
 
 shell_script! {
@@ -4375,6 +4595,7 @@ mod tests {
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
         }];
         let checkout = vec!["my-repo".to_string()];
         let result = validate_checkout_list(&repos, &checkout);
@@ -4389,6 +4610,7 @@ mod tests {
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
         }];
         let checkout = vec!["unknown-alias".to_string()];
         let result = validate_checkout_list(&repos, &checkout);
@@ -4404,6 +4626,7 @@ mod tests {
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
         }];
         let result = validate_checkout_list(&repos, &[]);
         assert!(result.is_ok());
@@ -4419,6 +4642,7 @@ mod tests {
             name: "org/repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
         }];
         let checkout = vec!["repo".to_string()];
         let err = validate_checkout_list(&repos, &checkout).unwrap_err();
@@ -6146,40 +6370,65 @@ safe-outputs:
 
     // ─── format_step_yaml / format_step_yaml_indented ────────────────────────
 
-    // ─── generate_acquire_ado_token ──────────────────────────────────────────
+    // ─── acquire_ado_token_step ──────────────────────────────────────────────
 
     #[test]
     fn test_generate_acquire_ado_token_with_sc() {
-        let result = generate_acquire_ado_token(Some("my-arm-sc"), "SC_READ_TOKEN");
-        assert!(result.contains("AzureCLI@2"), "Should use AzureCLI@2 task");
-        assert!(
-            result.contains("azureSubscription: 'my-arm-sc'"),
-            "Should embed service connection name"
+        let Some(crate::compile::ir::step::Step::Task(task)) = acquire_ado_token_step(
+            Some("my-arm-sc"),
+            crate::compile::types::WriteConnectionType::AzureRm,
+            AdoTokenVariable::Read,
+        ) else {
+            panic!("expected token task");
+        };
+        assert_eq!(task.task, "AzureCLI@3");
+        assert_eq!(
+            task.inputs.get("connectionType").map(String::as_str),
+            Some("azureRM")
         );
-        assert!(
-            result.contains("variable=SC_READ_TOKEN;issecret=true"),
-            "Should set correct pipeline variable as secret"
+        assert_eq!(
+            task.inputs.get("azureSubscription").map(String::as_str),
+            Some("my-arm-sc")
         );
-        assert!(
-            result.contains("az account get-access-token"),
-            "Should call az CLI to get access token"
-        );
+        let script = task.inputs.get("inlineScript").unwrap();
+        assert!(script.contains("SC_READ_TOKEN"));
+        assert!(script.contains("az account get-access-token"));
     }
 
     #[test]
     fn test_generate_acquire_ado_token_none_returns_empty() {
-        let result = generate_acquire_ado_token(None, "SC_READ_TOKEN");
         assert!(
-            result.is_empty(),
-            "None service connection should return empty string"
+            acquire_ado_token_step(
+                None,
+                crate::compile::types::WriteConnectionType::AzureRm,
+                AdoTokenVariable::Read
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn test_generate_acquire_ado_token_write_token_variable() {
-        let result = generate_acquire_ado_token(Some("write-sc"), "SC_WRITE_TOKEN");
-        assert!(result.contains("variable=SC_WRITE_TOKEN;issecret=true"));
-        assert!(!result.contains("SC_READ_TOKEN"));
+        let Some(crate::compile::ir::step::Step::Task(task)) = acquire_ado_token_step(
+            Some("write-sc"),
+            crate::compile::types::WriteConnectionType::AzureDevOps,
+            AdoTokenVariable::Write,
+        ) else {
+            panic!("expected token task");
+        };
+        assert_eq!(
+            task.inputs.get("connectionType").map(String::as_str),
+            Some("azureDevOps")
+        );
+        assert_eq!(
+            task.inputs
+                .get("azureDevOpsServiceConnection")
+                .map(String::as_str),
+            Some("write-sc")
+        );
+        let script = task.inputs.get("inlineScript").unwrap();
+        assert!(script.contains("SC_WRITE_TOKEN"));
+        assert!(!script.contains("SC_READ_TOKEN"));
     }
 
     // ─── engine env / generate_executor_ado_env ────────────────────────────
@@ -8273,6 +8522,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8280,7 +8530,72 @@ safe-outputs:
         let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
         assert_eq!(repos[0].repository, "docs");
         assert_eq!(repos[0].name, "my-org/docs");
+        assert!(repos[0].organization.is_none());
         assert_eq!(checkout, vec!["docs"]);
+    }
+
+    #[test]
+    fn test_repos_object_form_preserves_cross_org_organization() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "Other Project/docs".to_string(),
+            alias: Some("cross-docs".to_string()),
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            endpoint: Some("cross-org-checkout".to_string()),
+            organization: Some(crate::secure::AdoOrganization::parse("other-org").unwrap()),
+            checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
+        })];
+
+        let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
+
+        assert_eq!(checkout, vec!["cross-docs"]);
+        assert_eq!(
+            repos[0].organization.as_ref().map(|value| value.as_str()),
+            Some("other-org")
+        );
+    }
+
+    #[test]
+    fn test_repos_cross_org_metadata_requires_git_endpoint_and_valid_name() {
+        for item in [
+            RepoEntry {
+                name: "Other Project/docs".to_string(),
+                alias: Some("docs".to_string()),
+                repo_type: "github".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: Some("checkout".to_string()),
+                organization: Some(crate::secure::AdoOrganization::parse("other-org").unwrap()),
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            },
+            RepoEntry {
+                name: "Other Project/docs".to_string(),
+                alias: Some("docs".to_string()),
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
+                organization: Some(crate::secure::AdoOrganization::parse("other-org").unwrap()),
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            },
+            RepoEntry {
+                name: "not-a-project-repository-pair".to_string(),
+                alias: Some("docs".to_string()),
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: Some("checkout".to_string()),
+                organization: Some(crate::secure::AdoOrganization::parse("other-org").unwrap()),
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            },
+        ] {
+            assert!(lower_repos(&[ReposItem::Full(item)]).is_err());
+        }
     }
 
     #[test]
@@ -8291,6 +8606,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: false,
             fetch_depth: None,
             fetch_tags: None,
@@ -8309,6 +8625,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/release/2.x".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8327,6 +8644,7 @@ safe-outputs:
             repo_type: "github".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8344,6 +8662,7 @@ safe-outputs:
             repo_type: "githubenterprise".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: Some("shared-conn".to_string()),
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8408,6 +8727,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8425,6 +8745,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -8449,6 +8770,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -8467,6 +8789,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8485,6 +8808,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: false,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -8505,6 +8829,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: Some(1),
                 fetch_tags: Some(false),
@@ -8531,6 +8856,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: Some(0),
             fetch_tags: Some(false),
@@ -8555,6 +8881,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: Some(1),
                 fetch_tags: None,
@@ -8565,6 +8892,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: Some(true),
@@ -8584,6 +8912,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/feature".to_string(),
             endpoint: None,
+            organization: None,
             checkout: false,
             fetch_depth: Some(1),
             fetch_tags: None,
@@ -8621,6 +8950,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: false,
             fetch_depth: Some(1),
             fetch_tags: Some(false),

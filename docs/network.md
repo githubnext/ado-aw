@@ -239,8 +239,8 @@ See [`imports:`](imports.md) for the ADO-first compile-time `repository` and
 
 ## Permissions (ADO Access Tokens)
 
-The ARM service-connection scope does not determine what its identity may do in
-Azure DevOps. `permissions.read` and `permissions.write` describe intended
+The service-connection resource scope does not determine what its identity may
+do in Azure DevOps. `permissions.read` and `permissions.write` describe intended
 pipeline roles and token placement; operators must separately grant each
 underlying identity the minimum Azure DevOps permissions. The executor
 (Stage 3) always has a write-capable token; what changes is its *source* and
@@ -249,7 +249,7 @@ underlying identity the minimum Azure DevOps permissions. The executor
 | Source                              | When                                          | Identity                                        |
 | ----------------------------------- | --------------------------------------------- | ----------------------------------------------- |
 | `$(System.AccessToken)` *(default)* | No `permissions.write` configured             | `Project Collection Build Service (org)`        |
-| `$(SC_WRITE_TOKEN)` *(opt-in)*      | `permissions.write: <arm-service-connection>` | The federated identity behind the ARM SC        |
+| `$(SC_WRITE_TOKEN)` *(opt-in)*      | Any `permissions.write` service connection    | The configured connection's Entra identity      |
 
 The agent (Stage 1) never receives the executor's token. Stage separation —
 not token type — is the trust boundary.
@@ -261,7 +261,7 @@ not token type — is the trust boundary.
    don't match (`PATCH _apis/build/builds/{id}`) and fetches PR metadata for
    Tier 2 filters (labels, draft status, changed files). Runs before the
    agent, outside the AWF sandbox.
-2. **Stage 3 executor** — when no ARM write SC is configured (the default),
+2. **Stage 3 executor** — when no write service connection is configured (the default),
    the executor's `SYSTEM_ACCESSTOKEN` env var is sourced from
    `$(System.AccessToken)`.
 
@@ -287,9 +287,11 @@ agents. Set `permissions.write` only when you need:
 
 1. **Cross-org or cross-project writes** — `System.AccessToken` is scoped to
    the host project. Targeting work items or repos in a different ADO
-   project / organization requires an ARM SC with broader scope.
+   project may use an Azure Resource Manager connection. Cross-organization
+   repository writes require an Azure DevOps connection and explicit allow
+   scope.
 2. **Named-identity attribution** — `System.AccessToken` writes are
-   attributed to the `Project Collection Build Service` identity. An ARM SC
+   attributed to the `Project Collection Build Service` identity. A service connection
    attributes writes to its underlying federated identity (e.g.
    `safe-output-bot@contoso.com`), useful when audit logs or work-item
    notifications need a specific actor.
@@ -343,6 +345,35 @@ agents. Set `permissions.write` only when you need:
   used **only** by the executor in Stage 3 (`SafeOutputs` job). Overrides
   the default `$(System.AccessToken)` for write operations. Never exposed
   to the agent.
+
+  Scalar form preserves the Azure Resource Manager connection contract:
+
+  ```yaml
+  permissions:
+    write: my-arm-connection
+  ```
+
+  Expanded form selects AzureCLI@3's connection type and adds exact
+  cross-organization repository scopes:
+
+  ```yaml
+  permissions:
+    write:
+      service-connection: ado-repository-writer
+      connection-type: azureDevOps
+      allow:
+        - organization: other-org
+          projects:
+            - project: Other Project
+              repositories: [target-repo]
+  ```
+
+  `connection-type` is either `azureRM` or `azureDevOps`. Only
+  `azureDevOps` permits cross-organization repository writes. The Azure DevOps
+  service connection must be backed by Entra workload identity federation; its
+  identity must belong to the same tenant, be added to every target
+  organization, and receive repository ACLs there. `allow` is additive to the
+  implicit current organization and is deny-by-default for cross-org targets.
 - **Both omitted**: The agent has no ADO API access. The executor still has
   a write-capable token via `$(System.AccessToken)`, scoped by the
   pipeline's job-authorization settings.
@@ -354,10 +385,21 @@ agents. Set `permissions.write` only when you need:
 permissions:
   read: my-read-sc
 
-# Cross-org / named-identity attribution — executor writes via ARM SC.
+# Named-identity attribution through an Azure Resource Manager connection.
 permissions:
   read: my-read-sc
   write: my-write-sc
+
+# Cross-org repository writes through an Azure DevOps WIF connection.
+permissions:
+  write:
+    service-connection: ado-repository-writer
+    connection-type: azureDevOps
+    allow:
+      - organization: other-org
+        projects:
+          - project: Other Project
+            repositories: [target-repo]
 
 # Agent has no ADO read access; executor still writes via $(System.AccessToken).
 # (Empty front matter — no `permissions:` key at all.)

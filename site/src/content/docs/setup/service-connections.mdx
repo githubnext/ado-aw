@@ -1,32 +1,45 @@
 ---
 title: Service Connections
-description: Create the Azure Resource Manager service connections needed for ado-aw pipelines
+description: Configure Azure Resource Manager or Azure DevOps service connections for ado-aw
 sidebar:
   order: 2
 ---
 
 import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
 
-`ado-aw` pipelines use **Azure Resource Manager (ARM) service connections** to mint Azure DevOps-scoped tokens at runtime. These tokens grant the pipeline controlled access to ADO APIs — separately for the agent (read) and the executor (write).
+`ado-aw` pipelines use service connections to mint Azure DevOps-scoped tokens
+at runtime. Scalar `permissions.read` / `permissions.write` values refer to
+Azure Resource Manager connections. Cross-organization repository writes use
+an Azure DevOps service connection backed by Entra workload identity
+federation.
 
 ## Why service connections?
 
-The compiled pipeline uses the `AzureCLI@2` task to call `az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798` — this mints a short-lived ADO token scoped to the service connection's identity. This keeps credentials short-lived and auditable, and avoids storing long-lived PATs.
+The compiled pipeline uses `AzureCLI@3` to call
+`az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798`.
+`connection-type: azureRM` emits the ARM task inputs;
+`connection-type: azureDevOps` emits the Azure DevOps service-connection
+inputs.
 
 | Connection | Used by | Purpose |
 |------------|---------|---------|
-| **Write** (optional override) | Stage 3 — SafeOutputs executor | Override the default `$(System.AccessToken)` for cross-org writes or named-identity attribution |
+| **Write** (optional override) | Stage 3 — SafeOutputs executor | Override `$(System.AccessToken)` for cross-project writes, scoped cross-org repository writes, or named attribution |
 | **Read** (optional) | Stage 1 — Agent | Query ADO APIs (work items, repos, builds) |
 
 :::tip[Reusing existing connections]
-If your project already has ARM service connections with appropriate ADO permissions, you can reuse them — just reference their names in `permissions.write` / `permissions.read` in your agent file. Skip to [Verify your connection works](#verify-your-connection-works) to confirm they're suitable.
+Existing ARM connections remain valid for scalar configuration and
+same-organization writes. Cross-organization repository writes require an
+Azure DevOps service connection; converting an ARM connection to WIF does not
+change its connection type.
 :::
 
 ---
 
 ## Create the write service connection
 
-The write service connection overrides the default `$(System.AccessToken)` — use it when you need writes attributed to a named service principal, or for cross-org / cross-project safe outputs where the pipeline's built-in token lacks sufficient scope.
+The write service connection overrides `$(System.AccessToken)`. Use an ARM
+connection for the existing scalar path or an Azure DevOps WIF connection for
+cross-organization repository writes.
 
 <Steps>
 1. Go to your **Azure DevOps Project → Project Settings → Service connections**
@@ -86,12 +99,41 @@ The write service connection overrides the default `$(System.AccessToken)` — u
    ```
 </Steps>
 
+### Cross-organization Azure Repos writes
+
+Create an **Azure DevOps** service connection backed by Entra workload identity
+federation. Add its service principal or managed identity to every target
+Azure DevOps organization in the same tenant and grant the required repository
+permissions. Then use expanded write configuration:
+
+```yaml
+permissions:
+  write:
+    service-connection: ado-repository-writer
+    connection-type: azureDevOps
+    allow:
+      - organization: other-org
+        projects:
+          - project: Other Project
+            repositories: [target-repo]
+
+repos:
+  - name: Other Project/target-repo
+    alias: target
+    organization: other-org
+    endpoint: ado-repository-writer
+```
+
+The repeated connection name is intentional: `endpoint` authenticates
+checkout, while `permissions.write` authorizes trusted Stage 3 REST writes.
+
 :::caution[Least privilege]
 Only grant the permissions your workflows actually use. If your agents only create work item comments, you don't need full Contributor access. See [Safe Outputs reference](/ado-aw/reference/safe-outputs/) for what each tool requires.
 :::
 
 :::note[Default executor token]
-The Stage 3 executor always has write access — it defaults to `$(System.AccessToken)` (the pipeline's built-in OAuth token), which is sufficient for most same-project safe outputs. A `permissions.write` service connection is only needed for cross-org writes, cross-project operations, or when you need the action attributed to a named service principal rather than the pipeline's build service identity.
+The Stage 3 executor always has write access — it defaults to `$(System.AccessToken)` (the pipeline's built-in OAuth token), which is sufficient for most same-project safe outputs. A `permissions.write` service connection is needed for cross-project
+operations, cross-organization repository writes, or named attribution.
 :::
 
 ---
@@ -121,9 +163,9 @@ Separation ensures the Stage 1 agent — which runs untrusted AI-generated code 
 
 | Configuration | Agent can read ADO? | Safe outputs can write? |
 |---|---|---|
-| Both `read` + `write` | ✅ | ✅ (ARM-minted identity) |
+| Both `read` + `write` | ✅ | ✅ (configured connection identity) |
 | Only `read` | ✅ | ✅ (default `System.AccessToken`) |
-| Only `write` | ❌ | ✅ (ARM-minted identity) |
+| Only `write` | ❌ | ✅ (configured connection identity) |
 | Neither (default) | ❌ | ✅ (default `System.AccessToken`) |
 
 ---
@@ -150,9 +192,10 @@ pool:
   vmImage: ubuntu-latest
 
 steps:
-  - task: AzureCLI@2
+  - task: AzureCLI@3
     displayName: "Test ADO token mint"
     inputs:
+      connectionType: azureRM
       azureSubscription: 'ado-aw-write'  # your connection name
       scriptType: 'bash'
       scriptLocation: 'inlineScript'
@@ -176,7 +219,7 @@ If this pipeline succeeds, your connection is correctly configured for `ado-aw`.
 
 | Symptom | Likely cause |
 |---------|-------------|
-| `AzureCLI@2` fails with "service connection not found" | The pipeline isn't authorized to use the connection — check pipeline permissions in the connection's Security tab |
+| `AzureCLI@3` fails with "service connection not found" | The pipeline isn't authorized to use the connection or `connection-type` does not match the server-side connection type |
 | Token mints but safe outputs return 401/403 | The service principal doesn't have sufficient ADO permissions — verify its group membership in ADO Organization Settings → Users |
 | "AADSTS700024: Client assertion is not within its valid time range" | Federated credential issuer/subject mismatch — regenerate in the App Registration |
 | Same-project safe-output writes return 403 with `TF401027: ... 'PullRequestContribute'` | You're on the default `$(System.AccessToken)` and the underlying build identity lacks PR-contribute (or has an explicit Deny) on the target repo. See the dedicated [Safe-output 401/403 errors](/ado-aw/troubleshooting/safe-output-permissions/) page for the diagnosis flow and three fix paths. |
