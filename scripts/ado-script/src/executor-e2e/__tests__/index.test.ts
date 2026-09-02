@@ -37,6 +37,7 @@ describe("scenario registry", () => {
       "set-github-issue-type-clear",
       "create-github-issue-temporary-id-handoff",
       "comment-on-github-issue",
+      "comment-on-github-issue-hide-older",
       "hide-github-issue-comment",
       "add-github-issue-labels",
       "remove-github-issue-labels",

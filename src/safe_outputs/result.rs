@@ -93,6 +93,10 @@ pub struct ExecutionContext {
     pub access_token: Option<String>,
     /// GitHub credential used by GitHub safe outputs in Stage 3.
     pub github_token: Option<String>,
+    /// Authenticated GitHub App bot login captured while minting the Stage 3
+    /// installation token. PAT-backed execution leaves this unset and resolves
+    /// the authenticated user through `GET /user`.
+    pub github_actor_login: Option<String>,
     /// GitHub REST API base URL for Stage 3 issue calls.
     pub github_api_url: String,
     /// Working directory for file operations (safe outputs directory)
@@ -406,6 +410,7 @@ impl ExecutionContext {
             ado_project_id: env("SYSTEM_TEAMPROJECTID"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
             github_token: env("ADO_AW_GITHUB_TOKEN"),
+            github_actor_login: env("ADO_AW_GITHUB_ACTOR_LOGIN"),
             github_api_url: env("ADO_AW_GITHUB_API_URL")
                 .unwrap_or_else(|| "https://api.github.com".to_string()),
             working_directory: std::env::current_dir().unwrap_or_default(),
@@ -1118,6 +1123,20 @@ mod tests {
         assert_eq!(ctx.source_branch.as_deref(), Some("refs/heads/main"));
         assert_eq!(ctx.source_branch_name.as_deref(), Some("main"));
         assert_eq!(ctx.source_version.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn test_from_env_lookup_populates_github_actor_login() {
+        let ctx = ExecutionContext::from_env_lookup(env_from(&[(
+            "ADO_AW_GITHUB_ACTOR_LOGIN",
+            "ado-aw-app[bot]",
+        )]));
+        assert_eq!(ctx.github_actor_login.as_deref(), Some("ado-aw-app[bot]"));
+        assert!(
+            ExecutionContext::from_env_lookup(env_from(&[]))
+                .github_actor_login
+                .is_none()
+        );
     }
 
     #[test]

@@ -3303,6 +3303,7 @@ index 0000000..abcdefg
             ado_project_id: None,
             access_token: Some("fake-token".to_string()),
             github_token: None,
+            github_actor_login: None,
             source_directory: dir.path().to_path_buf(),
             self_repository_directory: dir.path().to_path_buf(),
             working_directory: dir.path().to_path_buf(),

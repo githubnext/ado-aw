@@ -2540,6 +2540,7 @@ pub fn generate_acquire_ado_token(service_connection: Option<&str>, variable_nam
 pub fn generate_executor_ado_env(
     write_service_connection: Option<&str>,
     github_auth: Option<&crate::compile::types::GithubSafeOutputsAuth>,
+    github_actor_required: bool,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     // Select the ADO bearer via the shared `token_source_for` helper so the
@@ -2551,6 +2552,15 @@ pub fn generate_executor_ado_env(
             "ADO_AW_GITHUB_TOKEN: $({})",
             github_auth.executor_token_var()
         ));
+        if github_actor_required
+            && let Some(actor_var) = github_auth.executor_actor_var()
+        {
+            lines.push(format!(
+                "{}: $({})",
+                crate::compile::types::SAFE_OUTPUTS_GITHUB_ACTOR_LOGIN_ENV,
+                actor_var
+            ));
+        }
         let api_url = serde_json::to_string(github_auth.api_url())
             .expect("serializing a validated GitHub API URL cannot fail");
         lines.push(format!("ADO_AW_GITHUB_API_URL: {api_url}"));
@@ -6231,7 +6241,7 @@ safe-outputs:
 
     #[test]
     fn test_generate_executor_ado_env_with_connection() {
-        let result = generate_executor_ado_env(Some("my-sc"), None);
+        let result = generate_executor_ado_env(Some("my-sc"), None, false);
         assert!(
             result.contains("env:"),
             "Executor env block should include the 'env:' key"
@@ -6257,7 +6267,7 @@ safe-outputs:
 
     #[test]
     fn test_generate_executor_ado_env_none_uses_system_access_token() {
-        let result = generate_executor_ado_env(None, None);
+        let result = generate_executor_ado_env(None, None, false);
         assert!(
             result.starts_with("env:\n"),
             "Should always emit env: block (executor needs SYSTEM_ACCESSTOKEN)"
@@ -6282,7 +6292,7 @@ safe-outputs:
             variable: "MY_GITHUB_WRITE_TOKEN".to_string(),
             api_url: "https://api.github.com".to_string(),
         };
-        let result = generate_executor_ado_env(None, Some(&auth));
+        let result = generate_executor_ado_env(None, Some(&auth), false);
         assert!(result.starts_with("env:\n"), "Should emit env: block");
         assert!(
             result.contains("SYSTEM_ACCESSTOKEN: $(System.AccessToken)"),
@@ -6308,12 +6318,28 @@ safe-outputs:
             variable: "ADO_AW_GITHUB_TOKEN".to_string(),
             api_url: "https://api.github.com".to_string(),
         };
-        let result = generate_executor_ado_env(Some("write-sc"), Some(&auth));
+        let result = generate_executor_ado_env(Some("write-sc"), Some(&auth), false);
         assert!(result.contains("SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)"));
         assert!(result.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_GITHUB_TOKEN)"));
         assert!(
             !result.contains("$(System.AccessToken)"),
             "Write SC overrides System.AccessToken default"
+        );
+    }
+
+    #[test]
+    fn test_generate_executor_ado_env_with_github_app_actor() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  github-app:\n    app-id: 123\n    owner: octo\n  create-github-issue:\n    target-repo: octo/repo\n---\n",
+        )
+        .unwrap();
+        let auth = fm.github_safe_outputs_auth().unwrap().unwrap();
+        let result = generate_executor_ado_env(None, Some(&auth), true);
+        assert!(result.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"));
+        assert!(
+            result.contains(
+                "ADO_AW_GITHUB_ACTOR_LOGIN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN)"
+            )
         );
     }
 

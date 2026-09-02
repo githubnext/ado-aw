@@ -128,11 +128,6 @@ pub struct GithubUser {
     pub node_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GithubInstallation {
-    app_slug: String,
-}
-
 /// Minimal milestone metadata needed by milestone assignment.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GithubMilestone {
@@ -279,52 +274,6 @@ impl GithubClient {
             Err(error) => return Ok(Err(error)),
         };
         Ok(response.json("Failed to parse authenticated GitHub user"))
-    }
-
-    /// Resolve the actor identity used for issue comments.
-    ///
-    /// User/PAT tokens expose `GET /user`. Installation tokens do not, so on
-    /// the installation-token 403 path derive the bot login from
-    /// `GET /installation` instead. The caller can then compare the exact actor
-    /// login and avoid minimizing comments written by a different actor.
-    pub async fn authenticated_comment_actor(
-        &self,
-    ) -> anyhow::Result<Result<GithubUser, GithubApiError>> {
-        let response = self.send(Method::GET, self.route(&["user"])?, None).await?;
-        if response.is_success() {
-            return Ok(response.json("Failed to parse authenticated GitHub user"));
-        }
-        if response.status != StatusCode::FORBIDDEN {
-            return Ok(Err(GithubApiError::from_response(
-                "Failed to fetch authenticated GitHub user",
-                response,
-            )));
-        }
-
-        let response = self
-            .send(Method::GET, self.route(&["installation"])?, None)
-            .await?;
-        let response = match response.require_success("Failed to fetch GitHub App installation") {
-            Ok(response) => response,
-            Err(error) => return Ok(Err(error)),
-        };
-        let installation: GithubInstallation =
-            match response.json("Failed to parse GitHub App installation") {
-                Ok(installation) => installation,
-                Err(error) => return Ok(Err(error)),
-            };
-        if installation.app_slug.trim().is_empty() {
-            return Ok(Err(GithubApiError {
-                operation: "Failed to parse GitHub App installation".to_string(),
-                status: Some(response.status),
-                message: "GitHub App installation contained no app_slug".to_string(),
-            }));
-        }
-        Ok(Ok(GithubUser {
-            login: format!("{}[bot]", installation.app_slug),
-            id: None,
-            node_id: None,
-        }))
     }
 
     pub async fn graphql(
@@ -751,7 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn derives_comment_actor_from_app_installation() {
+    async fn authenticated_user_rejects_installation_token_without_fallback() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/user"))
@@ -761,19 +710,10 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        Mock::given(method("GET"))
-            .and(path("/installation"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "app_slug": "ado-aw-app"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
         let client = GithubClient::new(&server.uri(), "installation-token").unwrap();
-        let actor = client.authenticated_comment_actor().await.unwrap().unwrap();
-        assert_eq!(actor.login, "ado-aw-app[bot]");
-        assert_eq!(actor.id, None);
-        assert_eq!(actor.node_id, None);
+        let error = client.authenticated_user().await.unwrap().unwrap_err();
+        assert_eq!(error.status, Some(StatusCode::FORBIDDEN));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
