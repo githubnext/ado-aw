@@ -32,7 +32,7 @@ import * as azdev from "azure-devops-node-api";
 import type { WebApi } from "azure-devops-node-api";
 import { logError } from "./vso-logger.js";
 
-const cached = new Map<string, WebApi>();
+const cached = new Map<string, { token: string; client: WebApi }>();
 
 /** For tests only: clear the cached WebApi. */
 export function _resetCacheForTesting(): void {
@@ -60,13 +60,13 @@ export async function getWebApi(organizationUrl?: string): Promise<WebApi> {
     process.env.ADO_AW_ACCESS_TOKEN_KIND === "bearer" ? "bearer" : "pat";
   const cacheKey = `${tokenKind}:${orgUrl}`;
   const existing = cached.get(cacheKey);
-  if (existing) return existing;
+  if (existing?.token === token) return existing.client;
 
   const handler =
     tokenKind === "bearer"
       ? azdev.getBearerHandler(token)
       : azdev.getPersonalAccessTokenHandler(token);
   const client = new azdev.WebApi(orgUrl, handler);
-  cached.set(cacheKey, client);
+  cached.set(cacheKey, { token, client });
   return client;
 }

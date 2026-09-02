@@ -44,19 +44,24 @@ export function resolveCrossOrgEnv(ctx: ScenarioContext): CrossOrgEnv {
       `cross-org repository scenarios require ${missing.join(", ")}`,
     );
   }
+  if (!organization || !project || !repository || !endpoint || !token) {
+    throw new SkipError(
+      "cross-org repository scenario configuration is incomplete",
+    );
+  }
   const orgUrl = `https://dev.azure.com/${organization}/`;
   return {
-    organization: organization!,
+    organization,
     orgUrl,
-    project: project!,
-    repository: repository!,
+    project,
+    repository,
     alias: "cross-org-target",
-    endpoint: endpoint!,
-    token: token!,
+    endpoint,
+    token,
     rest: new AdoRest({
       orgUrl,
-      project: project!,
-      token: token!,
+      project,
+      token,
       authKind: "bearer",
       log: ctx.log,
     }),

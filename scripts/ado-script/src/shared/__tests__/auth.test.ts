@@ -73,4 +73,16 @@ describe("getWebApi", () => {
       "PersonalAccessTokenCredentialHandler",
     );
   });
+
+  it("replaces a cached client when the short-lived token rotates", async () => {
+    process.env.SYSTEM_COLLECTIONURI = "https://example.visualstudio.com/";
+    process.env.ADO_AW_ACCESS_TOKEN_KIND = "bearer";
+    process.env.SYSTEM_ACCESSTOKEN = "first-token";
+    const first = await getWebApi();
+
+    process.env.SYSTEM_ACCESSTOKEN = "second-token";
+    const second = await getWebApi();
+
+    expect(second).not.toBe(first);
+  });
 });

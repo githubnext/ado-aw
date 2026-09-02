@@ -2756,6 +2756,82 @@ mod tests {
         assert!(execution.message.contains("not in allowed-labels"));
     }
 
+    #[tokio::test]
+    async fn test_dry_run_rejects_unknown_repository_selector() {
+        let mut ctx = cross_org_ctx(Some("other-org"), true);
+        ctx.dry_run = true;
+        let mut result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: "Fix bug in parser".to_string(),
+            description: "This PR fixes a critical bug in the parser module.".to_string(),
+            source_branch: "agent/fix".to_string(),
+            patch_file: "patch.diff".to_string(),
+            repository: "not-checked-out".to_string(),
+            agent_labels: vec![],
+            base_commit: None,
+            patch_sha256: "deadbeef".to_string(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!execution.success);
+        assert!(execution.message.contains("not in the allowed list"));
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_accepts_unique_trailing_repository_name() {
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
+            ado_organization: Some("current-org".to_string()),
+            ado_project: Some("Current Project".to_string()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let allow = vec![crate::compile::types::AdoOrganizationScope {
+            organization: crate::secure::AdoOrganization::parse("other-org").unwrap(),
+            projects: vec![crate::compile::types::AdoProjectScope {
+                project: crate::secure::AdoProject::parse("Other Project").unwrap(),
+                project_id: None,
+                repositories: vec![crate::secure::AdoRepository::parse("cross-org-repo").unwrap()],
+            }],
+        }];
+        crate::safe_outputs::configure_repository_write_context(
+            &mut ctx,
+            &["target-alias".to_string()],
+            vec![crate::safe_outputs::RepositoryTargetSpec {
+                alias: "target-alias".to_string(),
+                repo_type: "git".to_string(),
+                name: "Other Project/cross-org-repo".to_string(),
+                organization: Some("other-org".to_string()),
+                endpoint: Some("cross-org-checkout".to_string()),
+            }],
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+            &allow,
+        );
+        let mut result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: "Fix bug in parser".to_string(),
+            description: "This PR fixes a critical bug in the parser module.".to_string(),
+            source_branch: "agent/fix".to_string(),
+            patch_file: "patch.diff".to_string(),
+            repository: "cross-org-repo".to_string(),
+            agent_labels: vec![],
+            base_commit: None,
+            patch_sha256: "deadbeef".to_string(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(execution.success, "{}", execution.message);
+        assert!(
+            execution
+                .message
+                .contains("other-org/Other Project/cross-org-repo"),
+            "{}",
+            execution.message
+        );
+    }
+
     #[test]
     fn test_target_branches_sanitizes_both_keys_and_values() {
         use crate::sanitize::SanitizeConfig;

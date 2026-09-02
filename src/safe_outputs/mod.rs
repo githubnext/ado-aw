@@ -1536,6 +1536,18 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Basic OnBhdC10b2tlbg==")
         );
+
+        let default_auth =
+            authenticate_ado_request(client.get("https://example.test"), "pat-token", None)
+                .build()
+                .unwrap();
+        assert_eq!(
+            default_auth
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Basic OnBhdC10b2tlbg==")
+        );
     }
 
     #[test]

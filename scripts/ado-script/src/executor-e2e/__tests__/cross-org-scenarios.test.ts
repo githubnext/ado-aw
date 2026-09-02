@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { AdoRest } from "../ado-rest.js";
 import type { ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
 import {
   crossOrgSource,
+  createCrossOrgBranch,
+  createCrossOrgGitTag,
   resolveCrossOrgEnv,
+  type CrossOrgEnv,
 } from "../scenarios/cross-org.js";
 
 function fakeCtx(): ScenarioContext {
@@ -58,6 +62,138 @@ describe("cross-org executor environment", () => {
           repositories: ["target-repo"],
         }],
       }],
+    });
+  });
+
+  describe("cross-org branch and tag scenarios", () => {
+    function scenarioEnv(
+      getRefObjectId: ReturnType<typeof vi.fn>,
+      deleteRef = vi.fn(async () => {}),
+    ): CrossOrgEnv {
+      return {
+        organization: "other-org",
+        orgUrl: "https://dev.azure.com/other-org/",
+        project: "Other Project",
+        repository: "target-repo",
+        alias: "cross-org-target",
+        endpoint: "ado-write",
+        token: "entra-token",
+        rest: {
+          getRefObjectId,
+          deleteRef,
+        } as unknown as AdoRest,
+      };
+    }
+
+    it("builds and verifies a cross-org branch proposal", async () => {
+      const getRefObjectId = vi.fn(async () => "a".repeat(40));
+      const deleteRef = vi.fn(async () => {});
+      const state = {
+        env: scenarioEnv(getRefObjectId, deleteRef),
+        branch: "ado-aw-det-77-cross-branch",
+        base: "main",
+      };
+
+      const source = createCrossOrgBranch.source;
+      if (!source) throw new Error("cross-org branch scenario source is required");
+      await expect(source(fakeCtx(), state)).resolves.toEqual(crossOrgSource(state.env));
+      expect(createCrossOrgBranch.config(fakeCtx(), state)).toEqual({
+        "allowed-repositories": ["cross-org-target"],
+        max: 1,
+      });
+      await expect(
+        createCrossOrgBranch.ndjson(fakeCtx(), state),
+      ).resolves.toEqual({
+        branch_name: state.branch,
+        source_branch: "main",
+        repository: "cross-org-target",
+      });
+      await expect(
+        createCrossOrgBranch.assert(
+          fakeCtx(),
+          state,
+          {
+            name: "create_branch",
+            status: "succeeded",
+          },
+          [],
+        ),
+      ).resolves.toBeUndefined();
+      expect(getRefObjectId).toHaveBeenCalledWith(
+        "target-repo",
+        `heads/${state.branch}`,
+      );
+      await createCrossOrgBranch.cleanup(fakeCtx(), state);
+      expect(deleteRef).toHaveBeenCalledWith(
+        "target-repo",
+        `refs/heads/${state.branch}`,
+      );
+    });
+
+    it("builds, verifies, and cleans up a cross-org tag proposal", async () => {
+      const getRefObjectId = vi.fn(async () => "b".repeat(40));
+      const deleteRef = vi.fn(async () => {});
+      const state = {
+        env: scenarioEnv(getRefObjectId, deleteRef),
+        tag: "ado-aw-det-77-cross-tag",
+      };
+
+      const source = createCrossOrgGitTag.source;
+      if (!source) throw new Error("cross-org tag scenario source is required");
+      await expect(source(fakeCtx(), state)).resolves.toEqual(crossOrgSource(state.env));
+      expect(createCrossOrgGitTag.config(fakeCtx(), state)).toEqual({
+        "allowed-repositories": ["cross-org-target"],
+        max: 1,
+      });
+      await expect(createCrossOrgGitTag.ndjson(fakeCtx(), state)).resolves.toEqual({
+        tag_name: state.tag,
+        message: expect.stringContaining("create-git-tag-cross-org"),
+        repository: "cross-org-target",
+      });
+      await expect(
+        createCrossOrgGitTag.assert(
+          fakeCtx(),
+          state,
+          {
+            name: "create_git_tag",
+            status: "succeeded",
+          },
+          [],
+        ),
+      ).resolves.toBeUndefined();
+      expect(getRefObjectId).toHaveBeenCalledWith(
+        "target-repo",
+        `tags/${state.tag}`,
+      );
+      await expect(
+        createCrossOrgGitTag.env!(fakeCtx(), state),
+      ).resolves.toEqual({
+        SYSTEM_ACCESSTOKEN: "entra-token",
+      });
+      await createCrossOrgGitTag.cleanup(fakeCtx(), state);
+      expect(deleteRef).toHaveBeenCalledWith(
+        "target-repo",
+        `refs/tags/${state.tag}`,
+      );
+    });
+
+    it("fails verification when a cross-org tag is absent", async () => {
+      const state = {
+        env: scenarioEnv(vi.fn(async () => undefined)),
+        tag: "ado-aw-det-77-cross-tag",
+      };
+
+      await expect(
+        createCrossOrgGitTag.assert(
+          fakeCtx(),
+          state,
+          {
+            name: "create_git_tag",
+            status: "succeeded",
+          },
+          [],
+        ),
+      ).rejects.toThrow(/was not created/);
     });
   });
 
