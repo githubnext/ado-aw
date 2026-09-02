@@ -239,9 +239,21 @@ impl Executor for CommentOnGithubIssueResult {
 
         let mut older_node_ids = Vec::new();
         if config.hide_older_comments {
-            let authenticated = match client.authenticated_comment_actor().await? {
-                Ok(user) => user,
-                Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
+            let authenticated = match ctx.github_actor_login.as_deref() {
+                Some(login) if !login.trim().is_empty() => GithubUser {
+                    login: login.trim().to_string(),
+                    id: None,
+                    node_id: None,
+                },
+                Some(_) => {
+                    return Ok(ExecutionResult::failure(
+                        "ADO_AW_GITHUB_ACTOR_LOGIN is empty; cannot safely identify older GitHub App comments",
+                    ));
+                }
+                None => match client.authenticated_user().await? {
+                    Ok(user) => user,
+                    Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
+                },
             };
             let comments = match client
                 .list_issue_comments(&target.repository, target.number)
@@ -725,27 +737,11 @@ max: 2
     }
 
     #[tokio::test]
-    async fn hide_older_derives_app_bot_identity_without_user_endpoint() {
+    async fn hide_older_uses_mint_derived_app_actor_without_discovery() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/octo/repo/issues/7"))
             .respond_with(ResponseTemplate::new(200).set_body_json(issue_json(7, false)))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/user"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
-                "message": "Resource not accessible by integration"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/installation"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "app_slug": "ado-aw-app"
-            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -793,13 +789,14 @@ max: 2
             .mount(&server)
             .await;
 
-        let ctx = context(
+        let mut ctx = context(
             &server,
             serde_json::json!({
                 "target-repo": "octo/repo",
                 "hide-older-comments": true
             }),
         );
+        ctx.github_actor_login = Some("ado-aw-app[bot]".to_string());
         let mut result = make_result(GithubIssueNumber::Number(7));
         let execution = result.execute_sanitized(&ctx).await.unwrap();
         assert!(execution.success, "{}", execution.message);
@@ -807,6 +804,44 @@ max: 2
             execution.data.as_ref().unwrap()["hidden_older_comments"],
             serde_json::json!(1)
         );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| {
+                    request.url.path() != "/user" && request.url.path() != "/installation"
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn hide_older_rejects_empty_app_actor_before_comment_writes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/octo/repo/issues/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(issue_json(7, false)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut ctx = context(
+            &server,
+            serde_json::json!({
+                "target-repo": "octo/repo",
+                "hide-older-comments": true
+            }),
+        );
+        ctx.github_actor_login = Some("  ".to_string());
+        let mut result = make_result(GithubIssueNumber::Number(7));
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution
+                .message
+                .contains("ADO_AW_GITHUB_ACTOR_LOGIN is empty")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

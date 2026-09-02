@@ -753,9 +753,16 @@ JSON uses the snake_case parameter names below.
 marker and, by default, a trace footer (`footer: false` disables the visible
 footer). `hide-older-comments: true` first minimizes older comments carrying
 the same pipeline marker **and** authored by the authenticated actor. It never
-trusts agent-authored marker text. `allowed-reasons` restricts minimization
-reasons; supported reasons are `SPAM`, `ABUSE`, `OFF_TOPIC`, `OUTDATED`
-(default), `RESOLVED`, and `LOW_QUALITY`.
+trusts agent-authored marker text. With PAT authentication, Stage 3 resolves
+the actor through GitHub's `GET /user` endpoint. With
+`safe-outputs.github-app`, the JWT-authenticated token-mint step captures the
+installation's App slug and passes the derived `<slug>[bot]` login to Stage 3;
+installation access tokens are not sent to `/user` or `/installation` for
+actor discovery. Actor resolution, older-comment discovery, and minimization
+remain fail-closed and complete before the replacement comment is posted.
+`allowed-reasons` restricts minimization reasons; supported reasons are
+`SPAM`, `ABUSE`, `OFF_TOPIC`, `OUTDATED` (default), `RESOLVED`, and
+`LOW_QUALITY`.
 
 `hide-github-issue-comment` accepts either a numeric REST comment ID or a
 GraphQL node ID. It resolves the owning issue, PR, or discussion and applies

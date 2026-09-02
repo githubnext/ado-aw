@@ -407,9 +407,15 @@ its own App JWT / minted installation token, so it carries no
 `SYSTEM_ACCESSTOKEN` and no ADO predefined mirrors. Its only env var is the
 masked private-key secret (`GH_APP_PRIVATE_KEY`, and `GH_APP_TOKEN` for revoke);
 every other, non-secret input (App ID, owner, repositories, output-variable
-name, api-url) is a single-quoted **argv flag** rather than an env var, so a
-pipeline variable can never shadow it (ADO injects pipeline variables into a
-step's env, but argv comes only from the compiler-authored script).
+name, optional actor-output-variable name, api-url) is a single-quoted **argv
+flag** rather than an env var, so a pipeline variable can never shadow it (ADO
+injects pipeline variables into a step's env, but argv comes only from the
+compiler-authored script). When GitHub App-backed SafeOutputs enable
+`hide-older-comments`, the bundle also captures `app_slug` from the
+JWT-authenticated installation lookup and emits the derived `<slug>[bot]`
+login as a non-secret same-job variable. The Stage 3 executor uses that
+identity for exact matching instead of sending the installation access token
+to actor-discovery endpoints it cannot call.
 
 
 ## End-to-end data flow

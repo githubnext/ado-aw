@@ -206,6 +206,12 @@ Accuracy rules:
 
 Reject trivial churn (pure wording nitpicks with no reader value).
 
+After selecting a candidate documentation gap, search all open pull requests for
+one that already materially addresses the same gap. Compare its title, body,
+changed files, and diff as needed; overlapping files alone do not make it a
+duplicate. If such a PR exists, make no changes and emit `noop` citing its PR
+number.
+
 ## Decision Criteria
 
 **Create a pull request** if you find any of:

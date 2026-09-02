@@ -738,6 +738,7 @@ pub fn github_app_token_step_typed(
     github_app_token_step_typed_for(
         cfg,
         crate::engine::GITHUB_APP_TOKEN_VAR,
+        None,
         "Mint GitHub App token (Copilot engine auth)",
         &cfg.permissions,
     )
@@ -746,6 +747,7 @@ pub fn github_app_token_step_typed(
 pub fn github_app_token_step_typed_for(
     cfg: &crate::compile::types::GithubAppTokenConfig,
     output_var: &str,
+    actor_output_var: Option<&str>,
     display_name: &str,
     permissions: &std::collections::BTreeMap<
         String,
@@ -762,6 +764,12 @@ pub fn github_app_token_step_typed_for(
         // pipeline variable can redirect the minted token.
         format!("--output-var {}", sh_single_quote(output_var)),
     ];
+    if let Some(actor_output_var) = actor_output_var {
+        args.push(format!(
+            "--actor-output-var {}",
+            sh_single_quote(actor_output_var)
+        ));
+    }
     if !cfg.repositories.is_empty() {
         args.push(format!(
             "--repositories {}",

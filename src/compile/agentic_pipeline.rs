@@ -2583,13 +2583,26 @@ fn build_safeoutputs_job(
             ));
         }
     }
+    let github_actor_required = variant
+        .github_issue_tools
+        .iter()
+        .any(|tool| tool == "comment-on-github-issue")
+        && front_matter
+            .comment_on_github_issue_config()?
+            .is_some_and(|config| config.hide_older_comments);
     if let Some(app) = github_app {
         let permissions =
             front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
+        let actor_output_var = if github_actor_required {
+            Some(crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR)
+        } else {
+            None
+        };
         steps.push(
             super::extensions::ado_script::github_app_token_step_typed_for(
                 app,
                 crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+                actor_output_var,
                 "Mint GitHub App token (SafeOutputs)",
                 &permissions,
             )?,
@@ -2602,6 +2615,7 @@ fn build_safeoutputs_job(
             .and_then(|permissions| permissions.write.as_ref())
             .map(crate::compile::types::WritePermissionConfig::service_connection),
         github_auth.as_ref(),
+        github_actor_required,
     );
     let resolved_config_path = "$(Agent.TempDirectory)/ado-aw-resolved-config.json";
     steps.push(Step::Bash(write_custom_runtime_config_step(

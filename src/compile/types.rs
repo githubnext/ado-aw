@@ -660,6 +660,9 @@ pub struct GithubAppTokenConfig {
 
 pub const DEFAULT_SAFE_OUTPUTS_GITHUB_TOKEN_VAR: &str = "ADO_AW_GITHUB_TOKEN";
 pub const SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR: &str = "ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN";
+pub const SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR: &str =
+    "ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN";
+pub const SAFE_OUTPUTS_GITHUB_ACTOR_LOGIN_ENV: &str = "ADO_AW_GITHUB_ACTOR_LOGIN";
 
 /// Canonical GitHub issue-family safe-output names.
 ///
@@ -735,6 +738,13 @@ impl GithubSafeOutputsAuth {
         match self {
             Self::Token { variable, .. } => variable,
             Self::App { .. } => SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+        }
+    }
+
+    pub fn executor_actor_var(&self) -> Option<&str> {
+        match self {
+            Self::Token { .. } => None,
+            Self::App { .. } => Some(SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR),
         }
     }
 

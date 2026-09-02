@@ -67,10 +67,16 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
   scenario supplies only `ADO_AW_SELF_REPOSITORY_NAME` — matching what the
   compiler emits — so it also proves the executor resolves a repository from
   its name alone.
-- **GitHub issues:** `create-github-issue`, `set-github-issue-type`, and the
-  same-run `temporary_id` handoff between them. These are the only scenarios
-  that assert against **GitHub** rather than ADO — see
-  [GitHub issue scenarios](#github-issue-scenarios) below.
+- **GitHub issues:** the complete GitHub issue safe-output family, including
+  ordinary comment creation, `hide-github-issue-comment`, and a combined
+  `comment-on-github-issue` scenario with `hide-older-comments: true`. The
+  combined scenario uses the configured PAT to prove actor matching,
+  minimization, replacement creation, and result reporting. GitHub App
+  mint-to-executor identity wiring is covered by deterministic bundle,
+  compiler, and Rust integration tests rather than new live App credentials in
+  this pipeline. These are the only scenarios that assert against **GitHub**
+  rather than ADO — see [GitHub issue scenarios](#github-issue-scenarios)
+  below.
 
 Excluded (out of scope): none of the currently shipped safe outputs.
 

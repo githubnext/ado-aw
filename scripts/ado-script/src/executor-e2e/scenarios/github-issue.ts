@@ -674,6 +674,108 @@ export const commentOnGithubIssue: Scenario<MutationIssueState> = {
       .run(),
 };
 
+interface HideOlderCommentState extends MutationIssueState {
+  olderCommentId: number;
+  olderCommentNodeId: string;
+  definitionId: string;
+}
+
+export const commentOnGithubIssueHideOlder: Scenario<HideOlderCommentState> = {
+  id: "comment-on-github-issue-hide-older",
+  tool: "comment-on-github-issue",
+  config: (_ctx, state) =>
+    mutationConfig(state, {
+      "hide-older-comments": true,
+      "allowed-reasons": ["OUTDATED"],
+    }),
+  setup: async (ctx) => {
+    const id = "comment-on-github-issue-hide-older";
+    const env = resolveGithubIssueEnv(id);
+    await requireIssueWrite(env, id);
+    await requireGraphqlFeature(env, id, [["Mutation", "minimizeComment"]]);
+    const state = await seedMutationIssue(ctx, env, id);
+    const definitionId = "2079";
+    try {
+      const older = await createIssueComment(
+        env.gh,
+        state.issueNumber,
+        [
+          detBody(ctx, "comment-on-github-issue-hide-older-previous"),
+          `<!-- ado-aw:github-comment:pipeline-definition-id=${definitionId} -->`,
+        ].join("\n\n"),
+      );
+      return {
+        ...state,
+        olderCommentId: older.id,
+        olderCommentNodeId: older.nodeId,
+        definitionId,
+      };
+    } catch (err) {
+      await closeMutationIssue(state).catch(() => {});
+      throw err;
+    }
+  },
+  ndjson: async (ctx, state) => ({
+    issue_number: state.issueNumber,
+    body: detBody(ctx, "comment-on-github-issue-hide-older-replacement"),
+  }),
+  env: async (_ctx, state) => ({
+    ...executeEnv(state),
+    SYSTEM_DEFINITIONID: state.definitionId,
+  }),
+  assert: async (ctx, state, record) => {
+    const minimized = await getCommentMinimization(
+      state.gh,
+      state.olderCommentNodeId,
+    );
+    if (!minimized.isMinimized) {
+      throw new Error(`older comment ${state.olderCommentId} was not minimized`);
+    }
+    if (minimized.reason?.toUpperCase() !== "OUTDATED") {
+      throw new Error(
+        `older comment ${state.olderCommentId} has unexpected minimized reason '${minimized.reason ?? ""}'`,
+      );
+    }
+
+    const expected = detBody(
+      ctx,
+      "comment-on-github-issue-hide-older-replacement",
+    );
+    const replacement = (
+      await listIssueComments(state.gh, state.issueNumber)
+    ).find((comment) => comment.body.includes(expected));
+    if (!replacement) {
+      throw new Error(
+        `issue #${state.issueNumber} has no replacement executor comment`,
+      );
+    }
+    state.commentId = replacement.id;
+    const expectedMarker = `<!-- ado-aw:github-comment:pipeline-definition-id=${state.definitionId} -->`;
+    if (!replacement.body.includes(expectedMarker)) {
+      throw new Error("replacement comment is missing the pipeline marker");
+    }
+    if (record.result?.hidden_older_comments !== 1) {
+      throw new Error(
+        `executor reported hidden_older_comments=${String(record.result?.hidden_older_comments)}`,
+      );
+    }
+  },
+  cleanup: async (ctx, state) =>
+    new Teardown()
+      .add("delete replacement comment", () =>
+        deleteMatchingComments(
+          ctx,
+          state,
+          "comment-on-github-issue-hide-older-replacement",
+        ),
+      )
+      .add("delete older comment", () =>
+        deleteIssueComment(state.gh, state.olderCommentId),
+      )
+      .add("close scratch issue", () => closeMutationIssue(state))
+      .run(),
+};
+
 interface HiddenCommentState extends MutationIssueState {
   commentNodeId: string;
 }
@@ -1240,6 +1342,7 @@ export const githubIssueScenarios: Scenario<unknown>[] = [
   setGithubIssueTypeClear,
   createGithubIssueTemporaryIdHandoff,
   commentOnGithubIssue,
+  commentOnGithubIssueHideOlder,
   hideGithubIssueComment,
   addGithubIssueLabels,
   removeGithubIssueLabels,

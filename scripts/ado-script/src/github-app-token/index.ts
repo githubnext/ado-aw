@@ -9,7 +9,7 @@
  * Flow:
  *   1. Build a short-lived RS256 JWT signed with the App private key
  *      (`node:crypto` — no `openssl`, no npm dep).
- *   2. Resolve the installation ID for the configured owner
+ *   2. Resolve the installation metadata for the configured owner
  *      (`GET /orgs/{owner}/installation`, falling back to
  *      `GET /users/{owner}/installation`).
  *   3. Exchange the JWT for an installation access token
@@ -33,6 +33,7 @@
  *
  *   Mint:   node github-app-token.js \
  *             --app-id <id> --owner <login> --output-var <name> \
+ *             [--actor-output-var <name>] \
  *             [--repositories "a b"] [--permissions-json '{"issues":"write"}'] \
  *             [--api-url https://host/api/v3]
  *           env: GH_APP_PRIVATE_KEY (required, secret)
@@ -42,13 +43,20 @@
  *
  * Flags: `--app-id` the GitHub App ID; `--owner` installation owner (org/user);
  * `--output-var` the masked variable name to set (compiler-pinned, defaults to
- * `GITHUB_APP_TOKEN`); `--repositories` space/comma-separated repo names to
- * scope the token to; `--api-url` API base URL (default `https://api.github.com`,
+ * `GITHUB_APP_TOKEN`); `--actor-output-var` the optional non-secret App bot
+ * login variable; `--repositories` space/comma-separated repo names to scope
+ * the token to; `--api-url` API base URL (default `https://api.github.com`,
  * GHES uses `https://<host>/api/v3`).
  */
 import { createSign } from "node:crypto";
 
-import { logError, logInfo, logWarning, setSecretVar } from "../shared/vso-logger.js";
+import {
+  logError,
+  logInfo,
+  logWarning,
+  setSecretVar,
+  setVar,
+} from "../shared/vso-logger.js";
 
 const DEFAULT_API_URL = "https://api.github.com";
 const DEFAULT_OUTPUT_VAR = "GITHUB_APP_TOKEN";
@@ -201,16 +209,21 @@ function ghHeaders(bearer: string): Record<string, string> {
 }
 
 /**
- * Resolve the installation ID for `owner`. Tries the org endpoint first, then
- * the user endpoint (GitHub App installations exist on either an org or a
+ * Resolve the installation metadata for `owner`. Tries the org endpoint first,
+ * then the user endpoint (GitHub App installations exist on either an org or a
  * user account).
  */
-export async function resolveInstallationId(
+export interface GithubInstallation {
+  id: number;
+  appSlug?: string;
+}
+
+export async function resolveInstallation(
   fetchFn: FetchLike,
   apiUrl: string,
   jwt: string,
   owner: string,
-): Promise<number> {
+): Promise<GithubInstallation> {
   const candidates = [
     `${apiUrl}/orgs/${encodeURIComponent(owner)}/installation`,
     `${apiUrl}/users/${encodeURIComponent(owner)}/installation`,
@@ -223,9 +236,16 @@ export async function resolveInstallationId(
       headers: ghHeaders(jwt),
     });
     if (resp.ok) {
-      const data = (await resp.json()) as { id?: number };
+      const data = (await resp.json()) as {
+        id?: number;
+        app_slug?: string;
+      };
       if (typeof data.id === "number") {
-        return data.id;
+        return {
+          id: data.id,
+          appSlug:
+            typeof data.app_slug === "string" ? data.app_slug.trim() : undefined,
+        };
       }
       throw new Error(
         `installation lookup for '${owner}' returned no numeric id`,
@@ -309,6 +329,7 @@ export interface CliArgs {
   appId?: string;
   owner?: string;
   outputVar?: string;
+  actorOutputVar?: string;
   repositories?: string;
   permissionsJson?: string;
   apiUrl?: string;
@@ -342,6 +363,9 @@ export function parseArgs(argv: string[]): CliArgs {
         break;
       case "--output-var":
         if (value !== undefined) out.outputVar = value;
+        break;
+      case "--actor-output-var":
+        if (value !== undefined) out.actorOutputVar = value;
         break;
       case "--repositories":
         if (value !== undefined) out.repositories = value;
@@ -427,19 +451,34 @@ export async function main(
       args.outputVar && args.outputVar.length > 0
         ? args.outputVar
         : DEFAULT_OUTPUT_VAR;
+    const actorOutputVar =
+      args.actorOutputVar === undefined
+        ? undefined
+        : requireArg(args.actorOutputVar, "--actor-output-var");
 
     const jwt = buildAppJwt(appId, privateKey);
-    const installationId = await resolveInstallationId(
+    const installation = await resolveInstallation(
       fetchFn,
       apiUrl,
       jwt,
       owner,
     );
+    const actorLogin =
+      actorOutputVar === undefined
+        ? undefined
+        : (() => {
+            if (!installation.appSlug) {
+              throw new Error(
+                `installation lookup for '${owner}' returned no app_slug required by --actor-output-var`,
+              );
+            }
+            return `${installation.appSlug}[bot]`;
+          })();
     const token = await mintInstallationToken(
       fetchFn,
       apiUrl,
       jwt,
-      installationId,
+      installation.id,
       repositories,
       permissions,
     );
@@ -447,9 +486,12 @@ export async function main(
     // Mask + expose to the same-job consumer. Emitting the secret BEFORE
     // any log line that could contain it keeps ADO's scrubber ahead of leaks.
     setSecretVar(outputVar, token);
+    if (actorOutputVar && actorLogin) {
+      setVar(actorOutputVar, actorLogin);
+    }
     logInfo(
       `[github-app-token] minted installation token for owner '${owner}' ` +
-        `(installation ${installationId}, ${
+        `(installation ${installation.id}, ${
           repositories.length > 0
             ? `${repositories.length} repo(s)`
             : "all repos"
