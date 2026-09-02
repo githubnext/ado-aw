@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.51.0](https://github.com/githubnext/ado-aw/compare/v0.50.0...v0.51.0) (2026-09-02)
+
+
+### Features
+
+* **safe-outputs:** support cross-organization repository writes ([#2087](https://github.com/githubnext/ado-aw/issues/2087)) ([f789429](https://github.com/githubnext/ado-aw/commit/f7894295d86b252bc10cfbe16379d9a957b31b0a))
+
+
+### Bug Fixes
+
+* **mcpg:** plumb custom MCP pipeline variables ([#2088](https://github.com/githubnext/ado-aw/issues/2088)) ([59a7e9f](https://github.com/githubnext/ado-aw/commit/59a7e9f8d995cb56cd23dfde15aa70c8260d0538))
+* **safe-outputs:** accept create-work-item temporary IDs in comment-on-work-item ([#1925](https://github.com/githubnext/ado-aw/issues/1925)) ([30ba3db](https://github.com/githubnext/ado-aw/commit/30ba3db6d11189e48937327930a5aa01b33b938f))
+* **safe-outputs:** make create-work-item body field configurable ([#1926](https://github.com/githubnext/ado-aw/issues/1926)) ([9ef8855](https://github.com/githubnext/ado-aw/commit/9ef88556dd74d9becb3d331985b6ebf1abf4dd29))
+* **safe-outputs:** reject cross-organization repos in create-pull-request ([#1935](https://github.com/githubnext/ado-aw/issues/1935)) ([c636f17](https://github.com/githubnext/ado-aw/commit/c636f17f11ac7d8270abc9d7f4b0d9a05cf29e47))
+* **safe-outputs:** support GitHub App comment replacement ([#2082](https://github.com/githubnext/ado-aw/issues/2082)) ([c9de348](https://github.com/githubnext/ado-aw/commit/c9de348373d268e5fa7f1d05ca02de7ae11a7e4d))
+* **workflows:** avoid duplicate documentation PRs ([#2084](https://github.com/githubnext/ado-aw/issues/2084)) ([5aa1b92](https://github.com/githubnext/ado-aw/commit/5aa1b9287e9476ac95272e87fcabbc261537adc8))
+* **workflows:** wait for rust-critic/ts-critic sub-agent results ([#1973](https://github.com/githubnext/ado-aw/issues/1973)) ([01ec634](https://github.com/githubnext/ado-aw/commit/01ec634ae9629b21894ef318090b6a5927b9a101))
+* **workflows:** wait for TypeScript reviewer subagent ([#2083](https://github.com/githubnext/ado-aw/issues/2083)) ([e17597d](https://github.com/githubnext/ado-aw/commit/e17597d420fd65a2023bf1e11d2c4714f548fd1e))
+
 ## [0.50.0](https://github.com/githubnext/ado-aw/compare/v0.49.0...v0.50.0) (2026-08-14)
 
 
