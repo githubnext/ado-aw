@@ -2276,7 +2276,9 @@ fn prepare_custom_agent_output_step(config_path: &str, output_path: &str) -> Bas
 fn agent_temp_filename(path: &str) -> String {
     let prefix = "$(Agent.TempDirectory)/";
     path.strip_prefix(prefix)
-        .unwrap_or_else(|| panic!("custom-tools config path {path:?} must start with {prefix:?}"))
+        .unwrap_or_else(|| panic!(
+            "custom-tools config path {path:?} must start with {prefix:?}"
+        ))
         .to_string()
 }
 
@@ -3095,15 +3097,20 @@ fn build_conclusion_job(
     // defaults (type: Task, no area/iteration path). The global
     // report-failure-as-work-item toggle controls whether it files at all.
     for tool_key in &["noop", "missing-tool", "missing-data"] {
-        conclusion_step = apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
+        conclusion_step =
+            apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
     }
 
     // Pass upstream job results via job-level variables hoist.
     // ADO only evaluates $[...] runtime expressions inside `variables:` and
     // `condition:` — NOT in step env blocks. We hoist to job variables and
     // reference them as $(name) macros in the step env.
-    let (conclusion_variables, conclusion_step) =
-        hoist_conclusion_job_results(conclusion_step, prefix, custom_defs, has_reviewed_job)?;
+    let (conclusion_variables, conclusion_step) = hoist_conclusion_job_results(
+        conclusion_step,
+        prefix,
+        custom_defs,
+        has_reviewed_job,
+    )?;
 
     steps.push(Step::Bash(conclusion_step));
 
@@ -3820,7 +3827,8 @@ fn prepare_mcpg_config_step(
          {mcpg_sentinel}"
     );
     let custom_tools_fragment = if let Some(custom_tools_json) = custom_tools_json {
-        let sentinel = super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
+        let sentinel =
+            super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
         format!(
             "# Write compiler-generated dynamic SafeOutputs tool definitions\n\
              cat > \"$AGENT_TEMP/staging/custom-tools.json\" << '{sentinel}'\n\
@@ -4567,7 +4575,10 @@ fn execute_safe_outputs_step(
         // no part of it needs separate lowering.
         EnvValue::literal(self_repository_directory),
     );
-    script = script.with_env("ADO_AW_SELF_REPOSITORY_NAME", self_repository_name.clone());
+    script = script.with_env(
+        "ADO_AW_SELF_REPOSITORY_NAME",
+        self_repository_name.clone(),
+    );
     Ok(script)
 }
 
@@ -4894,14 +4905,23 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
             Binding::text(ado_proxy_container_entrypoint_flattened()),
         )
         .fragment("resolve_org", common::resolve_ado_organization_bash())
-        .fragment("setup_workdir", phase_body(&START_ADO_PROXY_SETUP_WORKDIR))
+        .fragment(
+            "setup_workdir",
+            phase_body(&START_ADO_PROXY_SETUP_WORKDIR),
+        )
         .fragment("write_policy", phase_body(&START_ADO_PROXY_WRITE_POLICY))
-        .fragment("mint_material", phase_body(&START_ADO_PROXY_MINT_MATERIAL))
+        .fragment(
+            "mint_material",
+            phase_body(&START_ADO_PROXY_MINT_MATERIAL),
+        )
         .fragment(
             "build_material",
             phase_body(&START_ADO_PROXY_BUILD_MATERIAL),
         )
-        .fragment("run_container", phase_body(&START_ADO_PROXY_RUN_CONTAINER))
+        .fragment(
+            "run_container",
+            phase_body(&START_ADO_PROXY_RUN_CONTAINER),
+        )
         .fragment(
             "handover_material",
             phase_body(&START_ADO_PROXY_HANDOVER_MATERIAL),
@@ -6179,10 +6199,7 @@ fn verify_mcp_backends_step() -> BashStep {
     ShellScript::new(&VERIFY_MCP_BACKENDS)
         .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
         .into_step("Verify MCP backends")
-        .with_env(
-            "MCPG_API_KEY",
-            EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
-        )
+        .with_env("MCPG_API_KEY", EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -7283,9 +7300,9 @@ safe-outputs:
             step.script
         );
         assert!(
-            step.script
-                .contains("printf '%s' \"$PROXY_MATERIAL\" | docker exec -i \"$PROXY_CONTAINER\"")
-                && step.script.contains("cat > /tmp/ado-proxy-material"),
+            step.script.contains(
+                "printf '%s' \"$PROXY_MATERIAL\" | docker exec -i \"$PROXY_CONTAINER\""
+            ) && step.script.contains("cat > /tmp/ado-proxy-material"),
             "material must stream through the container-private FIFO: {}",
             step.script
         );
@@ -7344,7 +7361,8 @@ safe-outputs:
         let copy = copy_logs_step("/tmp/copilot", false);
         assert!(copy.script.contains("/tmp/gh-aw/ado-proxy-logs"));
         assert!(
-            copy.script.contains("AGENT_TEMP='$(Agent.TempDirectory)'")
+            copy.script
+                .contains("AGENT_TEMP='$(Agent.TempDirectory)'")
                 && copy
                     .script
                     .contains(r#""$AGENT_TEMP/staging/logs/ado-proxy""#),
@@ -7381,8 +7399,9 @@ safe-outputs:
         );
         assert!(
             script.contains(&format!("CA_HOST_PATH='{ADO_PROXY_PUBLIC_CA_HOST_PATH}'"))
-                && script
-                    .contains("##vso[task.setvariable variable=ADO_PROXY_CA_FILE]$CA_HOST_PATH"),
+                && script.contains(
+                    "##vso[task.setvariable variable=ADO_PROXY_CA_FILE]$CA_HOST_PATH"
+                ),
             "clients need the published certificate's path: {script}"
         );
         assert!(
@@ -7435,8 +7454,10 @@ safe-outputs:
             "docker run must reuse the bound $PROXY_IMAGE: {script}"
         );
         assert!(
-            script.contains(&format!("PROXY_SCRIPT_PATH='{}'", paths::ADO_PROXY_PATH))
-                && script.contains("\"$PROXY_SCRIPT_PATH:/app/ado-proxy.js:ro\""),
+            script.contains(&format!(
+                "PROXY_SCRIPT_PATH='{}'",
+                paths::ADO_PROXY_PATH
+            )) && script.contains("\"$PROXY_SCRIPT_PATH:/app/ado-proxy.js:ro\""),
             "docker run must mount the bound ado-proxy bundle: {script}"
         );
     }
