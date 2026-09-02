@@ -29,6 +29,11 @@ import { join } from "node:path";
 import type { Scenario, ScenarioContext } from "../scenario.js";
 import { partialOutput } from "../execute-cli.js";
 import { detBody, numResult, Teardown } from "./common.js";
+import {
+  crossOrgSource,
+  resolveCrossOrgEnv,
+  type CrossOrgEnv,
+} from "./cross-org.js";
 
 interface CreatePrState {
   repo: string;
@@ -42,13 +47,17 @@ interface CreatePrState {
   sourcesDir: string;
   /** Actual git checkout beneath sourcesDir. */
   checkoutDir: string;
+  rest: ScenarioContext["rest"];
+  executorToken: string;
+  repositorySelector: string;
+  crossOrg?: CrossOrgEnv;
   /** PR id, populated in assert() so cleanup can abandon it. */
   prId?: number;
 }
 
 interface CreatePrScenarioOptions {
   readonly id: string;
-  readonly repositorySelector: "named" | "self";
+  readonly repositorySelector: "named" | "self" | "cross-org";
   readonly patchRelPath: string;
   readonly changedFileSuffix?: string;
 }
@@ -124,13 +133,28 @@ async function setupCreatePullRequest(
   ctx: ScenarioContext,
   options: CreatePrScenarioOptions,
 ): Promise<CreatePrState> {
-  const repo = ctx.adoRepo;
-  const authHeader = "Basic " + Buffer.from(":" + ctx.token).toString("base64");
+  const crossOrg =
+    options.repositorySelector === "cross-org"
+      ? resolveCrossOrgEnv(ctx)
+      : undefined;
+  const repo = crossOrg?.repository ?? ctx.adoRepo;
+  const orgUrl = crossOrg?.orgUrl ?? ctx.orgUrl;
+  const project = crossOrg?.project ?? ctx.project;
+  const token = crossOrg?.token ?? ctx.token;
+  const rest = crossOrg?.rest ?? ctx.rest;
+  const authHeader = crossOrg
+    ? `Bearer ${token}`
+    : "Basic " + Buffer.from(":" + token).toString("base64");
   const sourcesDir = join(ctx.workDir, options.id, "src-checkout");
   await mkdir(sourcesDir, { recursive: true });
-  const checkoutDir = join(sourcesDir, repo);
+  const repositorySelector = crossOrg?.alias ??
+    (options.repositorySelector === "self" ? "self" : repo);
+  const checkoutDir = join(
+    sourcesDir,
+    crossOrg?.alias ?? repo,
+  );
 
-  const cloneUrl = `${ctx.orgUrl.replace(/\/+$/, "")}/${encodeURIComponent(ctx.project)}/_git/${encodeURIComponent(repo)}`;
+  const cloneUrl = `${orgUrl.replace(/\/+$/, "")}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repo)}`;
   ctx.log(`[${options.id}] cloning ${repo}`);
   await git(ctx, ["clone", cloneUrl, checkoutDir], sourcesDir, authHeader, options.id);
 
@@ -188,6 +212,10 @@ async function setupCreatePullRequest(
     patchContent,
     sourcesDir,
     checkoutDir,
+    rest,
+    executorToken: token,
+    repositorySelector,
+    crossOrg,
   };
 }
 
@@ -197,7 +225,7 @@ function createPullRequestScenario(
   return {
     id: options.id,
     tool: "create-pull-request",
-    targetsAdoRepo: true,
+    targetsAdoRepo: options.repositorySelector === "named",
     config: (_ctx, state) => ({
       // Target the repo's actual default branch (state.targetBranch), which is
       // also where base_commit was taken from, rather than hardcoding "main".
@@ -208,11 +236,16 @@ function createPullRequestScenario(
       "include-stats": false,
     }),
     setup: (ctx) => setupCreatePullRequest(ctx, options),
+    source: async (_ctx, state) =>
+      state.crossOrg ? crossOrgSource(state.crossOrg) : {},
     files: async (_ctx, state) => ({ [state.patchRelPath]: state.patchContent }),
     env: async (_ctx, state) => {
       const env: Record<string, string> = {
         BUILD_SOURCESDIRECTORY: state.sourcesDir,
       };
+      if (state.crossOrg) {
+        env.SYSTEM_ACCESSTOKEN = state.executorToken;
+      }
       if (options.repositorySelector === "self") {
         Object.assign(env, {
           ADO_AW_SELF_REPOSITORY_DIRECTORY: state.checkoutDir,
@@ -235,7 +268,7 @@ function createPullRequestScenario(
       description: detBody(ctx, options.id),
       source_branch: state.sourceBranch,
       patch_file: state.patchRelPath,
-      repository: options.repositorySelector === "self" ? "self" : state.repo,
+      repository: state.repositorySelector,
       agent_labels: [],
       base_commit: state.baseCommit,
       patch_sha256: state.patchSha256,
@@ -245,9 +278,9 @@ function createPullRequestScenario(
       // Record the PR id up front so cleanup abandons it even if a later
       // assertion (or the getPullRequest call itself) throws.
       state.prId = prId;
-      const pr = await ctx.rest.getPullRequest(state.repo, prId);
+      const pr = await state.rest.getPullRequest(state.repo, prId);
       if (pr.status === "abandoned") throw new Error(`PR #${prId} is abandoned`);
-      const sha = await ctx.rest.getRefObjectId(state.repo, `heads/${state.sourceBranch}`);
+      const sha = await state.rest.getRefObjectId(state.repo, `heads/${state.sourceBranch}`);
       if (!sha) throw new Error(`source branch '${state.sourceBranch}' was not pushed`);
     },
     cleanup: async (ctx, state) => {
@@ -257,11 +290,11 @@ function createPullRequestScenario(
       const teardown = new Teardown();
       if (state.prId !== undefined) {
         const prId = state.prId;
-        teardown.add("abandon PR", () => ctx.rest.abandonPullRequest(state.repo, prId));
+        teardown.add("abandon PR", () => state.rest.abandonPullRequest(state.repo, prId));
       }
       await teardown
         .add("delete source branch", () =>
-          ctx.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`),
+          state.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`),
         )
         // Remove the cloned checkout so repeated local runs don't accumulate it.
         .add("remove local checkout", () =>
@@ -285,7 +318,15 @@ export const createPullRequestSelfMultiCheckout = createPullRequestScenario({
   changedFileSuffix: "-self-multi-checkout",
 });
 
+export const createPullRequestCrossOrg = createPullRequestScenario({
+  id: "create-pull-request-cross-org",
+  repositorySelector: "cross-org",
+  patchRelPath: "create-pr-cross-org.patch",
+  changedFileSuffix: "-cross-org",
+});
+
 export const createPullRequestScenarios: Scenario<unknown>[] = [
   createPullRequest,
   createPullRequestSelfMultiCheckout,
+  createPullRequestCrossOrg,
 ];

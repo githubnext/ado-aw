@@ -43,6 +43,37 @@ describe("renderSourceMarkdown", () => {
     expect(md).toContain('"set-github-issue-type": {"target-repo":"o/r"}');
     expect(md.match(/^---$/gm)?.length).toBe(2);
   });
+
+  it("emits expanded write permissions and cross-org repository metadata", () => {
+    const md = renderSourceMarkdown({
+      tool: "create-branch",
+      safeOutputs: { "create-branch": { "allowed-repositories": ["target"] } },
+      source: {
+        repositories: [{
+          name: "Other Project/target-repo",
+          alias: "target",
+          organization: "other-org",
+          endpoint: "ado-write",
+        }],
+        writePermissions: {
+          serviceConnection: "ado-write",
+          connectionType: "azureDevOps",
+          allow: [{
+            organization: "other-org",
+            projects: [{
+              project: "Other Project",
+              repositories: ["target-repo"],
+            }],
+          }],
+        },
+      },
+    });
+
+    expect(md).toContain("permissions:");
+    expect(md).toContain('"connection-type":"azureDevOps"');
+    expect(md).toContain('"organization":"other-org"');
+    expect(md).toContain('"endpoint":"ado-write"');
+  });
 });
 
 describe("renderNdjsonLine", () => {

@@ -16,7 +16,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
-import type { ExecutedRecord, PriorEntry } from "./scenario.js";
+import type { ExecutedRecord, PriorEntry, ScenarioSource } from "./scenario.js";
 
 const SAFE_OUTPUT_FILENAME = "safe_outputs.ndjson";
 const EXECUTED_FILENAME = "safe-outputs-executed.ndjson";
@@ -27,6 +27,7 @@ export interface RenderSourceOptions {
   safeOutputs: Record<string, Record<string, unknown>>;
   /** ADO repo name for repo-targeting tools (emits a `repos:` block). */
   adoRepo?: string;
+  source?: ScenarioSource;
 }
 
 /**
@@ -45,7 +46,21 @@ export function renderSourceMarkdown(opts: RenderSourceOptions): string {
     "engine:",
     "  id: copilot",
   ];
-  if (opts.adoRepo) {
+  if (opts.source?.writePermissions) {
+    const write = opts.source.writePermissions;
+    lines.push("permissions:");
+    lines.push(`  write: ${JSON.stringify({
+      "service-connection": write.serviceConnection,
+      "connection-type": write.connectionType,
+      allow: write.allow,
+    })}`);
+  }
+  if (opts.source?.repositories) {
+    lines.push("repos:");
+    for (const repository of opts.source.repositories) {
+      lines.push(`  - ${JSON.stringify(repository)}`);
+    }
+  } else if (opts.adoRepo) {
     lines.push("repos:");
     // JSON-stringify both the alias and the repo name (valid YAML) to stay
     // consistent with the rest of the rendered front-matter and guard against
@@ -87,6 +102,7 @@ export interface RunExecuteOptions {
    */
   priorEntries?: PriorEntry[];
   adoRepo?: string;
+  source?: ScenarioSource;
   orgUrl: string;
   project: string;
   token: string;
@@ -137,7 +153,12 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
   safeOutputs[opts.tool] = opts.config;
   await writeFile(
     sourcePath,
-    renderSourceMarkdown({ tool: opts.tool, safeOutputs, adoRepo: opts.adoRepo }),
+    renderSourceMarkdown({
+      tool: opts.tool,
+      safeOutputs,
+      adoRepo: opts.adoRepo,
+      source: opts.source,
+    }),
     "utf8",
   );
 

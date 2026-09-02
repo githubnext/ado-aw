@@ -2,9 +2,8 @@
  * Minimal, self-contained Azure DevOps REST client for the deterministic
  * executor E2E harness.
  *
- * Uses the global `fetch` (Node 20+) with Basic auth (empty user + token),
- * matching how the `ado-aw` Rust executor authenticates
- * (`reqwest ... .basic_auth("", Some(token))`). Endpoints and api-versions are
+ * Uses the global `fetch` (Node 20+) with Basic auth by default and Bearer auth
+ * for Azure DevOps service-connection tokens. Endpoints and api-versions are
  * chosen to line up with the executors under test so setup/assert/cleanup hit
  * the same surfaces the executor writes to.
  *
@@ -15,6 +14,7 @@ export interface AdoRestOptions {
   orgUrl: string;
   project: string;
   token: string;
+  authKind?: "basic" | "bearer";
   log?: (msg: string) => void;
 }
 
@@ -42,7 +42,10 @@ export class AdoRest {
   constructor(opts: AdoRestOptions) {
     this.base = opts.orgUrl.replace(/\/+$/, "");
     this.project = opts.project;
-    this.authHeader = "Basic " + Buffer.from(":" + opts.token).toString("base64");
+    this.authHeader =
+      opts.authKind === "bearer"
+        ? `Bearer ${opts.token}`
+        : "Basic " + Buffer.from(":" + opts.token).toString("base64");
     this.log = opts.log ?? (() => {});
     this.timeoutMs = Number(process.env.EXECUTOR_E2E_REST_TIMEOUT_MS) || 30_000;
   }

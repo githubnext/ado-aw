@@ -65,6 +65,10 @@ variables:
   # skip gracefully. Override at queue time (or via a variable group) to enable.
   # EXECUTOR_E2E_GITHUB_TOKEN must be provided as a SECRET pipeline variable
   # scoped to Issues:read/write on the configured issue repository.
+  # Cross-org repository scenarios require five definition variables:
+  # EXECUTOR_E2E_CROSS_ORG_ORGANIZATION / PROJECT / REPOSITORY / ENDPOINT plus
+  # secret EXECUTOR_E2E_CROSS_ORG_TOKEN. They remain unset in the default lane,
+  # so the scenarios skip until pre-provisioned WIF infrastructure is approved.
 
 steps:
   - checkout: self
@@ -155,3 +159,11 @@ steps:
       # EXECUTOR_E2E_ISSUE_REPO, and skip when neither is set.
       EXECUTOR_E2E_SCENARIO_ISSUE_REPO: $(EFFECTIVE_EXECUTOR_E2E_SCENARIO_ISSUE_REPO)
       E2E_GITHUB_ISSUE_TYPE: $(EFFECTIVE_E2E_GITHUB_ISSUE_TYPE)
+      # Optional cross-organization Azure Repos scenarios. The token must be a
+      # short-lived Entra bearer minted from the Azure DevOps service connection
+      # named by ENDPOINT; unexpanded macros are treated as absent.
+      EXECUTOR_E2E_CROSS_ORG_ORGANIZATION: $(EXECUTOR_E2E_CROSS_ORG_ORGANIZATION)
+      EXECUTOR_E2E_CROSS_ORG_PROJECT: $(EXECUTOR_E2E_CROSS_ORG_PROJECT)
+      EXECUTOR_E2E_CROSS_ORG_REPOSITORY: $(EXECUTOR_E2E_CROSS_ORG_REPOSITORY)
+      EXECUTOR_E2E_CROSS_ORG_ENDPOINT: $(EXECUTOR_E2E_CROSS_ORG_ENDPOINT)
+      EXECUTOR_E2E_CROSS_ORG_TOKEN: $(EXECUTOR_E2E_CROSS_ORG_TOKEN)

@@ -67,13 +67,14 @@ export async function runScenario<S>(
     // Guard the auxiliary scenario methods too: a harness-level bug in any of
     // these must record a failed result and let the rest of the suite run,
     // not propagate out of runScenario and abort runAll early.
-    let config, entry, files, extraEnv, priorEntries;
+    let config, entry, files, extraEnv, priorEntries, source;
     try {
       config = scenario.config(ctx, state);
       entry = await scenario.ndjson(ctx, state);
       priorEntries = scenario.priorEntries ? await scenario.priorEntries(ctx, state) : undefined;
       files = scenario.files ? await scenario.files(ctx, state) : undefined;
       extraEnv = scenario.env ? await scenario.env(ctx, state) : undefined;
+      source = scenario.source ? await scenario.source(ctx, state) : undefined;
     } catch (err) {
       return finish({ ok: false, phase: "execute", message: errMessage(err) });
     }
@@ -88,6 +89,7 @@ export async function runScenario<S>(
         entry,
         priorEntries,
         adoRepo: scenario.targetsAdoRepo ? ctx.adoRepo : undefined,
+        source,
         orgUrl: ctx.orgUrl,
         project: ctx.project,
         token: ctx.token,

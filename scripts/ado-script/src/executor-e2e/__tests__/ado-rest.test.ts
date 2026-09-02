@@ -19,6 +19,28 @@ describe("AdoRest.workItemTypeExists", () => {
     vi.unstubAllGlobals();
   });
 
+  describe("AdoRest authentication", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("uses Bearer auth when requested", async () => {
+      const fetchMock = stubFetch(
+        () =>
+          new Response(JSON.stringify({ id: "repo" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+
+      await new AdoRest({ ...options, authKind: "bearer" }).getRepository("repo");
+
+      expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+        headers: expect.objectContaining({ Authorization: "Bearer token" }),
+      });
+    });
+  });
+
   it("resolves true and encodes the project and type segments", async () => {
     const fetchMock = stubFetch(
       () =>

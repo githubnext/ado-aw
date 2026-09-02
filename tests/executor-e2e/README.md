@@ -56,6 +56,8 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
 - **PR:** `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`,
   `submit-pr-review`, `update-pr`
 - **Git:** `create-branch`, `create-git-tag`
+- **Cross-org Git (optional infrastructure):** `create-branch-cross-org`,
+  `create-git-tag-cross-org`, and `create-pull-request-cross-org`
 - **Build:** `add-build-tag`, `queue-build`, `upload-build-attachment`,
   `upload-pipeline-artifact`
 - **Flagship:** `create-pull-request` covers both a named additional checkout at
@@ -223,6 +225,37 @@ scratch repository, not a canonical one.
 | `EXECUTOR_E2E_GITHUB_TOKEN` | Reused from failure-issue filing. It must now also carry **Issues: write** on the scratch repository, because these scenarios create, mutate, and close issues. |
 | `EXECUTOR_E2E_SCENARIO_ISSUE_REPO` | Optional. `owner/repo` for scratch issues; falls back to `EXECUTOR_E2E_ISSUE_REPO`. Set it to keep scenario issues away from the failure-report repository. |
 | `E2E_GITHUB_ISSUE_TYPE` | Optional. Forces a native issue-type name for environments where the token cannot read org metadata but the type is known to exist. |
+| `EXECUTOR_E2E_CROSS_ORG_ORGANIZATION` | Target Azure DevOps organization name. |
+| `EXECUTOR_E2E_CROSS_ORG_PROJECT` | Target project containing the scratch repository. |
+| `EXECUTOR_E2E_CROSS_ORG_REPOSITORY` | Scratch repository used for branch, tag, and PR writes. |
+| `EXECUTOR_E2E_CROSS_ORG_ENDPOINT` | Azure DevOps WIF service-connection name used by the source fixture. |
+| `EXECUTOR_E2E_CROSS_ORG_TOKEN` | Secret, short-lived Entra bearer minted from that connection. |
+
+### Cross-organization repository-write scenarios
+
+These scenarios are registered but skip unless all five variables above are
+present. The target must be in the same Entra tenant, and the service
+connection's identity must be added to both Azure DevOps organizations with
+Read, Contribute, Create branch/tag, and Create pull request permissions on the
+scratch repository.
+
+The harness:
+
+1. uses Bearer authentication for target-org setup/assert/cleanup;
+2. renders `repos.organization`, the checkout `endpoint`, and expanded
+   `permissions.write` with `connection-type: azureDevOps`;
+3. runs the real Stage 3 executor with the target token;
+4. creates and deletes a branch and annotated tag;
+5. clones the target repository, generates a patch, creates and abandons a PR,
+   deletes its source branch, and removes the local checkout.
+
+The registered AgentPlayground pipeline does not currently mint this token:
+creating or authorizing the Azure DevOps WIF service connection, adding its
+identity to the target organization, and granting repository ACLs are
+administrative side effects that must be provisioned separately. After that,
+add an `AzureCLI@3` token-mint step and map its secret output to
+`EXECUTOR_E2E_CROSS_ORG_TOKEN`; the scenarios then become mandatory rather
+than skipped.
 
 There is deliberately **no default repo** for these scenarios: when neither
 variable is set they skip rather than filing scratch issues onto

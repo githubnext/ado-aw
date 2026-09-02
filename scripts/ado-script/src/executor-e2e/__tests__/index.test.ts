@@ -25,6 +25,9 @@ describe("scenario registry", () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toContain("create-pull-request");
     expect(ids).toContain("create-pull-request-self-multi-checkout");
+    expect(ids).toContain("create-pull-request-cross-org");
+    expect(ids).toContain("create-branch-cross-org");
+    expect(ids).toContain("create-git-tag-cross-org");
   });
 
   it("registers the GitHub issue scenarios with unique ids", () => {

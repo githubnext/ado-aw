@@ -49,6 +49,28 @@ export interface PriorEntry {
   readonly config: Record<string, unknown>;
 }
 
+export interface ScenarioSourceRepository {
+  readonly name: string;
+  readonly alias: string;
+  readonly organization?: string;
+  readonly endpoint?: string;
+}
+
+export interface ScenarioSource {
+  readonly repositories?: ScenarioSourceRepository[];
+  readonly writePermissions?: {
+    readonly serviceConnection: string;
+    readonly connectionType: "azureDevOps";
+    readonly allow: Array<{
+      readonly organization: string;
+      readonly projects: Array<{
+        readonly project: string;
+        readonly repositories: string[];
+      }>;
+    }>;
+  };
+}
+
 /** Shared, read-only context handed to every scenario phase. */export interface ScenarioContext {
   /** ADO collection URI, e.g. https://dev.azure.com/msazuresphere/ */
   readonly orgUrl: string;
@@ -93,6 +115,8 @@ export interface Scenario<State = unknown> {
    * per-tool `allowed-repositories` config.
    */
   readonly targetsAdoRepo?: boolean;
+  /** Optional trusted front-matter additions for cross-org executor scenarios. */
+  source?(ctx: ScenarioContext, state: State): Promise<ScenarioSource>;
   /** Per-tool `safe-outputs: <tool>:` front-matter config fragment. */
   config(ctx: ScenarioContext, state: State): Record<string, unknown>;
   /**
