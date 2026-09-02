@@ -1298,6 +1298,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn split_repository_target_name_rejects_too_many_segments() {
+        let error =
+            split_repository_target_name("Project/team/repository", "Current Project").unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("must be a repository name or project/repository"),
+            "{}",
+            error.message
+        );
+    }
+
     fn repository_target_ctx() -> ExecutionContext {
         ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/current-org/".to_string()),
