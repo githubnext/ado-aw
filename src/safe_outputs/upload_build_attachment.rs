@@ -915,6 +915,7 @@ attachment-type: "agent-artifact"
             ado_project_id: None,
             access_token: None,
             github_token: None,
+            github_actor_login: None,
             source_directory: working_directory.clone(),
             self_repository_directory: working_directory.clone(),
             working_directory,

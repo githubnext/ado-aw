@@ -6,7 +6,7 @@ import {
   parseArgs,
   parsePermissions,
   parseRepositories,
-  resolveInstallationId,
+  resolveInstallation,
   mintInstallationToken,
   revoke,
   main,
@@ -161,16 +161,20 @@ describe("parseRepositories", () => {
   });
 });
 
-describe("resolveInstallationId", () => {
-  it("returns the id from the org endpoint when it succeeds", async () => {
-    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(200, { id: 42 }));
-    const id = await resolveInstallationId(
+describe("resolveInstallation", () => {
+  it("returns installation metadata from the org endpoint", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, { id: 42, app_slug: "ado-aw-app" }),
+      );
+    const installation = await resolveInstallation(
       fetchFn as never,
       "https://api.github.com",
       "jwt",
       "octo-org",
     );
-    expect(id).toBe(42);
+    expect(installation).toEqual({ id: 42, appSlug: "ado-aw-app" });
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect(fetchFn.mock.calls[0]![0]).toContain("/orgs/octo-org/installation");
   });
@@ -180,13 +184,13 @@ describe("resolveInstallationId", () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse(404, "not found"))
       .mockResolvedValueOnce(jsonResponse(200, { id: 7 }));
-    const id = await resolveInstallationId(
+    const installation = await resolveInstallation(
       fetchFn as never,
       "https://api.github.com",
       "jwt",
       "octo-user",
     );
-    expect(id).toBe(7);
+    expect(installation).toEqual({ id: 7, appSlug: undefined });
     expect(fetchFn).toHaveBeenCalledTimes(2);
     expect(fetchFn.mock.calls[1]![0]).toContain("/users/octo-user/installation");
   });
@@ -196,7 +200,7 @@ describe("resolveInstallationId", () => {
       .fn()
       .mockResolvedValue(jsonResponse(404, "nope"));
     await expect(
-      resolveInstallationId(
+      resolveInstallation(
         fetchFn as never,
         "https://api.github.com",
         "jwt",
@@ -284,6 +288,8 @@ describe("parseArgs", () => {
       "octo-org",
       "--output-var",
       "GITHUB_APP_TOKEN",
+      "--actor-output-var",
+      "GITHUB_APP_ACTOR_LOGIN",
       "--repositories",
       "repo-a repo-b",
       "--permissions-json",
@@ -295,6 +301,7 @@ describe("parseArgs", () => {
       appId: "1234567",
       owner: "octo-org",
       outputVar: "GITHUB_APP_TOKEN",
+      actorOutputVar: "GITHUB_APP_ACTOR_LOGIN",
       repositories: "repo-a repo-b",
       permissionsJson: '{"issues":"write"}',
       apiUrl: "https://ghe.example.com/api/v3",
@@ -369,6 +376,74 @@ describe("main", () => {
       repositories: ["repo-a", "repo-b"],
       permissions: { issues: "write" },
     });
+  });
+
+  it("emits the App bot login when --actor-output-var is set", async () => {
+    const { privateKey } = makeKeyPair();
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, { id: 55, app_slug: "ado-aw-app" }),
+      )
+      .mockResolvedValueOnce(jsonResponse(201, { token: "ghs_minted" }));
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array): boolean => {
+        writes.push(chunk.toString());
+        return true;
+      });
+
+    const rc = await main(
+      {
+        appId: "123",
+        owner: "octo-org",
+        outputVar: "GITHUB_APP_TOKEN",
+        actorOutputVar: "GITHUB_APP_ACTOR_LOGIN",
+      },
+      { GH_APP_PRIVATE_KEY: privateKey } as NodeJS.ProcessEnv,
+      fetchFn as never,
+    );
+    spy.mockRestore();
+
+    expect(rc).toBe(0);
+    const out = writes.join("");
+    expect(out).toContain(
+      "##vso[task.setvariable variable=GITHUB_APP_TOKEN;issecret=true]ghs_minted",
+    );
+    expect(out).toContain(
+      "##vso[task.setvariable variable=GITHUB_APP_ACTOR_LOGIN]ado-aw-app[bot]",
+    );
+  });
+
+  it("fails before minting when actor output is requested without app_slug", async () => {
+    const { privateKey } = makeKeyPair();
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { id: 55 }));
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array): boolean => {
+        writes.push(chunk.toString());
+        return true;
+      });
+
+    const rc = await main(
+      {
+        appId: "123",
+        owner: "octo-org",
+        actorOutputVar: "GITHUB_APP_ACTOR_LOGIN",
+      },
+      { GH_APP_PRIVATE_KEY: privateKey } as NodeJS.ProcessEnv,
+      fetchFn as never,
+    );
+    spy.mockRestore();
+
+    expect(rc).toBe(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(writes.join("")).toContain("returned no app_slug");
+    expect(writes.join("")).not.toContain("issecret=true");
   });
 
   it("honours --api-url and --output-var", async () => {

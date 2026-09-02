@@ -174,7 +174,7 @@ describe("resolveGithubIssueEnv", () => {
 describe("registry", () => {
   it("registers the complete GitHub issue scenario family with unique ids", () => {
     const ids = githubIssueScenarios.map((s) => s.id ?? s.tool);
-    expect(new Set(ids).size).toBe(20);
+    expect(new Set(ids).size).toBe(21);
     expect(ids).toEqual([
       "create-github-issue",
       "create-github-issue-label-denied",
@@ -182,6 +182,7 @@ describe("registry", () => {
       "set-github-issue-type-clear",
       "create-github-issue-temporary-id-handoff",
       "comment-on-github-issue",
+      "comment-on-github-issue-hide-older",
       "hide-github-issue-comment",
       "add-github-issue-labels",
       "remove-github-issue-labels",

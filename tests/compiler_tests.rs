@@ -6130,8 +6130,10 @@ fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
     ));
     assert!(compiled.contains("Mint GitHub App token (SafeOutputs)"));
     assert!(compiled.contains("--output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN'"));
+    assert!(!compiled.contains("--actor-output-var"));
     assert!(compiled.contains("--permissions-json '{\"issues\":\"write\"}'"));
     assert!(compiled.contains("ADO_AW_GITHUB_TOKEN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN)"));
+    assert!(!compiled.contains("ADO_AW_GITHUB_ACTOR_LOGIN"));
 
     let agent_start = compiled.find("- job: Agent").expect("Agent job");
     let detection_start = compiled.find("- job: Detection").expect("Detection job");
@@ -6144,6 +6146,8 @@ fn test_compile_github_issue_app_fixture_scopes_tokens_by_stage() {
     ] {
         assert!(block.contains("--permissions-json '{\"contents\":\"read\",\"issues\":\"read\"}'"));
         assert!(!block.contains("ADO_AW_GITHUB_TOKEN"));
+        assert!(!block.contains("ADO_AW_GITHUB_ACTOR_LOGIN"));
+        assert!(!block.contains("--actor-output-var"));
     }
 }
 
@@ -6183,10 +6187,41 @@ Create a reviewed GitHub issue.
 
     assert!(!automatic.contains("Mint GitHub App token (SafeOutputs)"));
     assert!(!automatic.contains("ADO_AW_SAFE_OUTPUTS_GITHUB_APP_TOKEN"));
+    assert!(!automatic.contains("ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN"));
     assert!(reviewed.contains("Mint GitHub App token (SafeOutputs)"));
+    assert!(!reviewed.contains("--actor-output-var"));
+    assert!(!reviewed.contains("ADO_AW_GITHUB_ACTOR_LOGIN"));
     assert!(reviewed.contains("--repositories 'reviewed-repo'"));
     assert!(reviewed.contains("--permissions-json '{\"issues\":\"write\"}'"));
     assert!(reviewed.contains("Revoke GitHub App token (SafeOutputs)"));
+}
+
+#[test]
+fn test_compile_github_app_hide_older_wires_actor_identity() {
+    let compiled = compile_inline_agent(
+        "github-app-hide-older",
+        r#"---
+name: "GitHub App Hide Older"
+description: "GitHub App actor identity is scoped to comment replacement"
+engine: copilot
+safe-outputs:
+  github-app:
+    app-id: 1234567
+    owner: octo-org
+  comment-on-github-issue:
+    target-repo: octo-org/octo-repo
+    hide-older-comments: true
+---
+
+Replace the managed issue comment.
+"#,
+    );
+    assert!(
+        compiled.contains("--actor-output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN'")
+    );
+    assert!(compiled.contains(
+        "ADO_AW_GITHUB_ACTOR_LOGIN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN)"
+    ));
 }
 
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
