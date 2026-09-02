@@ -471,6 +471,40 @@ describe("prepare-pr-base main", () => {
     expect(calls.filter((call) => call.args[0] === "fetch")).toHaveLength(1);
   });
 
+  it("returns failure after processing later repos when a required target fails", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const visited: string[] = [];
+    const { deps, calls } = dependencies({
+      remote: "https://dev.azure.com/org/project/_git/repo",
+      chdir: (dir) => void visited.push(dir),
+    });
+    const rc = await main(
+      {
+        mode: "target-worktree",
+        repos: [
+          {
+            dir: "/required-cross-org",
+            target: "main",
+            organization: "other-org",
+            project: "Other Project",
+            repository: "target-repo",
+          },
+          { dir: "/same-org", target: "main" },
+        ],
+        fallbackTarget: "main",
+      },
+      {
+        SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
+        SYSTEM_ACCESSTOKEN: "cross-token",
+      },
+      deps,
+    );
+
+    expect(rc).toBe(1);
+    expect(visited).toEqual(["/required-cross-org", "/same-org"]);
+    expect(calls.filter((call) => call.args[0] === "fetch")).toHaveLength(1);
+  });
+
   it("uses BUILD_SOURCESDIRECTORY and BUILD_SOURCEBRANCH for legacy no-arg calls", async () => {
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const { deps, dirs } = dependencies({ remote: "https://github.com/org/repo" });
