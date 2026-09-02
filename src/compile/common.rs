@@ -704,6 +704,118 @@ pub fn validate_permissions_write_policy(front_matter: &FrontMatter) -> Result<(
     options.validate()
 }
 
+pub fn repository_write_readiness_warnings(front_matter: &FrontMatter) -> Vec<String> {
+    let configured_tools: Vec<&str> = ["create-pull-request", "create-branch", "create-git-tag"]
+        .into_iter()
+        .filter(|tool| front_matter.safe_outputs.contains_key(*tool))
+        .collect();
+    if configured_tools.is_empty() {
+        return Vec::new();
+    }
+    let write = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.write.as_ref());
+    let mut warnings = Vec::new();
+    for repository in front_matter.repositories.iter().filter(|repository| {
+        repository.repo_type.eq_ignore_ascii_case("git")
+            && repository.endpoint.is_some()
+            && front_matter
+                .checkout
+                .iter()
+                .any(|alias| alias == &repository.repository)
+    }) {
+        let alias = &repository.repository;
+        let tools = configured_tools.join(", ");
+        let Some(organization) = repository.organization.as_ref() else {
+            warnings.push(format!(
+                "repository-write safe output(s) {tools} may target checkout alias '{alias}', \
+                 but its endpoint-backed Azure Repos entry has no `organization:`. Add the \
+                 target Azure DevOps organization; dry-run and runtime reject this alias."
+            ));
+            continue;
+        };
+        let Some(write) = write else {
+            warnings.push(format!(
+                "repository-write safe output(s) {tools} may target cross-organization alias \
+                 '{alias}', but `permissions.write` is not configured. Add expanded \
+                 `permissions.write` with `connection-type: azureDevOps` and an explicit allow \
+                 scope; dry-run and runtime reject this alias."
+            ));
+            continue;
+        };
+        if !write.supports_cross_organization_writes() {
+            warnings.push(format!(
+                "repository-write safe output(s) {tools} may target cross-organization alias \
+                 '{alias}', but `permissions.write` uses `connection-type: {}`. Cross-organization \
+                 writes require `connection-type: azureDevOps`; dry-run and runtime reject this alias.",
+                write.connection_type().as_ado_str()
+            ));
+            continue;
+        }
+        let Some((project, name)) = repository.name.split_once('/') else {
+            continue;
+        };
+        if !write.allows_repository(organization.as_str(), project, name) {
+            warnings.push(format!(
+                "repository-write safe output(s) {tools} may target \
+                 '{}/{}/{}' (alias '{alias}'), but that repository is not listed in \
+                 `permissions.write.allow`; dry-run and runtime reject this alias.",
+                organization.as_str(),
+                project,
+                name
+            ));
+        }
+    }
+    warnings.sort();
+    warnings
+}
+
+#[cfg(test)]
+fn readiness_warnings(source: &str) -> Vec<String> {
+    let (mut front_matter, _) = parse_markdown(source).unwrap();
+    let (repositories, checkout, checkout_fetch) = resolve_repos(&front_matter).unwrap();
+    front_matter.repositories = repositories;
+    front_matter.checkout = checkout;
+    front_matter.checkout_fetch = checkout_fetch;
+    repository_write_readiness_warnings(&front_matter)
+}
+
+#[test]
+fn repository_write_readiness_warning_matrix() {
+    let prefix = "---\nname: test\ndescription: test\n";
+    let repo_without_org = "repos:\n  - name: Other Project/target-repo\n    alias: target\n    endpoint: checkout\nsafe-outputs:\n  create-branch: {}\n---\n";
+    let warnings = readiness_warnings(&format!("{prefix}{repo_without_org}"));
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("no `organization:`"), "{warnings:?}");
+
+    let cross_repo = "repos:\n  - name: Other Project/target-repo\n    alias: target\n    organization: other-org\n    endpoint: checkout\nsafe-outputs:\n  create-pull-request: {}\n  create-branch: {}\n  create-git-tag: {}\n---\n";
+    let warnings = readiness_warnings(&format!("{prefix}{cross_repo}"));
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].contains("permissions.write") && warnings[0].contains("create-git-tag"),
+        "{warnings:?}"
+    );
+
+    let arm =
+        "permissions:\n  write:\n    service-connection: write\n    connection-type: azureRM\n";
+    let warnings = readiness_warnings(&format!("{prefix}{arm}{cross_repo}"));
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].contains("connection-type: azureRM"),
+        "{warnings:?}"
+    );
+
+    let missing_scope =
+        "permissions:\n  write:\n    service-connection: write\n    connection-type: azureDevOps\n";
+    let warnings = readiness_warnings(&format!("{prefix}{missing_scope}{cross_repo}"));
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("not listed"), "{warnings:?}");
+
+    let ready = "permissions:\n  write:\n    service-connection: write\n    connection-type: azureDevOps\n    allow:\n      - organization: other-org\n        projects:\n          - project: Other Project\n            repositories: [target-repo]\n";
+    assert!(readiness_warnings(&format!("{prefix}{ready}{cross_repo}")).is_empty());
+}
+
 /// Validate the `variable-groups:` front-matter block (issue #1385).
 ///
 /// Enforces two rules before the pipeline is built:

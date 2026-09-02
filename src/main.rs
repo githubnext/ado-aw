@@ -825,9 +825,7 @@ struct ResolvedExecutionRepository {
     /// `"git"` for resolved-config JSON emitted before this field existed.
     #[serde(default = "default_resolved_repo_type", rename = "type")]
     repo_type: String,
-    /// Service connection name, when set. Present alongside `type: git` only
-    /// for a repository in a different Azure DevOps organization — see
-    /// `FrontMatter::checkout_cross_organization_repo_aliases`.
+    /// Checkout service connection name, when set.
     #[serde(default)]
     endpoint: Option<String>,
     #[serde(default)]
