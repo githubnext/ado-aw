@@ -27,6 +27,12 @@
     "gcr.io",
     "auth.docker.io"
   ],
+  "copilot-vendor": [
+    "api.business.githubcopilot.com",
+    "api.enterprise.githubcopilot.com",
+    "api.individual.githubcopilot.com",
+    "telemetry.enterprise.githubcopilot.com"
+  ],
   "dart": [
     "pub.dev",
     "pub.dartlang.org",
