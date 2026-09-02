@@ -691,6 +691,19 @@ pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()
     options.validate()
 }
 
+/// Validate the expanded Stage 3 write credential and its additional scopes.
+pub fn validate_permissions_write_policy(front_matter: &FrontMatter) -> Result<()> {
+    let Some(options) = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.write.as_ref())
+        .and_then(crate::compile::types::WritePermissionConfig::options)
+    else {
+        return Ok(());
+    };
+    options.validate()
+}
+
 /// Validate the `variable-groups:` front-matter block (issue #1385).
 ///
 /// Enforces two rules before the pipeline is built:
@@ -897,6 +910,45 @@ pub fn validate_repo_endpoint(
     Ok(())
 }
 
+fn validate_repo_organization(
+    repo_type: &str,
+    endpoint: &Option<String>,
+    organization: Option<&crate::secure::AdoOrganization>,
+    name: &str,
+) -> Result<()> {
+    let Some(organization) = organization else {
+        return Ok(());
+    };
+    if !repo_type.eq_ignore_ascii_case("git") {
+        anyhow::bail!(
+            "Repository '{name}' sets `organization: {organization}`, but `organization` \
+             is supported only for Azure Repos `type: git` entries."
+        );
+    }
+    if endpoint.as_deref().is_none_or(str::is_empty) {
+        anyhow::bail!(
+            "Cross-organization repository '{name}' sets `organization: {organization}` \
+             but has no `endpoint:` service connection for checkout."
+        );
+    }
+    let Some((project, repository)) = name.split_once('/') else {
+        anyhow::bail!(
+            "Cross-organization repository '{name}' must use `name: project/repository`."
+        );
+    };
+    if repository.contains('/') {
+        anyhow::bail!(
+            "Cross-organization repository '{name}' must contain exactly one '/' between \
+             the project and repository names."
+        );
+    }
+    crate::secure::AdoProject::parse(project)
+        .with_context(|| format!("invalid project in cross-organization repository '{name}'"))?;
+    crate::secure::AdoRepository::parse(repository)
+        .with_context(|| format!("invalid repository in cross-organization repository '{name}'"))?;
+    Ok(())
+}
+
 /// Lower a `repos:` list into the internal [`LoweredRepos`] triple consumed by
 /// the rest of the compiler. A reserved `self` entry (an entry whose *name* is
 /// exactly `self`) contributes only fetch tuning under the
@@ -927,38 +979,41 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             continue;
         }
 
-        let (name, alias, repo_type, repo_ref, endpoint, do_checkout, fetch_opts) = match item {
-            ReposItem::Shorthand(s) => {
-                let (alias, name) = parse_shorthand(s)?;
-                (
-                    name,
-                    alias,
-                    "git".to_string(),
-                    "refs/heads/main".to_string(),
-                    None,
-                    true,
-                    CheckoutFetchOpts::default(),
-                )
-            }
-            ReposItem::Full(entry) => {
-                let alias = match &entry.alias {
-                    Some(a) => a.clone(),
-                    None => derive_alias(&entry.name)?,
-                };
-                (
-                    entry.name.clone(),
-                    alias,
-                    entry.repo_type.clone(),
-                    entry.repo_ref.clone(),
-                    entry.endpoint.clone(),
-                    entry.checkout,
-                    CheckoutFetchOpts {
-                        fetch_depth: entry.fetch_depth,
-                        fetch_tags: entry.fetch_tags,
-                    },
-                )
-            }
-        };
+        let (name, alias, repo_type, repo_ref, endpoint, organization, do_checkout, fetch_opts) =
+            match item {
+                ReposItem::Shorthand(s) => {
+                    let (alias, name) = parse_shorthand(s)?;
+                    (
+                        name,
+                        alias,
+                        "git".to_string(),
+                        "refs/heads/main".to_string(),
+                        None,
+                        None,
+                        true,
+                        CheckoutFetchOpts::default(),
+                    )
+                }
+                ReposItem::Full(entry) => {
+                    let alias = match &entry.alias {
+                        Some(a) => a.clone(),
+                        None => derive_alias(&entry.name)?,
+                    };
+                    (
+                        entry.name.clone(),
+                        alias,
+                        entry.repo_type.clone(),
+                        entry.repo_ref.clone(),
+                        entry.endpoint.clone(),
+                        entry.organization.clone(),
+                        entry.checkout,
+                        CheckoutFetchOpts {
+                            fetch_depth: entry.fetch_depth,
+                            fetch_tags: entry.fetch_tags,
+                        },
+                    )
+                }
+            };
 
         // Reject aliases that aren't safe as a single path segment. The alias
         // is used unquoted as an ADO `checkout:` value / repository resource
@@ -1015,6 +1070,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
         }
 
         validate_repo_endpoint(&repo_type, &endpoint, &name)?;
+        validate_repo_organization(&repo_type, &endpoint, organization.as_ref(), &name)?;
 
         repositories.push(Repository {
             repository: alias.clone(),
@@ -1022,6 +1078,7 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             name,
             repo_ref,
             endpoint,
+            organization,
         });
 
         if do_checkout {
@@ -1064,6 +1121,12 @@ fn self_entry_fetch_opts(item: &ReposItem) -> Result<Option<CheckoutFetchOpts>> 
             let mut unsupported = Vec::new();
             if entry.alias.is_some() {
                 unsupported.push("alias");
+            }
+            if entry.endpoint.is_some() {
+                unsupported.push("endpoint");
+            }
+            if entry.organization.is_some() {
+                unsupported.push("organization");
             }
             if entry.repo_type != "git" {
                 unsupported.push("type");
@@ -2192,11 +2255,7 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
     {
         for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
             if front_matter.safe_outputs.contains_key(*consumer) {
-                require_same_approval_lane(
-                    front_matter,
-                    "create-github-issue",
-                    consumer,
-                )?;
+                require_same_approval_lane(front_matter, "create-github-issue", consumer)?;
             }
         }
     }
@@ -3647,9 +3706,7 @@ pub fn generate_awf_path_step(awf_paths: &[String]) -> String {
             }
         })
         .collect();
-    format!(
-        "- bash: |\n{indented}  displayName: \"Generate GITHUB_PATH file\""
-    )
+    format!("- bash: |\n{indented}  displayName: \"Generate GITHUB_PATH file\"")
 }
 
 shell_script! {
@@ -4405,6 +4462,7 @@ mod tests {
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
         }];
         let checkout = vec!["my-repo".to_string()];
         let result = validate_checkout_list(&repos, &checkout);
@@ -4419,6 +4477,7 @@ mod tests {
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
         }];
         let checkout = vec!["unknown-alias".to_string()];
         let result = validate_checkout_list(&repos, &checkout);
@@ -4434,6 +4493,7 @@ mod tests {
             name: "org/my-repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
         }];
         let result = validate_checkout_list(&repos, &[]);
         assert!(result.is_ok());
@@ -4449,6 +4509,7 @@ mod tests {
             name: "org/repo".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
         }];
         let checkout = vec!["repo".to_string()];
         let err = validate_checkout_list(&repos, &checkout).unwrap_err();
@@ -8294,6 +8355,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8301,7 +8363,72 @@ safe-outputs:
         let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
         assert_eq!(repos[0].repository, "docs");
         assert_eq!(repos[0].name, "my-org/docs");
+        assert!(repos[0].organization.is_none());
         assert_eq!(checkout, vec!["docs"]);
+    }
+
+    #[test]
+    fn test_repos_object_form_preserves_cross_org_organization() {
+        let items = vec![ReposItem::Full(RepoEntry {
+            name: "Other Project/docs".to_string(),
+            alias: Some("cross-docs".to_string()),
+            repo_type: "git".to_string(),
+            repo_ref: "refs/heads/main".to_string(),
+            endpoint: Some("cross-org-checkout".to_string()),
+            organization: Some(crate::secure::AdoOrganization::parse("other-org").unwrap()),
+            checkout: true,
+            fetch_depth: None,
+            fetch_tags: None,
+        })];
+
+        let (repos, checkout, _fetch) = lower_repos(&items).unwrap();
+
+        assert_eq!(checkout, vec!["cross-docs"]);
+        assert_eq!(
+            repos[0].organization.as_ref().map(|value| value.as_str()),
+            Some("other-org")
+        );
+    }
+
+    #[test]
+    fn test_repos_cross_org_metadata_requires_git_endpoint_and_valid_name() {
+        for item in [
+            RepoEntry {
+                name: "Other Project/docs".to_string(),
+                alias: Some("docs".to_string()),
+                repo_type: "github".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: Some("checkout".to_string()),
+                organization: Some(crate::secure::AdoOrganization::parse("other-org").unwrap()),
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            },
+            RepoEntry {
+                name: "Other Project/docs".to_string(),
+                alias: Some("docs".to_string()),
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
+                organization: Some(crate::secure::AdoOrganization::parse("other-org").unwrap()),
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            },
+            RepoEntry {
+                name: "not-a-project-repository-pair".to_string(),
+                alias: Some("docs".to_string()),
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: Some("checkout".to_string()),
+                organization: Some(crate::secure::AdoOrganization::parse("other-org").unwrap()),
+                checkout: true,
+                fetch_depth: None,
+                fetch_tags: None,
+            },
+        ] {
+            assert!(lower_repos(&[ReposItem::Full(item)]).is_err());
+        }
     }
 
     #[test]
@@ -8312,6 +8439,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: false,
             fetch_depth: None,
             fetch_tags: None,
@@ -8330,6 +8458,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/release/2.x".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8348,6 +8477,7 @@ safe-outputs:
             repo_type: "github".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8365,6 +8495,7 @@ safe-outputs:
             repo_type: "githubenterprise".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: Some("shared-conn".to_string()),
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8429,6 +8560,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8446,6 +8578,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -8470,6 +8603,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -8488,6 +8622,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: None,
             fetch_tags: None,
@@ -8506,6 +8641,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: false,
                 fetch_depth: None,
                 fetch_tags: None,
@@ -8526,6 +8662,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: Some(1),
                 fetch_tags: Some(false),
@@ -8552,6 +8689,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: true,
             fetch_depth: Some(0),
             fetch_tags: Some(false),
@@ -8576,6 +8714,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: Some(1),
                 fetch_tags: None,
@@ -8586,6 +8725,7 @@ safe-outputs:
                 repo_type: "git".to_string(),
                 repo_ref: "refs/heads/main".to_string(),
                 endpoint: None,
+                organization: None,
                 checkout: true,
                 fetch_depth: None,
                 fetch_tags: Some(true),
@@ -8605,6 +8745,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/feature".to_string(),
             endpoint: None,
+            organization: None,
             checkout: false,
             fetch_depth: Some(1),
             fetch_tags: None,
@@ -8642,6 +8783,7 @@ safe-outputs:
             repo_type: "git".to_string(),
             repo_ref: "refs/heads/main".to_string(),
             endpoint: None,
+            organization: None,
             checkout: false,
             fetch_depth: Some(1),
             fetch_tags: Some(false),

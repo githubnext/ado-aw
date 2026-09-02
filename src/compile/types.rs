@@ -3059,11 +3059,109 @@ pub struct PermissionsConfig {
     /// The raw token is not injected into the Agent process.
     #[serde(default)]
     pub read: Option<ReadPermissionConfig>,
-    /// ARM service connection for write ADO access.
+    /// Optional service connection for write ADO access.
+    ///
+    /// The scalar form is an Azure Resource Manager connection. The expanded
+    /// form selects AzureCLI@3's `azureRM` or `azureDevOps` connection type and
+    /// may authorize additional organization/project/repository targets.
     /// Token is minted and used only by the executor in Stage 3 (Execution).
     /// This token is never exposed to the agent.
     #[serde(default)]
-    pub write: Option<String>,
+    pub write: Option<WritePermissionConfig>,
+}
+
+/// Service-connection type used to acquire an Azure DevOps bearer.
+///
+/// The serialized values deliberately match AzureCLI@3's `connectionType`
+/// input so front matter and generated YAML use one vocabulary.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WriteConnectionType {
+    #[default]
+    #[serde(rename = "azureRM")]
+    AzureRm,
+    #[serde(rename = "azureDevOps")]
+    AzureDevOps,
+}
+
+/// Stage 3 Azure DevOps credential and additional write-scope policy.
+///
+/// The scalar form remains shorthand for an Azure Resource Manager service
+/// connection. The expanded form selects an AzureCLI@3 connection type and
+/// declares additional organization/project/repository targets.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum WritePermissionConfig {
+    ServiceConnection(crate::secure::ServiceConnection),
+    WithOptions(WritePermissionOptions),
+}
+
+impl WritePermissionConfig {
+    pub fn service_connection(&self) -> &str {
+        match self {
+            Self::ServiceConnection(value) => value.as_str(),
+            Self::WithOptions(options) => options.service_connection.as_str(),
+        }
+    }
+
+    pub fn connection_type(&self) -> WriteConnectionType {
+        match self {
+            Self::ServiceConnection(_) => WriteConnectionType::AzureRm,
+            Self::WithOptions(options) => options.connection_type,
+        }
+    }
+
+    pub fn options(&self) -> Option<&WritePermissionOptions> {
+        match self {
+            Self::ServiceConnection(_) => None,
+            Self::WithOptions(options) => Some(options),
+        }
+    }
+
+    pub fn supports_cross_organization_writes(&self) -> bool {
+        self.connection_type() == WriteConnectionType::AzureDevOps
+    }
+
+    pub fn allows_repository(&self, organization: &str, project: &str, repository: &str) -> bool {
+        self.options().is_some_and(|options| {
+            options.allow.iter().any(|organization_scope| {
+                organization_scope
+                    .organization
+                    .as_str()
+                    .eq_ignore_ascii_case(organization)
+                    && organization_scope.projects.iter().any(|project_scope| {
+                        project_scope.project.as_str().eq_ignore_ascii_case(project)
+                            && project_scope
+                                .repositories
+                                .iter()
+                                .any(|allowed| allowed.as_str().eq_ignore_ascii_case(repository))
+                    })
+            })
+        })
+    }
+}
+
+impl SanitizeConfigTrait for WritePermissionConfig {
+    fn sanitize_config_fields(&mut self) {
+        // Every string field is a validated newtype checked at deserialization.
+    }
+}
+
+/// Expanded Stage 3 write credential and deny-by-default additional scopes.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WritePermissionOptions {
+    #[serde(rename = "service-connection")]
+    pub service_connection: crate::secure::ServiceConnection,
+    #[serde(rename = "connection-type")]
+    pub connection_type: WriteConnectionType,
+    #[serde(default)]
+    pub allow: Vec<AdoOrganizationScope>,
+}
+
+impl WritePermissionOptions {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_ado_scope_tree(&self.allow, "permissions.write.allow", true)
+    }
 }
 
 /// Stage 1 Azure DevOps credential and policy configuration.
@@ -3132,17 +3230,7 @@ impl ReadPermissionOptions {
     /// project-scoped reads without any repository-scoped read, so it narrows
     /// rather than widens.
     pub fn validate(&self) -> anyhow::Result<()> {
-        for scope in &self.allow {
-            if scope.projects.is_empty() {
-                anyhow::bail!(
-                    "permissions.read.allow entry for organization '{}' lists no projects. \
-                     Name the projects to allow; an empty list would grant every project in \
-                     the organization.",
-                    scope.organization.as_str()
-                );
-            }
-        }
-        Ok(())
+        validate_ado_scope_tree(&self.allow, "permissions.read.allow", false)
     }
 }
 
@@ -3199,19 +3287,19 @@ impl AdoReadCapability {
 /// Explicit Azure DevOps organization scope.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct AdoReadOrganizationScope {
+pub struct AdoOrganizationScope {
     pub organization: crate::secure::AdoOrganization,
     /// Projects to allow within this organization.
     ///
     /// Required and non-empty — see [`ReadPermissionOptions::validate`].
     #[serde(default)]
-    pub projects: Vec<AdoReadProjectScope>,
+    pub projects: Vec<AdoProjectScope>,
 }
 
 /// Explicit project and optional repository scope within an organization.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct AdoReadProjectScope {
+pub struct AdoProjectScope {
     pub project: crate::secure::AdoProject,
     /// Optional Azure DevOps project GUID.
     ///
@@ -3229,6 +3317,57 @@ pub struct AdoReadProjectScope {
     /// work items) without granting any repository-scoped read.
     #[serde(default)]
     pub repositories: Vec<crate::secure::AdoRepository>,
+}
+
+pub type AdoReadOrganizationScope = AdoOrganizationScope;
+fn validate_ado_scope_tree(
+    scopes: &[AdoOrganizationScope],
+    label: &str,
+    require_repositories: bool,
+) -> anyhow::Result<()> {
+    let mut organizations = std::collections::HashSet::new();
+    for organization_scope in scopes {
+        let organization = organization_scope.organization.as_str();
+        if !organizations.insert(organization.to_ascii_lowercase()) {
+            anyhow::bail!("{label} contains duplicate organization '{organization}'");
+        }
+        if organization_scope.projects.is_empty() {
+            anyhow::bail!(
+                "{label} entry for organization '{organization}' lists no projects. \
+                 Name the projects to allow; an empty list would grant every project in \
+                 the organization."
+            );
+        }
+
+        let mut projects = std::collections::HashSet::new();
+        for project_scope in &organization_scope.projects {
+            let project = project_scope.project.as_str();
+            if !projects.insert(project.to_ascii_lowercase()) {
+                anyhow::bail!(
+                    "{label} entry for organization '{organization}' contains duplicate \
+                     project '{project}'"
+                );
+            }
+            if require_repositories && project_scope.repositories.is_empty() {
+                anyhow::bail!(
+                    "{label} entry for '{organization}/{project}' lists no repositories. \
+                     Cross-organization write scopes must name every repository explicitly."
+                );
+            }
+
+            let mut repositories = std::collections::HashSet::new();
+            for repository in &project_scope.repositories {
+                if !repositories.insert(repository.as_str().to_ascii_lowercase()) {
+                    anyhow::bail!(
+                        "{label} entry for '{organization}/{project}' contains duplicate \
+                         repository '{}'",
+                        repository.as_str()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Debug-only configuration block.
@@ -3464,6 +3603,8 @@ pub struct Repository {
     pub repo_ref: String,
     #[serde(default)]
     pub endpoint: Option<String>,
+    #[serde(default)]
+    pub organization: Option<crate::secure::AdoOrganization>,
 }
 
 fn default_ref() -> String {
@@ -3492,9 +3633,15 @@ pub struct RepoEntry {
     /// Branch/tag ref. Defaults to `"refs/heads/main"`.
     #[serde(default = "default_ref", rename = "ref")]
     pub repo_ref: String,
-    /// Service connection name for GitHub/GitHub Enterprise repository resources.
+    /// Service connection name. Required for external repository providers and
+    /// for Azure Repos Git repositories in another organization.
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// Azure DevOps Services organization containing a cross-organization
+    /// `type: git` repository. Omitted for repositories in the pipeline's own
+    /// organization and for non-Azure-Repos providers.
+    #[serde(default)]
+    pub organization: Option<crate::secure::AdoOrganization>,
     /// Whether the agent job checks out this repository. Defaults to `true`.
     #[serde(default = "default_checkout")]
     pub checkout: bool,
@@ -4759,7 +4906,9 @@ imports:
                     read: Some(ReadPermissionConfig::ServiceConnection(
                         crate::secure::ServiceConnection::parse("read").unwrap(),
                     )),
-                    write: Some("write".to_string()),
+                    write: Some(WritePermissionConfig::ServiceConnection(
+                        crate::secure::ServiceConnection::parse("write").unwrap(),
+                    )),
                 }))
                 .is_ok()
         );
@@ -6010,7 +6159,18 @@ github-app-token:
                 .map(ReadPermissionConfig::service_connection),
             Some("my-read-sc")
         );
-        assert_eq!(pc.write.as_deref(), Some("my-write-sc"));
+        assert_eq!(
+            pc.write
+                .as_ref()
+                .map(WritePermissionConfig::service_connection),
+            Some("my-write-sc")
+        );
+        assert_eq!(
+            pc.write
+                .as_ref()
+                .map(WritePermissionConfig::connection_type),
+            Some(WriteConnectionType::AzureRm)
+        );
     }
 
     #[test]
@@ -6182,7 +6342,90 @@ read:
         let yaml = "write: my-write-sc";
         let pc: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(pc.read.is_none());
-        assert_eq!(pc.write.as_deref(), Some("my-write-sc"));
+        assert_eq!(
+            pc.write
+                .as_ref()
+                .map(WritePermissionConfig::service_connection),
+            Some("my-write-sc")
+        );
+    }
+
+    #[test]
+    fn test_permissions_write_object_form() {
+        let yaml = r#"
+write:
+  service-connection: repository-writer
+  connection-type: azureDevOps
+  allow:
+    - organization: other-org
+      projects:
+        - project: Other Project
+          repositories: [Repo One, Repo Two]
+"#;
+        let permissions: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+        let write = permissions.write.as_ref().unwrap();
+
+        assert_eq!(write.service_connection(), "repository-writer");
+        assert_eq!(write.connection_type(), WriteConnectionType::AzureDevOps);
+        assert!(write.supports_cross_organization_writes());
+        assert!(write.allows_repository("OTHER-ORG", "other project", "repo one"));
+        assert!(!write.allows_repository("other-org", "Other Project", "Repo Three"));
+        write.options().unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn test_permissions_write_object_rejects_unknown_connection_type() {
+        let yaml = r#"
+write:
+  service-connection: repository-writer
+  connection-type: workload-identity
+"#;
+
+        assert!(serde_yaml::from_str::<PermissionsConfig>(yaml).is_err());
+    }
+
+    #[test]
+    fn write_policy_requires_explicit_repository_scopes() {
+        for yaml in [
+            "write:\n  service-connection: sc\n  connection-type: azureDevOps\n  allow:\n    - organization: other-org",
+            "write:\n  service-connection: sc\n  connection-type: azureDevOps\n  allow:\n    - organization: other-org\n      projects:\n        - project: Other Project",
+        ] {
+            let permissions: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+            let error = permissions
+                .write
+                .as_ref()
+                .unwrap()
+                .options()
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("lists no projects") || error.contains("lists no repositories"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_policy_rejects_case_insensitive_duplicates() {
+        for yaml in [
+            "write:\n  service-connection: sc\n  connection-type: azureDevOps\n  allow:\n    - organization: other-org\n      projects:\n        - project: P\n          repositories: [R]\n    - organization: OTHER-ORG\n      projects:\n        - project: Q\n          repositories: [S]",
+            "write:\n  service-connection: sc\n  connection-type: azureDevOps\n  allow:\n    - organization: other-org\n      projects:\n        - project: P\n          repositories: [R]\n        - project: p\n          repositories: [S]",
+            "write:\n  service-connection: sc\n  connection-type: azureDevOps\n  allow:\n    - organization: other-org\n      projects:\n        - project: P\n          repositories: [Repo, REPO]",
+        ] {
+            let permissions: PermissionsConfig = serde_yaml::from_str(yaml).unwrap();
+            let error = permissions
+                .write
+                .as_ref()
+                .unwrap()
+                .options()
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("duplicate"), "{error}");
+        }
     }
 
     #[test]
@@ -6217,7 +6460,13 @@ Body
                 .map(ReadPermissionConfig::service_connection),
             Some("my-read-sc")
         );
-        assert_eq!(perms.write.as_deref(), Some("my-write-sc"));
+        assert_eq!(
+            perms
+                .write
+                .as_ref()
+                .map(WritePermissionConfig::service_connection),
+            Some("my-write-sc")
+        );
     }
 
     #[test]
