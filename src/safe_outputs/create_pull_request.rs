@@ -1,11 +1,12 @@
 //! Create pull request safe output tool
 
 use log::{debug, info, warn};
+use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, PATH_SEGMENT, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
@@ -161,10 +162,7 @@ async fn resolve_reviewer_identity(
     }
 
     // Use Identity Picker API on vssps.dev.azure.com to resolve email or display name
-    let identity_url = format!(
-        "https://vssps.dev.azure.com/{}/_apis/identitypicker/identities?api-version=7.1-preview.1",
-        organization
-    );
+    let identity_url = identity_picker_url(organization);
     debug!("Identity lookup URL: {}", identity_url);
 
     let query_body = serde_json::json!({
@@ -219,6 +217,13 @@ async fn resolve_reviewer_identity(
             None
         }
     }
+}
+
+fn identity_picker_url(organization: &str) -> String {
+    format!(
+        "https://vssps.dev.azure.com/{}/_apis/identitypicker/identities?api-version=7.1-preview.1",
+        organization
+    )
 }
 
 /// Parameters for creating a pull request
@@ -493,33 +498,6 @@ pub(crate) fn short_branch(git_ref: &str) -> &str {
         .unwrap_or(git_ref)
 }
 
-/// Returns a clear failure result when `repository` resolves to a checkout
-/// alias flagged as cross-organization (`ctx.cross_organization_repositories`).
-///
-/// `create-pull-request` composes every Git REST call from the pipeline's own
-/// `ado_org_url`/`ado_project`, so a `repos:` alias checked out from another
-/// Azure DevOps organization via an `endpoint:` service connection cannot be
-/// targeted correctly today — the request would silently resolve against the
-/// wrong organization (a 404, not a permissions error). Rejecting this
-/// up front, before any network call, replaces that confusing failure with an
-/// actionable one and lets `--dry-run` catch it too (issue #1934).
-fn reject_cross_organization_repository(
-    repository: &str,
-    ctx: &ExecutionContext,
-) -> Option<ExecutionResult> {
-    let alias = crate::safe_outputs::canonical_repository_alias(repository, ctx)?;
-    if !ctx.cross_organization_repositories.contains(&alias) {
-        return None;
-    }
-    Some(ExecutionResult::failure(format!(
-        "Repository '{repository}' (checkout alias '{alias}') is checked out from another \
-         Azure DevOps organization via a `repos:` `endpoint:` service connection. \
-         create-pull-request cannot yet target a cross-organization repository — it composes \
-         every Git API call against this pipeline's own organization and project. See \
-         docs/safe-outputs.md for details."
-    )))
-}
-
 impl CreatePrConfig {
     /// Resolve the target (base) branch for a PR against `repo_alias`
     /// (`"self"` or a `checkout:` alias). Shared by the compiler (to deepen the
@@ -567,6 +545,15 @@ fn default_max_files() -> usize {
 
 fn default_protected_files() -> ProtectedFiles {
     ProtectedFiles::Blocked
+}
+
+fn repository_api_base(target: &crate::safe_outputs::result::AdoRepositoryTarget) -> String {
+    format!(
+        "{}/{}/_apis/git/repositories/{}",
+        target.organization_url,
+        utf8_percent_encode(&target.project, PATH_SEGMENT),
+        utf8_percent_encode(target.repository_locator(), PATH_SEGMENT),
+    )
 }
 
 impl Default for CreatePrConfig {
@@ -621,22 +608,22 @@ impl Executor for CreatePrResult {
         format!("create PR: '{}' in repo '{}'", self.title, self.repository)
     }
 
-    /// Rejects a cross-organization repository alias before the default
-    /// dry-run short-circuit, so `--dry-run` surfaces the same failure a real
-    /// run would hit instead of reporting a false "would execute" success
-    /// (issue #1934).
     async fn execute_sanitized(
         &mut self,
         ctx: &ExecutionContext,
     ) -> anyhow::Result<ExecutionResult> {
         self.sanitize_content_fields();
-        if let Some(failure) = reject_cross_organization_repository(&self.repository, ctx) {
-            return Ok(failure);
-        }
+        let target =
+            match crate::safe_outputs::resolve_repository_write_target(Some(&self.repository), ctx)
+            {
+                Ok(target) => target,
+                Err(failure) => return Ok(failure),
+            };
         if ctx.dry_run {
             return Ok(ExecutionResult::success(format!(
-                "[DRY-RUN] Would execute: {}",
-                self.dry_run_summary()
+                "[DRY-RUN] Would execute: create PR: '{}' in {}",
+                self.title,
+                target.display_name()
             )));
         }
         self.execute_impl(ctx).await
@@ -710,56 +697,23 @@ impl Executor for CreatePrResult {
                     .join(", ")
             )));
         };
-        let repo_id = if repository_alias == "self" {
-            // "self" or a name match against the pipeline's own repository
-            debug!("Using 'self' repository (matched '{}')", self.repository);
-            ctx.repository_id
-                .as_ref()
-                .or(ctx.repository_name.as_ref())
-                .context("Repository ID not configured for 'self'")?
-                .clone()
-        } else if let Some(ado_repo_name) = ctx.allowed_repositories.get(&repository_alias) {
-            debug!(
-                "Repository '{}' resolved through alias '{}' to '{}'",
-                self.repository, repository_alias, ado_repo_name
-            );
-            ado_repo_name.clone()
-        } else {
-            // Unreachable: `repository_alias` is either "self" (handled above)
-            // or a key produced by iterating `ctx.allowed_repositories`, so the
-            // lookup cannot miss. Kept as a fail-closed guard in case the
-            // canonicalization and the map ever drift apart.
-            debug_assert!(
-                false,
-                "canonical alias '{repository_alias}' is absent from allowed_repositories"
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Repository alias '{}' has no configured repository",
-                repository_alias
-            )));
+        let target = match crate::safe_outputs::resolve_repository_write_target(
+            Some(&repository_alias),
+            ctx,
+        ) {
+            Ok(target) => target,
+            Err(failure) => return Ok(failure),
         };
-        debug!("Resolved repository ID: {}", repo_id);
+        debug!("Resolved repository ID: {}", target.repository_locator());
 
-        // Get ADO configuration
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("Azure DevOps organization URL not configured")?;
-        let organization = ctx
-            .ado_organization
-            .as_ref()
-            .context("Azure DevOps organization name not configured")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("Azure DevOps project not configured")?;
         let token = ctx
             .access_token
             .as_ref()
             .context("Access token not configured")?;
         debug!(
-            "ADO org: {}, organization: {}, project: {}",
-            org_url, organization, project
+            "ADO target: {} (alias '{}')",
+            target.display_name(),
+            repository_alias
         );
 
         // Validate and read the patch file
@@ -1091,8 +1045,9 @@ impl Executor for CreatePrResult {
         // Get the target branch ref to find the base commit
         debug!("Getting target branch ref from ADO");
         let refs_url = format!(
-            "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
-            org_url, project, repo_id, target_branch
+            "{}/refs?filter=heads/{}&api-version=7.1",
+            repository_api_base(&target),
+            target_branch
         );
         debug!("Refs URL: {}", refs_url);
 
@@ -1147,8 +1102,9 @@ impl Executor for CreatePrResult {
         // Retry with new random suffixes up to 3 times.
         for attempt in 0..3 {
             let check_ref_url = format!(
-                "{}{}/_apis/git/repositories/{}/refs?filter=heads/{}&api-version=7.1",
-                org_url, project, repo_id, source_branch
+                "{}/refs?filter=heads/{}&api-version=7.1",
+                repository_api_base(&target),
+                source_branch
             );
             debug!(
                 "Checking if source branch exists (attempt {}): {}",
@@ -1183,10 +1139,7 @@ impl Executor for CreatePrResult {
 
         // Push changes via ADO API (this creates the branch and commits in one call)
         info!("Pushing changes to ADO");
-        let push_url = format!(
-            "{}{}/_apis/git/repositories/{}/pushes?api-version=7.1",
-            org_url, project, repo_id
-        );
+        let push_url = format!("{}/pushes?api-version=7.1", repository_api_base(&target));
         debug!("Push URL: {}", push_url);
 
         (source_branch, source_ref) = match push_new_branch(PushBranchParams {
@@ -1225,8 +1178,8 @@ impl Executor for CreatePrResult {
         // Create the pull request via REST API
         info!("Creating pull request");
         let pr_url = format!(
-            "{}{}/_apis/git/repositories/{}/pullrequests?api-version=7.1",
-            org_url, project, repo_id
+            "{}/pullrequests?api-version=7.1",
+            repository_api_base(&target)
         );
         debug!("PR URL: {}", pr_url);
 
@@ -1335,14 +1288,12 @@ impl Executor for CreatePrResult {
         let pr_ctx = PrContext {
             client: &client,
             config: &config,
-            org_url,
-            project,
-            repo_id: &repo_id,
+            target: &target,
             pr_id,
             token,
         };
         set_pr_completion_options(&pr_ctx, pr_data["createdBy"]["id"].as_str()).await;
-        add_reviewers_to_pr(&pr_ctx, organization).await;
+        add_reviewers_to_pr(&pr_ctx).await;
 
         info!(
             "PR #{} created successfully: {} -> {}{}",
@@ -1749,9 +1700,7 @@ fn validate_and_build_labels(
 struct PrContext<'a> {
     client: &'a reqwest::Client,
     config: &'a CreatePrConfig,
-    org_url: &'a str,
-    project: &'a str,
-    repo_id: &'a str,
+    target: &'a crate::safe_outputs::result::AdoRepositoryTarget,
     pr_id: i64,
     token: &'a str,
 }
@@ -1765,8 +1714,9 @@ async fn set_pr_completion_options(ctx: &PrContext<'_>, pr_created_by_id: Option
         ctx.config.delete_source_branch, ctx.config.squash_merge, ctx.config.auto_complete
     );
     let pr_update_url = format!(
-        "{}{}/_apis/git/repositories/{}/pullrequests/{}?api-version=7.1",
-        ctx.org_url, ctx.project, ctx.repo_id, ctx.pr_id
+        "{}/pullrequests/{}?api-version=7.1",
+        repository_api_base(ctx.target),
+        ctx.pr_id
     );
 
     let mut update_body = serde_json::json!({
@@ -1813,7 +1763,7 @@ async fn set_pr_completion_options(ctx: &PrContext<'_>, pr_created_by_id: Option
 /// Resolves each reviewer's identity (email/display-name → ADO identity ID) and
 /// issues a `PUT` for each one. Logs a warning if a reviewer cannot be resolved or
 /// if the API call fails; does not abort the overall PR creation.
-async fn add_reviewers_to_pr(ctx: &PrContext<'_>, organization: &str) {
+async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
     if ctx.config.reviewers.is_empty() {
         return;
     }
@@ -1822,21 +1772,29 @@ async fn add_reviewers_to_pr(ctx: &PrContext<'_>, organization: &str) {
         debug!("Adding reviewer: {}", reviewer);
 
         // Resolve reviewer identity (email/name -> ID)
-        let reviewer_id =
-            match resolve_reviewer_identity(ctx.client, organization, ctx.token, reviewer).await {
-                Some(id) => id,
-                None => {
-                    warn!(
-                        "Could not resolve reviewer '{}' to an identity ID, skipping",
-                        reviewer
-                    );
-                    continue;
-                }
-            };
+        let reviewer_id = match resolve_reviewer_identity(
+            ctx.client,
+            &ctx.target.organization,
+            ctx.token,
+            reviewer,
+        )
+        .await
+        {
+            Some(id) => id,
+            None => {
+                warn!(
+                    "Could not resolve reviewer '{}' to an identity ID, skipping",
+                    reviewer
+                );
+                continue;
+            }
+        };
 
         let reviewer_url = format!(
-            "{}{}/_apis/git/repositories/{}/pullrequests/{}/reviewers/{}?api-version=7.1",
-            ctx.org_url, ctx.project, ctx.repo_id, ctx.pr_id, reviewer_id
+            "{}/pullrequests/{}/reviewers/{}?api-version=7.1",
+            repository_api_base(ctx.target),
+            ctx.pr_id,
+            reviewer_id
         );
         let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
 
@@ -2647,57 +2605,66 @@ mod tests {
         assert_eq!(short_branch("refs/heads/"), "refs/heads/");
     }
 
-    fn cross_org_ctx() -> ExecutionContext {
-        ExecutionContext {
-            allowed_repositories: std::collections::HashMap::from([
-                (
-                    "cross-org-repo".to_string(),
-                    "OtherProj/cross-org-repo".to_string(),
-                ),
-                (
-                    "same-org-repo".to_string(),
-                    "Proj/same-org-repo".to_string(),
-                ),
-            ]),
-            cross_organization_repositories: std::collections::HashSet::from([
-                "cross-org-repo".to_string()
-            ]),
-            ..Default::default()
-        }
-    }
-
     #[test]
-    fn test_reject_cross_organization_repository_flags_cross_org_alias() {
-        let ctx = cross_org_ctx();
-        let result = reject_cross_organization_repository("cross-org-repo", &ctx);
-        assert!(result.is_some());
-        let result = result.unwrap();
-        assert!(!result.success);
-        assert!(
-            result.message.contains("cross-organization"),
-            "message should explain the cross-organization limitation: {}",
-            result.message
+    fn test_cross_org_api_and_identity_urls_use_target_context() {
+        let target = crate::safe_outputs::result::AdoRepositoryTarget {
+            alias: "target".to_string(),
+            organization: "other-org".to_string(),
+            organization_url: "https://dev.azure.com/other-org".to_string(),
+            project: "Other Project".to_string(),
+            repository: "target repo".to_string(),
+            repository_id: None,
+            cross_organization: true,
+        };
+
+        assert_eq!(
+            repository_api_base(&target),
+            "https://dev.azure.com/other-org/Other%20Project/_apis/git/repositories/target%20repo"
+        );
+        assert_eq!(
+            identity_picker_url(&target.organization),
+            "https://vssps.dev.azure.com/other-org/_apis/identitypicker/identities?api-version=7.1-preview.1"
         );
     }
 
-    #[test]
-    fn test_reject_cross_organization_repository_allows_same_org_alias() {
-        let ctx = cross_org_ctx();
-        assert!(reject_cross_organization_repository("same-org-repo", &ctx).is_none());
-        assert!(reject_cross_organization_repository("self", &ctx).is_none());
-    }
-
-    #[test]
-    fn test_reject_cross_organization_repository_matches_by_trailing_name() {
-        let ctx = cross_org_ctx();
-        // Matches through `lookup_allowed_repository_alias`'s trailing-name fallback.
-        assert!(reject_cross_organization_repository("cross-org-repo", &ctx).is_some());
-        assert!(reject_cross_organization_repository("OtherProj/cross-org-repo", &ctx).is_some());
+    fn cross_org_ctx(organization: Option<&str>, allow: bool) -> ExecutionContext {
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
+            ado_organization: Some("current-org".to_string()),
+            ado_project: Some("Current Project".to_string()),
+            ..Default::default()
+        };
+        let scopes = allow.then(|| {
+            vec![crate::compile::types::AdoOrganizationScope {
+                organization: crate::secure::AdoOrganization::parse("other-org").unwrap(),
+                projects: vec![crate::compile::types::AdoProjectScope {
+                    project: crate::secure::AdoProject::parse("Other Project").unwrap(),
+                    project_id: None,
+                    repositories: vec![
+                        crate::secure::AdoRepository::parse("cross-org-repo").unwrap(),
+                    ],
+                }],
+            }]
+        });
+        crate::safe_outputs::configure_repository_write_context(
+            &mut ctx,
+            &["cross-org-repo".to_string()],
+            vec![crate::safe_outputs::RepositoryTargetSpec {
+                alias: "cross-org-repo".to_string(),
+                repo_type: "git".to_string(),
+                name: "Other Project/cross-org-repo".to_string(),
+                organization: organization.map(str::to_string),
+                endpoint: Some("cross-org-checkout".to_string()),
+            }],
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+            scopes.as_deref().unwrap_or(&[]),
+        );
+        ctx
     }
 
     #[tokio::test]
-    async fn test_dry_run_surfaces_cross_organization_rejection() {
-        let mut ctx = cross_org_ctx();
+    async fn test_dry_run_resolves_authorized_cross_organization_target() {
+        let mut ctx = cross_org_ctx(Some("other-org"), true);
         ctx.dry_run = true;
 
         let mut result = CreatePrResult {
@@ -2714,14 +2681,39 @@ mod tests {
 
         let execution = result.execute_sanitized(&ctx).await.unwrap();
         assert!(
-            !execution.success,
-            "dry-run must not report success for a cross-organization repository"
-        );
-        assert!(
-            execution.message.contains("cross-organization"),
-            "dry-run message should explain the limitation: {}",
+            execution.success,
+            "authorized dry-run should succeed: {}",
             execution.message
         );
+        assert!(
+            execution
+                .message
+                .contains("other-org/Other Project/cross-org-repo"),
+            "dry-run message should name the resolved target: {}",
+            execution.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_rejects_cross_org_endpoint_without_organization() {
+        let mut ctx = cross_org_ctx(None, true);
+        ctx.dry_run = true;
+        let mut result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: "Fix bug in parser".to_string(),
+            description: "This PR fixes a critical bug in the parser module.".to_string(),
+            source_branch: "agent/fix".to_string(),
+            patch_file: "patch.diff".to_string(),
+            repository: "cross-org-repo".to_string(),
+            agent_labels: vec![],
+            base_commit: None,
+            patch_sha256: "deadbeef".to_string(),
+        };
+
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!execution.success);
+        assert!(execution.message.contains("repos.organization"));
     }
 
     #[test]
