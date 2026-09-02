@@ -22,6 +22,7 @@ pub mod imports;
 pub(crate) mod ir;
 mod job;
 mod job_ir;
+pub(crate) mod mcpg;
 mod onees;
 mod onees_ir;
 mod path_layout_check;

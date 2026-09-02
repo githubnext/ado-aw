@@ -461,11 +461,10 @@ pub(crate) fn build_pipeline_context(
     };
     let resolved_execution_config_json =
         super::custom_tools::resolved_execution_config_json(front_matter, &custom_tool_schemas)?;
-    let mcpg_config_obj = common::generate_mcpg_config(front_matter, &extension_declarations)?;
-    let mcpg_config_json = serde_json::to_string_pretty(&mcpg_config_obj)
+    let mcpg_compilation =
+        common::compile_mcpg(front_matter, &extension_declarations, debug_pipeline)?;
+    let mcpg_config_json = serde_json::to_string_pretty(&mcpg_compilation.config)
         .map_err(|e| anyhow::anyhow!("Failed to serialize MCPG config: {e}"))?;
-    let mcpg_docker_env = common::generate_mcpg_docker_env(front_matter, &extension_declarations);
-    let mcpg_step_env = common::generate_mcpg_step_env(&extension_declarations);
 
     // Source / pipeline paths (for integrity check + metadata).
     // `source_path` embeds `{{ trigger_repo_directory }}` which the
@@ -560,8 +559,7 @@ pub(crate) fn build_pipeline_context(
         mcpg_config_json,
         custom_tools_json,
         resolved_execution_config_json,
-        mcpg_docker_env,
-        mcpg_step_env,
+        mcpg_launch_env: mcpg_compilation.launch_env,
         source_path,
         source_relative_path,
         pipeline_path: pipeline_path.clone(),
@@ -824,10 +822,9 @@ pub(crate) struct StandaloneCtx {
     pub(crate) custom_tools_json: Option<String>,
     /// Fully merged, compiler-owned Stage 3 configuration.
     pub(crate) resolved_execution_config_json: String,
-    /// `-e KEY=...` docker flags for MCPG.
-    pub(crate) mcpg_docker_env: String,
-    /// `env:` block for the MCPG step (`env:\n  KEY: ...`).
-    pub(crate) mcpg_step_env: String,
+    /// Typed environment bindings shared by the MCPG pipeline step and its
+    /// nested Docker invocation.
+    pub(crate) mcpg_launch_env: super::mcpg::McpgLaunchEnvironment,
     pub(crate) source_path: String,
     /// Validated path to the workflow source relative to the trigger repository.
     /// SafeOutputs variants combine this with their job-local checkout layout.
@@ -1266,9 +1263,7 @@ fn build_agent_job(
 
     // 15. MCP Gateway (MCPG), which launches SafeOutputs as a stdio child.
     steps.push(Step::Bash(start_mcpg_step(
-        &cfg.mcpg_docker_env,
-        &cfg.mcpg_step_env,
-        cfg.debug_pipeline,
+        &cfg.mcpg_launch_env,
         front_matter.supply_chain(),
     )?));
 
@@ -4055,9 +4050,8 @@ shell_script! {
     /// can later attach it to its isolated internal network. This is
     /// contractually a *single* Bash task — the API key never leaves the
     /// process — so the block-scalar body has to carry the full multi-line
-    /// `docker run …` invocation. The compiler-owned `docker_env_lines` and
-    /// `debug_flag` fragments splice any extra `-e VAR=…` and `-e DEBUG=…`
-    /// continuation lines directly into the middle of that invocation.
+    /// `docker run …` invocation. Dynamic env names arrive as a validated word
+    /// list; the static body converts them to a quoted Bash argument array.
     ///
     /// Uses:
     /// - the pipeline variables `MCP_GATEWAY_API_KEY` (secret) and
@@ -4066,13 +4060,15 @@ shell_script! {
     ///   emitted YAML prelude
     /// - `Binding::text` for the two static topology names (container +
     ///   image ref) and `Binding::number` for the fixed listen port
+    /// - typed step env for the validated environment-name list, so
+    ///   credential-like names never enter the committed shell prelude
     /// - Compile-time constant `MCP_GATEWAY_DOMAIN` bound as text so the
     ///   docker container receives the same domain constant used elsewhere
     START_MCPG {
         interpreter: Bash,
         bindings: [MCPG_CONTAINER, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN],
-        externals: [MCP_GATEWAY_API_KEY, ADO_PROXY_IP],
-        fragments: [debug_flag, docker_env_lines],
+        externals: [MCP_GATEWAY_API_KEY, ADO_PROXY_IP, MCPG_ENV_NAMES],
+        fragments: [],
         body: r###"
 # Substitute runtime values into MCPG config
 MCP_RUNNER_UID=$(id -u)
@@ -4104,6 +4100,14 @@ GATEWAY_OUTPUT="/tmp/gh-aw/mcp-config/gateway-output.json"
 mkdir -p "$(dirname "$GATEWAY_OUTPUT")" /tmp/gh-aw/mcp-logs
 rm -f "$GATEWAY_OUTPUT"
 
+: "${MCPG_ENV_NAMES:=}"
+MCPG_DOCKER_ENV_ARGS=()
+# Names are compiler-validated shell words; splitting creates one Docker flag per name.
+# shellcheck disable=SC2086
+for MCPG_ENV_NAME in $MCPG_ENV_NAMES; do
+  MCPG_DOCKER_ENV_ARGS+=(-e "$MCPG_ENV_NAME")
+done
+
 # Start MCPG on Docker's bridge network. AWF attaches this named,
 # trusted container to its internal network after creating awf-net.
 # The Docker socket mount is required because MCPG spawns stdio-based MCP
@@ -4120,8 +4124,7 @@ echo "$MCPG_CONFIG" | docker run -i --rm \
   -e MCP_GATEWAY_PORT="$MCPG_PORT" \
   -e MCP_GATEWAY_DOMAIN="$MCPG_DOMAIN" \
   -e MCP_GATEWAY_API_KEY="$MCP_GATEWAY_API_KEY" \
-  # ado-aw:fragment debug_flag
-  # ado-aw:fragment docker_env_lines
+  "${MCPG_DOCKER_ENV_ARGS[@]}" \
   "$MCPG_IMAGE" \
   --routed --listen "0.0.0.0:$MCPG_PORT" --config-stdin --log-dir /tmp/gh-aw/mcp-logs \
   > "$GATEWAY_OUTPUT" 2> >(tee /tmp/gh-aw/mcp-logs/stderr.log >&2) &
@@ -4185,9 +4188,7 @@ cat /tmp/awf-tools/mcp-config.json
 }
 
 fn start_mcpg_step(
-    mcpg_docker_env: &str,
-    mcpg_step_env: &str,
-    debug_pipeline: bool,
+    mcpg_launch_env: &super::mcpg::McpgLaunchEnvironment,
     supply_chain: Option<&SupplyChainConfig>,
 ) -> Result<BashStep> {
     let registry_base = supply_chain
@@ -4195,49 +4196,24 @@ fn start_mcpg_step(
         .map(|r| r.name.as_str());
     let mcpg_image_v = image_ref(MCPG_IMAGE, &format!("v{MCPG_VERSION}"), registry_base);
 
-    // Match the legacy layout of two placeholder `\`-continuation lines when
-    // no extensions contribute docker env — bash treats a lone `\` as a
-    // no-op continuation and preserving the shape keeps the docker-run
-    // command's argument boundaries identical to the pre-migration YAML.
-    // `generate_mcpg_docker_env` returns a single `\` byte when no
-    // extensions contribute, so match that sentinel as well as an empty
-    // string.
-    let docker_env_lines: String =
-        if mcpg_docker_env.trim().is_empty() || mcpg_docker_env.trim() == "\\" {
-            // Two empty continuation lines mirror the legacy template's
-            // two-marker layout.
-            "\\\n  \\".to_string()
-        } else {
-            // `generate_mcpg_docker_env` already terminates every line with
-            // ` \` continuation, so re-indent the lines without appending
-            // another ` \` (issue #1034).
-            mcpg_docker_env.lines().collect::<Vec<_>>().join("\n  ")
-        };
-    // `--debug-pipeline` injects an extra `-e DEBUG="*" \` continuation line
-    // into the `docker run …` invocation so MCPG (and the stdio backends it
-    // spawns) emit verbose logs to the gateway stderr stream.
-    let debug_flag = if debug_pipeline {
-        "-e DEBUG=\"*\" \\".to_string()
-    } else {
-        "\\".to_string()
-    };
-
     use super::ir::env::EnvValue;
     let mut step = ShellScript::new(&START_MCPG)
         .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
         .bind_text("MCPG_IMAGE", &mcpg_image_v)
         .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
         .bind_text("MCPG_DOMAIN", MCPG_DOMAIN)
-        .fragment("debug_flag", debug_flag)
-        .fragment("docker_env_lines", docker_env_lines)
         .into_step("Start MCP Gateway (MCPG)")
         .with_env(
             "MCP_GATEWAY_API_KEY",
             EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
         )
-        .with_env("ADO_PROXY_IP", EnvValue::pipeline_var("ADO_PROXY_IP"));
-    for (k, v) in parse_env_block(mcpg_step_env)? {
-        step = step.with_env(k, v);
+        .with_env("ADO_PROXY_IP", EnvValue::pipeline_var("ADO_PROXY_IP"))
+        .with_env(
+            "MCPG_ENV_NAMES",
+            EnvValue::literal(mcpg_launch_env.names().collect::<Vec<_>>().join(" ")),
+        );
+    for (name, value) in mcpg_launch_env.iter() {
+        step = step.with_env(name, value.clone());
     }
     Ok(step)
 }
@@ -6491,6 +6467,7 @@ const _SUBMODULES_OPT_BIND: Option<SubmodulesOpt> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::mcpg::McpgLaunchEnvironment;
 
     fn test_front_matter(yaml: &str) -> FrontMatter {
         serde_yaml::from_str(yaml).expect("front matter should parse")
@@ -6529,8 +6506,7 @@ mod tests {
             mcpg_config_json: "{}".to_string(),
             custom_tools_json: None,
             resolved_execution_config_json: "{}".to_string(),
-            mcpg_docker_env: String::new(),
-            mcpg_step_env: String::new(),
+            mcpg_launch_env: McpgLaunchEnvironment::default(),
             source_path: "$(Build.SourcesDirectory)/agents/test.md".to_string(),
             source_relative_path: "agents/test.md".to_string(),
             pipeline_path: "$(Build.SourcesDirectory)/agents/test.lock.yml".to_string(),
@@ -7521,7 +7497,7 @@ safe-outputs:
 
     #[test]
     fn start_mcpg_step_marks_copilot_mcp_servers_as_default() {
-        let step = start_mcpg_step("", "", false, None).unwrap();
+        let step = start_mcpg_step(&McpgLaunchEnvironment::default(), None).unwrap();
 
         assert!(
             step.script.contains(".value.tools = [\"*\"]"),
@@ -7533,6 +7509,32 @@ safe-outputs:
             "Copilot mcp-config conversion should mark generated MCP servers as default/trusted: {}",
             step.script
         );
+    }
+
+    #[test]
+    fn start_mcpg_step_uses_typed_env_and_static_docker_array() {
+        let source = crate::secure::AdoVariableName::parse("SOURCE_TOKEN").unwrap();
+        let mut env = McpgLaunchEnvironment::default();
+        env.bind_pipeline_variable("DEST_TOKEN", &source, "test")
+            .unwrap();
+        env.bind_literal("DEBUG", "*", "test").unwrap();
+
+        let step = start_mcpg_step(&env, None).unwrap();
+        assert!(matches!(
+            step.env.get("DEST_TOKEN"),
+            Some(EnvValue::PipelineVar(name)) if name == "SOURCE_TOKEN"
+        ));
+        assert!(matches!(
+            step.env.get("DEBUG"),
+            Some(EnvValue::Literal(value)) if value == "*"
+        ));
+        assert!(matches!(
+            step.env.get("MCPG_ENV_NAMES"),
+            Some(EnvValue::Literal(value)) if value == "DEBUG DEST_TOKEN"
+        ));
+        assert!(step.script.contains("MCPG_DOCKER_ENV_ARGS+=(-e"));
+        assert!(step.script.contains("\"${MCPG_DOCKER_ENV_ARGS[@]}\""));
+        assert!(!step.script.contains("DEST_TOKEN=\"$SOURCE_TOKEN\""));
     }
 
     // ── split_yaml_step_sequence ───────────────────────────────────────────
@@ -7657,8 +7659,7 @@ safe-outputs:
             mcpg_config_json: "{}".to_string(),
             custom_tools_json: None,
             resolved_execution_config_json: "{}".to_string(),
-            mcpg_docker_env: String::new(),
-            mcpg_step_env: String::new(),
+            mcpg_launch_env: McpgLaunchEnvironment::default(),
             source_path: "source.md".to_string(),
             source_relative_path: "source.md".to_string(),
             pipeline_path: "source.lock.yml".to_string(),

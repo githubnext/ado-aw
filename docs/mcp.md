@@ -17,7 +17,8 @@ mcp-servers:
     entrypoint: "npx"
     entrypoint-args: ["-y", "@azure-devops/mcp", "myorg", "-d", "core", "work-items"]
     env:
-      AZURE_DEVOPS_EXT_PAT: ""
+      AZURE_DEVOPS_EXT_PAT:
+        pipeline-variable: AZURE_DEVOPS_EXT_PAT
     allowed:
       - core_list_projects
       - wit_get_work_item
@@ -48,7 +49,9 @@ mcp-servers:
 - `entrypoint-args:` - Arguments passed to the container entrypoint
 - `args:` - Additional Docker runtime arguments (inserted before the image in `docker run`). **Security note**: dangerous flags like `--privileged`, `--network host` will trigger compile-time warnings.
 - `mounts:` - Volume mounts in `"source:dest:mode"` format (e.g., `["/host/data:/app/data:ro"]`)
-- `env:` - Environment variables for the MCP server process. Use `""` (empty string) for passthrough from the pipeline environment.
+- `env:` - Environment variables for the MCP server process. Use a string for
+  a static value or `{ pipeline-variable: NAME }` to read an ADO pipeline,
+  variable-group, queue-time, or earlier-same-job variable at runtime.
 
 **HTTP servers:**
 - `url:` - HTTP endpoint URL for the remote MCP server
@@ -62,13 +65,23 @@ HTTP MCPs ignore `env:`; use `headers:` for HTTP authentication instead.
 
 ## Environment Variable Passthrough
 
-MCP containers may need secrets from the pipeline (e.g., ADO tokens). The `env:` field supports passthrough:
+MCP containers may need secrets from the pipeline (e.g., ADO tokens). The
+`env:` field uses an explicit pipeline-variable source:
 
 ```yaml
 env:
-  AZURE_DEVOPS_EXT_PAT: ""        # Passthrough from pipeline environment
+  MCP_AUTH_TOKEN:                 # Name visible inside the MCP container
+    pipeline-variable: ADO_TOKEN  # ADO variable/variable-group source
   STATIC_CONFIG: "some-value"     # Literal value embedded in config
 ```
+
+The compiler emits `MCP_AUTH_TOKEN: $(ADO_TOKEN)` on the MCPG pipeline step,
+then Docker forwards the resulting process value with `-e MCP_AUTH_TOKEN`.
+Secret values remain runtime-only and are never written into compiled YAML.
+The source variable must exist before the MCPG step runs: pipeline,
+variable-group, and queue-time variables exist from job start; a
+`task.setvariable` source must be published by an earlier step in the same job.
+Cross-job/stage output expressions are not accepted by `pipeline-variable`.
 
 The first-party `tools.azure-devops` integration is deliberately different:
 it gives the MCP a non-secret sentinel in `ADO_MCP_AUTH_TOKEN`. The real
@@ -85,7 +98,8 @@ mcp-servers:
     entrypoint: "npx"
     entrypoint-args: ["-y", "@azure-devops/mcp", "myorg"]
     env:
-      AZURE_DEVOPS_EXT_PAT: ""
+      AZURE_DEVOPS_EXT_PAT:
+        pipeline-variable: AZURE_DEVOPS_EXT_PAT
     allowed:
       - core_list_projects
       - wit_get_work_item

@@ -3020,7 +3020,11 @@ where
 }
 
 /// Validate a container-based MCP entry and emit any warnings.
-fn validate_stdio_mcp(name: &str, container: &str, opts: &crate::compile::types::McpOptions) {
+fn validate_stdio_mcp(
+    name: &str,
+    container: &str,
+    opts: &crate::compile::types::McpOptions,
+) -> Result<()> {
     for w in validate::validate_container_image(container, name) {
         eprintln!("{}", w);
     }
@@ -3032,9 +3036,26 @@ fn validate_stdio_mcp(name: &str, container: &str, opts: &crate::compile::types:
     for w in validate::validate_docker_args(&opts.args, name) {
         eprintln!("{}", w);
     }
-    for w in validate::warn_potential_secrets(name, &opts.env, &opts.headers) {
+    for env_name in opts.env.keys() {
+        if !validate::is_valid_env_var_name(env_name) {
+            anyhow::bail!(
+                "mcp-servers.{name}.env key '{env_name}' is invalid; expected [A-Za-z_][A-Za-z0-9_]*"
+            );
+        }
+    }
+    let literal_env: HashMap<String, String> = opts
+        .env
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .literal()
+                .map(|value| (name.clone(), value.to_string()))
+        })
+        .collect();
+    for w in validate::warn_potential_secrets(name, &literal_env, &opts.headers) {
         eprintln!("{}", w);
     }
+    Ok(())
 }
 
 /// Build a stdio `McpgServerConfig` from a container-based MCP options block.
@@ -3057,7 +3078,16 @@ fn build_stdio_mcpg_server(
         runtime: runtime.build()?,
         url: None,
         headers: None,
-        env: nonempty_map(&opts.env),
+        env: if opts.env.is_empty() {
+            None
+        } else {
+            Some(
+                opts.env
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.mcpg_value()))
+                    .collect(),
+            )
+        },
         tools: nonempty_vec(&opts.allowed),
     })
 }
@@ -3085,6 +3115,7 @@ fn try_add_user_mcp(
     name: &str,
     config: &McpConfig,
     servers: &mut std::collections::BTreeMap<String, McpgServerConfig>,
+    launch_env: &mut super::mcpg::McpgLaunchEnvironment,
 ) -> Result<()> {
     // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
     if name.eq_ignore_ascii_case("safeoutputs") {
@@ -3137,12 +3168,19 @@ fn try_add_user_mcp(
     }
 
     if let Some(container) = &opts.container {
-        validate_stdio_mcp(name, container, opts);
-        servers.insert(
-            name.to_string(),
-            build_stdio_mcpg_server(container, opts)
-                .with_context(|| format!("invalid runtime configuration for MCP `{name}`"))?,
-        );
+        validate_stdio_mcp(name, container, opts)?;
+        let server = build_stdio_mcpg_server(container, opts)
+            .with_context(|| format!("invalid runtime configuration for MCP `{name}`"))?;
+        for (destination, value) in &opts.env {
+            if let Some(source) = value.pipeline_variable() {
+                launch_env.bind_pipeline_variable(
+                    destination,
+                    source,
+                    format!("mcp-servers.{name}.env.{destination}"),
+                )?;
+            }
+        }
+        servers.insert(name.to_string(), server);
     } else if let Some(url) = &opts.url {
         // HTTP-based MCP (remote server)
         for w in validate::validate_mcp_url(url, name) {
@@ -3152,6 +3190,15 @@ fn try_add_user_mcp(
             eprintln!("{}", w);
         }
         if !opts.env.is_empty() {
+            if opts
+                .env
+                .values()
+                .any(|value| value.pipeline_variable().is_some())
+            {
+                anyhow::bail!(
+                    "mcp-servers.{name}.env uses pipeline-variable, but HTTP MCP servers cannot receive process environment variables; use headers instead"
+                );
+            }
             eprintln!(
                 "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
                 Use headers for authentication instead.",
@@ -3172,17 +3219,29 @@ fn try_add_user_mcp(
 /// SafeOutputs is always included as a hardened stdio container. Other
 /// extension-contributed MCPG entries (e.g., azure-devops) are included via the
 /// `extensions` parameter.
-pub fn generate_mcpg_config(
+pub fn compile_mcpg(
     front_matter: &FrontMatter,
     extension_declarations: &[Declarations],
-) -> Result<McpgConfig> {
+    debug_pipeline: bool,
+) -> Result<super::mcpg::McpgCompilation> {
     let mut mcp_servers = std::collections::BTreeMap::new();
+    let mut launch_env = super::mcpg::McpgLaunchEnvironment::default();
 
     // Add extension-contributed MCPG server entries (safeoutputs, azure-devops, etc.)
     for decl in extension_declarations {
         for (name, config) in &decl.mcpg_servers {
             mcp_servers.insert(name.clone(), config.clone());
         }
+        for mapping in &decl.pipeline_env {
+            launch_env.bind_pipeline_variable(
+                mapping.container_var(),
+                mapping.pipeline_var(),
+                format!("extension pipeline_env.{}", mapping.container_var()),
+            )?;
+        }
+    }
+    if debug_pipeline {
+        launch_env.bind_literal("DEBUG", "*", "debug-pipeline")?;
     }
 
     let effective_workspace = compute_effective_workspace(
@@ -3265,128 +3324,29 @@ pub fn generate_mcpg_config(
     );
 
     for (name, config) in &front_matter.mcp_servers {
-        try_add_user_mcp(name, config, &mut mcp_servers)?;
+        try_add_user_mcp(name, config, &mut mcp_servers, &mut launch_env)?;
     }
 
-    Ok(McpgConfig {
-        mcp_servers,
-        gateway: McpgGatewayConfig {
-            port: MCPG_PORT,
-            domain: MCPG_DOMAIN.to_string(),
-            api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
-            payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
+    Ok(super::mcpg::McpgCompilation {
+        config: McpgConfig {
+            mcp_servers,
+            gateway: McpgGatewayConfig {
+                port: MCPG_PORT,
+                domain: MCPG_DOMAIN.to_string(),
+                api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
+                payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
+            },
         },
+        launch_env,
     })
 }
 
-/// Generate additional `-e` flags for the MCPG Docker run command.
-///
-/// Two sources of env flags:
-/// 1. **Extension pipeline var mappings** — extensions declare `required_pipeline_vars()`
-///    which map container env vars to pipeline variables (typically secrets).
-///    These become `-e CONTAINER_VAR="$PIPELINE_VAR"` flags referencing bash vars
-///    (the companion `generate_mcpg_step_env` provides the ADO `env:` mapping).
-/// 2. **User-configured MCP passthrough** — front matter `mcp-servers:` entries with
-///    `env: { VAR: "" }` become bare `-e VAR` flags (MCPG passthrough from host env).
-///
-/// Returns flags formatted for inline insertion in the `docker run` command.
-pub fn generate_mcpg_docker_env(
+#[cfg(test)]
+fn generate_mcpg_config(
     front_matter: &FrontMatter,
     extension_declarations: &[Declarations],
-) -> String {
-    let mut env_flags: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    // 1. Extension pipeline var mappings (e.g., AZURE_DEVOPS_EXT_PAT -> SC_READ_TOKEN)
-    for decl in extension_declarations {
-        for mapping in &decl.pipeline_env {
-            if seen.contains(&mapping.container_var) {
-                continue;
-            }
-            env_flags.push(format!(
-                "-e {}=\"${}\"",
-                mapping.container_var, mapping.pipeline_var
-            ));
-            seen.insert(mapping.container_var.clone());
-        }
-    }
-
-    // 2. User-configured MCP passthrough env vars (empty value = passthrough from host)
-    for (mcp_name, config) in &front_matter.mcp_servers {
-        let opts = match config {
-            McpConfig::WithOptions(opts) if opts.enabled.unwrap_or(true) => opts,
-            _ => continue,
-        };
-
-        if opts.container.is_none() {
-            continue;
-        }
-
-        for (var_name, var_value) in &opts.env {
-            if !validate::is_valid_env_var_name(var_name) {
-                log::warn!(
-                    "MCP '{}': skipping invalid env var name '{}' — must match [A-Za-z_][A-Za-z0-9_]*",
-                    mcp_name,
-                    var_name
-                );
-                continue;
-            }
-            if seen.contains(var_name) {
-                continue;
-            }
-            if var_value.is_empty() {
-                env_flags.push(format!("-e {}", var_name));
-                seen.insert(var_name.clone());
-            }
-        }
-    }
-
-    env_flags.sort();
-    if env_flags.is_empty() {
-        "\\".to_string()
-    } else {
-        let flags = env_flags.join(" \\\n");
-        format!("{} \\", flags)
-    }
-}
-
-/// Generate the ADO step-level `env:` block for the MCPG start step.
-///
-/// ADO secret variables (set via `##vso[task.setvariable;issecret=true]`) must
-/// be explicitly mapped via the step's `env:` block to be available as bash
-/// environment variables. This function collects all pipeline variable mappings
-/// from extensions and generates the corresponding `env:` entries.
-///
-/// Returns YAML `env:` entries (e.g., `SC_READ_TOKEN: $(SC_READ_TOKEN)`),
-/// or an empty string if no mappings are needed.
-pub fn generate_mcpg_step_env(extension_declarations: &[Declarations]) -> String {
-    let mut entries: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    for decl in extension_declarations {
-        for mapping in &decl.pipeline_env {
-            if seen.contains(&mapping.pipeline_var) {
-                continue;
-            }
-            entries.push(format!(
-                "{}: $({})",
-                mapping.pipeline_var, mapping.pipeline_var
-            ));
-            seen.insert(mapping.pipeline_var.clone());
-        }
-    }
-
-    if entries.is_empty() {
-        return String::new();
-    }
-
-    // Return full `env:` block so the template marker can be cleanly omitted when empty
-    let indented = entries
-        .iter()
-        .map(|e| format!("  {}", e))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("env:\n{}", indented)
+) -> Result<McpgConfig> {
+    Ok(compile_mcpg(front_matter, extension_declarations, false)?.config)
 }
 
 // ==================== Domain allowlist ====================
@@ -3786,7 +3746,7 @@ mod tests {
     use crate::compile::extensions::{
         CompileContext, CompilerExtension, Declarations, Extension, collect_extensions,
     };
-    use crate::compile::types::{McpConfig, McpOptions, OnConfig, Repository};
+    use crate::compile::types::{McpConfig, McpEnvValue, McpOptions, OnConfig, Repository};
     use std::collections::HashMap;
 
     /// Helper: create a minimal FrontMatter by parsing YAML
@@ -7474,7 +7434,10 @@ safe-outputs:
     fn test_generate_mcpg_config_container_with_env() {
         let mut fm = minimal_front_matter();
         let mut env = HashMap::new();
-        env.insert("TOKEN".to_string(), "secret".to_string());
+        env.insert(
+            "TOKEN".to_string(),
+            McpEnvValue::Literal("secret".to_string()),
+        );
         fm.mcp_servers.insert(
             "with-env".to_string(),
             McpConfig::WithOptions(Box::new(McpOptions {
@@ -7623,139 +7586,122 @@ safe-outputs:
     }
 
     #[test]
-    fn test_generate_mcpg_docker_env_with_permissions_read() {
-        // `permissions.read` selects the service connection the *engine* uses.
-        // It must not cause the token to be projected into MCPG's own
-        // environment, from where it would reach the MCP container.
+    fn test_compile_mcpg_builds_typed_pipeline_and_literal_env() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
-        ).unwrap();
-        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
-        let env = generate_mcpg_docker_env(&fm, &declarations);
-        assert!(
-            !env.contains("-e ADO_MCP_AUTH_TOKEN=\"$SC_READ_TOKEN\""),
-            "the credential must not be mapped into MCPG: {env}"
-        );
-    }
-
-    #[test]
-    fn test_generate_mcpg_docker_env_no_extensions() {
-        // No tools enabled — no extension pipeline vars — only user MCP passthrough
-        let fm = minimal_front_matter();
-        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
-        let env = generate_mcpg_docker_env(&fm, &declarations);
-        assert!(
-            !env.contains("ADO_MCP_AUTH_TOKEN"),
-            "Should not have ADO token when no extension needs it"
-        );
-    }
-
-    #[test]
-    fn test_generate_mcpg_docker_env_dedup_extension_and_user_passthrough() {
-        // Extension provides ADO_MCP_AUTH_TOKEN mapping, user MCP also has it as passthrough.
-        // Extension mapping should win (deduplicated).
-        let (mut fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\npermissions:\n  read: my-read-sc\n---\n",
-        ).unwrap();
-        fm.mcp_servers.insert(
-            "ado-tool".to_string(),
-            McpConfig::WithOptions(Box::new(McpOptions {
-                container: Some("node:20-slim".to_string()),
-                env: {
-                    let mut e = HashMap::new();
-                    e.insert("ADO_MCP_AUTH_TOKEN".to_string(), "".to_string());
-                    e
-                },
-                ..Default::default()
-            })),
-        );
-        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
-        let env = generate_mcpg_docker_env(&fm, &declarations);
-        let count = env.matches("ADO_MCP_AUTH_TOKEN").count();
-        assert_eq!(
-            count, 1,
-            "ADO_MCP_AUTH_TOKEN should appear exactly once, got {}",
-            count
-        );
-    }
-
-    #[test]
-    fn test_generate_mcpg_docker_env_passthrough_vars() {
-        let mut fm = minimal_front_matter();
-        fm.mcp_servers.insert(
-            "tool".to_string(),
-            McpConfig::WithOptions(Box::new(McpOptions {
-                container: Some("img:latest".to_string()),
-                env: {
-                    let mut e = HashMap::new();
-                    e.insert("PASS_THROUGH".to_string(), "".to_string());
-                    e.insert("STATIC".to_string(), "value".to_string());
-                    e
-                },
-                ..Default::default()
-            })),
-        );
-        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
-        let env = generate_mcpg_docker_env(&fm, &declarations);
-        assert!(
-            env.contains("-e PASS_THROUGH"),
-            "Should include passthrough var"
-        );
-        assert!(!env.contains("-e STATIC"), "Should NOT include static var");
-    }
-
-    #[test]
-    fn test_generate_mcpg_docker_env_rejects_invalid_names() {
-        let mut fm = minimal_front_matter();
-        fm.mcp_servers.insert(
-            "evil".to_string(),
-            McpConfig::WithOptions(Box::new(McpOptions {
-                container: Some("img:latest".to_string()),
-                env: {
-                    let mut e = HashMap::new();
-                    e.insert("MY_VAR --privileged".to_string(), "".to_string());
-                    e.insert("GOOD_VAR".to_string(), "".to_string());
-                    e
-                },
-                ..Default::default()
-            })),
-        );
-        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
-        let env = generate_mcpg_docker_env(&fm, &declarations);
-        assert!(
-            !env.contains("--privileged"),
-            "Should reject invalid env var name with Docker flag injection"
-        );
-        assert!(env.contains("-e GOOD_VAR"), "Should include valid env var");
-    }
-
-    // ─── generate_mcpg_step_env ──────────────────────────────────────────────
-
-    #[test]
-    fn test_generate_mcpg_step_env_with_ado_extension() {
-        // The ADO tool no longer contributes any pipeline variable: it used to
-        // map SC_READ_TOKEN into the MCPG step so the MCP could authenticate
-        // directly. Nothing should replace it.
-        let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\ntools:\n  azure-devops: true\n---\n",
+            "---\nname: test\ndescription: test\nmcp-servers:\n  tool:\n    container: img:latest\n    env:\n      PASS_THROUGH:\n        pipeline-variable: SOURCE_TOKEN\n      STATIC: value\n---\n",
         )
         .unwrap();
-        let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
-        let env = generate_mcpg_step_env(&declarations);
-        assert!(
-            !env.contains("SC_READ_TOKEN"),
-            "the ADO tool must not surface the read token to MCPG: {env}"
-        );
+        let compilation = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false).unwrap();
+        assert!(matches!(
+            compilation.launch_env.get("PASS_THROUGH"),
+            Some(crate::compile::ir::env::EnvValue::PipelineVar(source))
+                if source == "SOURCE_TOKEN"
+        ));
+        assert!(compilation.launch_env.get("STATIC").is_none());
+        let env = compilation.config.mcp_servers["tool"].env.as_ref().unwrap();
+        assert_eq!(env["PASS_THROUGH"], "");
+        assert_eq!(env["STATIC"], "value");
     }
 
     #[test]
-    fn test_generate_mcpg_step_env_no_extensions() {
-        let fm = minimal_front_matter();
-        let (_extensions, declarations) = collect_exts_and_decls(&fm);
-        let env = generate_mcpg_step_env(&declarations);
-        assert!(
-            env.is_empty(),
-            "Should be empty when no extensions need pipeline vars"
+    fn test_compile_mcpg_rejects_invalid_destination_env_name() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  tool:\n    container: img:latest\n    env:\n      BAD-NAME:\n        pipeline-variable: SOURCE_TOKEN\n---\n",
+        )
+        .unwrap();
+        let error = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("BAD-NAME"));
+        assert!(error.contains("[A-Za-z_][A-Za-z0-9_]*"));
+    }
+
+    #[test]
+    fn test_compile_mcpg_rejects_pipeline_env_for_http_server() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  remote:\n    url: https://mcp.example.com\n    env:\n      TOKEN:\n        pipeline-variable: SOURCE_TOKEN\n---\n",
+        )
+        .unwrap();
+        let error = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP MCP servers"));
+    }
+
+    #[test]
+    fn test_compile_mcpg_skips_disabled_user_launch_env() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  disabled:\n    enabled: false\n    container: img:latest\n    env:\n      TOKEN:\n        pipeline-variable: SOURCE_TOKEN\n---\n",
+        )
+        .unwrap();
+        let compilation = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false).unwrap();
+        assert!(compilation.launch_env.get("TOKEN").is_none());
+        assert!(!compilation.config.mcp_servers.contains_key("disabled"));
+    }
+
+    #[test]
+    fn test_compile_mcpg_rejects_conflicting_user_bindings() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  one:\n    container: one:latest\n    env:\n      TOKEN:\n        pipeline-variable: FIRST\n  two:\n    container: two:latest\n    env:\n      TOKEN:\n        pipeline-variable: SECOND\n---\n",
+        )
+        .unwrap();
+        let error = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mcp-servers.one.env.TOKEN"));
+        assert!(error.contains("mcp-servers.two.env.TOKEN"));
+    }
+
+    #[test]
+    fn test_compile_mcpg_extension_binding_wins_only_when_identical() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  tool:\n    container: tool:latest\n    env:\n      TOKEN:\n        pipeline-variable: OTHER\n---\n",
+        )
+        .unwrap();
+        let declarations = vec![Declarations {
+            pipeline_env: vec![
+                crate::compile::extensions::PipelineEnvMapping::new("TOKEN", "EXTENSION")
+                    .unwrap(),
+            ],
+            ..Default::default()
+        }];
+        let error = compile_mcpg(&fm, &declarations, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("extension pipeline_env.TOKEN"));
+        assert!(error.contains("mcp-servers.tool.env.TOKEN"));
+    }
+
+    #[test]
+    fn test_compile_mcpg_skipped_duplicate_server_does_not_expose_env() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  extension-owned:\n    container: user:latest\n    env:\n      TOKEN:\n        pipeline-variable: SOURCE\n---\n",
+        )
+        .unwrap();
+        let declarations = vec![Declarations {
+            mcpg_servers: vec![(
+                "extension-owned".to_string(),
+                McpgServerConfig {
+                    server_type: "stdio".to_string(),
+                    container: Some("extension:latest".to_string()),
+                    entrypoint: None,
+                    entrypoint_args: None,
+                    runtime: Default::default(),
+                    url: None,
+                    headers: None,
+                    env: None,
+                    tools: None,
+                },
+            )],
+            ..Default::default()
+        }];
+        let compilation = compile_mcpg(&fm, &declarations, false).unwrap();
+        assert!(compilation.launch_env.get("TOKEN").is_none());
+        assert_eq!(
+            compilation.config.mcp_servers["extension-owned"]
+                .container
+                .as_deref(),
+            Some("extension:latest")
         );
     }
 
@@ -7979,10 +7925,17 @@ safe-outputs:
         )
         .unwrap();
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
-        let env = generate_mcpg_docker_env(&fm, &declarations);
+        let compilation = compile_mcpg(&fm, &declarations, false).unwrap();
         assert!(
-            !env.contains("SC_READ_TOKEN"),
-            "the real bearer must never reach the MCP container: {env}"
+            compilation
+                .launch_env
+                .iter()
+                .all(|(_, value)| !matches!(
+                    value,
+                    crate::compile::ir::env::EnvValue::PipelineVar(source)
+                        if source == "SC_READ_TOKEN"
+                )),
+            "the real bearer must never reach the MCP container"
         );
     }
 

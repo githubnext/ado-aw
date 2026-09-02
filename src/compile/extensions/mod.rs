@@ -599,9 +599,33 @@ impl<'de> serde::Deserialize<'de> for AwfMount {
 #[derive(Debug, Clone)]
 pub struct PipelineEnvMapping {
     /// The env var name inside the MCP container (e.g., `AZURE_DEVOPS_EXT_PAT`).
-    pub container_var: String,
+    container_var: super::mcpg::McpgEnvName,
     /// The ADO pipeline variable name (e.g., `SC_READ_TOKEN`).
-    pub pipeline_var: String,
+    pipeline_var: crate::secure::AdoVariableName,
+}
+
+impl PipelineEnvMapping {
+    #[allow(dead_code)] // Reserved extension contract; no in-tree producer currently needs a credential mapping.
+    pub fn new(
+        container_var: impl Into<String>,
+        pipeline_var: impl Into<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            container_var: super::mcpg::McpgEnvName::parse(
+                container_var,
+                "extension pipeline_env",
+            )?,
+            pipeline_var: crate::secure::AdoVariableName::parse(pipeline_var)?,
+        })
+    }
+
+    pub fn container_var(&self) -> &str {
+        self.container_var.as_str()
+    }
+
+    pub fn pipeline_var(&self) -> &crate::secure::AdoVariableName {
+        &self.pipeline_var
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
