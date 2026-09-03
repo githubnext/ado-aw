@@ -411,8 +411,9 @@ on:
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
         assert!(oc.schedule.is_some(), "should have schedule");
+        let schedule = oc.schedule.as_ref().unwrap().entries();
         assert_eq!(
-            oc.schedule.unwrap().expression(),
+            schedule[0].expression,
             "daily around 14:00",
             "schedule expression should round-trip"
         );
@@ -447,9 +448,10 @@ on:
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let oc: OnConfig = serde_yaml::from_value(val["on"].clone()).unwrap();
         let schedule = oc.schedule.unwrap();
-        assert_eq!(schedule.expression(), "weekly on monday");
+        let entries = schedule.entries();
+        assert_eq!(entries[0].expression, "weekly on monday");
         assert_eq!(
-            schedule.branches(),
+            entries[0].branches,
             &["main"],
             "schedule branches should round-trip"
         );

@@ -1317,8 +1317,9 @@ Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
         let schedule = fm.schedule().unwrap();
-        assert_eq!(schedule.expression(), "daily around 14:00");
-        assert!(schedule.branches().is_empty());
+        let entries = schedule.entries();
+        assert_eq!(entries[0].expression, "daily around 14:00");
+        assert!(entries[0].branches.is_empty());
     }
 
     #[test]
@@ -1337,13 +1338,14 @@ Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
         let schedule = fm.schedule().unwrap();
-        assert_eq!(schedule.expression(), "weekly on friday around 17:00");
-        assert_eq!(schedule.branches(), &["main", "release/*"]);
+        let entries = schedule.entries();
+        assert_eq!(entries[0].expression, "weekly on friday around 17:00");
+        assert_eq!(entries[0].branches, &["main", "release/*"]);
     }
 
     #[test]
     fn test_schedule_object_form_no_branches() {
-        // Object form without a `branches` key: schedule.branches() must default to empty.
+        // Object form without a `branches` key defaults to an empty branch list.
         let content = r#"---
 name: "Agent"
 description: "Test"
@@ -1355,8 +1357,9 @@ Body
 "#;
         let (fm, _) = parse_markdown(content).unwrap();
         let schedule = fm.schedule().unwrap();
-        assert_eq!(schedule.expression(), "daily around 10:00");
-        assert!(schedule.branches().is_empty());
+        let entries = schedule.entries();
+        assert_eq!(entries[0].expression, "daily around 10:00");
+        assert!(entries[0].branches.is_empty());
     }
 
     #[test]

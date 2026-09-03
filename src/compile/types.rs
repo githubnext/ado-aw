@@ -159,6 +159,15 @@ impl SanitizeConfigTrait for PoolConfig {
 ///   branches:
 ///     - main
 ///     - release/*
+///
+/// # Multiple fuzzy or raw cron schedules
+/// schedule:
+///   - cron: daily on weekdays
+///     branches:
+///       - main
+///   - cron: "0 9 * * 1-5"
+///     branches:
+///       - release/*
 /// ```
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
@@ -167,22 +176,29 @@ pub enum ScheduleConfig {
     Simple(String),
     /// Schedule with options (branch filtering)
     WithOptions(ScheduleOptions),
+    /// Multiple fuzzy or raw cron schedules
+    Multiple(Vec<ScheduleListItem>),
 }
 
 impl ScheduleConfig {
-    /// Get the schedule expression string
-    pub fn expression(&self) -> &str {
+    /// Return a normalized one-or-many view over the configured schedules.
+    pub fn entries(&self) -> Vec<ScheduleEntryRef<'_>> {
         match self {
-            ScheduleConfig::Simple(s) => s,
-            ScheduleConfig::WithOptions(opts) => &opts.run,
-        }
-    }
-
-    /// Get the branches filter (empty means default to "main" branch)
-    pub fn branches(&self) -> &[String] {
-        match self {
-            ScheduleConfig::Simple(_) => &[],
-            ScheduleConfig::WithOptions(opts) => &opts.branches,
+            ScheduleConfig::Simple(expression) => vec![ScheduleEntryRef {
+                expression,
+                branches: &[],
+            }],
+            ScheduleConfig::WithOptions(options) => vec![ScheduleEntryRef {
+                expression: &options.run,
+                branches: &options.branches,
+            }],
+            ScheduleConfig::Multiple(items) => items
+                .iter()
+                .map(|item| ScheduleEntryRef {
+                    expression: &item.cron,
+                    branches: &item.branches,
+                })
+                .collect(),
         }
     }
 }
@@ -192,8 +208,19 @@ impl SanitizeConfigTrait for ScheduleConfig {
         match self {
             ScheduleConfig::Simple(s) => *s = crate::sanitize::sanitize_config(s),
             ScheduleConfig::WithOptions(opts) => opts.sanitize_config_fields(),
+            ScheduleConfig::Multiple(items) => {
+                for item in items {
+                    item.sanitize_config_fields();
+                }
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScheduleEntryRef<'a> {
+    pub expression: &'a str,
+    pub branches: &'a [String],
 }
 
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
@@ -201,6 +228,16 @@ pub struct ScheduleOptions {
     /// Fuzzy schedule expression (e.g., "daily around 14:00")
     pub run: String,
     /// Branches to restrict the schedule to (empty = defaults to "main")
+    #[serde(default)]
+    pub branches: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleListItem {
+    /// Fuzzy schedule expression or validated five-field ADO cron.
+    pub cron: String,
+    /// Branches to restrict this schedule to (empty = defaults to "main").
     #[serde(default)]
     pub branches: Vec<String>,
 }
@@ -5253,8 +5290,9 @@ imports:
         let yaml = "run: hourly";
         let opts: ScheduleOptions = serde_yaml::from_str(yaml).unwrap();
         let sc = ScheduleConfig::WithOptions(opts);
-        assert_eq!(sc.expression(), "hourly");
-        assert!(sc.branches().is_empty());
+        let entries = sc.entries();
+        assert_eq!(entries[0].expression, "hourly");
+        assert!(entries[0].branches.is_empty());
     }
 
     #[test]
@@ -5262,8 +5300,9 @@ imports:
         let yaml = "schedule: daily around 14:00";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let sc: ScheduleConfig = serde_yaml::from_value(fm["schedule"].clone()).unwrap();
-        assert_eq!(sc.expression(), "daily around 14:00");
-        assert!(sc.branches().is_empty());
+        let entries = sc.entries();
+        assert_eq!(entries[0].expression, "daily around 14:00");
+        assert!(entries[0].branches.is_empty());
     }
 
     #[test]
@@ -5271,8 +5310,41 @@ imports:
         let yaml = "schedule:\n  run: weekly on friday\n  branches:\n    - main\n    - develop";
         let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let sc: ScheduleConfig = serde_yaml::from_value(fm["schedule"].clone()).unwrap();
-        assert_eq!(sc.expression(), "weekly on friday");
-        assert_eq!(sc.branches(), &["main", "develop"]);
+        let entries = sc.entries();
+        assert_eq!(entries[0].expression, "weekly on friday");
+        assert_eq!(entries[0].branches, &["main", "develop"]);
+    }
+
+    #[test]
+    fn test_schedule_config_deserialized_as_list() {
+        let yaml = r#"
+schedule:
+  - cron: daily on weekdays
+  - cron: "0 9 * * 1-5"
+    branches: [main, "release/*"]
+"#;
+        let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let sc: ScheduleConfig = serde_yaml::from_value(fm["schedule"].clone()).unwrap();
+        let entries = sc.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].expression, "daily on weekdays");
+        assert!(entries[0].branches.is_empty());
+        assert_eq!(entries[1].expression, "0 9 * * 1-5");
+        assert_eq!(entries[1].branches, &["main", "release/*"]);
+    }
+
+    #[test]
+    fn test_schedule_list_rejects_timezone_field() {
+        let yaml = r#"
+schedule:
+  - cron: "0 9 * * 1-5"
+    timezone: America/New_York
+"#;
+        let fm: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            serde_yaml::from_value::<ScheduleConfig>(fm["schedule"].clone()).is_err(),
+            "IANA timezone fields must not be silently ignored"
+        );
     }
 
     // ─── EngineConfig deserialization ────────────────────────────────────────

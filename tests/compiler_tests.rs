@@ -3688,6 +3688,79 @@ Run daily on specific branches.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn test_schedule_list_compiles_mixed_fuzzy_and_raw_cron_entries() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-schedule-list-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = r#"---
+name: "Mixed Scheduled Agent"
+description: "Agent with fuzzy and raw cron schedules"
+on:
+  schedule:
+    - cron: daily on weekdays
+    - cron: "0 9 * * 1-5"
+      branches:
+        - release/*
+---
+
+## Mixed Scheduled Agent
+
+Run on multiple schedules.
+"#;
+
+    let input_path = temp_dir.join("mixed-scheduled-agent.md");
+    let output_path = temp_dir.join("mixed-scheduled-agent.yml");
+    fs::write(&input_path, input).expect("Failed to write test input");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&compiled).expect("Compiled output should be valid YAML");
+    let schedules = yaml["schedules"]
+        .as_sequence()
+        .expect("Compiled output should contain a schedules sequence");
+    assert_eq!(schedules.len(), 2);
+
+    let fuzzy_cron = schedules[0]["cron"]
+        .as_str()
+        .expect("Fuzzy schedule should compile to cron");
+    let fuzzy_fields = fuzzy_cron.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(fuzzy_fields.len(), 5);
+    assert_eq!(fuzzy_fields[4], "1-5");
+    assert_eq!(
+        schedules[0]["branches"]["include"][0].as_str(),
+        Some("main")
+    );
+
+    assert_eq!(schedules[1]["cron"].as_str(), Some("0 9 * * 1-5"));
+    assert_eq!(
+        schedules[1]["branches"]["include"][0].as_str(),
+        Some("release/*")
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Test that network.allowed with a bare '*' fails compilation
 #[test]
 fn test_network_allow_bare_wildcard_fails() {
