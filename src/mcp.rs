@@ -1140,6 +1140,7 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
             patch_file: patch_filename,
             repository: repository.to_string(),
             agent_labels: sanitized.labels,
+            agent_reviewers: sanitized.reviewers,
             base_commit: Some(merge_base),
             patch_sha256,
         };
@@ -2590,6 +2591,23 @@ safe-outputs:
         let schema = serde_json::to_value(&tool.input_schema).unwrap();
         let properties = schema["properties"].as_object().unwrap();
         assert!(!properties.contains_key("temporary_id"));
+    }
+
+    #[tokio::test]
+    async fn test_create_pr_schema_accepts_reviewers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let enabled = vec!["create-pull-request".to_string()];
+        let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
+            .await
+            .unwrap();
+        let tools = so.tool_router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "create-pull-request")
+            .expect("create-pull-request should be enabled");
+        let schema = serde_json::to_value(&tool.input_schema).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("reviewers"));
     }
 
     #[tokio::test]
