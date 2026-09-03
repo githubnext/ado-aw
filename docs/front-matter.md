@@ -92,7 +92,9 @@ mcp-servers:
     args: ["--pull=always"]     # Docker runtime args inserted before the image
     mounts: ["$(Build.SourcesDirectory):/workspace:ro"]
     env:
-      CUSTOM_TOKEN: ""          # empty string = pass through from pipeline env
+      CUSTOM_TOKEN:
+        pipeline-variable: CUSTOM_TOKEN  # ADO pipeline/variable-group/same-job source
+      STATIC_CONFIG: "value"    # literal value embedded in MCPG config
     allowed:
       - custom_function_1
       - custom_function_2

@@ -106,6 +106,15 @@ pub struct Declarations {
 
 Return `Declarations::default()` and fill only the fields your feature owns. The three fields marked "reserved for future use" (`agent_finalize_steps`, `detection_prepare_steps`, `safe_outputs_steps`) exist in the struct but are not currently read by any compile target — steps placed in them will be silently dropped. Do not add target-specific special cases when the same information can be declared here.
 
+`pipeline_env` entries must be constructed with
+`PipelineEnvMapping::new(container_name, pipeline_variable)`. The destination
+name is validated as a process environment variable and the source as an ADO
+pipeline-variable name. These mappings join user `mcp-servers.*.env`
+`pipeline-variable` entries in one `McpgLaunchEnvironment`; identical mappings
+deduplicate and conflicting sources for the same destination fail compilation.
+The resulting values are attached to the MCPG `BashStep` through typed
+`EnvValue::PipelineVar` entries rather than generated YAML strings.
+
 ## Building typed steps
 
 Compiler-owned steps should be `Step` variants from `src/compile/ir/step.rs`.

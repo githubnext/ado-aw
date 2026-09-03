@@ -87,6 +87,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
 │   │   ├── path_layout_check.rs # Warning-only checkout-aware path validation: $(Build.SourcesDirectory)/<seg> refs in steps, runtime-import targets, deprecated directory markers in the body
 │   │   ├── custom_tools.rs # Typed custom safe-output job model, closed MCP schemas, resolved execution config, and shared argument validation
+│   │   ├── mcpg.rs        # Typed MCPG compilation result + deterministic launch env shared by BashStep env and Docker passthrough
 │   │   ├── imports/      # Reusable component imports: ADO-first source/ref resolution, bounded nested graph + SHA-keyed cache, import-schema substitution, and field-specific merge semantics
 │   │   │   ├── mod.rs    # Resolution entry point: source/ref parsing, nested import graph, SHA-keyed `.ado-aw/imports/` cache
 │   │   │   ├── schema.rs # import-schema input substitution
@@ -120,6 +121,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── 0005_drop_build_attachment_allowed_build_ids.rs # Remove inert safe-outputs.upload-build-attachment.allowed-build-ids key (build attachments are current-run only)
 │   │   │   ├── 0006_explicit_push_trigger.rs # Pin the legacy implicit all-branches push trigger for sources whose committed lock predates 0.49.0
 │   │   │   ├── 0007_promote_debug_create_github_issue.rs # Move legacy ado-aw-debug.create-issue into public safe-outputs.create-github-issue with auth bridge
+│   │   │   ├── 0008_explicit_mcp_pipeline_env.rs # Rewrite empty MCP env passthrough to explicit pipeline-variable objects
 │   │   │   └── helpers.rs # take_key, insert_no_overwrite, rename_key, ConflictPolicy
 │   │   ├── codemod_integration_test.rs # White-box rewrite-path tests (stub registry injection)
 │   │   ├── types.rs      # Front matter grammar and types

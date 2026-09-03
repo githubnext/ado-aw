@@ -3767,9 +3767,80 @@ impl SanitizeConfigTrait for McpConfig {
     fn sanitize_config_fields(&mut self) {
         match self {
             McpConfig::Enabled(_) => {}
-            McpConfig::WithOptions(opts) => opts.sanitize_config_fields(),
+            McpConfig::WithOptions(opts) => {
+                opts.sanitize_config_fields();
+                for value in opts.env.values_mut() {
+                    value.sanitize_config_fields();
+                }
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpEnvValue {
+    Literal(String),
+    PipelineVariable(McpPipelineVariable),
+}
+
+impl<'de> serde::Deserialize<'de> for McpEnvValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Literal(String),
+            PipelineVariable(McpPipelineVariable),
+        }
+
+        match Raw::deserialize(deserializer)? {
+            Raw::Literal(value) if value.is_empty() => Err(serde::de::Error::custom(
+                "empty MCP env values are deprecated; use `{ pipeline-variable: NAME }`",
+            )),
+            Raw::Literal(value) => Ok(Self::Literal(value)),
+            Raw::PipelineVariable(reference) => Ok(Self::PipelineVariable(reference)),
+        }
+    }
+}
+
+impl McpEnvValue {
+    pub fn mcpg_value(&self) -> String {
+        match self {
+            Self::Literal(value) => value.clone(),
+            Self::PipelineVariable(_) => String::new(),
+        }
+    }
+
+    pub fn pipeline_variable(&self) -> Option<&crate::secure::AdoVariableName> {
+        match self {
+            Self::Literal(_) => None,
+            Self::PipelineVariable(reference) => Some(&reference.pipeline_variable),
+        }
+    }
+
+    pub fn literal(&self) -> Option<&str> {
+        match self {
+            Self::Literal(value) => Some(value),
+            Self::PipelineVariable(_) => None,
+        }
+    }
+}
+
+impl SanitizeConfigTrait for McpEnvValue {
+    fn sanitize_config_fields(&mut self) {
+        if let Self::Literal(value) = self {
+            *value = crate::sanitize::sanitize_config(value);
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct McpPipelineVariable {
+    #[serde(rename = "pipeline-variable")]
+    pub pipeline_variable: crate::secure::AdoVariableName,
 }
 
 /// Detailed MCP options
@@ -3802,9 +3873,11 @@ pub struct McpOptions {
     /// Allowed tool names (for MCPG tool filtering)
     #[serde(default)]
     pub allowed: Vec<String>,
-    /// Environment variables for the MCP server process
+    /// Environment variables for the MCP server process. Static strings are
+    /// embedded in MCPG config; `pipeline-variable` objects are wired through
+    /// the typed MCPG launch-step environment.
     #[serde(default)]
-    pub env: HashMap<String, String>,
+    pub env: HashMap<String, McpEnvValue>,
 }
 
 /// Unified trigger configuration — `on:` front matter key.
@@ -4639,6 +4712,39 @@ mod tests {
     use super::*;
 
     const IMPORT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn mcp_env_value_accepts_literal_and_pipeline_variable() {
+        let literal: McpEnvValue = serde_yaml::from_str("value").unwrap();
+        assert_eq!(literal, McpEnvValue::Literal("value".to_string()));
+
+        let pipeline: McpEnvValue =
+            serde_yaml::from_str("pipeline-variable: Library.Secret-Name_01").unwrap();
+        assert_eq!(
+            pipeline.pipeline_variable().map(|name| name.as_str()),
+            Some("Library.Secret-Name_01")
+        );
+    }
+
+    #[test]
+    fn mcp_env_value_rejects_legacy_empty_and_expression_sources() {
+        let empty = serde_yaml::from_str::<McpEnvValue>("''")
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("pipeline-variable"));
+
+        for source in [
+            "$(TOKEN)",
+            "$[ dependencies.Setup.outputs['mint.TOKEN'] ]",
+            "${{ variables.TOKEN }}",
+        ] {
+            let yaml = format!("pipeline-variable: {source:?}");
+            assert!(
+                serde_yaml::from_str::<McpEnvValue>(&yaml).is_err(),
+                "source should be rejected: {source}"
+            );
+        }
+    }
 
     fn bare_import(uses: impl Into<String>) -> ImportEntry {
         ImportEntry {

@@ -2435,14 +2435,38 @@ fn test_mcpg_config_http_based_mcp() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that env passthrough generates -e flags in MCPG Docker run
+/// Test that explicit MCP pipeline variables are plumbed through typed step env.
 #[test]
-fn test_mcpg_docker_env_passthrough() {
+fn test_mcpg_pipeline_variable_env() {
     let temp_dir =
         std::env::temp_dir().join(format!("agentic-pipeline-mcpg-env-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
-    let input = "---\nname: \"Env Test\"\ndescription: \"Tests env passthrough\"\npermissions:\n  read: my-read-sc\n  write: my-write-sc\nmcp-servers:\n  my-tool:\n    container: \"node:20-slim\"\n    env:\n      AZURE_DEVOPS_EXT_PAT: \"\"\n      MY_TOKEN: \"\"\n      STATIC_VAR: \"static-value\"\nsafe-outputs:\n  create-work-item:\n    work-item-type: Task\n---\n\n## Test\n";
+    let input = r###"---
+name: "Env Test"
+description: "Tests explicit pipeline variable env"
+permissions:
+  read: my-read-sc
+  write: my-write-sc
+steps:
+  - bash: |
+      echo "##vso[task.setvariable variable=MY_TOKEN;issecret=true]test-only"
+mcp-servers:
+  my-tool:
+    container: "node:20-slim"
+    env:
+      AZURE_DEVOPS_EXT_PAT:
+        pipeline-variable: AZURE_DEVOPS_EXT_PAT
+      CONTAINER_TOKEN:
+        pipeline-variable: MY_TOKEN
+      STATIC_VAR: "static-value"
+safe-outputs:
+  create-work-item:
+    work-item-type: Task
+---
+
+## Test
+"###;
 
     let input_path = temp_dir.join("env-passthrough.md");
     let output_path = temp_dir.join("env-passthrough.yml");
@@ -2467,23 +2491,36 @@ fn test_mcpg_docker_env_passthrough() {
 
     let compiled = fs::read_to_string(&output_path).unwrap();
 
-    // AZURE_DEVOPS_EXT_PAT with "" is bare passthrough for user-configured MCPs
-    // (only tools.azure-devops extension provides SC_READ_TOKEN mapping)
     assert!(
-        compiled.contains("-e AZURE_DEVOPS_EXT_PAT"),
-        "Should forward AZURE_DEVOPS_EXT_PAT as passthrough"
+        compiled.contains("AZURE_DEVOPS_EXT_PAT: $(AZURE_DEVOPS_EXT_PAT)"),
+        "Should map the same-name pipeline variable through typed step env"
+    );
+    assert!(
+        compiled.contains("CONTAINER_TOKEN: $(MY_TOKEN)"),
+        "Should remap the source pipeline variable to the container env name"
+    );
+    assert!(
+        compiled
+            .find("task.setvariable variable=MY_TOKEN")
+            .is_some_and(|producer| {
+                compiled
+                    .find("displayName: Start MCP Gateway (MCPG)")
+                    .is_some_and(|consumer| producer < consumer)
+            }),
+        "A same-job task.setvariable producer must precede the typed MCPG consumer"
+    );
+    assert!(
+        compiled.contains("MCPG_ENV_NAMES: AZURE_DEVOPS_EXT_PAT CONTAINER_TOKEN"),
+        "Docker forwarding names should come from the same sorted typed bindings"
     );
 
-    // Should forward passthrough env var MY_TOKEN
-    assert!(
-        compiled.contains("-e MY_TOKEN"),
-        "Should forward passthrough env var"
-    );
-
-    // Static var should be in config
     assert!(
         compiled.contains("\"STATIC_VAR\": \"static-value\""),
         "Static env var should be in config"
+    );
+    assert!(
+        compiled.contains("\"CONTAINER_TOKEN\": \"\""),
+        "MCPG JSON should receive its internal passthrough marker"
     );
 
     // Regression for issue #1034: the docker-env continuation lines must never
@@ -2497,6 +2534,43 @@ fn test_mcpg_docker_env_passthrough() {
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mcpg_pipeline_variable_env_compiles_for_all_targets() {
+    for target in ["standalone", "1es", "job", "stage"] {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "agentic-pipeline-mcpg-env-{target}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+        let input = format!(
+            "---\nname: \"Env {target}\"\ndescription: \"Tests MCP env for {target}\"\ntarget: {target}\nmcp-servers:\n  my-tool:\n    container: node:20-slim\n    env:\n      CONTAINER_TOKEN:\n        pipeline-variable: SOURCE_TOKEN\n---\n\nTest.\n"
+        );
+        let input_path = temp_dir.join("env.md");
+        let output_path = temp_dir.join("env.yml");
+        fs::write(&input_path, input).unwrap();
+        let output = std::process::Command::new(PathBuf::from(env!("CARGO_BIN_EXE_ado-aw")))
+            .args([
+                "compile",
+                input_path.to_str().unwrap(),
+                "-o",
+                output_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run compiler");
+        assert!(
+            output.status.success(),
+            "target {target} should compile: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let compiled = fs::read_to_string(&output_path).unwrap();
+        assert!(
+            compiled.contains("CONTAINER_TOKEN: $(SOURCE_TOKEN)"),
+            "target {target} should retain typed pipeline variable mapping"
+        );
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }
 
 /// Test that user-defined parameters are emitted in the compiled pipeline YAML
@@ -5120,7 +5194,7 @@ fn test_debug_pipeline_includes_debug_env() {
     assert_valid_yaml(&compiled, "minimal-agent.md (debug-pipeline)");
 
     assert!(
-        compiled.contains(r#"DEBUG="*""#),
+        compiled.contains("DEBUG: '*'"),
         "Pipeline compiled with --debug-pipeline should contain DEBUG=* env var"
     );
 }
@@ -5154,7 +5228,7 @@ fn test_default_excludes_debug_diagnostics() {
     let compiled = compile_fixture("minimal-agent.md");
 
     assert!(
-        !compiled.contains(r#"DEBUG="*""#),
+        !compiled.contains("DEBUG: '*'"),
         "Pipeline compiled without --debug-pipeline should NOT contain DEBUG=* env var"
     );
     assert!(
@@ -5172,7 +5246,7 @@ fn test_debug_pipeline_valid_yaml_standalone() {
     let compiled = compile_fixture_with_flags("complete-agent.md", &["--debug-pipeline"]);
     assert_valid_yaml(&compiled, "complete-agent.md (debug-pipeline)");
     assert!(
-        compiled.contains(r#"DEBUG="*""#),
+        compiled.contains("DEBUG: '*'"),
         "complete-agent.md compiled with --debug-pipeline should contain DEBUG=* env var"
     );
     assert!(
@@ -5186,7 +5260,7 @@ fn test_debug_pipeline_valid_yaml_1es() {
     let compiled = compile_fixture_with_flags("1es-test-agent.md", &["--debug-pipeline"]);
     assert_valid_yaml(&compiled, "1es-test-agent.md (debug-pipeline)");
     assert!(
-        compiled.contains(r#"DEBUG="*""#),
+        compiled.contains("DEBUG: '*'"),
         "1es-test-agent.md compiled with --debug-pipeline should contain DEBUG=* env var"
     );
     assert!(
@@ -5209,7 +5283,7 @@ fn test_skip_integrity_and_debug_pipeline_combined() {
 
     // Debug content present
     assert!(
-        compiled.contains(r#"DEBUG="*""#),
+        compiled.contains("DEBUG: '*'"),
         "Combined flags: should contain DEBUG=*"
     );
     assert!(
