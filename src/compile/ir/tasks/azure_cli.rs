@@ -242,6 +242,7 @@ pub struct AzureCliV3 {
     connection: AzureCliV3Connection,
     script_type: ScriptType,
     location: ScriptLocation,
+    add_spn_to_environment: Option<bool>,
     visible_az_login: Option<bool>,
     display_name: Option<String>,
 }
@@ -256,9 +257,17 @@ impl AzureCliV3 {
             connection,
             script_type,
             location,
+            add_spn_to_environment: None,
             visible_az_login: None,
             display_name: None,
         }
+    }
+
+    /// `addSpnToEnvironment` — expose service-principal details and, for a
+    /// workload-identity connection, the short-lived `idToken`.
+    pub fn add_spn_to_environment(mut self, value: bool) -> Self {
+        self.add_spn_to_environment = Some(value);
+        self
     }
 
     pub fn visible_az_login(mut self, value: bool) -> Self {
@@ -293,6 +302,11 @@ impl AzureCliV3 {
                     .with_input("scriptPath", path);
             }
         }
+        push_bool(
+            &mut task,
+            "addSpnToEnvironment",
+            self.add_spn_to_environment,
+        );
         push_bool(&mut task, "visibleAzLogin", self.visible_az_login);
         task
     }
@@ -490,6 +504,7 @@ mod tests {
             ScriptType::Bash,
             ScriptLocation::Inline("echo token\n".to_string()),
         )
+        .add_spn_to_environment(true)
         .visible_az_login(false)
         .into_step();
 
@@ -506,6 +521,10 @@ mod tests {
         assert_eq!(
             task.inputs.get("visibleAzLogin").map(String::as_str),
             Some("false")
+        );
+        assert_eq!(
+            task.inputs.get("addSpnToEnvironment").map(String::as_str),
+            Some("true")
         );
     }
 

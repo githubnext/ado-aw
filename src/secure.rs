@@ -188,6 +188,33 @@ validated_string! {
 }
 
 validated_string! {
+    /// An absolute POSIX path inside a container.
+    ///
+    /// Used for compiler-owned mount destinations. Rejects root, traversal,
+    /// empty/dot components, control characters, shell metacharacters, and
+    /// Docker's `:` mount separator.
+    ContainerAbsolutePath, "container path", |value: &str, label: &str| {
+        if !value.starts_with('/') || value == "/" {
+            anyhow::bail!("{label} must be an absolute POSIX path below `/`");
+        }
+        if value.ends_with('/')
+            || value.contains(['\0', '\n', '\r', ':', '$', '`', '\\'])
+            || value.contains("##vso[")
+        {
+            anyhow::bail!("{label} contains characters that are unsafe in a container mount");
+        }
+        if value
+            .split('/')
+            .skip(1)
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
+            anyhow::bail!("{label} must not contain empty, `.` or `..` path components");
+        }
+        Ok(())
+    }
+}
+
+validated_string! {
     /// A single safe path segment / alias (e.g. a repository checkout alias).
     PathSegment, "segment", |value: &str, label: &str| {
         if validate::is_safe_path_segment(value) {
@@ -602,6 +629,17 @@ mod tests {
         assert!(StrictRelativePath::parse("a/b.txt").is_ok());
         assert!(StrictRelativePath::parse(".hidden").is_err());
         assert!(StrictRelativePath::parse("a:b").is_err());
+    }
+
+    #[test]
+    fn container_absolute_path_rules() {
+        assert!(ContainerAbsolutePath::parse("/var/run/ado-aw/azure").is_ok());
+        assert!(ContainerAbsolutePath::parse("/").is_err());
+        assert!(ContainerAbsolutePath::parse("relative/path").is_err());
+        assert!(ContainerAbsolutePath::parse("/var/run/../secret").is_err());
+        assert!(ContainerAbsolutePath::parse("/var//run").is_err());
+        assert!(ContainerAbsolutePath::parse("/var/run:rw").is_err());
+        assert!(ContainerAbsolutePath::parse("/var/$(TOKEN)").is_err());
     }
 
     #[test]

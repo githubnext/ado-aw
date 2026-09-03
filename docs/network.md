@@ -134,6 +134,29 @@ not found" failure mode.
 See [`docs/tools.md`](tools.md#built-in-clis) for the agent-facing
 contract (auth scope, available subcommands).
 
+## Renewable Azure authentication for MCP servers
+
+`mcp-servers.<name>.azure-auth` is a trusted-infrastructure credential path for
+containerized stdio MCP servers. It is separate from the agent-facing Azure CLI
+wrapper described above:
+
+- AzureCLI@3 receives an ARM workload-identity service connection and exposes
+  the initial federated assertion only to its trusted setup script.
+- `System.AccessToken` and the initial assertion are streamed to a dedicated
+  refresh sidecar over a one-shot FIFO; neither is stored in Docker
+  environment, command arguments, generated YAML, or a host credential file.
+- The sidecar keeps the ADO request credential in memory and writes only the
+  renewable federated assertion beneath `$(Agent.TempDirectory)`.
+- MCPG mounts the assertion's token-only directory read-only into the configured
+  MCP container, so atomic file replacement is visible without exposing
+  sidecar status or material channels.
+- The AWF agent receives no credential mount, no identity environment
+  variables, and no route to the refresher container.
+
+The credential directory must not move to runner `/tmp`: AWF mounts runner
+`/tmp` into the agent chroot, making files there agent-readable. See
+[`docs/mcp.md`](mcp.md#renewable-azure-workload-identity) for configuration.
+
 ## Adding Additional Hosts
 
 Agents can specify additional allowed hosts in their front matter using either ecosystem identifiers or raw domain patterns:

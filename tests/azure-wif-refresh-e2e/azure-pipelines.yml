@@ -1,0 +1,179 @@
+# Manual credentialed proof for mcp-servers.<name>.azure-auth.
+#
+# The service connection is a queue-time parameter so no environment-specific
+# credential name is committed. The pipeline emits an instructions-only job
+# when queued without it.
+
+trigger: none
+pr: none
+
+parameters:
+  - name: serviceConnection
+    displayName: ARM workload-identity service connection
+    type: string
+    default: ""
+
+pool:
+  vmImage: ubuntu-22.04
+
+jobs:
+  - ${{ if eq(parameters.serviceConnection, '') }}:
+      - job: Instructions
+        steps:
+          - script: |
+              echo "Queue this pipeline with the serviceConnection parameter set."
+            displayName: Explain required parameter
+
+  - ${{ if ne(parameters.serviceConnection, '') }}:
+      - job: DelayedFirstExchange
+        timeoutInMinutes: 25
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: UseNode@1
+            inputs:
+              version: "20.x"
+            displayName: Use Node.js 20
+
+          - script: |
+              set -euo pipefail
+              npm ci
+              npm run build:azure-wif-refresh
+            workingDirectory: $(Build.SourcesDirectory)/scripts/ado-script
+            displayName: Build candidate refresher
+
+          - task: AzureCLI@3
+            displayName: Verify refresh after initial assertion expiry
+            inputs:
+              connectionType: azureRM
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              visibleAzLogin: false
+              inlineScript: |
+                set -euo pipefail
+
+                GUID_RE='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+                SERVICE_CONNECTION_ID="${AZURESUBSCRIPTION_SERVICE_CONNECTION_ID:-}"
+                if [ -z "${idToken:-}" ] \
+                   || ! [[ "${servicePrincipalId:-}" =~ $GUID_RE ]] \
+                   || ! [[ "${tenantId:-}" =~ $GUID_RE ]] \
+                   || ! [[ "$SERVICE_CONNECTION_ID" =~ $GUID_RE ]] \
+                   || [ -z "${SYSTEM_OIDCREQUESTURI:-}" ]; then
+                  echo "Required workload-identity metadata is unavailable" >&2
+                  exit 1
+                fi
+
+                ROOT="$(Agent.TempDirectory)/azure-wif-refresh-e2e"
+                rm -rf "$ROOT"
+                mkdir -p "$ROOT/token.d"
+                chmod 700 "$ROOT"
+                chmod 755 "$ROOT/token.d"
+                FIFO="$ROOT/material"
+                mkfifo -m 600 "$FIFO"
+                LOG="$ROOT/refresher.log"
+
+                node "$(Build.SourcesDirectory)/scripts/ado-script/azure-wif-refresh.js" \
+                  < "$FIFO" >"$LOG" 2>&1 &
+                REFRESH_PID=$!
+                cleanup() {
+                  kill -TERM "$REFRESH_PID" 2>/dev/null || true
+                  wait "$REFRESH_PID" 2>/dev/null || true
+                  rm -rf "$ROOT"
+                }
+                trap cleanup EXIT
+
+                MATERIAL_FIFO="$FIFO" \
+                INITIAL_ID_TOKEN="$idToken" \
+                SYSTEM_ACCESSTOKEN="$SYSTEM_ACCESSTOKEN" \
+                SYSTEM_OIDCREQUESTURI="$SYSTEM_OIDCREQUESTURI" \
+                SERVICE_CONNECTION_ID="$SERVICE_CONNECTION_ID" \
+                node -e '
+                const fs = require("node:fs");
+                const e = process.env;
+                fs.writeFileSync(e.MATERIAL_FIFO, JSON.stringify({
+                  initialIdToken: e.INITIAL_ID_TOKEN,
+                  systemAccessToken: e.SYSTEM_ACCESSTOKEN,
+                  oidcRequestUri: e.SYSTEM_OIDCREQUESTURI,
+                  serviceConnectionId: e.SERVICE_CONNECTION_ID,
+                  tokenPath: process.argv[1] + "/token.d/token",
+                  readyPath: process.argv[1] + "/ready.json",
+                  statusPath: process.argv[1] + "/status.json"
+                }));
+                ' "$ROOT"
+                rm -f "$FIFO"
+
+                for _i in $(seq 1 30); do
+                  if [ -s "$ROOT/token.d/token" ] \
+                     && jq -e '.state == "ready"' "$ROOT/ready.json" >/dev/null 2>&1; then
+                    break
+                  fi
+                  if ! kill -0 "$REFRESH_PID" 2>/dev/null; then
+                    cat "$LOG" >&2
+                    exit 1
+                  fi
+                  sleep 1
+                done
+                test -s "$ROOT/token.d/token"
+
+                INITIAL_HASH=$(printf '%s' "$idToken" | sha256sum | cut -d' ' -f1)
+                INITIAL_EXP=$(INITIAL_ID_TOKEN="$idToken" node -e '
+                  const p = process.env.INITIAL_ID_TOKEN.split(".")[1];
+                  const claims = JSON.parse(Buffer.from(p, "base64url"));
+                  if (!Number.isSafeInteger(claims.exp)) process.exit(1);
+                  process.stdout.write(String(claims.exp));
+                ')
+                NOW=$(date +%s)
+                WAIT_SECONDS=$((INITIAL_EXP - NOW + 5))
+                if [ "$WAIT_SECONDS" -lt 1 ] || [ "$WAIT_SECONDS" -gt 900 ]; then
+                  echo "Unexpected initial assertion lifetime: ${WAIT_SECONDS}s" >&2
+                  exit 1
+                fi
+                echo "Initial assertion expires at $(date -u -d "@$INITIAL_EXP" --iso-8601=seconds)"
+                sleep "$WAIT_SECONDS"
+
+                REFRESHED=$(cat "$ROOT/token.d/token")
+                REFRESHED_HASH=$(printf '%s' "$REFRESHED" | sha256sum | cut -d' ' -f1)
+                REFRESHED_EXP=$(REFRESHED="$REFRESHED" node -e '
+                  const p = process.env.REFRESHED.split(".")[1];
+                  const claims = JSON.parse(Buffer.from(p, "base64url"));
+                  if (!Number.isSafeInteger(claims.exp)) process.exit(1);
+                  process.stdout.write(String(claims.exp));
+                ')
+                if [ "$REFRESHED_HASH" = "$INITIAL_HASH" ] || [ "$REFRESHED_EXP" -le "$INITIAL_EXP" ]; then
+                  echo "Assertion was not refreshed before the initial expiry" >&2
+                  cat "$LOG" >&2
+                  exit 1
+                fi
+                echo "Refreshed assertion expires at $(date -u -d "@$REFRESHED_EXP" --iso-8601=seconds)"
+
+                REFRESHED_ASSERTION="$REFRESHED" \
+                CLIENT_ID="$servicePrincipalId" \
+                TENANT_ID="$tenantId" \
+                node -e '
+                  const form = new URLSearchParams({
+                    client_id: process.env.CLIENT_ID,
+                    client_assertion: process.env.REFRESHED_ASSERTION,
+                    client_assertion_type:
+                      "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                    grant_type: "client_credentials",
+                    scope: "https://management.azure.com/.default"
+                  });
+                  const response = await fetch(
+                    `https://login.microsoftonline.com/${encodeURIComponent(process.env.TENANT_ID)}/oauth2/v2.0/token`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                      body: form
+                    }
+                  );
+                  const body = await response.json();
+                  if (!response.ok || typeof body.access_token !== "string" || body.access_token === "") {
+                    throw new Error(`Entra exchange failed with HTTP ${response.status}`);
+                  }
+                '
+                echo "Refreshed assertion successfully exchanged for an Azure access token"
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)

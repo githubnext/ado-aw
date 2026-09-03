@@ -3265,6 +3265,47 @@ fn validate_stdio_mcp(
             );
         }
     }
+    if let Some(auth) = &opts.azure_auth {
+        if opts.args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-e" | "--env" | "-v" | "--volume" | "--mount" | "--volumes-from"
+            ) || arg.starts_with("--env=")
+                || arg.starts_with("--volume=")
+                || arg.starts_with("--mount=")
+                || (arg.starts_with("-e") && arg.len() > 2)
+                || (arg.starts_with("-v") && arg.len() > 2)
+        }) {
+            anyhow::bail!(
+                "mcp-servers.{name}.args cannot contain Docker env or mount flags when azure-auth is configured; use the structured env and mounts fields"
+            );
+        }
+        for reserved in [
+            "AZURE_CLIENT_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_FEDERATED_TOKEN_FILE",
+        ] {
+            if opts.env.contains_key(reserved) {
+                anyhow::bail!(
+                    "mcp-servers.{name}.env.{reserved} conflicts with compiler-owned azure-auth"
+                );
+            }
+        }
+        let auth_destination = auth.mount_path.as_str();
+        for mount in &opts.mounts {
+            let parsed = Mount::try_from(mount.as_str())
+                .with_context(|| format!("invalid container mount `{mount}`"))?;
+            let destination = parsed.destination();
+            if destination == auth_destination
+                || destination.starts_with(&format!("{auth_destination}/"))
+                || auth_destination.starts_with(&format!("{destination}/"))
+            {
+                anyhow::bail!(
+                    "mcp-servers.{name}.mounts destination '{destination}' conflicts with azure-auth.mount-path '{auth_destination}'"
+                );
+            }
+        }
+    }
     let literal_env: HashMap<String, String> = opts
         .env
         .iter()
@@ -3282,8 +3323,10 @@ fn validate_stdio_mcp(
 
 /// Build a stdio `McpgServerConfig` from a container-based MCP options block.
 fn build_stdio_mcpg_server(
+    name: &str,
     container: &str,
     opts: &crate::compile::types::McpOptions,
+    launch_env: &mut super::mcpg::McpgLaunchEnvironment,
 ) -> Result<McpgServerConfig> {
     let mut runtime = ContainerRuntimeConfig::builder().extra_args(&opts.args);
     for mount in &opts.mounts {
@@ -3291,6 +3334,36 @@ fn build_stdio_mcpg_server(
             Mount::try_from(mount.as_str())
                 .with_context(|| format!("invalid container mount `{mount}`"))?,
         );
+    }
+    let mut env: std::collections::BTreeMap<String, String> = opts
+        .env
+        .iter()
+        .map(|(name, value)| (name.clone(), value.mcpg_value()))
+        .collect();
+    if let Some(auth) = &opts.azure_auth {
+        let client_variable = super::mcpg::azure_auth_client_variable(name)?;
+        let tenant_variable = super::mcpg::azure_auth_tenant_variable(name)?;
+        launch_env.bind_internal_pipeline_variable(
+            client_variable.as_str(),
+            &client_variable,
+            format!("mcp-servers.{name}.azure-auth client id"),
+        )?;
+        launch_env.bind_internal_pipeline_variable(
+            tenant_variable.as_str(),
+            &tenant_variable,
+            format!("mcp-servers.{name}.azure-auth tenant id"),
+        )?;
+        let host_token_dir = format!("{}/token.d", super::mcpg::azure_auth_host_directory(name));
+        runtime = runtime.mount(Mount::read_only(host_token_dir, auth.mount_path.as_str())?);
+        env.insert(
+            "AZURE_CLIENT_ID".to_string(),
+            format!("${{{}}}", client_variable.as_str()),
+        );
+        env.insert(
+            "AZURE_TENANT_ID".to_string(),
+            format!("${{{}}}", tenant_variable.as_str()),
+        );
+        env.insert("AZURE_FEDERATED_TOKEN_FILE".to_string(), auth.token_path());
     }
     Ok(McpgServerConfig {
         server_type: "stdio".to_string(),
@@ -3300,15 +3373,10 @@ fn build_stdio_mcpg_server(
         runtime: runtime.build()?,
         url: None,
         headers: None,
-        env: if opts.env.is_empty() {
+        env: if env.is_empty() {
             None
         } else {
-            Some(
-                opts.env
-                    .iter()
-                    .map(|(name, value)| (name.clone(), value.mcpg_value()))
-                    .collect(),
-            )
+            Some(env)
         },
         tools: nonempty_vec(&opts.allowed),
     })
@@ -3341,6 +3409,14 @@ fn try_add_user_mcp(
 ) -> Result<()> {
     // Prevent user-defined MCPs from overwriting the reserved safeoutputs backend
     if name.eq_ignore_ascii_case("safeoutputs") {
+        if matches!(
+            config,
+            McpConfig::WithOptions(options) if options.azure_auth.is_some()
+        ) {
+            anyhow::bail!(
+                "mcp-servers.{name}.azure-auth cannot target the compiler-owned safeoutputs server"
+            );
+        }
         log::warn!(
             "MCP name 'safeoutputs' is reserved for the compiler-owned safe outputs backend — skipping"
         );
@@ -3364,6 +3440,14 @@ fn try_add_user_mcp(
 
     // Skip if already auto-configured by an extension (e.g., tools.azure-devops)
     if servers.contains_key(name) {
+        if matches!(
+            config,
+            McpConfig::WithOptions(options) if options.azure_auth.is_some()
+        ) {
+            anyhow::bail!(
+                "mcp-servers.{name}.azure-auth cannot target a server owned by a compiler extension"
+            );
+        }
         return Ok(());
     }
 
@@ -3391,7 +3475,7 @@ fn try_add_user_mcp(
 
     if let Some(container) = &opts.container {
         validate_stdio_mcp(name, container, opts)?;
-        let server = build_stdio_mcpg_server(container, opts)
+        let server = build_stdio_mcpg_server(name, container, opts, launch_env)
             .with_context(|| format!("invalid runtime configuration for MCP `{name}`"))?;
         for (destination, value) in &opts.env {
             if let Some(source) = value.pipeline_variable() {
@@ -3404,6 +3488,11 @@ fn try_add_user_mcp(
         }
         servers.insert(name.to_string(), server);
     } else if let Some(url) = &opts.url {
+        if opts.azure_auth.is_some() {
+            anyhow::bail!(
+                "mcp-servers.{name}.azure-auth is only supported for containerized stdio MCP servers"
+            );
+        }
         // HTTP-based MCP (remote server)
         for w in validate::validate_mcp_url(url, name) {
             eprintln!("{}", w);
@@ -3429,6 +3518,11 @@ fn try_add_user_mcp(
         }
         servers.insert(name.to_string(), build_http_mcpg_server(url, opts));
     } else {
+        if opts.azure_auth.is_some() {
+            anyhow::bail!(
+                "mcp-servers.{name}.azure-auth requires a containerized stdio MCP server"
+            );
+        }
         log::warn!("MCP '{}' has no container or url — skipping", name);
     }
 
@@ -7850,6 +7944,107 @@ safe-outputs:
         let env = compilation.config.mcp_servers["tool"].env.as_ref().unwrap();
         assert_eq!(env["PASS_THROUGH"], "");
         assert_eq!(env["STATIC"], "value");
+    }
+
+    #[test]
+    fn test_compile_mcpg_injects_renewable_azure_auth() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  kusto:\n    container: node:22-slim\n    azure-auth:\n      service-connection: my-arm-sc\n---\n",
+        )
+        .unwrap();
+        let compilation = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false).unwrap();
+        let server = &compilation.config.mcp_servers["kusto"];
+        let auth = fm.azure_authenticated_mcp_servers()[0].2;
+        let env = server.env.as_ref().unwrap();
+        let client = super::super::mcpg::azure_auth_client_variable("kusto").unwrap();
+        let tenant = super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap();
+        assert_eq!(env["AZURE_CLIENT_ID"], format!("${{{}}}", client.as_str()));
+        assert_eq!(env["AZURE_TENANT_ID"], format!("${{{}}}", tenant.as_str()));
+        assert_eq!(env["AZURE_FEDERATED_TOKEN_FILE"], auth.token_path());
+        assert!(matches!(
+            compilation.launch_env.get(client.as_str()),
+            Some(crate::compile::ir::env::EnvValue::PipelineVar(source))
+                if source == client.as_str()
+        ));
+        assert!(
+            compilation
+                .launch_env
+                .required_names()
+                .any(|name| name == client.as_str())
+        );
+        let mounts = server.runtime.mounts();
+        assert!(mounts.iter().any(|mount| {
+            mount.source()
+                == format!(
+                    "{}/token.d",
+                    super::super::mcpg::azure_auth_host_directory("kusto")
+                )
+                && mount.destination() == auth.mount_path.as_str()
+                && mount.is_read_only()
+        }));
+    }
+
+    #[test]
+    fn test_compile_mcpg_rejects_azure_auth_on_http_server() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  remote:\n    url: https://mcp.example.com\n    azure-auth:\n      service-connection: my-arm-sc\n---\n",
+        )
+        .unwrap();
+        let error = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("only supported for containerized stdio"));
+    }
+
+    #[test]
+    fn test_compile_mcpg_rejects_azure_auth_env_override() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  tool:\n    container: img:latest\n    azure-auth:\n      service-connection: my-arm-sc\n    env:\n      AZURE_CLIENT_ID: override\n---\n",
+        )
+        .unwrap();
+        let error = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("AZURE_CLIENT_ID"));
+        assert!(error.contains("compiler-owned azure-auth"));
+    }
+
+    #[test]
+    fn test_compile_mcpg_rejects_azure_auth_mount_collision() {
+        let (fm, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  tool:\n    container: img:latest\n    azure-auth:\n      service-connection: my-arm-sc\n    mounts:\n      - /host:/var/run/ado-aw:ro\n---\n",
+        )
+        .unwrap();
+        let error = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicts with azure-auth.mount-path"));
+    }
+
+    #[test]
+    fn test_compile_mcpg_rejects_azure_auth_runtime_env_or_mount_flags() {
+        for args in [
+            "[-e, AZURE_CLIENT_ID=override]",
+            "[-v, /host:/var/run/ado-aw/azure]",
+            "[--mount=type=bind,source=/host,target=/var/run/ado-aw/azure]",
+        ] {
+            let source = format!(
+                "---\nname: test\ndescription: test\nmcp-servers:\n  tool:\n    container: img:latest\n    azure-auth:\n      service-connection: my-arm-sc\n    args: {args}\n---\n"
+            );
+            let (fm, _) = parse_markdown(&source).unwrap();
+            let error = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Docker env or mount flags"), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_azure_auth_rejects_unsafe_container_mount_path() {
+        let result = parse_markdown(
+            "---\nname: test\ndescription: test\nmcp-servers:\n  tool:\n    container: img:latest\n    azure-auth:\n      service-connection: my-arm-sc\n      mount-path: /var/run/../secret\n---\n",
+        );
+        assert!(result.is_err());
     }
 
     #[test]

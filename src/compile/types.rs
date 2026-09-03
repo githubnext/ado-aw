@@ -1563,6 +1563,40 @@ impl FrontMatter {
             .map(|p| p.overrides())
             .unwrap_or_else(|| EMPTY_OVERRIDES.get_or_init(HashMap::new))
     }
+
+    pub fn azure_authenticated_mcp_servers(&self) -> Vec<(&str, &McpOptions, &AzureMcpAuthConfig)> {
+        let mut servers = self
+            .mcp_servers
+            .iter()
+            .filter_map(|(name, config)| match config {
+                McpConfig::WithOptions(options)
+                    if options.enabled.unwrap_or(true) && options.azure_auth.is_some() =>
+                {
+                    Some((
+                        name.as_str(),
+                        options.as_ref(),
+                        options
+                            .azure_auth
+                            .as_ref()
+                            .expect("azure-auth presence checked"),
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        servers.sort_by_key(|(name, _, _)| *name);
+        servers
+    }
+
+    pub fn has_azure_authenticated_mcp_servers(&self) -> bool {
+        self.mcp_servers.values().any(|config| {
+            matches!(
+                config,
+                McpConfig::WithOptions(options)
+                    if options.enabled.unwrap_or(true) && options.azure_auth.is_some()
+            )
+        })
+    }
 }
 
 /// Compile-time source for a remote reusable import.
@@ -3843,6 +3877,30 @@ pub struct McpPipelineVariable {
     pub pipeline_variable: crate::secure::AdoVariableName,
 }
 
+fn default_azure_mcp_mount_path() -> crate::secure::ContainerAbsolutePath {
+    crate::secure::ContainerAbsolutePath::parse("/var/run/ado-aw/azure")
+        .expect("compiler-owned Azure MCP mount path is valid")
+}
+
+/// Renewable workload-identity authentication for a containerized MCP server.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AzureMcpAuthConfig {
+    /// ARM workload-identity service connection used to mint ADO ID tokens.
+    #[serde(rename = "service-connection")]
+    pub service_connection: crate::secure::ServiceConnection,
+    /// Directory mounted into the MCP container. The assertion is written to
+    /// `<mount-path>/token`.
+    #[serde(default = "default_azure_mcp_mount_path", rename = "mount-path")]
+    pub mount_path: crate::secure::ContainerAbsolutePath,
+}
+
+impl AzureMcpAuthConfig {
+    pub fn token_path(&self) -> String {
+        format!("{}/token", self.mount_path.as_str())
+    }
+}
+
 /// Detailed MCP options
 #[derive(Debug, Deserialize, Clone, Default, SanitizeConfig)]
 pub struct McpOptions {
@@ -3878,6 +3936,11 @@ pub struct McpOptions {
     /// the typed MCPG launch-step environment.
     #[serde(default)]
     pub env: HashMap<String, McpEnvValue>,
+    /// Renewable Azure workload-identity authentication for containerized
+    /// stdio MCP servers.
+    #[serde(default, rename = "azure-auth")]
+    #[sanitize_config(skip)]
+    pub azure_auth: Option<AzureMcpAuthConfig>,
 }
 
 /// Unified trigger configuration — `on:` front matter key.

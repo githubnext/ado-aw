@@ -16,6 +16,7 @@ conclusion.js
 github-app-token.js
 prepare-pr-base.js
 ado-proxy.js
+azure-wif-refresh.js
 schema
 *.tsbuildinfo
 test-bin
