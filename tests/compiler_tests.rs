@@ -2395,6 +2395,55 @@ fn test_mcpg_config_container_based_mcp() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn test_mcpg_container_azure_auth_emits_refresher_and_rotating_token_mount() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcpg-azure-auth-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Azure Auth MCP Test\"\ndescription: \"Tests renewable Azure workload identity\"\nmcp-servers:\n  kusto:\n    container: \"node:22-slim\"\n    azure-auth:\n      service-connection: \"my-arm-sc\"\n      mount-path: \"/var/run/custom-azure\"\n---\n\n## Test\n";
+    let input_path = temp_dir.join("azure-auth-mcp.md");
+    let output_path = temp_dir.join("azure-auth-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compiled = fs::read_to_string(&output_path).unwrap();
+    assert!(compiled.contains("task: AzureCLI@3"));
+    assert!(compiled.contains("connectionType: azureRM"));
+    assert!(compiled.contains("azureSubscription: my-arm-sc"));
+    assert!(compiled.contains("addSpnToEnvironment: 'true'"));
+    assert!(compiled.contains("azure-wif-refresh.js"));
+    assert!(compiled.contains("\"AZURE_FEDERATED_TOKEN_FILE\": \"/var/run/custom-azure/token\""));
+    assert!(compiled.contains("$(Agent.TempDirectory)/ado-aw-azure-auth/"));
+    assert!(compiled.contains("/token.d:/var/run/custom-azure:ro"));
+    assert!(compiled.contains("MCPG_REQUIRED_ENV_NAMES"));
+    assert!(compiled.contains("Stop Azure auth refresher (kusto)"));
+    assert!(
+        !compiled.contains("initialIdToken: \""),
+        "generated YAML must not contain a federated assertion"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Test that HTTP-based MCPs generate correct MCPG config JSON structure
 #[test]
 fn test_mcpg_config_http_based_mcp() {
@@ -6372,12 +6421,11 @@ safe-outputs:
 Replace the managed issue comment.
 "#,
     );
+    assert!(compiled.contains("--actor-output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN'"));
     assert!(
-        compiled.contains("--actor-output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN'")
+        compiled
+            .contains("ADO_AW_GITHUB_ACTOR_LOGIN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN)")
     );
-    assert!(compiled.contains(
-        "ADO_AW_GITHUB_ACTOR_LOGIN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN)"
-    ));
 }
 
 /// The example file in `examples/dogfood-failure-reporter.md` must compile

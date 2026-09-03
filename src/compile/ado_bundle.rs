@@ -63,6 +63,10 @@ pub enum Bundle {
     /// containerized SafeOutputs MCP server can compute a diff base on
     /// shallow-default pools.
     PreparePrBase,
+    /// Renewable Azure Pipelines workload-identity assertion writer for
+    /// user-defined stdio MCP servers. Runs in a trusted sidecar for the
+    /// lifetime of the Agent job and receives credentials on stdin.
+    AzureWifRefresh,
     /// Credential-isolated Azure DevOps policy engine. Unlike every other
     /// bundle it is not invoked by a pipeline step: it is bind-mounted into
     /// the `ado-proxy` container and run there, for the whole lifetime of the
@@ -153,6 +157,7 @@ impl Bundle {
         Bundle::Conclusion,
         Bundle::GithubAppToken,
         Bundle::PreparePrBase,
+        Bundle::AzureWifRefresh,
         Bundle::AdoProxy,
     ];
 
@@ -180,6 +185,7 @@ impl Bundle {
             Bundle::Conclusion => paths::CONCLUSION_PATH,
             Bundle::GithubAppToken => paths::GITHUB_APP_TOKEN_PATH,
             Bundle::PreparePrBase => paths::PREPARE_PR_BASE_PATH,
+            Bundle::AzureWifRefresh => paths::AZURE_WIF_REFRESH_PATH,
             Bundle::AdoProxy => paths::ADO_PROXY_PATH,
         }
     }
@@ -209,6 +215,7 @@ impl Bundle {
             // Authenticates to the GitHub API with its own App JWT / minted
             // token, not the ADO bearer.
             | Bundle::GithubAppToken
+            | Bundle::AzureWifRefresh
             // Receives its ADO bearer inside the stdin material document, not
             // from the environment — deliberately, so the credential is not
             // visible in the container's `Env` or the process table.

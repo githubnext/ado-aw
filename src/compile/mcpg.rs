@@ -12,13 +12,25 @@ pub struct McpgEnvName(String);
 
 impl McpgEnvName {
     pub fn parse(value: impl Into<String>, origin: &str) -> Result<Self> {
+        Self::parse_with_internal(value, origin, false)
+    }
+
+    fn parse_internal(value: impl Into<String>, origin: &str) -> Result<Self> {
+        Self::parse_with_internal(value, origin, true)
+    }
+
+    fn parse_with_internal(
+        value: impl Into<String>,
+        origin: &str,
+        allow_internal: bool,
+    ) -> Result<Self> {
         let value = value.into();
         if !crate::validate::is_valid_env_var_name(&value) {
             bail!(
                 "{origin} environment variable name '{value}' is invalid; expected [A-Za-z_][A-Za-z0-9_]*"
             );
         }
-        if value.starts_with("ADO_AW_MCPG_INTERNAL_")
+        if (!allow_internal && value.starts_with("ADO_AW_MCPG_INTERNAL_"))
             || matches!(
                 value.as_str(),
                 "MCP_GATEWAY_API_KEY"
@@ -34,6 +46,7 @@ impl McpgEnvName {
                     | "MCPG_CONFIG"
                     | "GATEWAY_OUTPUT"
                     | "MCPG_ENV_NAMES"
+                    | "MCPG_REQUIRED_ENV_NAMES"
                     | "MCPG_DOCKER_ENV_ARGS"
                     | "MCPG_ENV_NAME"
             )
@@ -54,6 +67,7 @@ impl McpgEnvName {
 struct McpgLaunchBinding {
     value: EnvValue,
     origin: String,
+    required: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,7 +82,28 @@ impl McpgLaunchEnvironment {
         source: &AdoVariableName,
         origin: impl Into<String>,
     ) -> Result<()> {
-        self.bind(destination, EnvValue::pipeline_var(source.as_str()), origin)
+        self.bind(
+            destination,
+            EnvValue::pipeline_var(source.as_str()),
+            origin,
+            false,
+            false,
+        )
+    }
+
+    pub fn bind_internal_pipeline_variable(
+        &mut self,
+        destination: impl Into<String>,
+        source: &AdoVariableName,
+        origin: impl Into<String>,
+    ) -> Result<()> {
+        self.bind(
+            destination,
+            EnvValue::pipeline_var(source.as_str()),
+            origin,
+            true,
+            true,
+        )
     }
 
     pub fn bind_literal(
@@ -77,7 +112,7 @@ impl McpgLaunchEnvironment {
         value: impl Into<String>,
         origin: impl Into<String>,
     ) -> Result<()> {
-        self.bind(destination, EnvValue::literal(value), origin)
+        self.bind(destination, EnvValue::literal(value), origin, false, false)
     }
 
     fn bind(
@@ -85,11 +120,17 @@ impl McpgLaunchEnvironment {
         destination: impl Into<String>,
         value: EnvValue,
         origin: impl Into<String>,
+        allow_internal: bool,
+        required: bool,
     ) -> Result<()> {
         let origin = origin.into();
-        let destination = McpgEnvName::parse(destination, &origin)?;
+        let destination = if allow_internal {
+            McpgEnvName::parse_internal(destination, &origin)?
+        } else {
+            McpgEnvName::parse(destination, &origin)?
+        };
         if let Some(existing) = self.bindings.get(&destination) {
-            if existing.value == value {
+            if existing.value == value && existing.required == required {
                 return Ok(());
             }
             bail!(
@@ -101,8 +142,14 @@ impl McpgLaunchEnvironment {
                 value
             );
         }
-        self.bindings
-            .insert(destination, McpgLaunchBinding { value, origin });
+        self.bindings.insert(
+            destination,
+            McpgLaunchBinding {
+                value,
+                origin,
+                required,
+            },
+        );
         Ok(())
     }
 
@@ -116,12 +163,50 @@ impl McpgLaunchEnvironment {
         self.bindings.keys().map(McpgEnvName::as_str)
     }
 
+    pub fn required_names(&self) -> impl Iterator<Item = &str> {
+        self.bindings
+            .iter()
+            .filter_map(|(name, binding)| binding.required.then_some(name.as_str()))
+    }
+
     #[cfg(test)]
     pub fn get(&self, name: &str) -> Option<&EnvValue> {
         self.bindings
             .iter()
             .find_map(|(key, binding)| (key.as_str() == name).then_some(&binding.value))
     }
+}
+
+pub fn azure_auth_runtime_id(server_name: &str) -> String {
+    crate::hash::sha256_hex(server_name.as_bytes())[..16].to_ascii_uppercase()
+}
+
+pub fn azure_auth_client_variable(server_name: &str) -> Result<AdoVariableName> {
+    AdoVariableName::parse(format!(
+        "ADO_AW_MCPG_INTERNAL_AZURE_{}_CLIENT_ID",
+        azure_auth_runtime_id(server_name)
+    ))
+}
+
+pub fn azure_auth_tenant_variable(server_name: &str) -> Result<AdoVariableName> {
+    AdoVariableName::parse(format!(
+        "ADO_AW_MCPG_INTERNAL_AZURE_{}_TENANT_ID",
+        azure_auth_runtime_id(server_name)
+    ))
+}
+
+pub fn azure_auth_host_directory(server_name: &str) -> String {
+    format!(
+        "$(Agent.TempDirectory)/ado-aw-azure-auth/{}",
+        azure_auth_runtime_id(server_name).to_ascii_lowercase()
+    )
+}
+
+pub fn azure_auth_container_name(server_name: &str) -> String {
+    format!(
+        "ado-aw-azure-auth-{}",
+        azure_auth_runtime_id(server_name).to_ascii_lowercase()
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -188,5 +273,22 @@ mod tests {
                 .to_string();
             assert!(error.contains("reserved"));
         }
+    }
+
+    #[test]
+    fn compiler_internal_binding_is_required_and_user_inaccessible() {
+        let source = AdoVariableName::parse("ADO_AW_MCPG_INTERNAL_AZURE_TEST_CLIENT_ID").unwrap();
+        let mut env = McpgLaunchEnvironment::default();
+        env.bind_internal_pipeline_variable(source.as_str(), &source, "compiler azure-auth")
+            .unwrap();
+        assert_eq!(
+            env.required_names().collect::<Vec<_>>(),
+            vec!["ADO_AW_MCPG_INTERNAL_AZURE_TEST_CLIENT_ID"]
+        );
+        let error = env
+            .bind_pipeline_variable(source.as_str(), &source, "user")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("reserved"));
     }
 }

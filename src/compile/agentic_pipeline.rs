@@ -83,7 +83,9 @@ use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
-use super::ir::tasks::azure_cli::{AzureCli, ScriptLocation, ScriptType};
+use super::ir::tasks::azure_cli::{
+    AzureCli, AzureCliV3, AzureCliV3Connection, ScriptLocation, ScriptType,
+};
 use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::tasks::download_package::DownloadPackage;
 use super::ir::tasks::download_pipeline_artifact::{
@@ -1253,7 +1255,12 @@ fn build_agent_job(
     // 14. AWF path step (when extensions declare path prepends)
     push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml)?;
 
-    // 14a. Credential-isolated Azure DevOps policy engine.
+    // 14a. Renewable Azure workload-identity assertions for user-defined
+    //      stdio MCP servers. The ado-script bundle was delivered by the
+    //      always-on extension above when this feature is active.
+    steps.extend(start_azure_wif_refresh_steps(front_matter)?);
+
+    // 14b. Credential-isolated Azure DevOps policy engine.
     //
     //      Must precede MCPG: the Azure DevOps MCP is redirected at the
     //      engine's container address, and that address does not exist until
@@ -1393,7 +1400,11 @@ fn build_agent_job(
     // 20. Stop MCPG and SafeOutputs
     steps.push(Step::Bash(stop_mcpg_step()));
 
-    // 20a. Stop the policy engine, then remove its network. `--rm` only fires
+    // 20a. Stop renewable Azure assertion sidecars after MCPG has stopped its
+    //      stdio children and released their read-only token mounts.
+    steps.extend(stop_azure_wif_refresh_steps(front_matter));
+
+    // 20b. Stop the policy engine, then remove its network. `--rm` only fires
     //      on a clean exit, so an OOM or SIGKILL would otherwise leave the
     //      container — and the credential it holds in memory — running past
     //      the job.
@@ -4162,7 +4173,10 @@ shell_script! {
     START_MCPG {
         interpreter: Bash,
         bindings: [MCPG_CONTAINER, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN],
-        externals: [MCP_GATEWAY_API_KEY, ADO_PROXY_IP, MCPG_ENV_NAMES],
+        externals: [
+            MCP_GATEWAY_API_KEY, ADO_PROXY_IP,
+            MCPG_ENV_NAMES, MCPG_REQUIRED_ENV_NAMES
+        ],
         fragments: [],
         body: r###"
 # Substitute runtime values into MCPG config
@@ -4201,6 +4215,19 @@ MCPG_DOCKER_ENV_ARGS=()
 # shellcheck disable=SC2086
 for MCPG_ENV_NAME in $MCPG_ENV_NAMES; do
   MCPG_DOCKER_ENV_ARGS+=(-e "$MCPG_ENV_NAME")
+done
+
+: "${MCPG_REQUIRED_ENV_NAMES:=}"
+# Required internal bindings are produced by earlier authenticated setup tasks.
+# Refuse to launch MCPG with empty identity metadata.
+# shellcheck disable=SC2086
+for MCPG_ENV_NAME in $MCPG_REQUIRED_ENV_NAMES; do
+  MCPG_ENV_VALUE="${!MCPG_ENV_NAME:-}"
+  # shellcheck disable=SC2016 # '$(' is a literal unresolved ADO macro prefix.
+  if [ -z "$MCPG_ENV_VALUE" ] || [[ "$MCPG_ENV_VALUE" == '$('* ]]; then
+    echo "##vso[task.complete result=Failed]required MCPG environment variable '$MCPG_ENV_NAME' is empty"
+    exit 1
+  fi
 done
 
 # Start MCPG on Docker's bridge network. AWF attaches this named,
@@ -4306,6 +4333,15 @@ fn start_mcpg_step(
         .with_env(
             "MCPG_ENV_NAMES",
             EnvValue::literal(mcpg_launch_env.names().collect::<Vec<_>>().join(" ")),
+        )
+        .with_env(
+            "MCPG_REQUIRED_ENV_NAMES",
+            EnvValue::literal(
+                mcpg_launch_env
+                    .required_names()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
         );
     for (name, value) in mcpg_launch_env.iter() {
         step = step.with_env(name, value.clone());
@@ -4920,6 +4956,226 @@ fn stop_mcpg_step() -> BashStep {
         .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
         .into_step("Stop MCPG")
         .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Start one trusted Azure workload-identity refresh sidecar.
+    ///
+    /// AzureCLI@3 supplies the initial `idToken`, client ID and tenant ID.
+    /// `System.AccessToken` is explicitly mapped onto the task and reaches the
+    /// sidecar only through a one-shot FIFO material document. The sidecar
+    /// retains the request credential in memory and writes only rotating
+    /// federated assertions to the private Agent.TempDirectory mount.
+    START_AZURE_WIF_REFRESH {
+        interpreter: Bash,
+        bindings: [
+            AGENT_TEMP, RUNTIME_ID, REFRESH_CONTAINER, REFRESH_IMAGE,
+            REFRESH_BUNDLE, CLIENT_VARIABLE, TENANT_VARIABLE
+        ],
+        externals: [
+            SYSTEM_ACCESSTOKEN, SYSTEM_OIDCREQUESTURI
+        ],
+        fragments: [],
+        body: r###"
+set -euo pipefail
+
+AZURE_WIF_ID_TOKEN=$(printenv idToken || true)
+AZURE_WIF_CLIENT_ID=$(printenv servicePrincipalId || true)
+AZURE_WIF_TENANT_ID=$(printenv tenantId || true)
+AZURE_WIF_SERVICE_CONNECTION_ID=$(printenv AZURESUBSCRIPTION_SERVICE_CONNECTION_ID || true)
+GUID_RE='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+if [ -z "$AZURE_WIF_ID_TOKEN" ] \
+   || ! [[ "$AZURE_WIF_CLIENT_ID" =~ $GUID_RE ]] \
+   || ! [[ "$AZURE_WIF_TENANT_ID" =~ $GUID_RE ]] \
+   || ! [[ "$AZURE_WIF_SERVICE_CONNECTION_ID" =~ $GUID_RE ]]; then
+  echo "##vso[task.complete result=Failed]azure-auth requires an ARM workload-identity service connection that exposes idToken, servicePrincipalId and tenantId"
+  exit 1
+fi
+if [ -z "${SYSTEM_ACCESSTOKEN:-}" ]; then
+  echo "##vso[task.complete result=Failed]System.AccessToken is unavailable for Azure workload-identity refresh"
+  exit 1
+fi
+if [ -z "${SYSTEM_OIDCREQUESTURI:-}" ]; then
+  echo "##vso[task.complete result=Failed]System.OidcRequestUri is unavailable for Azure workload-identity refresh"
+  exit 1
+fi
+
+umask 077
+AUTH_ROOT="$AGENT_TEMP/ado-aw-azure-auth"
+AUTH_DIR="$AUTH_ROOT/$RUNTIME_ID"
+docker rm -f "$REFRESH_CONTAINER" >/dev/null 2>&1 || true
+rm -rf "$AUTH_DIR"
+mkdir -p "$AUTH_DIR/token.d"
+chmod 700 "$AUTH_ROOT" "$AUTH_DIR"
+chmod 755 "$AUTH_DIR/token.d"
+MATERIAL_FIFO="$AUTH_DIR/material"
+mkfifo -m 600 "$MATERIAL_FIFO"
+
+docker run -d \
+  --name "$REFRESH_CONTAINER" \
+  --network bridge \
+  --user "$(id -u):$(id -g)" \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec \
+  --pids-limit 64 \
+  --entrypoint sh \
+  -v "$REFRESH_BUNDLE:/app/azure-wif-refresh.js:ro" \
+  -v "$AUTH_DIR:/var/lib/ado-aw-azure-auth:rw" \
+  "$REFRESH_IMAGE" \
+  -c 'exec node /app/azure-wif-refresh.js < /var/lib/ado-aw-azure-auth/material' \
+  >/dev/null
+
+# The short-lived encoder inherits the AzureCLI task environment and writes
+# directly to the FIFO. Credentials never become process arguments or files.
+MATERIAL_STATUS=0
+MATERIAL_FIFO="$MATERIAL_FIFO" \
+AZURE_WIF_ID_TOKEN="$AZURE_WIF_ID_TOKEN" \
+AZURE_WIF_SERVICE_CONNECTION_ID="$AZURE_WIF_SERVICE_CONNECTION_ID" \
+SYSTEM_ACCESSTOKEN="$SYSTEM_ACCESSTOKEN" \
+SYSTEM_OIDCREQUESTURI="$SYSTEM_OIDCREQUESTURI" \
+timeout 60s node -e '
+const fs = require("node:fs");
+const env = process.env;
+const required = [
+  "AZURE_WIF_ID_TOKEN", "AZURE_WIF_SERVICE_CONNECTION_ID",
+  "SYSTEM_ACCESSTOKEN", "SYSTEM_OIDCREQUESTURI", "MATERIAL_FIFO"
+];
+for (const name of required) {
+  if (!env[name]) throw new Error(`missing ${name}`);
+}
+const material = {
+  initialIdToken: env.AZURE_WIF_ID_TOKEN,
+  systemAccessToken: env.SYSTEM_ACCESSTOKEN,
+  oidcRequestUri: env.SYSTEM_OIDCREQUESTURI,
+  serviceConnectionId: env.AZURE_WIF_SERVICE_CONNECTION_ID,
+  tokenPath: "/var/lib/ado-aw-azure-auth/token.d/token",
+  readyPath: "/var/lib/ado-aw-azure-auth/ready.json",
+  statusPath: "/var/lib/ado-aw-azure-auth/status.json"
+};
+fs.writeFileSync(env.MATERIAL_FIFO, JSON.stringify(material));
+' || MATERIAL_STATUS=$?
+rm -f "$MATERIAL_FIFO"
+if [ "$MATERIAL_STATUS" -ne 0 ]; then
+  echo "##vso[task.logissue type=error]Failed to hand Azure workload-identity material to refresher"
+  docker logs "$REFRESH_CONTAINER" 2>&1 || true
+  exit 1
+fi
+
+printf '##vso[task.setvariable variable=%s]%s\n' "$CLIENT_VARIABLE" "$AZURE_WIF_CLIENT_ID"
+printf '##vso[task.setvariable variable=%s]%s\n' "$TENANT_VARIABLE" "$AZURE_WIF_TENANT_ID"
+
+READY=false
+for _i in $(seq 1 30); do
+  if [ -s "$AUTH_DIR/token.d/token" ] \
+     && [ -s "$AUTH_DIR/ready.json" ] \
+     && jq -e '.state == "ready"' "$AUTH_DIR/ready.json" >/dev/null 2>&1; then
+    READY=true
+    break
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' "$REFRESH_CONTAINER" 2>/dev/null || true)" != "true" ]; then
+    break
+  fi
+  sleep 1
+done
+if [ "$READY" != "true" ]; then
+  echo "##vso[task.logissue type=error]Azure workload-identity refresher failed to become ready"
+  docker logs "$REFRESH_CONTAINER" 2>&1 || true
+  exit 1
+fi
+"###,
+    }
+}
+
+fn start_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Result<Vec<Step>> {
+    let mut steps = Vec::new();
+    for (server_name, _, auth) in front_matter.azure_authenticated_mcp_servers() {
+        let runtime_id = super::mcpg::azure_auth_runtime_id(server_name).to_ascii_lowercase();
+        let client_variable = super::mcpg::azure_auth_client_variable(server_name)?;
+        let tenant_variable = super::mcpg::azure_auth_tenant_variable(server_name)?;
+        let script = ShellScript::new(&START_AZURE_WIF_REFRESH)
+            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+            .bind_text("RUNTIME_ID", &runtime_id)
+            .bind_text(
+                "REFRESH_CONTAINER",
+                super::mcpg::azure_auth_container_name(server_name),
+            )
+            .bind_text("REFRESH_IMAGE", ADO_PROXY_IMAGE)
+            .bind_text("REFRESH_BUNDLE", paths::AZURE_WIF_REFRESH_PATH)
+            .bind_text("CLIENT_VARIABLE", client_variable.as_str())
+            .bind_text("TENANT_VARIABLE", tenant_variable.as_str())
+            .render();
+        let mut task = AzureCliV3::new(
+            AzureCliV3Connection::AzureRm(auth.service_connection.as_str().to_string()),
+            ScriptType::Bash,
+            ScriptLocation::Inline(script),
+        )
+        .add_spn_to_environment(true)
+        .visible_az_login(false)
+        .with_display_name(format!("Start Azure auth refresher ({server_name})"))
+        .into_step();
+        task.env.insert(
+            "SYSTEM_ACCESSTOKEN".to_string(),
+            EnvValue::secret("System.AccessToken"),
+        );
+        steps.push(Step::Task(task));
+    }
+    Ok(steps)
+}
+
+shell_script! {
+    /// Stop one Azure workload-identity refresh sidecar and delete its private
+    /// assertion directory. The step is idempotent for partial startup paths.
+    STOP_AZURE_WIF_REFRESH {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, RUNTIME_ID, REFRESH_CONTAINER],
+        externals: [],
+        fragments: [],
+        body: r###"
+REFRESH_FAILED=false
+STATUS_PATH="$AGENT_TEMP/ado-aw-azure-auth/$RUNTIME_ID/status.json"
+if [ -s "$STATUS_PATH" ] && jq -e '.state == "unhealthy"' "$STATUS_PATH" >/dev/null 2>&1; then
+  echo "##vso[task.logissue type=error]Azure workload-identity refresher reported an unhealthy state"
+  REFRESH_FAILED=true
+fi
+if docker inspect "$REFRESH_CONTAINER" >/dev/null 2>&1 \
+   && [ "$(docker inspect -f '{{.State.Running}}' "$REFRESH_CONTAINER")" != "true" ]; then
+  echo "##vso[task.logissue type=error]Azure workload-identity refresher exited before cleanup"
+  REFRESH_FAILED=true
+fi
+if [ "$REFRESH_FAILED" = "true" ]; then
+  docker logs "$REFRESH_CONTAINER" 2>&1 || true
+fi
+docker stop --time 10 "$REFRESH_CONTAINER" >/dev/null 2>&1 || true
+docker rm -f "$REFRESH_CONTAINER" >/dev/null 2>&1 || true
+rm -rf "$AGENT_TEMP/ado-aw-azure-auth/$RUNTIME_ID"
+if [ "$REFRESH_FAILED" = "true" ]; then
+  exit 1
+fi
+"###,
+    }
+}
+
+fn stop_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Vec<Step> {
+    front_matter
+        .azure_authenticated_mcp_servers()
+        .into_iter()
+        .map(|(server_name, _, _)| {
+            let runtime_id = super::mcpg::azure_auth_runtime_id(server_name).to_ascii_lowercase();
+            Step::Bash(
+                ShellScript::new(&STOP_AZURE_WIF_REFRESH)
+                    .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+                    .bind_text("RUNTIME_ID", &runtime_id)
+                    .bind_text(
+                        "REFRESH_CONTAINER",
+                        super::mcpg::azure_auth_container_name(server_name),
+                    )
+                    .into_step(format!("Stop Azure auth refresher ({server_name})"))
+                    .with_condition(Condition::Always),
+            )
+        })
+        .collect()
 }
 
 /// Start the `ado-proxy` policy engine as a host container.
@@ -7334,6 +7590,65 @@ safe-outputs:
         )
         .unwrap()
         .0
+    }
+
+    fn azure_auth_fm() -> FrontMatter {
+        crate::compile::parse_markdown(
+            "---\nname: t\ndescription: x\nmcp-servers:\n  kusto:\n    container: node:22-slim\n    azure-auth:\n      service-connection: my-arm-sc\n---\n",
+        )
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn azure_auth_refresher_uses_typed_azure_cli_v3_and_stdin_custody() {
+        let steps = start_azure_wif_refresh_steps(&azure_auth_fm()).unwrap();
+        let [Step::Task(task)] = steps.as_slice() else {
+            panic!("expected one AzureCLI@3 task");
+        };
+        assert_eq!(task.task, "AzureCLI@3");
+        assert_eq!(
+            task.inputs.get("connectionType").map(String::as_str),
+            Some("azureRM")
+        );
+        assert_eq!(
+            task.inputs.get("azureSubscription").map(String::as_str),
+            Some("my-arm-sc")
+        );
+        assert_eq!(
+            task.inputs.get("addSpnToEnvironment").map(String::as_str),
+            Some("true")
+        );
+        assert!(matches!(
+            task.env.get("SYSTEM_ACCESSTOKEN"),
+            Some(EnvValue::Secret(name)) if name == "System.AccessToken"
+        ));
+        let script = task.inputs.get("inlineScript").unwrap();
+        assert!(script.contains("mkfifo -m 600"));
+        assert!(script.contains("docker run -d"));
+        assert!(!script.contains("docker run -d --rm"));
+        assert!(script.contains("azure-wif-refresh.js"));
+        assert!(script.contains("fs.writeFileSync(env.MATERIAL_FIFO"));
+        assert!(script.contains("SYSTEM_OIDCREQUESTURI"));
+        assert!(script.contains("AZURESUBSCRIPTION_SERVICE_CONNECTION_ID"));
+        assert!(script.contains("$AUTH_DIR/token.d/token"));
+        assert!(!script.contains("-e SYSTEM_ACCESSTOKEN"));
+        assert!(!script.contains("--token"));
+        assert!(script.contains("AGENT_TEMP='$(Agent.TempDirectory)'"));
+    }
+
+    #[test]
+    fn azure_auth_refresher_cleanup_is_always_and_scoped() {
+        let steps = stop_azure_wif_refresh_steps(&azure_auth_fm());
+        let [Step::Bash(step)] = steps.as_slice() else {
+            panic!("expected one cleanup bash step");
+        };
+        assert_eq!(step.condition, Some(Condition::Always));
+        assert!(step.script.contains("docker rm -f \"$REFRESH_CONTAINER\""));
+        assert!(
+            step.script
+                .contains("rm -rf \"$AGENT_TEMP/ado-aw-azure-auth/$RUNTIME_ID\"")
+        );
     }
 
     // ── start_ado_proxy_step / stop_ado_proxy_step ──────────────────────────
