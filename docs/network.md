@@ -179,7 +179,7 @@ Available ecosystem identifiers include:
 |------------|------------|
 | `default-safe-outputs` | `defaults` + `dev-tools` + `github` + `local` — the standard set of domains needed for most safe-output execution scenarios |
 
-Additional ecosystems: `bazel`, `chrome`, `clojure`, `dart`, `deno`, `elixir`, `fonts`, `github-actions`, `haskell`, `julia`, `kotlin`, `latex`, `lean`, `lua`, `node-cdns`, `ocaml`, `perl`, `php`, `playwright`, `powershell`, `python-native`, `r`, `scala`, `zig`.
+Additional ecosystems: `bazel`, `chrome`, `clojure`, `copilot-vendor`, `dart`, `deno`, `elixir`, `fonts`, `github-actions`, `haskell`, `julia`, `kotlin`, `latex`, `lean`, `lua`, `node-cdns`, `ocaml`, `perl`, `php`, `playwright`, `powershell`, `python-native`, `r`, `scala`, `zig`.
 
 The full domain lists for direct identifiers are defined in `src/data/ecosystem_domains.json`. Compound identifiers are defined in `src/ecosystem_domains.rs`.
 

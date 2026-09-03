@@ -95,6 +95,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   └── integration_tests.rs # Import resolution + merge integration tests
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
+│   │   │   ├── container_runtime.rs # Typed Docker runtime config for MCPG stdio servers (Mount/Network/Tmpfs/AddHost/ContainerUser)
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
