@@ -4,7 +4,7 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 ## Schedule Syntax (Fuzzy Schedule Time Syntax)
 
-The `on.schedule` field supports a human-friendly fuzzy schedule syntax that automatically distributes execution times to prevent server load spikes. The syntax is based on the [Fuzzy Schedule Time Syntax Specification](https://github.com/githubnext/gh-aw/blob/main/docs/src/content/docs/reference/fuzzy-schedule-specification.md).
+The `on.schedule` field supports a human-friendly fuzzy schedule syntax that automatically distributes execution times to prevent server load spikes. The syntax follows the [gh-aw schedule reference](https://github.github.com/gh-aw/reference/schedule-syntax/) and its fuzzy-schedule parser where the concepts map to Azure Pipelines. The [formal fuzzy schedule specification](https://github.com/githubnext/gh-aw/blob/main/docs/src/content/docs/specs/fuzzy-schedule-specification.md) describes the core grammar but currently trails the reference for weekday modifiers.
 
 Schedule is configured under the `on:` key:
 
@@ -22,7 +22,14 @@ schedule: daily around 3pm               # 12-hour format supported
 schedule: daily around midnight          # Keywords: midnight, noon
 schedule: daily between 9:00 and 17:00   # Business hours (9 AM - 5 PM)
 schedule: daily between 22:00 and 02:00  # Overnight (handles midnight crossing)
+schedule: daily on weekdays              # Monday-Friday at a scattered time
+schedule: daily around 9am on weekdays   # Monday-Friday within ±60 minutes
+schedule: daily between 9:00 and 17:00 on weekdays
 ```
+
+`on weekdays` is supported on daily schedules, including `around` and
+`between`. The generated Azure Pipelines cron uses the day-of-week range
+`1-5`.
 
 ### Weekly Schedules
 
@@ -44,9 +51,14 @@ schedule: every 1h     # Equivalent to hourly
 schedule: every 2h     # Every 2 hours at scattered minute
 schedule: every 2 hours # Long form also supported
 schedule: every 6h     # Every 6 hours at scattered minute
+schedule: hourly on weekdays
+schedule: every 2h on weekdays
 ```
 
 Valid hour intervals: 1, 2, 3, 4, 6, 8, 12 (factors of 24 for even distribution)
+
+Weekday filtering is not supported for minute, day, week, bi-weekly, or
+tri-weekly intervals.
 
 ### Minute Intervals (Fixed, Not Scattered)
 
@@ -84,9 +96,20 @@ schedule: daily around 14:00 utc+9      # 2 PM JST → 5 AM UTC
 schedule: daily around 3pm utc-5        # 3 PM EST → 8 PM UTC
 schedule: daily around 09:00 utc        # Bare UTC means UTC+0
 schedule: daily between 9am utc+05:30 and 5pm utc+05:30  # IST business hours
+schedule: daily around 08:00 utc-7 on weekdays
 ```
 
-Supported offset formats: `utc`, `utc+9`, `utc-5`, `utc+05:30`, `utc-08:00`
+Supported offset formats: `utc`, `utc+9`, `utc-5`, `utc+05:30`, `utc-08:00`.
+Keep the offset with the time and put `on weekdays` last. For compatibility
+with the syntax requested in #1965, `daily around 08:00 on weekdays utc-7` is
+also accepted.
+
+Azure Pipelines YAML schedules are always evaluated in UTC. IANA timezone names
+such as `America/New_York` are not supported because Azure Pipelines has no
+schedule timezone field and a single UTC cron cannot preserve local wall-clock
+time across daylight-saving transitions. When a fixed UTC offset crosses
+midnight, the compiler rotates the cron weekday range so the schedule still
+runs Monday-Friday in the requested local offset.
 
 ### How Scattering Works
 
@@ -112,3 +135,34 @@ schedule:
     - main
     - release/*
 ```
+
+### Raw Cron and Multiple Schedules
+
+Use a validated five-field Azure Pipelines cron expression when fuzzy syntax
+cannot express the required schedule:
+
+```yaml
+on:
+  schedule: "0 9 * * 1-5"
+```
+
+The fields are `minute hour day-of-month month day-of-week`. Numeric values,
+wildcards, lists, ranges, and steps are supported and validated against the ADO
+field ranges. Months and weekdays also accept full English names or their first
+three letters, such as `Jan` and `Mon-Fri`.
+
+Use list form to configure multiple fuzzy and/or raw cron schedules. Each item
+may specify its own branch include list; omitted branches default to `main`.
+
+```yaml
+on:
+  schedule:
+    - cron: daily on weekdays
+    - cron: "0 9 * * 1-5"
+      branches:
+        - main
+        - release/*
+```
+
+List items accept only `cron` and `branches`. IANA `timezone`, display-name,
+batching, and branch-exclusion options are not supported.

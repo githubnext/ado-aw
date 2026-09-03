@@ -984,21 +984,28 @@ fn build_resources(repos: &[RepoCfg], on: &Option<OnConfig>) -> Result<Resources
 fn build_triggers(on: &Option<OnConfig>, front_matter: &FrontMatter) -> Result<Triggers> {
     // Schedules — fuzzy schedule parsed once into typed Schedule items.
     let mut schedules: Vec<Schedule> = Vec::new();
-    if let Some(s) = front_matter.schedule() {
-        let parsed = crate::fuzzy_schedule::parse_fuzzy_schedule(s.expression())?;
-        let cron = crate::fuzzy_schedule::generate_cron(&parsed, &front_matter.name);
-        let branches = s.branches();
-        let branches_include = if branches.is_empty() {
-            vec!["main".to_string()]
-        } else {
-            branches.to_vec()
-        };
-        schedules.push(Schedule {
-            cron,
-            display_name: "Scheduled run".to_string(),
-            branches_include,
-            always: true,
-        });
+    if let Some(config) = front_matter.schedule() {
+        let entries = config.entries();
+        if entries.is_empty() {
+            anyhow::bail!("on.schedule list must contain at least one schedule item");
+        }
+        for schedule in entries {
+            let cron = crate::fuzzy_schedule::schedule_expression_to_cron(
+                schedule.expression,
+                &front_matter.name,
+            )?;
+            let branches_include = if schedule.branches.is_empty() {
+                vec!["main".to_string()]
+            } else {
+                schedule.branches.to_vec()
+            };
+            schedules.push(Schedule {
+                cron,
+                display_name: "Scheduled run".to_string(),
+                branches_include,
+                always: true,
+            });
+        }
     }
 
     // `on:` declares when this pipeline runs, and both keys are ALWAYS
@@ -8117,6 +8124,39 @@ safe-outputs:
         assert!(t.ci.as_ref().unwrap().disabled);
         assert!(t.pr.as_ref().unwrap().disabled);
         assert_eq!(t.schedules.len(), 1);
+    }
+
+    #[test]
+    fn build_triggers_compiles_mixed_schedule_list() {
+        let t = triggers_for(&format!(
+            "{BASE}on:\n  schedule:\n    - cron: daily on weekdays\n    - cron: '0 9 * * 1-5'\n      branches: [release/*]\n"
+        ));
+        assert_eq!(t.schedules.len(), 2);
+        assert_eq!(
+            t.schedules[0]
+                .cron
+                .split_whitespace()
+                .last()
+                .expect("cron should have a day-of-week field"),
+            "1-5"
+        );
+        assert_eq!(t.schedules[0].branches_include, vec!["main".to_string()]);
+        assert_eq!(t.schedules[1].cron, "0 9 * * 1-5");
+        assert_eq!(
+            t.schedules[1].branches_include,
+            vec!["release/*".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_triggers_rejects_empty_schedule_list() {
+        let fm = test_front_matter(&format!("{BASE}on:\n  schedule: []\n"));
+        let error = build_triggers(&fm.on_config, &fm).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must contain at least one schedule item")
+        );
     }
 
     #[test]
