@@ -25,6 +25,7 @@ safe-outputs:
     squash-merge: true
     reviewers:
       - "user@example.com"
+    allow-agent-reviewers: true # allow the model to select additional reviewers
     labels:
       - automated
       - agent-created
@@ -1099,6 +1100,7 @@ This hybrid approach combines:
 - `description` - PR description in markdown (required, 10+ characters)
 - `repository` - Repository to create PR in: "self" for pipeline repo, or alias from `checkout:` list (default: "self")
 - `labels` - Labels to add to the PR (optional; validated against `allowed-labels` when configured)
+- `reviewers` - Reviewers to add by email, display name, or Azure DevOps user ID (optional; requires `allow-agent-reviewers: true`)
 
 Note: The source branch name is auto-generated from a sanitized version of the PR title plus a unique suffix (e.g., `agent/fix-bug-in-parser-a1b2c3`). This format is human-readable while preventing injection attacks.
 
@@ -1146,7 +1148,8 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `protected-files` - Controls whether manifest/CI files (e.g., `package-lock.json`, `.github/`, `*.lock`) can be modified: `"blocked"` (default, reject changes to these files) or `"allowed"` (permit all files)
 - `excluded-files` - Glob patterns for files to strip from the patch before applying (e.g., `["*.lock", "dist/**"]`)
 - `allowed-labels` - Allowlist of labels the agent is permitted to apply. If empty (default), any labels are accepted.
-- `reviewers` - List of reviewer emails to add
+- `reviewers` - List of reviewer emails or Azure DevOps user IDs to add
+- `allow-agent-reviewers` - Allow the model to select additional reviewers in its `create-pull-request` call (default: false). Agent-selected reviewers are merged with and deduplicated against `reviewers`.
 - `labels` - List of labels to apply
 - `work-items` - List of work item IDs to link
 - `fallback-record-branch` - When PR creation fails, record the pushed branch name and target branch in the failure response so operators can manually create the PR (default: true)
