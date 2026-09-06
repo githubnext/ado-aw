@@ -48,6 +48,10 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
 
 - **Signals:** `noop`, `missing-tool`, `missing-data`, `report-incomplete`
   (no ADO write path; assert that the executor emits the expected status)
+- **Conclusion work-item filing:** `conclusion-noop`,
+  `conclusion-missing-tool`, `conclusion-missing-data` and
+  `conclusion-report-as-work-item-false` — see [Conclusion
+  scenarios](#conclusion-scenarios) below
 - **Work items:** `create-work-item`, `assign-work-item`, `update-work-item`,
   `comment-on-work-item`, `link-work-items`, `upload-workitem-attachment`, plus
   two rendering-fidelity scenarios (see [Rendering
@@ -132,6 +136,36 @@ definition/queue-time variable first, then falls back to
 > `missing-data`, `report-incomplete`) were previously exercised only by
 > now-deleted per-tool agentic smoke pipelines. Adding them here closes
 > the coverage gap while keeping the test deterministic.
+
+## Conclusion scenarios
+
+The signal safe-outputs have no ADO write path of their own: `ado-aw execute`
+only records them in `safe-outputs-executed.ndjson`. Their user-visible effect
+is produced one job later by the **Conclusion job**, which reads that manifest
+and files (or appends to) an Azure DevOps work item per signal — see
+[`docs/conclusion.md`](../../docs/conclusion.md).
+
+These scenarios extend the harness past Stage 3: after `ado-aw execute`
+succeeds, the runner's `postExecute` phase runs the **real compiled
+`conclusion.js`** against the manifest that run just wrote, with the same flat
+`AW_*` env contract the compiler emits. The work item is then asserted (and
+deleted) through the ADO REST API.
+
+| Scenario id | Signal | What it proves |
+| --- | --- | --- |
+| `conclusion-noop` | `noop` | a work item is created with the configured title, type and tags, and its description carries the rendered noop report plus the conclusion stats block |
+| `conclusion-missing-tool` | `missing-tool` | same for `missing-tool`, including the reported tool name; a **second** conclusion run over the same manifest appends one comment instead of filing a duplicate (title deduplication) |
+| `conclusion-missing-data` | `missing-data` | same for `missing-data`, including the reported data type and reason |
+| `conclusion-report-as-work-item-false` | `noop` | the per-tool `report-as-work-item: false` opt-out files nothing |
+
+Each scenario uses a title unique to the build
+(`[ado-aw-e2e conclusion] ado-aw-det-<buildId>-<scenario>`) so concurrent runs
+never dedup into each other's work item, and deletes it in `cleanup`.
+
+The bundle is a build artifact, not a checked-in file: the scenarios read its
+path from `EXECUTOR_E2E_CONCLUSION_BUNDLE` and **skip** when that is unset or
+points at a missing file. The pipeline builds it with `npm run
+build:conclusion` alongside the harness.
 
 ## GitHub issue scenarios
 
@@ -273,6 +307,8 @@ Some scenarios need optional infrastructure and **skip** (rather than fail)
 when it is not available:
 
 - `queue-build` — needs a target pipeline id in `E2E_QUEUE_PIPELINE_ID`.
+- The four `conclusion-*` scenarios — need a compiled `conclusion.js` in
+  `EXECUTOR_E2E_CONCLUSION_BUNDLE`.
 - `create-wiki-page` / `update-wiki-page` — need a wiki in the project. The
   harness auto-discovers the first wiki; set `E2E_WIKI_NAME` to force one. When
   no wiki exists, both skip.
@@ -303,13 +339,15 @@ You need a write-capable ADO token (PAT) and a checkout-built binary:
 
 ```bash
 cargo build --release --bin ado-aw
-cd scripts/ado-script && npm ci && npm run build:executor-e2e && cd ../..
+cd scripts/ado-script && npm ci && npm run build:executor-e2e && npm run build:conclusion && cd ../..
 
 export SYSTEM_COLLECTIONURI="https://dev.azure.com/msazuresphere/"
 export SYSTEM_TEAMPROJECT="AgentPlayground"
 export SYSTEM_ACCESSTOKEN="<write-capable-PAT>"
 export EXECUTOR_E2E_ADO_AW_BIN="$PWD/target/release/ado-aw"
 export EXECUTOR_E2E_ADO_REPO="agent-definitions"
+# Enables the conclusion work-item scenarios (they skip when unset):
+export EXECUTOR_E2E_CONCLUSION_BUNDLE="$PWD/scripts/ado-script/conclusion.js"
 # Optional:
 # export EXECUTOR_E2E_GITHUB_TOKEN="<fine-grained PAT: Issues rw on jamesadevine/ado-aw-issues>"
 # export EXECUTOR_E2E_ISSUE_REPO="jamesadevine/ado-aw-issues"
