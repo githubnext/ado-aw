@@ -265,9 +265,9 @@ export const conclusionOptOut: Scenario<ConclusionState> = {
   id: "conclusion-report-as-work-item-false",
   tool: "noop",
   config: () => ({}),
-  setup: async (ctx) => conclusionState(ctx, "conclusion-opt-out"),
+  setup: async (ctx) => conclusionState(ctx, "conclusion-report-as-work-item-false"),
   ndjson: async (ctx) => ({
-    context: `deterministic conclusion e2e opt-out for build ${ctx.buildId}`,
+    context: `deterministic conclusion e2e report-as-work-item-false for build ${ctx.buildId}`,
   }),
   postExecute: async (ctx, state, run) => {
     await reportOnce(
