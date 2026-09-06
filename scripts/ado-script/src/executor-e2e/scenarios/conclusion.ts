@@ -110,6 +110,8 @@ function fieldText(fields: Record<string, unknown>, name: string): string {
 /**
  * Assert the shared shape of a conclusion-filed work item: title, type, tag and
  * the substrings the reporter is expected to render into the description.
+ * Returns the asserted work item id so callers can make further checks against
+ * it without re-deriving (and re-guarding) it.
  *
  * Substrings are chosen to be free of `<`, `>` and `&` so the check holds
  * whether or not Azure DevOps stores the body as Markdown or re-encodes it.
@@ -118,11 +120,12 @@ async function assertFiledWorkItem(
   ctx: ScenarioContext,
   state: ConclusionState,
   expectedBodySubstrings: readonly string[],
-): Promise<void> {
-  if (state.workItemId === undefined) {
+): Promise<number> {
+  const workItemId = state.workItemId;
+  if (workItemId === undefined) {
     throw new Error("postExecute did not record a work item id");
   }
-  const item = await ctx.rest.getWorkItem(state.workItemId);
+  const item = await ctx.rest.getWorkItem(workItemId);
   const title = fieldText(item.fields, "System.Title");
   if (title !== state.title) {
     throw new Error(`work item title is '${title}', expected '${state.title}'`);
@@ -143,6 +146,7 @@ async function assertFiledWorkItem(
       );
     }
   }
+  return workItemId;
 }
 
 /** Best-effort teardown: delete the filed work item (resolving it by title if needed). */
@@ -216,12 +220,12 @@ export const conclusionMissingTool: Scenario<ConclusionState> = {
     await reportOnce(ctx, state, run, config);
   },
   assert: async (ctx, state) => {
-    await assertFiledWorkItem(ctx, state, [
+    const workItemId = await assertFiledWorkItem(ctx, state, [
       "missing_tool",
       `ado-aw-det-${ctx.buildId}-bash`,
       `deterministic conclusion e2e missing-tool for build ${ctx.buildId}`,
     ]);
-    const comments = await ctx.rest.getWorkItemComments(state.workItemId as number);
+    const comments = await ctx.rest.getWorkItemComments(workItemId);
     if (comments.length !== 1) {
       throw new Error(
         `expected exactly one appended comment after the second conclusion run, got ${comments.length}`,
