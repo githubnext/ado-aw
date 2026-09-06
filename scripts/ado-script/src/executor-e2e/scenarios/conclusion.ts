@@ -225,6 +225,10 @@ export const conclusionMissingTool: Scenario<ConclusionState> = {
       `ado-aw-det-${ctx.buildId}-bash`,
       `deterministic conclusion e2e missing-tool for build ${ctx.buildId}`,
     ]);
+    // Exactly one: the title is unique to this build and scenario, so the work
+    // item is always freshly created by the first conclusion run (which files,
+    // and does not comment). A second comment would mean the reporter appended
+    // twice; zero would mean it filed a duplicate work item instead.
     const comments = await ctx.rest.getWorkItemComments(workItemId);
     if (comments.length !== 1) {
       throw new Error(
