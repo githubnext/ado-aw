@@ -99,6 +99,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
 │   │   │   ├── ado_script.rs # Always-on ado-script extension (gate evaluator + runtime-import resolver + execution-context precomputes, per-job downloads)
+│   │   │   ├── container_runtime.rs # Typed Docker runtime config for MCPG stdio servers: `Mount`/`MountMode` (ro/rw bind mounts) + `ContainerRuntimeConfig`/`ContainerRuntimeBuilder`, consumed by extensions that launch MCPG backends in containers
 │   │   │   ├── exec_context/ # Always-on execution-context extension (issue #860)
 │   │   │   │   ├── mod.rs    # ExecContextExtension; CompilerExtension impl; contributor fan-out
 │   │   │   │   ├── contributor.rs # Internal ContextContributor trait + Contributor enum
