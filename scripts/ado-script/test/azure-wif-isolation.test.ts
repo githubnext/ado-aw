@@ -198,6 +198,9 @@ ${setup.replaceAll("$(Agent.TempDirectory)", "/state")}
 describe.skipIf(!awfEnabled)("Azure WIF real AWF boundary", () => {
   it("hides the host assertion and internal IDs from normal and chroot paths", async () => {
     expect(process.platform, "the real AWF regression requires Linux").toBe("linux");
+    if (!process.getuid || !process.getgid) throw new Error("Linux process identity is unavailable");
+    const owner = `${process.getuid()}:${process.getgid()}`;
+    expect(docker("info", "--format", "{{.OSType}}")).toBe("linux");
     // /tmp is intentionally agent-readable in AWF; keep private material in
     // a sibling of the workspace, outside both /tmp and mounted home subdirs.
     const directory = mkdtempSync(join(homedir(), "ado-aw-wif-awf-"));
@@ -206,8 +209,10 @@ describe.skipIf(!awfEnabled)("Azure WIF real AWF boundary", () => {
       const workspace = join(directory, "workspace");
       const temp = join(directory, "runner-temp");
       const tools = join(directory, "tools");
+      const home = join(directory, "home");
       const auth = join(temp, "ado-aw-azure-auth", "fixture");
       mkdirSync(workspace, { recursive: true });
+      mkdirSync(home);
       mkdirSync(join(auth, "token.d"), { recursive: true });
       chmodSync(join(temp, "ado-aw-azure-auth"), 0o700);
       chmodSync(auth, 0o700);
@@ -230,7 +235,7 @@ printf '%s\\0' "$@" > '${capture}'
         .replaceAll("$(Build.SourcesDirectory)", workspace);
       const env: NodeJS.ProcessEnv = {
         PATH: process.env.PATH,
-        HOME: homedir(),
+        HOME: home,
         WORKING_DIRECTORY: workspace,
         WIF_TEST_AUTH: auth,
         WIF_TEST_WORKSPACE: workspace,
@@ -284,6 +289,11 @@ echo wif-isolation-passed
       ], { ...env, GITHUB_WORKSPACE: workspace });
       expect(output).toContain("wif-isolation-passed");
     } finally {
+      // AWF's container setup creates root-owned files in its synthetic home.
+      // Restore only this disposable tree, without following symlinks.
+      docker("run", "--rm", "--network", "none",
+        "--mount", `type=bind,source=${directory},target=/fixture`,
+        image, "chown", "-Rh", owner, "/fixture");
       rmSync(directory, { recursive: true, force: true });
     }
   }, 240_000);
