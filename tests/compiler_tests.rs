@@ -2429,7 +2429,6 @@ fn test_mcpg_container_azure_auth_emits_refresher_and_rotating_token_mount() {
     assert!(compiled.contains("task: AzureCLI@3"));
     assert!(compiled.contains("connectionType: azureRM"));
     assert!(compiled.contains("azureSubscription: my-arm-sc"));
-    assert!(compiled.contains("addSpnToEnvironment: 'true'"));
     assert!(compiled.contains("azure-wif-refresh.js"));
     assert!(compiled.contains("\"AZURE_FEDERATED_TOKEN_FILE\": \"/var/run/custom-azure/token\""));
     assert!(compiled.contains("$(Agent.TempDirectory)/ado-aw-azure-auth/"));

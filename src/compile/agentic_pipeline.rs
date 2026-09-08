@@ -4189,6 +4189,43 @@ MCPG_CONFIG=$(sed \
   -e "s|\${ADO_PROXY_IP}|${ADO_PROXY_IP:-}|g" \
   /tmp/awf-tools/staging/mcpg-config.json)
 
+: "${MCPG_REQUIRED_ENV_NAMES:=}"
+# Required internal bindings are produced by earlier authenticated setup tasks.
+# Refuse to launch MCPG with empty identity metadata, then replace only exact
+# JSON string placeholders so values remain correctly escaped.
+# shellcheck disable=SC2086
+for MCPG_ENV_NAME in $MCPG_REQUIRED_ENV_NAMES; do
+  MCPG_ENV_VALUE="${!MCPG_ENV_NAME:-}"
+  # shellcheck disable=SC2016 # '$(' is a literal unresolved ADO macro prefix.
+  if [ -z "$MCPG_ENV_VALUE" ] || [[ "$MCPG_ENV_VALUE" == '$('* ]]; then
+    echo "##vso[task.complete result=Failed]required MCPG environment variable '$MCPG_ENV_NAME' is empty"
+    exit 1
+  fi
+done
+if [ -n "$MCPG_REQUIRED_ENV_NAMES" ]; then
+  MCPG_CONFIG=$(printf '%s' "$MCPG_CONFIG" | python3 -c '
+import json
+import os
+import sys
+
+replacements = {
+    "$" + "{" + name + "}": os.environ[name]
+    for name in os.environ["MCPG_REQUIRED_ENV_NAMES"].split()
+}
+
+def replace(value):
+    if isinstance(value, str):
+        return replacements.get(value, value)
+    if isinstance(value, list):
+        return [replace(item) for item in value]
+    if isinstance(value, dict):
+        return {key: replace(item) for key, item in value.items()}
+    return value
+
+json.dump(replace(json.load(sys.stdin)), sys.stdout, separators=(",", ":"))
+')
+fi
+
 # A client redirected at an empty address would resolve the real
 # Azure DevOps instead of the policy engine, quietly restoring the
 # direct path this design removes. Fail loudly rather than start.
@@ -4215,19 +4252,6 @@ MCPG_DOCKER_ENV_ARGS=()
 # shellcheck disable=SC2086
 for MCPG_ENV_NAME in $MCPG_ENV_NAMES; do
   MCPG_DOCKER_ENV_ARGS+=(-e "$MCPG_ENV_NAME")
-done
-
-: "${MCPG_REQUIRED_ENV_NAMES:=}"
-# Required internal bindings are produced by earlier authenticated setup tasks.
-# Refuse to launch MCPG with empty identity metadata.
-# shellcheck disable=SC2086
-for MCPG_ENV_NAME in $MCPG_REQUIRED_ENV_NAMES; do
-  MCPG_ENV_VALUE="${!MCPG_ENV_NAME:-}"
-  # shellcheck disable=SC2016 # '$(' is a literal unresolved ADO macro prefix.
-  if [ -z "$MCPG_ENV_VALUE" ] || [[ "$MCPG_ENV_VALUE" == '$('* ]]; then
-    echo "##vso[task.complete result=Failed]required MCPG environment variable '$MCPG_ENV_NAME' is empty"
-    exit 1
-  fi
 done
 
 # Start MCPG on Docker's bridge network. AWF attaches this named,
@@ -7945,6 +7969,10 @@ safe-outputs:
             step.env.get("MCPG_ENV_NAMES"),
             Some(EnvValue::Literal(value)) if value == "DEBUG DEST_TOKEN"
         ));
+        assert!(
+            step.script
+                .contains(r#""$" + "{" + name + "}": os.environ[name]"#)
+        );
         assert!(step.script.contains("MCPG_DOCKER_ENV_ARGS+=(-e"));
         assert!(step.script.contains("\"${MCPG_DOCKER_ENV_ARGS[@]}\""));
         assert!(!step.script.contains("DEST_TOKEN=\"$SOURCE_TOKEN\""));

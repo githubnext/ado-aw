@@ -152,7 +152,7 @@ jobs:
                 REFRESHED_ASSERTION="$REFRESHED" \
                 CLIENT_ID="$servicePrincipalId" \
                 TENANT_ID="$tenantId" \
-                node -e '
+                node --input-type=module -e '
                   const form = new URLSearchParams({
                     client_id: process.env.CLIENT_ID,
                     client_assertion: process.env.REFRESHED_ASSERTION,

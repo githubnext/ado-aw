@@ -733,10 +733,14 @@ export async function runRefresher(
         return 1;
       }
     }
+    const classified = errorCategory(error);
     const category =
-      error && typeof error === "object" && "code" in error
+      classified === "unknown" &&
+      error &&
+      typeof error === "object" &&
+      "code" in error
         ? "filesystem"
-        : errorCategory(error);
+        : classified;
     report(`sidecar failed (${category})`);
     try {
       return await unhealthy(material, writer, now, timing, category);

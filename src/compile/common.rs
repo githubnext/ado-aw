@@ -3269,8 +3269,15 @@ fn validate_stdio_mcp(
         if opts.args.iter().any(|arg| {
             matches!(
                 arg.as_str(),
-                "-e" | "--env" | "-v" | "--volume" | "--mount" | "--volumes-from"
+                "-e"
+                    | "--env"
+                    | "--env-file"
+                    | "-v"
+                    | "--volume"
+                    | "--mount"
+                    | "--volumes-from"
             ) || arg.starts_with("--env=")
+                || arg.starts_with("--env-file=")
                 || arg.starts_with("--volume=")
                 || arg.starts_with("--mount=")
                 || (arg.starts_with("-e") && arg.len() > 2)
@@ -8025,6 +8032,8 @@ safe-outputs:
     fn test_compile_mcpg_rejects_azure_auth_runtime_env_or_mount_flags() {
         for args in [
             "[-e, AZURE_CLIENT_ID=override]",
+            "[--env-file, /tmp/override.env]",
+            "[--env-file=/tmp/override.env]",
             "[-v, /host:/var/run/ado-aw/azure]",
             "[--mount=type=bind,source=/host,target=/var/run/ado-aw/azure]",
         ] {

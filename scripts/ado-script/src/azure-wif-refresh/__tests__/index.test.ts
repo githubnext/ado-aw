@@ -509,4 +509,23 @@ describe("refresh state machine", () => {
     expect(observable).not.toContain(INITIAL_TOKEN);
     expect(observable).not.toContain(SYSTEM_TOKEN);
   });
+
+  it("preserves network categories for coded startup failures", async () => {
+    const report = vi.fn();
+    const networkError = Object.assign(new Error("connection reset"), {
+      code: "ECONNRESET",
+    });
+
+    const rc = await runRefresher(
+      material(),
+      new AbortController().signal,
+      {
+        report,
+        writeAtomic: vi.fn().mockRejectedValue(networkError),
+      },
+    );
+
+    expect(rc).toBe(1);
+    expect(report).toHaveBeenCalledWith("sidecar failed (network)");
+  });
 });
