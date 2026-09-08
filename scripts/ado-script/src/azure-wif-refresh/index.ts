@@ -87,7 +87,10 @@ interface AssertionTiming {
 }
 
 export interface OidcProvider {
-  createOidcToken(material: RefreshMaterial): Promise<unknown>;
+  createOidcToken(
+    material: RefreshMaterial,
+    signal: AbortSignal,
+  ): Promise<unknown>;
 }
 
 export type AtomicWriter = (
@@ -370,6 +373,7 @@ export interface FetchLike {
       method: "POST";
       headers: Record<string, string>;
       body: string;
+      signal: AbortSignal;
     },
   ): Promise<{
     ok: boolean;
@@ -390,6 +394,7 @@ class HttpResponseError extends Error {
 /** Request a fresh assertion from the job-scoped Azure DevOps OIDC endpoint. */
 export async function requestOidcToken(
   material: RefreshMaterial,
+  signal: AbortSignal,
   fetchFn: FetchLike = fetch as unknown as FetchLike,
 ): Promise<string> {
   const url =
@@ -403,6 +408,7 @@ export async function requestOidcToken(
       "X-TFS-FedAuthRedirect": "Suppress",
     },
     body: "{}",
+    signal,
   });
   if (!response.ok) {
     throw new HttpResponseError(response.status);
@@ -415,8 +421,11 @@ export async function requestOidcToken(
 }
 
 class AzureDevOpsOidcProvider implements OidcProvider {
-  async createOidcToken(material: RefreshMaterial): Promise<unknown> {
-    return await requestOidcToken(material);
+  async createOidcToken(
+    material: RefreshMaterial,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    return await requestOidcToken(material, signal);
   }
 }
 
@@ -494,18 +503,25 @@ async function requestWithTimeout(
   timeoutMs: number,
 ): Promise<unknown> {
   if (signal.aborted) throw new ShutdownError();
+  const requestController = new AbortController();
   let timeout: NodeJS.Timeout | undefined;
   let abort: (() => void) | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => reject(new RequestTimeoutError()), timeoutMs);
+    timeout = setTimeout(() => {
+      requestController.abort();
+      reject(new RequestTimeoutError());
+    }, timeoutMs);
   });
   const abortPromise = new Promise<never>((_, reject) => {
-    abort = () => reject(new ShutdownError());
+    abort = () => {
+      requestController.abort();
+      reject(new ShutdownError());
+    };
     signal.addEventListener("abort", abort, { once: true });
   });
   try {
     return await Promise.race([
-      provider.createOidcToken(material),
+      provider.createOidcToken(material, requestController.signal),
       timeoutPromise,
       abortPromise,
     ]);

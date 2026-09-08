@@ -19,6 +19,7 @@ import {
   runRefresher,
   writeAtomic,
   type AtomicWriter,
+  type FetchLike,
   type RefreshMaterial,
   type StatusDocument,
 } from "../index.js";
@@ -133,6 +134,7 @@ describe("atomic publication", () => {
 
 describe("OIDC refresh request", () => {
   it("posts to the supplied endpoint with the bearer and service connection GUID", async () => {
+    const signal = new AbortController().signal;
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -143,7 +145,7 @@ describe("OIDC refresh request", () => {
       serviceConnectionId: "id with spaces",
     });
 
-    await expect(requestOidcToken(value, fetchFn)).resolves.toBe(
+    await expect(requestOidcToken(value, signal, fetchFn)).resolves.toBe(
       "refreshed.assertion.value",
     );
     expect(fetchFn).toHaveBeenCalledWith(
@@ -156,6 +158,7 @@ describe("OIDC refresh request", () => {
           "X-TFS-FedAuthRedirect": "Suppress",
         },
         body: "{}",
+        signal,
       },
     );
   });
@@ -167,7 +170,9 @@ describe("OIDC refresh request", () => {
       json: async () => ({ oidcToken: "" }),
     });
 
-    await expect(requestOidcToken(material(), fetchFn)).rejects.toThrow();
+    await expect(
+      requestOidcToken(material(), new AbortController().signal, fetchFn),
+    ).rejects.toThrow();
   });
 });
 
@@ -322,6 +327,92 @@ describe("refresh state machine", () => {
         errorCategory: "throttled",
       }),
     );
+  });
+
+  it("aborts the OIDC fetch when a request times out", async () => {
+    let now = 1_700_000_000_000;
+    const controller = new AbortController();
+    const { writes, writer } = recordingWriter();
+    let fetchSignal: AbortSignal | undefined;
+    const fetchFn: FetchLike = async (_url, init) => {
+      fetchSignal = init.signal;
+      return await new Promise<never>((_, reject) => {
+        init.signal.addEventListener(
+          "abort",
+          () => reject(new Error("fetch aborted")),
+          { once: true },
+        );
+      });
+    };
+    let sleepCount = 0;
+
+    const rc = await runRefresher(
+      material({ initialIdToken: jwt(now / 1000 + 61) }),
+      controller.signal,
+      {
+        now: () => now,
+        writeAtomic: writer,
+        requestTimeoutMs: 1,
+        provider: {
+          createOidcToken: async (value, signal) =>
+            await requestOidcToken(value, signal, fetchFn),
+        },
+        sleep: async (ms) => {
+          now += ms;
+          sleepCount += 1;
+          if (sleepCount === 2) controller.abort();
+        },
+      },
+    );
+
+    expect(rc).toBe(0);
+    expect(fetchSignal?.aborted).toBe(true);
+    expect(statusDocuments(writes)).toContainEqual(
+      expect.objectContaining({
+        state: "refreshing",
+        errorCategory: "timeout",
+      }),
+    );
+  });
+
+  it("aborts the OIDC fetch during shutdown", async () => {
+    let now = 1_700_000_000_000;
+    const controller = new AbortController();
+    const { writes, writer } = recordingWriter();
+    let fetchSignal: AbortSignal | undefined;
+    const fetchFn: FetchLike = async (_url, init) => {
+      fetchSignal = init.signal;
+      queueMicrotask(() => controller.abort());
+      return await new Promise<never>((_, reject) => {
+        init.signal.addEventListener(
+          "abort",
+          () => reject(new Error("fetch aborted")),
+          { once: true },
+        );
+      });
+    };
+
+    const rc = await runRefresher(
+      material({ initialIdToken: jwt(now / 1000 + 61) }),
+      controller.signal,
+      {
+        now: () => now,
+        writeAtomic: writer,
+        provider: {
+          createOidcToken: async (value, signal) =>
+            await requestOidcToken(value, signal, fetchFn),
+        },
+        sleep: async (ms) => {
+          now += ms;
+        },
+      },
+    );
+
+    expect(rc).toBe(0);
+    expect(fetchSignal?.aborted).toBe(true);
+    expect(statusDocuments(writes).at(-1)).toMatchObject({
+      state: "stopped",
+    });
   });
 
   it("rejects an empty refresh without overwriting the current assertion", async () => {
