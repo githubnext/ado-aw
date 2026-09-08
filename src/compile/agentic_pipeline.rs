@@ -5044,8 +5044,7 @@ AUTH_DIR="$AUTH_ROOT/$RUNTIME_ID"
 docker rm -f "$REFRESH_CONTAINER" >/dev/null 2>&1 || true
 rm -rf "$AUTH_DIR"
 mkdir -p "$AUTH_DIR/token.d"
-chmod 700 "$AUTH_ROOT" "$AUTH_DIR"
-chmod 755 "$AUTH_DIR/token.d"
+chmod 700 "$AUTH_ROOT" "$AUTH_DIR" "$AUTH_DIR/token.d"
 MATERIAL_FIFO="$AUTH_DIR/material"
 mkfifo -m 600 "$MATERIAL_FIFO"
 
