@@ -26,9 +26,14 @@ import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { Scenario, ScenarioContext } from "../scenario.js";
+import type {
+  ExecutedRecord,
+  PriorEntry,
+  Scenario,
+  ScenarioContext,
+} from "../scenario.js";
 import { partialOutput } from "../execute-cli.js";
-import { detBody, numResult, Teardown } from "./common.js";
+import { detBody, numResult, strResult, Teardown } from "./common.js";
 import {
   crossOrgSource,
   resolveCrossOrgEnv,
@@ -61,6 +66,9 @@ interface CreatePrScenarioOptions {
   readonly patchRelPath: string;
   readonly changedFileSuffix?: string;
 }
+
+const CREATE_PR_TEMPORARY_ID = "#aw_prcreate";
+const HANDOFF_TEMPORARY_ID = "#aw_prhandoff";
 
 function runGit(
   args: string[],
@@ -270,6 +278,7 @@ function createPullRequestScenario(
       patch_file: state.patchRelPath,
       repository: state.repositorySelector,
       agent_labels: [],
+      temporary_id: CREATE_PR_TEMPORARY_ID,
       base_commit: state.baseCommit,
       patch_sha256: state.patchSha256,
     }),
@@ -325,8 +334,120 @@ export const createPullRequestCrossOrg = createPullRequestScenario({
   changedFileSuffix: "-cross-org",
 });
 
+function executedRecordForTool(
+  records: ExecutedRecord[],
+  tool: string,
+): ExecutedRecord {
+  const recordName = tool.replaceAll("-", "_");
+  const record = records.find((candidate) => candidate.name === recordName);
+  if (!record) {
+    throw new Error(`no executed record found for prior tool '${tool}'`);
+  }
+  return record;
+}
+
+/**
+ * Runs create-pull-request and update-pr in one executor process. This is the
+ * production handoff shape: the create result registers the real PR under a
+ * temporary ID, then the following update resolves that ID without the model
+ * ever knowing Azure DevOps' numeric PR ID.
+ */
+export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
+  id: "create-pull-request-temporary-id-handoff",
+  tool: "update-pr",
+  targetsAdoRepo: true,
+  setup: (ctx) =>
+    setupCreatePullRequest(ctx, {
+      id: "create-pull-request-temporary-id-handoff",
+      repositorySelector: "named",
+      patchRelPath: "create-pr-temporary-id-handoff.patch",
+      changedFileSuffix: "-temporary-id-handoff",
+    }),
+  config: (_ctx, state) => ({
+    "allowed-operations": ["update-description"],
+    "allowed-repositories": [state.repo],
+    max: 1,
+  }),
+  priorEntries: async (ctx, state): Promise<PriorEntry[]> => [
+    {
+      tool: "create-pull-request",
+      config: {
+        "target-branch": state.targetBranch,
+        "allowed-repositories": [state.repo],
+        "delete-source-branch": true,
+        "if-no-changes": "error",
+        "include-stats": false,
+      },
+      entry: {
+        title: `${ctx.prefix("create-pull-request-temporary-id-handoff")} (do not merge)`,
+        description: detBody(ctx, "create-pull-request-temporary-id-handoff"),
+        source_branch: state.sourceBranch,
+        patch_file: state.patchRelPath,
+        repository: state.repositorySelector,
+        agent_labels: [],
+        temporary_id: HANDOFF_TEMPORARY_ID,
+        base_commit: state.baseCommit,
+        patch_sha256: state.patchSha256,
+      },
+    },
+  ],
+  files: async (_ctx, state) => ({ [state.patchRelPath]: state.patchContent }),
+  env: async (_ctx, state) => ({
+    BUILD_SOURCESDIRECTORY: state.sourcesDir,
+  }),
+  ndjson: async (ctx) => ({
+    pull_request_id: HANDOFF_TEMPORARY_ID,
+    operation: "update-description",
+    description: `${detBody(ctx, "create-pull-request-temporary-id-handoff")} Updated through temporary ID.`,
+  }),
+  assert: async (ctx, state, record, records) => {
+    const created = executedRecordForTool(records, "create-pull-request");
+    const createdPrId = numResult(created, "pull_request_id");
+    state.prId = createdPrId;
+
+    if (strResult(created, "temporary_id") !== HANDOFF_TEMPORARY_ID) {
+      throw new Error(
+        `create-pull-request reported temporary_id '${strResult(created, "temporary_id")}', expected '${HANDOFF_TEMPORARY_ID}'`,
+      );
+    }
+    const updatedPrId = numResult(record, "pull_request_id");
+    if (updatedPrId !== createdPrId) {
+      throw new Error(
+        `temporary_id '${HANDOFF_TEMPORARY_ID}' resolved to PR #${updatedPrId}, but create-pull-request filed #${createdPrId}`,
+      );
+    }
+
+    const expectedDescription =
+      `${detBody(ctx, "create-pull-request-temporary-id-handoff")} Updated through temporary ID.`;
+    const pr = await state.rest.getPullRequest(state.repo, createdPrId);
+    if (pr.description !== expectedDescription) {
+      throw new Error(
+        `PR #${createdPrId} description was not updated through temporary ID`,
+      );
+    }
+  },
+  cleanup: async (_ctx, state) => {
+    const teardown = new Teardown();
+    if (state.prId !== undefined) {
+      const prId = state.prId;
+      teardown.add("abandon PR", () =>
+        state.rest.abandonPullRequest(state.repo, prId),
+      );
+    }
+    await teardown
+      .add("delete source branch", () =>
+        state.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`),
+      )
+      .add("remove local checkout", () =>
+        rm(state.sourcesDir, { recursive: true, force: true }),
+      )
+      .run();
+  },
+};
+
 export const createPullRequestScenarios: Scenario<unknown>[] = [
   createPullRequest,
   createPullRequestSelfMultiCheckout,
   createPullRequestCrossOrg,
+  createPullRequestTemporaryIdHandoff,
 ];
