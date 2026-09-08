@@ -1354,64 +1354,146 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_safe_outputs_follows_temporary_pr_reference() {
-        use crate::safe_outputs::{AdoRepositoryTarget, ResolvedPullRequest};
-        use crate::secure::PullRequestTemporaryId;
+    async fn test_execute_safe_outputs_creates_then_updates_temporary_pr_reference() {
+        use std::process::Command;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        let api_base = "/Target%20Project/_apis/git/repositories/repo-id";
+        Mock::given(method("GET"))
+            .and(path(format!("{api_base}/refs")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{api_base}/pushes")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "pushId": 1
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{api_base}/pullrequests")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "pullRequestId": 42,
+                "url": "https://example.test/pr/42",
+                "createdBy": {"id": "creator-id"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("PATCH"))
-            .and(path(
-                "/Target%20Project/_apis/git/repositories/repo-id/pullRequests/42",
-            ))
+            .and(path(format!("{api_base}/pullRequests/42")))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
-        tokio::fs::write(
-            &safe_output_path,
-            r##"{"name":"update-pr","pull_request_id":"#aw_pr123","operation":"update-description","description":"Updated through the temporary reference."}
-"##,
-        )
-        .await
-        .unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        let safe_outputs_dir = temp_dir.path().join("safe-outputs");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::create_dir_all(&safe_outputs_dir).unwrap();
+        let run_git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repo_dir)
+                .output()
+                .expect("git command should run");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+        run_git(&["init", "-b", "main"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "Test User"]);
+        std::fs::write(repo_dir.join("file.txt"), "before\n").unwrap();
+        run_git(&["add", "file.txt"]);
+        run_git(&["commit", "-m", "initial"]);
+        std::fs::write(repo_dir.join("file.txt"), "after\n").unwrap();
+        run_git(&["add", "file.txt"]);
+        run_git(&["commit", "-m", "update file"]);
+        let patch = run_git(&["format-patch", "HEAD~1", "--stdout"]).stdout;
+        run_git(&["reset", "--hard", "HEAD~1"]);
+        run_git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let base_commit = String::from_utf8(run_git(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let patch_file = safe_outputs_dir.join("change.patch");
+        std::fs::write(&patch_file, &patch).unwrap();
+        let patch_sha256 = crate::hash::sha256_hex(&patch);
+
+        let create = serde_json::json!({
+            "name": "create-pull-request",
+            "title": "Update test file",
+            "description": "Update the test file before following up.",
+            "source_branch": "agent/update-test-file-abc123",
+            "patch_file": "change.patch",
+            "repository": "self",
+            "agent_labels": [],
+            "temporary_id": "#aw_pr123",
+            "base_commit": base_commit,
+            "patch_sha256": patch_sha256
+        });
+        let update = serde_json::json!({
+            "name": "update-pr",
+            "pull_request_id": "#aw_pr123",
+            "operation": "update-description",
+            "description": "Updated through the temporary reference."
+        });
+        let ndjson = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&create).unwrap(),
+            serde_json::to_string(&update).unwrap()
+        );
+        tokio::fs::write(safe_outputs_dir.join(SAFE_OUTPUT_FILENAME), ndjson)
+            .await
+            .unwrap();
 
         let mut tool_configs = HashMap::new();
+        tool_configs.insert(
+            "create-pull-request".to_string(),
+            serde_json::json!({"max": 1, "include-stats": false}),
+        );
         tool_configs.insert("update-pr".to_string(), serde_json::json!({"max": 1}));
         let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("target-org".to_string()),
+            ado_project: Some("Target Project".to_string()),
             access_token: Some("test-token".to_string()),
+            working_directory: safe_outputs_dir.clone(),
+            source_directory: repo_dir.clone(),
+            self_repository_directory: repo_dir,
+            repository_id: Some("repo-id".to_string()),
+            repository_name: Some("target-repo".to_string()),
+            repository_provider: Some("TfsGit".to_string()),
             tool_configs,
             ..Default::default()
         };
-        let temporary_id = PullRequestTemporaryId::parse("#aw_pr123").unwrap();
-        ctx.register_resolved_pull_request(
-            &temporary_id,
-            ResolvedPullRequest {
-                id: 42,
-                url: "https://example.test/pr/42".to_string(),
-                target: AdoRepositoryTarget {
-                    alias: "target".to_string(),
-                    organization: "target-org".to_string(),
-                    organization_url: server.uri(),
-                    project: "Target Project".to_string(),
-                    repository: "target-repo".to_string(),
-                    repository_id: Some("repo-id".to_string()),
-                    cross_organization: true,
-                },
-            },
-        )
-        .unwrap();
 
-        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+        let results = execute_safe_outputs(&safe_outputs_dir, &ctx, &ToolFilter::default())
             .await
             .unwrap();
-        assert_eq!(results.len(), 1);
+        assert_eq!(results.len(), 2);
         assert!(results[0].success, "{}", results[0].message);
+        assert_eq!(
+            results[0].data.as_ref().unwrap()["temporary_id"],
+            "#aw_pr123"
+        );
         assert_eq!(results[0].data.as_ref().unwrap()["pull_request_id"], 42);
+        assert!(results[1].success, "{}", results[1].message);
+        assert_eq!(results[1].data.as_ref().unwrap()["pull_request_id"], 42);
+        server.verify().await;
     }
 
     #[tokio::test]
