@@ -198,8 +198,9 @@ validated_string! {
             anyhow::bail!("{label} must be an absolute POSIX path below `/`");
         }
         if value.ends_with('/')
-            || value.contains(['\0', '\n', '\r', ':', '$', '`', '\\'])
-            || value.contains("##vso[")
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "/._-".contains(character))
         {
             anyhow::bail!("{label} contains characters that are unsafe in a container mount");
         }
@@ -640,6 +641,20 @@ mod tests {
         assert!(ContainerAbsolutePath::parse("/var//run").is_err());
         assert!(ContainerAbsolutePath::parse("/var/run:rw").is_err());
         assert!(ContainerAbsolutePath::parse("/var/$(TOKEN)").is_err());
+        for unsafe_path in [
+            "/var/run/token dir",
+            "/var/run/token\tdir",
+            "/var/run/'token'",
+            "/var/run/\"token\"",
+            "/var/run/token;command",
+            "/var/run/token|command",
+            "/var/run/token&command",
+        ] {
+            assert!(
+                ContainerAbsolutePath::parse(unsafe_path).is_err(),
+                "{unsafe_path:?} must be rejected"
+            );
+        }
     }
 
     #[test]
