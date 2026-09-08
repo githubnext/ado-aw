@@ -641,6 +641,9 @@ fn extract_daily_day_filter<'a>(tokens: &'a [&'a str]) -> Result<(Vec<&'a str>, 
 
     let mut remaining = tokens[..index].to_vec();
     if issue_compatibility_order {
+        if remaining.iter().any(|token| token.starts_with("utc") || token.contains("utc")) {
+            bail!("Conflicting UTC offsets: specify the offset only once, for example: daily around 09:00 utc-7 on weekdays");
+        }
         remaining.push(tokens[index + 2]);
     }
     if remaining
