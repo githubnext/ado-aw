@@ -149,7 +149,8 @@ on:
 The fields are `minute hour day-of-month month day-of-week`. Numeric values,
 wildcards, lists, ranges, and steps are supported and validated against the ADO
 field ranges. Months and weekdays also accept full English names or their first
-three letters, such as `Jan` and `Mon-Fri`.
+three letters, such as `Jan` and `Mon-Fri`, as documented in the
+[Azure Pipelines cron syntax reference](https://learn.microsoft.com/azure/devops/pipelines/process/scheduled-triggers#cron-syntax).
 
 Use list form to configure multiple fuzzy and/or raw cron schedules. Each item
 may specify its own branch include list; omitted branches default to `main`.

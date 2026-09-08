@@ -399,6 +399,9 @@ fn validate_raw_cron(input: &str) -> Result<()> {
 #[derive(Clone, Copy)]
 enum CronValueKind {
     Numeric,
+    // Azure Pipelines accepts numeric values plus full or three-letter English
+    // names for month and weekday fields:
+    // https://learn.microsoft.com/azure/devops/pipelines/process/scheduled-triggers#cron-syntax
     Month,
     Weekday,
 }
@@ -1414,6 +1417,45 @@ mod tests {
     }
 
     #[test]
+    fn test_rejects_invalid_hourly_modifier() {
+        let error = parse_fuzzy_schedule("hourly on weekends").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("accepts only the optional suffix 'on weekdays'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_cron_field_rejects_timezone_aware_weekdays() {
+        let error = DayFilter::Weekdays {
+            utc_offset_minutes: 60,
+        }
+        .cron_field()
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("require a schedule with a generated UTC time"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_cron_field_rejects_unsupported_day_shift() {
+        let error = DayFilter::Weekdays {
+            utc_offset_minutes: 2 * 1440,
+        }
+        .cron_field_for_utc_time(0)
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported day shift 2"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn test_parse_intervals() {
         assert_eq!(
             parse_fuzzy_schedule("every 2h").unwrap(),
@@ -1624,6 +1666,7 @@ mod tests {
             "*/15 * * * *",
             "5,20,35,50 8-17/3 1,15 * 1-5",
             "0 18 * * Mon,Wed,Fri",
+            "0 8 * * Mon-Fri",
             "0 0 1 Jan,July *",
         ] {
             assert_eq!(

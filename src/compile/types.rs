@@ -5348,6 +5348,25 @@ schedule:
         );
     }
 
+    #[test]
+    fn test_schedule_list_items_are_sanitized() {
+        let mut schedule = ScheduleConfig::Multiple(vec![ScheduleListItem {
+            cron: "##vso[task.setvariable variable=cron]unsafe".to_string(),
+            branches: vec!["##[error]unsafe".to_string()],
+        }]);
+
+        schedule.sanitize_config_fields();
+
+        let ScheduleConfig::Multiple(items) = schedule else {
+            panic!("expected multiple schedule items");
+        };
+        assert_eq!(
+            items[0].cron,
+            "`##vso[`task.setvariable variable=cron]unsafe"
+        );
+        assert_eq!(items[0].branches, ["`##[`error]unsafe"]);
+    }
+
     // ─── EngineConfig deserialization ────────────────────────────────────────
 
     #[test]
