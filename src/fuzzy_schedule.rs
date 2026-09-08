@@ -367,9 +367,9 @@ fn looks_like_raw_cron(input: &str) -> bool {
         return false;
     }
     fields.len() == 5
-        || first.starts_with('*')
-        || first.starts_with('$')
-        || first.chars().any(|ch| ch.is_ascii_digit())
+        || first
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '*' | ',' | '-' | '/'))
 }
 
 fn validate_raw_cron(input: &str) -> Result<()> {
@@ -1704,6 +1704,15 @@ mod tests {
                 "error for {cron:?} should contain {expected:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn test_digit_bearing_fuzzy_input_is_not_misclassified_as_cron() {
+        let error = schedule_expression_to_cron("2h on weekdays", "ignored").unwrap_err();
+        assert!(
+            error.to_string().contains("Unknown schedule type '2h'"),
+            "unexpected error: {error}"
+        );
     }
 
     // ─── invalid hour interval error path ────────────────────────────────────
