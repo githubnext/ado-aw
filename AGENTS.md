@@ -75,6 +75,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── stage.rs      # Stage-level ADO template compiler (target: stage)
 │   │   ├── stage_ir.rs   # Stage target typed-IR builder
 │   │   ├── az_wrapper.rs # Renders the `az` CLI redirect wrapper installed into the agent sandbox (env-based `HTTPS_PROXY` redirect, not argument rewriting)
+│   │   ├── container_invocation.rs # Typed compiler-owned `docker run` IR (validated shell words, lifecycle, hardening, mounts, entrypoint, command) lowered to a ShellScript fragment; no raw-argument escape hatch
 │   │   ├── source_path_guard.rs # Validation guard for untrusted workflow source-path inputs used by audit + mcp_author
 │   │   ├── shell/        # Typed generation of every shell script the compiler emits (see docs/extending.md "Generated shell scripts")
 │   │   │   ├── mod.rs    # ShellScript: raw-string bodies + a typed shell-quoted binding prelude; `# ado-aw:fragment` splicing; into_step()

@@ -72,6 +72,9 @@ use super::common::{
     HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
     image_ref,
 };
+use super::container_invocation::{
+    DockerMount, DockerRun, DockerTmpfs, ShellWord,
+};
 use super::custom_tools::{CustomToolDefinition, collect_custom_tool_definitions};
 use super::extensions::ado_script as paths;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
@@ -5005,7 +5008,12 @@ shell_script! {
         externals: [
             SYSTEM_ACCESSTOKEN, SYSTEM_OIDCREQUESTURI
         ],
-        fragments: [],
+        fragments: [run_container],
+        fragment_uses: [
+            run_container => [
+                REFRESH_CONTAINER, REFRESH_IMAGE, REFRESH_BUNDLE
+            ],
+        ],
         body: r###"
 set -euo pipefail
 
@@ -5041,21 +5049,7 @@ chmod 755 "$AUTH_DIR/token.d"
 MATERIAL_FIFO="$AUTH_DIR/material"
 mkfifo -m 600 "$MATERIAL_FIFO"
 
-docker run -d \
-  --name "$REFRESH_CONTAINER" \
-  --network bridge \
-  --user "$(id -u):$(id -g)" \
-  --cap-drop ALL \
-  --security-opt no-new-privileges \
-  --read-only \
-  --tmpfs /tmp:rw,nosuid,nodev,noexec \
-  --pids-limit 64 \
-  --entrypoint sh \
-  -v "$REFRESH_BUNDLE:/app/azure-wif-refresh.js:ro" \
-  -v "$AUTH_DIR:/var/lib/ado-aw-azure-auth:rw" \
-  "$REFRESH_IMAGE" \
-  -c 'exec node /app/azure-wif-refresh.js < /var/lib/ado-aw-azure-auth/material' \
-  >/dev/null
+# ado-aw:fragment run_container
 
 # The short-lived encoder inherits the AzureCLI task environment and writes
 # directly to the FIFO. Credentials never become process arguments or files.
@@ -5118,6 +5112,34 @@ fi
     }
 }
 
+fn azure_wif_refresh_container_invocation() -> Result<String> {
+    DockerRun::new(ShellWord::variable("REFRESH_IMAGE")?)
+        .detached()
+        .name(ShellWord::variable("REFRESH_CONTAINER")?)
+        .network(ShellWord::literal("bridge")?)
+        .user(ShellWord::current_user())
+        .cap_drop_all()
+        .no_new_privileges()
+        .read_only()
+        .tmpfs(DockerTmpfs::new("/tmp", "rw,nosuid,nodev,noexec")?)
+        .pids_limit(64)
+        .entrypoint(ShellWord::literal("sh")?)
+        .mount(DockerMount::read_only(
+            ShellWord::variable("REFRESH_BUNDLE")?,
+            "/app/azure-wif-refresh.js",
+        )?)
+        .mount(DockerMount::read_write(
+            ShellWord::variable("AUTH_DIR")?,
+            "/var/lib/ado-aw-azure-auth",
+        )?)
+        .command_arg(ShellWord::literal("-c")?)
+        .command_arg(ShellWord::literal(
+            "exec node /app/azure-wif-refresh.js < /var/lib/ado-aw-azure-auth/material",
+        )?)
+        .discard_stdout()
+        .render_bash()
+}
+
 fn start_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Result<Vec<Step>> {
     let mut steps = Vec::new();
     for (server_name, _, auth) in front_matter.azure_authenticated_mcp_servers() {
@@ -5135,6 +5157,10 @@ fn start_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Result<Vec<Step>
             .bind_text("REFRESH_BUNDLE", paths::AZURE_WIF_REFRESH_PATH)
             .bind_text("CLIENT_VARIABLE", client_variable.as_str())
             .bind_text("TENANT_VARIABLE", tenant_variable.as_str())
+            .fragment(
+                "run_container",
+                azure_wif_refresh_container_invocation()?,
+            )
             .render();
         let task = AzureCliV3::new(
             AzureCliV3Connection::AzureRm(auth.service_connection.as_str().to_string()),
@@ -5284,7 +5310,7 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
         )
         .fragment(
             "run_container",
-            phase_body(&START_ADO_PROXY_RUN_CONTAINER),
+            ado_proxy_run_container_phase(),
         )
         .fragment(
             "handover_material",
@@ -5310,6 +5336,76 @@ fn phase_body(def: &crate::compile::shell::ShellScriptDef) -> String {
     // is defence-in-depth), then dedent the raw body.
     let body = def.body.trim_start_matches('\n');
     crate::compile::shell::dedent(body).trim().to_string()
+}
+
+fn ado_proxy_run_container_phase() -> String {
+    ShellScript::new(&START_ADO_PROXY_RUN_CONTAINER)
+        .fragment(
+            "container_invocation",
+            ado_proxy_container_invocation()
+                .render_bash()
+                .expect("compiler-owned ado-proxy container invocation must be valid"),
+        )
+        .render()
+        .trim()
+        .to_string()
+}
+
+fn ado_proxy_container_invocation() -> DockerRun {
+    DockerRun::new(
+        ShellWord::variable("PROXY_IMAGE")
+            .expect("compiler-owned shell variable must be valid"),
+    )
+    .detached()
+    .name(
+        ShellWord::variable("PROXY_CONTAINER")
+            .expect("compiler-owned shell variable must be valid"),
+    )
+    .network(
+        ShellWord::variable("PROXY_NETWORK")
+            .expect("compiler-owned shell variable must be valid"),
+    )
+    .entrypoint(ShellWord::literal("sh").expect("static entrypoint must be valid"))
+    .mount(
+        DockerMount::read_only(
+            ShellWord::variable("PROXY_SCRIPT_PATH")
+                .expect("compiler-owned shell variable must be valid"),
+            "/app/ado-proxy.js",
+        )
+        .expect("static ado-proxy bundle mount must be valid"),
+    )
+    .mount(
+        DockerMount::read_only(
+            ShellWord::variable("PROXY_DIR")
+                .expect("compiler-owned shell variable must be valid")
+                .with_literal("/policy")
+                .expect("static policy suffix must be valid"),
+            "/etc/ado-proxy",
+        )
+        .expect("static ado-proxy policy mount must be valid"),
+    )
+    .mount(
+        DockerMount::read_write(
+            ShellWord::variable("AZ_WRAPPER_DIR")
+                .expect("compiler-owned shell variable must be valid"),
+            "/var/lib/ado-proxy",
+        )
+        .expect("static ado-proxy CA mount must be valid"),
+    )
+    .mount(
+        DockerMount::read_write(
+            ShellWord::literal("/tmp/gh-aw/ado-proxy-logs")
+                .expect("static log path must be valid"),
+            "/var/log/ado-proxy",
+        )
+        .expect("static ado-proxy log mount must be valid"),
+    )
+    .command_arg(ShellWord::literal("-c").expect("static command flag must be valid"))
+    .command_arg(
+        ShellWord::variable("CONTAINER_ENTRYPOINT")
+            .expect("compiler-owned shell variable must be valid"),
+    )
+    .discard_stdout()
 }
 
 /// The one-liner passed to the container's `sh -c`. Kept in sync with the
@@ -5503,7 +5599,13 @@ shell_script! {
             PROXY_CONTAINER, PROXY_NETWORK, PROXY_SCRIPT_PATH,
             PROXY_DIR, PROXY_IMAGE, CONTAINER_ENTRYPOINT, AZ_WRAPPER_DIR
         ],
-        fragments: [],
+        fragments: [container_invocation],
+        fragment_uses: [
+            container_invocation => [
+                PROXY_CONTAINER, PROXY_NETWORK, PROXY_SCRIPT_PATH,
+                PROXY_DIR, PROXY_IMAGE, CONTAINER_ENTRYPOINT, AZ_WRAPPER_DIR
+            ],
+        ],
         body: r###"
 # Remove any container left behind by an interrupted run.
 docker rm -f "$PROXY_CONTAINER" 2>/dev/null || true
@@ -5517,17 +5619,7 @@ mkdir -p /tmp/gh-aw/ado-proxy-logs
 # A container-local FIFO preserves the stdin-only custody contract:
 # material is streamed through `docker exec -i`, never written to a
 # runner path, container layer, argv, or environment.
-docker run -d \
-  --name "$PROXY_CONTAINER" \
-  --network "$PROXY_NETWORK" \
-  --entrypoint sh \
-  -v "$PROXY_SCRIPT_PATH:/app/ado-proxy.js:ro" \
-  -v "$PROXY_DIR/policy:/etc/ado-proxy:ro" \
-  -v "$AZ_WRAPPER_DIR:/var/lib/ado-proxy" \
-  -v /tmp/gh-aw/ado-proxy-logs:/var/log/ado-proxy \
-  "$PROXY_IMAGE" \
-  -c "$CONTAINER_ENTRYPOINT" \
-  >/dev/null
+# ado-aw:fragment container_invocation
 "###,
     }
 }
@@ -7652,8 +7744,8 @@ safe-outputs:
         ));
         let script = task.inputs.get("inlineScript").unwrap();
         assert!(script.contains("mkfifo -m 600"));
-        assert!(script.contains("docker run -d"));
-        assert!(!script.contains("docker run -d --rm"));
+        assert!(script.contains("docker run \\\n  -d \\"));
+        assert!(!script.contains("  --rm \\"));
         assert!(script.contains("azure-wif-refresh.js"));
         assert!(script.contains("fs.writeFileSync(env.MATERIAL_FIFO"));
         assert!(script.contains("SYSTEM_OIDCREQUESTURI"));
@@ -7662,6 +7754,29 @@ safe-outputs:
         assert!(!script.contains("-e SYSTEM_ACCESSTOKEN"));
         assert!(!script.contains("--token"));
         assert!(script.contains("AGENT_TEMP='$(Agent.TempDirectory)'"));
+    }
+
+    #[test]
+    fn credential_container_launches_lower_from_typed_invocations() {
+        let has_raw_docker_run = |body: &str| {
+            body.lines()
+                .map(str::trim_start)
+                .any(|line| line.starts_with("docker run"))
+        };
+        assert!(!has_raw_docker_run(START_AZURE_WIF_REFRESH.body));
+        assert!(
+            START_AZURE_WIF_REFRESH
+                .fragment_uses
+                .iter()
+                .any(|(name, _)| *name == "run_container")
+        );
+        assert!(!has_raw_docker_run(START_ADO_PROXY_RUN_CONTAINER.body));
+        assert!(
+            START_ADO_PROXY_RUN_CONTAINER
+                .fragment_uses
+                .iter()
+                .any(|(name, _)| *name == "container_invocation")
+        );
     }
 
     #[test]
@@ -7730,7 +7845,7 @@ safe-outputs:
             step.script
         );
         assert!(
-            step.script.contains("docker run -d")
+            step.script.contains("docker run \\\n  -d \\")
                 && step.script.contains("mkfifo \"$MATERIAL_FIFO\""),
             "the container must be detached from the Bash task before material handover"
         );
@@ -7750,9 +7865,9 @@ safe-outputs:
     #[test]
     fn ado_proxy_container_lifecycle_is_independent_of_the_start_task() {
         let script = start_ado_proxy_step(&proxy_fm()).script;
-        assert!(script.contains("docker run -d"));
+        assert!(script.contains("docker run \\\n  -d \\"));
         assert!(
-            !script.contains("docker run -i --rm"),
+            !script.contains("  --rm \\"),
             "attached --rm containers disappear when Azure Pipelines cleans up task STDIO"
         );
         assert!(script.contains("docker logs --tail 200"));
@@ -7817,7 +7932,7 @@ safe-outputs:
         assert!(script.contains("--public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem"));
         assert!(
             script.contains(&format!("AZ_WRAPPER_DIR='{AZ_WRAPPER_DIR}'"))
-                && script.contains("-v \"$AZ_WRAPPER_DIR:/var/lib/ado-proxy\""),
+                && script.contains("-v \"${AZ_WRAPPER_DIR}:/var/lib/ado-proxy:rw\""),
             "the wrapper directory must be bound and mounted at /var/lib/ado-proxy: {script}"
         );
         assert!(
@@ -7869,18 +7984,18 @@ safe-outputs:
         let script = start_ado_proxy_step(&proxy_fm()).script;
         assert_eq!(ADO_PROXY_IMAGE, common::ADO_MCP_IMAGE);
         // The image and the bundle path both reach the body through bindings,
-        // so the docker invocation references them as `$PROXY_IMAGE` and
-        // `$PROXY_SCRIPT_PATH` while the concrete values live in the prelude.
+        // so the docker invocation references them as `${PROXY_IMAGE}` and
+        // `${PROXY_SCRIPT_PATH}` while the concrete values live in the prelude.
         assert!(
             script.contains(&format!("PROXY_IMAGE='{ADO_PROXY_IMAGE}'"))
-                && script.contains("\"$PROXY_IMAGE\" \\"),
+                && script.contains("\"${PROXY_IMAGE}\" \\"),
             "docker run must reuse the bound $PROXY_IMAGE: {script}"
         );
         assert!(
             script.contains(&format!(
                 "PROXY_SCRIPT_PATH='{}'",
                 paths::ADO_PROXY_PATH
-            )) && script.contains("\"$PROXY_SCRIPT_PATH:/app/ado-proxy.js:ro\""),
+            )) && script.contains("\"${PROXY_SCRIPT_PATH}:/app/ado-proxy.js:ro\""),
             "docker run must mount the bound ado-proxy bundle: {script}"
         );
     }

@@ -11,6 +11,7 @@ pub mod az_wrapper;
 pub(crate) use common::resolve_repos;
 pub(crate) mod ado_bundle;
 pub(crate) mod agentic_pipeline;
+pub(crate) mod container_invocation;
 #[cfg(test)]
 mod codemod_integration_test;
 pub(crate) mod codemods;

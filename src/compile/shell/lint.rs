@@ -21,9 +21,9 @@ use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 
-use super::registry::{ShellScriptDef, all_scripts};
 use super::FRAGMENT_MARKER;
 use super::bindings::is_shell_var_name;
+use super::registry::{ShellScriptDef, all_scripts};
 
 /// One shellcheck JSON finding.
 #[derive(Debug, Deserialize)]
@@ -127,7 +127,10 @@ fn every_declared_variable_name_is_a_valid_shell_name() {
             }
         }
     }
-    assert!(problems.is_empty(), "invalid shell variable names:\n{problems}");
+    assert!(
+        problems.is_empty(),
+        "invalid shell variable names:\n{problems}"
+    );
 }
 
 #[test]
@@ -146,6 +149,33 @@ fn every_phase_is_also_a_declared_fragment() {
         }
     }
     assert!(problems.is_empty(), "phase declaration drift:\n{problems}");
+}
+
+#[test]
+fn every_dynamic_fragment_use_is_declared() {
+    let mut problems = String::new();
+    for def in all_scripts() {
+        for (fragment, variables) in def.fragment_uses {
+            if !def.fragments.contains(fragment) {
+                problems.push_str(&format!(
+                    "  {} declares uses for unknown fragment `{fragment}` ({}:{})\n",
+                    def.name, def.file, def.line
+                ));
+            }
+            for variable in *variables {
+                if !def.bindings.contains(variable) && !def.externals.contains(variable) {
+                    problems.push_str(&format!(
+                        "  {} fragment `{fragment}` uses undeclared variable `{variable}` ({}:{})\n",
+                        def.name, def.file, def.line
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "dynamic fragment variable declaration drift:\n{problems}"
+    );
 }
 
 #[test]
@@ -214,7 +244,10 @@ fn every_declared_fragment_has_a_marker_and_vice_versa() {
             }
         }
     }
-    assert!(problems.is_empty(), "fragment declaration drift:\n{problems}");
+    assert!(
+        problems.is_empty(),
+        "fragment declaration drift:\n{problems}"
+    );
 }
 
 #[test]
@@ -324,9 +357,7 @@ mod tests {
         // `$NF` belongs to awk, not to the shell — nothing expands inside
         // '…'. Treating it as a shell variable would force the author to
         // rename another language's variable to satisfy this checker.
-        let vars = referenced_vars(
-            r#"awk -F/ '{ if (NF>1) print $NF }' <<< "$COLLECTION""#,
-        );
+        let vars = referenced_vars(r#"awk -F/ '{ if (NF>1) print $NF }' <<< "$COLLECTION""#);
         assert_eq!(vars, vec!["COLLECTION"]);
     }
 
@@ -340,7 +371,10 @@ mod tests {
     fn assigned_in_body_recognises_the_common_forms() {
         assert!(assigned_in_body("PROXY_DIR=$(mktemp -d)", "PROXY_DIR"));
         assert!(assigned_in_body("export PROXY_DIR=/tmp", "PROXY_DIR"));
-        assert!(assigned_in_body("for PROXY_HOST in $HOSTS; do", "PROXY_HOST"));
+        assert!(assigned_in_body(
+            "for PROXY_HOST in $HOSTS; do",
+            "PROXY_HOST"
+        ));
         assert!(assigned_in_body("set -eu; UMASK=1", "UMASK"));
         assert!(!assigned_in_body("echo \"$PROXY_DIR\"", "PROXY_DIR"));
     }

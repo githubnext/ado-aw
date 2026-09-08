@@ -249,14 +249,15 @@ const DOCUMENT_DELIMITER: &str = "ADO_AW_SHELL_DOC_EOF";
 /// Refuse a value that names a credential. See [`SECRET_NAMES`].
 #[track_caller]
 fn assert_not_secret(value: &str) {
-    for secret in SECRET_NAMES {
-        assert!(
-            !value.contains(secret),
-            "a credential must not reach the generated prelude: {value:?} \
-             mentions {secret}. Pass it through `with_env` / `EnvValue::secret` \
-             so Azure DevOps masks it."
-        );
-    }
+    assert!(
+        !contains_secret_name(value),
+        "a credential must not reach the generated prelude: {value:?}. \
+         Pass it through `with_env` / `EnvValue::secret` so Azure DevOps masks it."
+    );
+}
+
+pub(crate) fn contains_secret_name(value: &str) -> bool {
+    SECRET_NAMES.iter().any(|secret| value.contains(secret))
 }
 
 /// POSIX single-quoting: the only escape available inside `'…'` is to close

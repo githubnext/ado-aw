@@ -76,6 +76,11 @@ pub struct ShellScriptDef {
     /// Every entry must also appear in [`fragments`](Self::fragments); a test
     /// enforces it.
     pub phases: &'static [(&'static str, &'static ShellScriptDef)],
+    /// Variables consumed by dynamically generated fragments.
+    ///
+    /// The lint source marks these as used without adding fake reads to the
+    /// emitted runtime script.
+    pub fragment_uses: &'static [(&'static str, &'static [&'static str])],
     /// The script itself, verbatim, exactly as it will run.
     pub body: &'static str,
     /// Source file, for the export provenance header.
@@ -117,6 +122,13 @@ impl ShellScriptDef {
             out.push_str(name);
             out.push_str("='ado-aw-lint-stub'\n");
         }
+        let mut fragment_uses = Vec::new();
+        self.collect_fragment_uses(&mut fragment_uses);
+        for name in fragment_uses {
+            out.push_str(": \"${");
+            out.push_str(name);
+            out.push_str("}\"\n");
+        }
         out.push_str("# --- end lint stubs ---\n");
 
         let body = super::dedent(body.trim_start_matches('\n'));
@@ -136,6 +148,19 @@ impl ShellScriptDef {
     pub fn export_file_name(&self) -> String {
         format!("{}.sh", self.name.replace("::", "__"))
     }
+
+    fn collect_fragment_uses(&self, out: &mut Vec<&'static str>) {
+        for (_, variables) in self.fragment_uses {
+            for variable in *variables {
+                if !out.contains(variable) {
+                    out.push(variable);
+                }
+            }
+        }
+        for (_, phase) in self.phases {
+            phase.collect_fragment_uses(out);
+        }
+    }
 }
 
 inventory::collect!(ShellScriptDef);
@@ -146,7 +171,9 @@ inventory::collect!(ShellScriptDef);
 /// document that it reads it — but the lint must not stub-assign it.
 /// Shellcheck already treats them as set, and assigning some of them is
 /// itself a finding (`PATH=…` trips SC2123).
-const SHELL_PROVIDED: &[&str] = &["PATH", "HOME", "TMPDIR", "PWD", "IFS", "SHELL", "USER", "TERM"];
+const SHELL_PROVIDED: &[&str] = &[
+    "PATH", "HOME", "TMPDIR", "PWD", "IFS", "SHELL", "USER", "TERM",
+];
 
 /// Every registered script, in a stable order (sorted by [`ShellScriptDef::name`]).
 ///
@@ -219,6 +246,35 @@ macro_rules! shell_script {
                 externals: [$($external),*],
                 fragments: [$($fragment),*],
                 phases: [],
+                fragment_uses: [],
+                body: $body,
+            }
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $ident:ident {
+            interpreter: $interpreter:ident,
+            bindings: [$($binding:ident),* $(,)?],
+            externals: [$($external:ident),* $(,)?],
+            fragments: [$($fragment:ident),* $(,)?],
+            fragment_uses: [
+                $($used_fragment:ident => [$($used_variable:ident),* $(,)?]),* $(,)?
+            ],
+            body: $body:expr $(,)?
+        }
+    ) => {
+        $crate::shell_script! {
+            $(#[$meta])*
+            $ident {
+                interpreter: $interpreter,
+                bindings: [$($binding),*],
+                externals: [$($external),*],
+                fragments: [$($fragment),*],
+                phases: [],
+                fragment_uses: [
+                    $($used_fragment => [$($used_variable),*]),*
+                ],
                 body: $body,
             }
         }
@@ -234,6 +290,33 @@ macro_rules! shell_script {
             body: $body:expr $(,)?
         }
     ) => {
+        $crate::shell_script! {
+            $(#[$meta])*
+            $ident {
+                interpreter: $interpreter,
+                bindings: [$($binding),*],
+                externals: [$($external),*],
+                fragments: [$($fragment),*],
+                phases: [$($phase = $phase_def),*],
+                fragment_uses: [],
+                body: $body,
+            }
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $ident:ident {
+            interpreter: $interpreter:ident,
+            bindings: [$($binding:ident),* $(,)?],
+            externals: [$($external:ident),* $(,)?],
+            fragments: [$($fragment:ident),* $(,)?],
+            phases: [$($phase:ident = $phase_def:path),* $(,)?],
+            fragment_uses: [
+                $($used_fragment:ident => [$($used_variable:ident),* $(,)?]),* $(,)?
+            ],
+            body: $body:expr $(,)?
+        }
+    ) => {
         $(#[$meta])*
         #[allow(dead_code)]
         pub const $ident: $crate::compile::shell::ShellScriptDef =
@@ -244,6 +327,14 @@ macro_rules! shell_script {
                 externals: &[$(stringify!($external)),*],
                 fragments: &[$(stringify!($fragment)),*],
                 phases: &[$((stringify!($phase), &$phase_def)),*],
+                fragment_uses: &[
+                    $(
+                        (
+                            stringify!($used_fragment),
+                            &[$(stringify!($used_variable)),*],
+                        )
+                    ),*
+                ],
                 body: $body,
                 file: file!(),
                 line: line!(),
@@ -311,7 +402,10 @@ echo "$TARGET $FROM_ENV $ORG"
     #[test]
     fn lint_source_stubs_every_declared_variable() {
         let source = REGISTRY_FIXTURE.lint_source();
-        assert!(source.starts_with("#!/bin/sh\n"), "shebang stays first: {source}");
+        assert!(
+            source.starts_with("#!/bin/sh\n"),
+            "shebang stays first: {source}"
+        );
         assert!(source.contains("TARGET='ado-aw-lint-stub'"));
         // An external is stubbed too: it genuinely arrives from outside, so
         // SC2154 on it would be noise.
@@ -324,12 +418,20 @@ echo "$TARGET $FROM_ENV $ORG"
         assert!(source.contains("# ado-aw:fragment resolve_org"));
         // Nothing undeclared is invented.
         assert!(!source.contains("UNDECLARED='ado-aw-lint-stub'"));
-        assert!(source.trim_end().ends_with("echo \"$TARGET $FROM_ENV $ORG\""));
+        assert!(
+            source
+                .trim_end()
+                .ends_with("echo \"$TARGET $FROM_ENV $ORG\"")
+        );
     }
 
     #[test]
     fn export_file_names_are_path_safe() {
-        assert!(REGISTRY_FIXTURE.export_file_name().ends_with("__REGISTRY_FIXTURE.sh"));
+        assert!(
+            REGISTRY_FIXTURE
+                .export_file_name()
+                .ends_with("__REGISTRY_FIXTURE.sh")
+        );
         assert!(!REGISTRY_FIXTURE.export_file_name().contains(':'));
     }
 

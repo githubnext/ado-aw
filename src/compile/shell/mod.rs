@@ -477,6 +477,7 @@ echo hello
             externals,
             fragments,
             phases: &[],
+            fragment_uses: &[],
             body,
             file: file!(),
             line: line!(),
