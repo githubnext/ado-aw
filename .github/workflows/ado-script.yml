@@ -6,6 +6,9 @@ on:
       - "scripts/ado-script/**"
       - "src/compile/filter_ir.rs"
       - "src/compile/extensions/ado_script.rs"
+      - "src/compile/agentic_pipeline.rs"
+      - "src/compile/container_invocation.rs"
+      - "src/compile/mcpg.rs"
       - "src/ado_proxy/**"
       - "src/main.rs"
       - "Cargo.toml"
@@ -22,6 +25,9 @@ on:
       - "scripts/ado-script/**"
       - "src/compile/filter_ir.rs"
       - "src/compile/extensions/ado_script.rs"
+      - "src/compile/agentic_pipeline.rs"
+      - "src/compile/container_invocation.rs"
+      - "src/compile/mcpg.rs"
       - "src/ado_proxy/**"
       - "src/main.rs"
       - "Cargo.toml"
@@ -79,6 +85,9 @@ jobs:
 
       - name: Smoke-test bundles
         working-directory: scripts/ado-script
+        env:
+          ADO_AW_TEST_DOCKER: "1"
+          ADO_AW_TEST_AWF: "1"
         run: npm run test:smoke
 
       - name: E2E gate test

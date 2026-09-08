@@ -158,6 +158,21 @@ fn copilot_byom_exclude_keys(is_copilot: bool, engine_config: &EngineConfig) -> 
     keys
 }
 
+fn awf_exclude_keys(
+    front_matter: &FrontMatter,
+    is_copilot: bool,
+    engine_config: &EngineConfig,
+) -> Result<Vec<String>> {
+    let mut keys = copilot_byom_exclude_keys(is_copilot, engine_config);
+    for (server_name, _, _) in front_matter.azure_authenticated_mcp_servers() {
+        keys.push(super::mcpg::azure_auth_client_variable(server_name)?.into_inner());
+        keys.push(super::mcpg::azure_auth_tenant_variable(server_name)?.into_inner());
+    }
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
+}
+
 /// Shared back-end for the three IR-driven target compilers
 /// (standalone / stage / job). Performs all the heavy lifting:
 /// validates the front matter, computes every scalar, fans out
@@ -248,7 +263,7 @@ fn fanout_extension_declarations(
 
 /// Bundle of engine-derived values computed once per pipeline compile:
 /// prompt invocations, install steps, composed env blocks, and the
-/// Copilot BYOM/BYOK exclusion keys for both the Agent and Detection
+/// provider/MCP identity exclusion keys for both the Agent and Detection
 /// engines. Split out of [`build_pipeline_context`] purely to keep that
 /// function's cognitive complexity manageable — behaviour is unchanged.
 struct EngineSetup {
@@ -309,10 +324,10 @@ fn build_engine_setup(
     // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
     // key is never treated as a Copilot provider credential.
     let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
-    let byom_exclude_keys = copilot_byom_exclude_keys(is_copilot, &front_matter.engine);
+    let byom_exclude_keys = awf_exclude_keys(front_matter, is_copilot, &front_matter.engine)?;
     let detection_is_copilot = matches!(detection_engine, crate::engine::Engine::Copilot);
     let detection_byom_exclude_keys =
-        copilot_byom_exclude_keys(detection_is_copilot, detection_engine_config);
+        awf_exclude_keys(front_matter, detection_is_copilot, detection_engine_config)?;
     let detection_engine_env = if detection_is_copilot {
         crate::engine::copilot_detection_env(detection_engine_config)?
     } else {
@@ -850,8 +865,8 @@ pub(crate) struct StandaloneCtx {
     /// `{{#runtime-import ...}}` marker).
     pub(crate) agent_content_value: String,
     pub(crate) debug_pipeline: bool,
-    /// Actual provider credential env keys present to pass to AWF `--exclude-env`;
-    /// empty for non-BYOM. AWF's API proxy itself is always enabled.
+    /// Provider credential and internal MCP identity env keys excluded from AWF.
+    /// AWF's API proxy itself is always enabled.
     pub(crate) byom_exclude_keys: Vec<String>,
     pub(crate) detection_byom_exclude_keys: Vec<String>,
     /// Validated inherited/overridden custom env for Detection.
@@ -4389,11 +4404,13 @@ fn awf_image_flags(supply_chain: Option<&SupplyChainConfig>) -> String {
     block
 }
 
-/// Build AWF environment-exclusion flag lines for a Copilot BYOM/BYOK run.
+/// Build AWF environment-exclusion flag lines for provider credentials and
+/// compiler-owned MCP identity variables.
 ///
-/// `exclude_keys` are the provider credential env keys present in `engine.env`
-/// (canonical uppercase `COPILOT_PROVIDER_*` names). AWF 0.27.32+ always enables
-/// its API proxy, so only one `--exclude-env <key>` line is needed per key.
+/// `exclude_keys` includes provider credential env keys present in `engine.env`
+/// and the generated client/tenant ID keys for Azure-authenticated MCPs.
+/// AWF 0.27.32+ always enables its API proxy, so only one `--exclude-env <key>`
+/// line is needed per key.
 ///
 /// How the credential reaches the provider without reaching the agent: AWF's
 /// api-proxy sidecar reads the *real*
@@ -4429,8 +4446,7 @@ shell_script! {
     /// - `topology_attach` — one `--topology-attach` line per trusted peer
     ///   (MCPG always, ado-proxy when the policy engine is enabled)
     /// - `image_flags` — `--image-tag` plus optional `--image-registry`
-    /// - `exclude_env` — one `--exclude-env <key>` line per BYOM/BYOK secret
-    ///   AWF's api-proxy sidecar strips out of the agent env
+    /// - `exclude_env` — provider credentials and internal MCP identity keys
     /// - `awf_mounts` — the compiler-supplied chain of `--mount "…"` args
     /// - `routed_engine_run` — the single-quoted `NO_PROXY` prefix + engine
     ///   command that AWF invokes inside the sandbox
@@ -5044,7 +5060,10 @@ AUTH_DIR="$AUTH_ROOT/$RUNTIME_ID"
 docker rm -f "$REFRESH_CONTAINER" >/dev/null 2>&1 || true
 rm -rf "$AUTH_DIR"
 mkdir -p "$AUTH_DIR/token.d"
-chmod 700 "$AUTH_ROOT" "$AUTH_DIR" "$AUTH_DIR/token.d"
+chmod 700 "$AUTH_ROOT" "$AUTH_DIR"
+# Only token.d is mounted into the MCP container, whose UID may differ from
+# the runner's. Private parents protect the host path, not the mounted view.
+chmod 755 "$AUTH_DIR/token.d"
 MATERIAL_FIFO="$AUTH_DIR/material"
 mkfifo -m 600 "$MATERIAL_FIFO"
 
@@ -7719,6 +7738,36 @@ safe-outputs:
     }
 
     #[test]
+    fn azure_auth_identity_exclusions_are_independent_of_the_engine() {
+        let fm = azure_auth_fm();
+        let client = super::super::mcpg::azure_auth_client_variable("kusto").unwrap();
+        let tenant = super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap();
+        for is_copilot in [true, false] {
+            let keys = awf_exclude_keys(&fm, is_copilot, &fm.engine).unwrap();
+            assert_eq!(keys, vec![client.as_str(), tenant.as_str()]);
+        }
+        let plain = test_front_matter("name: t\ndescription: d\n");
+        assert!(awf_exclude_keys(&plain, true, &plain.engine).unwrap().is_empty());
+    }
+
+    #[test]
+    fn azure_auth_identity_exclusions_preserve_provider_credentials() {
+        let fm = azure_auth_fm();
+        let provider = test_front_matter(
+            "name: t\ndescription: d\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_API_KEY: fake-key\n",
+        );
+        let keys = awf_exclude_keys(&fm, true, &provider.engine).unwrap();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&"COPILOT_PROVIDER_API_KEY".to_string()));
+        assert!(keys.contains(
+            &super::super::mcpg::azure_auth_client_variable("kusto").unwrap().into_inner()
+        ));
+        assert!(keys.contains(
+            &super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap().into_inner()
+        ));
+    }
+
+    #[test]
     fn azure_auth_refresher_uses_typed_azure_cli_v3_and_stdin_custody() {
         let steps = start_azure_wif_refresh_steps(&azure_auth_fm()).unwrap();
         let [Step::Task(task)] = steps.as_slice() else {
@@ -7753,6 +7802,8 @@ safe-outputs:
         assert!(!script.contains("-e SYSTEM_ACCESSTOKEN"));
         assert!(!script.contains("--token"));
         assert!(script.contains("AGENT_TEMP='$(Agent.TempDirectory)'"));
+        assert!(script.contains("chmod 700 \"$AUTH_ROOT\" \"$AUTH_DIR\""));
+        assert!(script.contains("chmod 755 \"$AUTH_DIR/token.d\""));
     }
 
     #[test]

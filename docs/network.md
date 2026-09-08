@@ -151,7 +151,17 @@ wrapper described above:
   MCP container, so atomic file replacement is visible without exposing
   sidecar status or material channels.
 - The AWF agent receives no credential mount, no identity environment
-  variables, and no route to the refresher container.
+  variables from `azure-auth`, and no route to the refresher container. The
+  compiler excludes its internal client/tenant ID variables from both Agent
+  and Detection environment passthrough.
+
+The host auth root and per-server directory use mode `0700`. Only the
+token-only directory is `0755`, with assertion files `0644`, so an MCP
+container running under a different UID can read its read-only mount.
+Unrelated unprivileged host users cannot traverse the private parent
+directories. These permissions do not isolate processes sharing the runner
+UID or host root; agent isolation depends on keeping the auth directory out
+of AWF's filesystem mounts, including its workspace and `/host` aliases.
 
 The credential directory must not move to runner `/tmp`: AWF mounts runner
 `/tmp` into the agent chroot, making files there agent-readable. See

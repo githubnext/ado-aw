@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 
+use crate::secure::ContainerAbsolutePath;
+
 use super::shell::bindings::{contains_secret_name, is_shell_var_name, single_quote};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +143,7 @@ impl DockerMountMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerMount {
     source: ShellWord,
-    destination: String,
+    destination: ContainerAbsolutePath,
     mode: DockerMountMode,
 }
 
@@ -159,11 +161,10 @@ impl DockerMount {
         destination: impl Into<String>,
         mode: DockerMountMode,
     ) -> Result<Self> {
-        let destination = destination.into();
-        if source.is_empty() || !destination.starts_with('/') {
-            bail!("container mounts require a non-empty source and absolute destination");
+        let destination = ContainerAbsolutePath::parse(destination)?;
+        if source.is_empty() {
+            bail!("container mounts require a non-empty source");
         }
-        validate_literal(&destination)?;
         Ok(Self {
             source,
             destination,
@@ -181,18 +182,17 @@ impl DockerMount {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerTmpfs {
-    destination: String,
+    destination: ContainerAbsolutePath,
     options: String,
 }
 
 impl DockerTmpfs {
     pub fn new(destination: impl Into<String>, options: impl Into<String>) -> Result<Self> {
-        let destination = destination.into();
+        let destination = ContainerAbsolutePath::parse(destination)?;
         let options = options.into();
-        if !destination.starts_with('/') || options.is_empty() {
-            bail!("container tmpfs requires an absolute destination and non-empty options");
+        if options.is_empty() || options.contains(':') {
+            bail!("container tmpfs options must be non-empty and must not contain `:`");
         }
-        validate_literal(&destination)?;
         validate_literal(&options)?;
         Ok(Self {
             destination,
@@ -482,6 +482,36 @@ mod tests {
                 DockerMount::read_write(ShellWord::literal("/two").unwrap(), "/target").unwrap(),
             );
         assert!(duplicate_mount.render_bash().is_err());
+    }
+
+    #[test]
+    fn mount_destinations_use_the_validated_container_path_contract() {
+        for path in [
+            "/",
+            "relative",
+            "/token:rw",
+            "/token:ro:/other",
+            "/var/../token",
+            "/var//token",
+            "/token/",
+            "/token\tfile",
+            "/token;command",
+        ] {
+            assert!(
+                DockerMount::read_only(ShellWord::literal("/source").unwrap(), path).is_err(),
+                "mount accepted {path:?}"
+            );
+            assert!(
+                DockerTmpfs::new(path, "rw,nosuid").is_err(),
+                "tmpfs accepted {path:?}"
+            );
+        }
+        for options in ["", "rw:ro", "rw\nnoexec", "rw\0"] {
+            assert!(
+                DockerTmpfs::new("/tmp", options).is_err(),
+                "tmpfs accepted options {options:?}"
+            );
+        }
     }
 
     #[test]

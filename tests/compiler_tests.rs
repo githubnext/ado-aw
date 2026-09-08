@@ -2435,6 +2435,39 @@ fn test_mcpg_container_azure_auth_emits_refresher_and_rotating_token_mount() {
     assert!(compiled.contains("/token.d:/var/run/custom-azure:ro"));
     assert!(compiled.contains("MCPG_REQUIRED_ENV_NAMES"));
     assert!(compiled.contains("Stop Azure auth refresher (kusto)"));
+    let pipeline: serde_yaml::Value = serde_yaml::from_str(&compiled).unwrap();
+    let jobs = pipeline["jobs"].as_sequence().unwrap();
+    let refresh = jobs
+        .iter()
+        .flat_map(|job| job["steps"].as_sequence().unwrap())
+        .find(|step| step["displayName"].as_str() == Some("Start Azure auth refresher (kusto)"))
+        .unwrap();
+    let refresh_script = refresh["inputs"]["inlineScript"].as_str().unwrap();
+    let identity_keys: Vec<_> = refresh_script
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("CLIENT_VARIABLE='")
+                .or_else(|| line.strip_prefix("TENANT_VARIABLE='"))
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .collect();
+    assert_eq!(identity_keys.len(), 2);
+    for name in ["Agent", "Detection"] {
+        let job = jobs.iter().find(|job| job["job"].as_str() == Some(name)).unwrap();
+        let run = job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["bash"].as_str())
+            .find(|script| script.contains("AWF_ARGS+=(--skip-pull --env-all)"))
+            .unwrap();
+        for key in &identity_keys {
+            assert!(
+                run.contains(&format!("--exclude-env {key}")),
+                "{name} must exclude internal identity {key}"
+            );
+        }
+    }
     assert!(
         !compiled.contains("initialIdToken: \""),
         "generated YAML must not contain a federated assertion"
