@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.52.0](https://github.com/githubnext/ado-aw/compare/v0.51.0...v0.52.0) (2026-09-08)
+
+
+### Features
+
+* **schedule:** support weekday and raw cron schedules ([#2098](https://github.com/githubnext/ado-aw/issues/2098)) ([61b72dc](https://github.com/githubnext/ado-aw/commit/61b72dc04d3023f3e6a2e27e832e44fa6f4f35ec))
+
 ## [0.51.0](https://github.com/githubnext/ado-aw/compare/v0.50.0...v0.51.0) (2026-09-02)
 
 
