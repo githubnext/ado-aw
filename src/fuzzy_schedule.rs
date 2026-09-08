@@ -123,14 +123,14 @@ pub enum DayFilter {
 }
 
 impl DayFilter {
-    fn cron_field(self) -> &'static str {
+    fn cron_field(self) -> Result<&'static str> {
         match self {
-            DayFilter::EveryDay => "*",
+            DayFilter::EveryDay => Ok("*"),
             DayFilter::Weekdays {
                 utc_offset_minutes: 0,
-            } => "1-5",
+            } => Ok("1-5"),
             DayFilter::Weekdays { .. } => {
-                unreachable!("timezone-aware weekday filters require a generated UTC time")
+                bail!("timezone-aware weekday filters require a schedule with a generated UTC time")
             }
         }
     }
@@ -144,16 +144,16 @@ impl DayFilter {
         }
     }
 
-    fn cron_field_for_utc_time(self, utc_minutes: u32) -> &'static str {
+    fn cron_field_for_utc_time(self, utc_minutes: u32) -> Result<&'static str> {
         match self {
-            DayFilter::EveryDay => "*",
+            DayFilter::EveryDay => Ok("*"),
             DayFilter::Weekdays { utc_offset_minutes } => {
                 let local_minutes = utc_minutes as i32 + utc_offset_minutes;
                 match local_minutes.div_euclid(1440) {
-                    -1 => "2-6",
-                    0 => "1-5",
-                    1 => "0-4",
-                    shift => unreachable!("UTC offset produced unsupported day shift {shift}"),
+                    -1 => Ok("2-6"),
+                    0 => Ok("1-5"),
+                    1 => Ok("0-4"),
+                    shift => bail!("UTC offset produced unsupported day shift {shift}"),
                 }
             }
         }
@@ -351,7 +351,7 @@ pub fn schedule_expression_to_cron(input: &str, workflow_id: &str) -> Result<Str
     }
 
     let schedule = parse_fuzzy_schedule(input)?;
-    Ok(generate_cron(&schedule, workflow_id))
+    generate_cron(&schedule, workflow_id)
 }
 
 fn looks_like_raw_cron(input: &str) -> bool {
@@ -934,21 +934,21 @@ fn parse_time_with_offset(tokens: &[&str]) -> Result<(TimeSpec, i32)> {
 }
 
 /// Generate a cron expression from a fuzzy schedule
-pub fn generate_cron(schedule: &FuzzySchedule, workflow_id: &str) -> String {
+pub fn generate_cron(schedule: &FuzzySchedule, workflow_id: &str) -> Result<String> {
     let hash = fnv1a_hash(workflow_id);
 
-    match schedule {
+    let cron = match schedule {
         FuzzySchedule::Daily { constraint, days } => {
-            generate_daily_cron(hash, constraint, *days)
+            return generate_daily_cron(hash, constraint, *days);
         }
         FuzzySchedule::Weekly { day, constraint } => generate_weekly_cron(hash, *day, constraint),
         FuzzySchedule::Hourly { days } => {
             let minute = hash % 60;
-            format!("{} * * * {}", minute, days.cron_field())
+            format!("{} * * * {}", minute, days.cron_field()?)
         }
         FuzzySchedule::EveryHours { interval, days } => {
             let minute = hash % 60;
-            format!("{} */{} * * {}", minute, interval, days.cron_field())
+            format!("{} */{} * * {}", minute, interval, days.cron_field()?)
         }
         FuzzySchedule::EveryMinutes(n) => {
             // Fixed intervals, not scattered
@@ -969,10 +969,11 @@ pub fn generate_cron(schedule: &FuzzySchedule, workflow_id: &str) -> String {
             let hour = (hash / 60) % 24;
             format!("{} {} */21 * *", minute, hour)
         }
-    }
+    };
+    Ok(cron)
 }
 
-fn generate_daily_cron(hash: u32, constraint: &TimeConstraint, days: DayFilter) -> String {
+fn generate_daily_cron(hash: u32, constraint: &TimeConstraint, days: DayFilter) -> Result<String> {
     let total_minutes = match constraint {
         TimeConstraint::None => {
             // Scatter across full 24 hours
@@ -1005,12 +1006,12 @@ fn generate_daily_cron(hash: u32, constraint: &TimeConstraint, days: DayFilter) 
     };
     let hour = total_minutes / 60;
     let minute = total_minutes % 60;
-    format!(
+    Ok(format!(
         "{} {} * * {}",
         minute,
         hour,
-        days.cron_field_for_utc_time(total_minutes)
-    )
+        days.cron_field_for_utc_time(total_minutes)?
+    ))
 }
 
 fn generate_weekly_cron(hash: u32, day: Option<Weekday>, constraint: &TimeConstraint) -> String {
@@ -1395,7 +1396,7 @@ mod tests {
         // Cron must be "M * * * *" — every hour at a hash-scattered minute.
         // A regression that emits "0 * * * *" (fixed minute) or changes the
         // field count would silently break the scattering contract.
-        let cron = generate_cron(&schedule, "test/workflow");
+        let cron = generate_cron(&schedule, "test/workflow").unwrap();
         let parts: Vec<&str> = cron.split_whitespace().collect();
         assert_eq!(parts.len(), 5, "Hourly cron must have 5 fields");
         let minute: u32 = parts[0].parse().expect("minute field must be a number");
@@ -1407,7 +1408,7 @@ mod tests {
 
         let weekday_schedule = parse_fuzzy_schedule("hourly on weekdays").unwrap();
         assert_eq!(
-            generate_cron(&weekday_schedule, "test/workflow"),
+            generate_cron(&weekday_schedule, "test/workflow").unwrap(),
             "47 * * * 1-5"
         );
     }
@@ -1448,7 +1449,7 @@ mod tests {
             }
         );
         assert_eq!(
-            generate_cron(&weekday_schedule, "test/workflow"),
+            generate_cron(&weekday_schedule, "test/workflow").unwrap(),
             "47 */2 * * 1-5"
         );
     }
@@ -1469,13 +1470,22 @@ mod tests {
     }
 
     #[test]
+    fn test_rejects_duplicate_weekdays_for_hour_interval() {
+        let error = parse_fuzzy_schedule("every 2h on weekdays on weekdays").unwrap_err();
+        assert!(
+            error.to_string().contains("may only be specified once"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn test_parse_special_periods() {
         // Verify parse and cron structure for bi-weekly and tri-weekly schedules.
         // The key assertion is the day-of-month step (*/14 / */21) — a regression
         // that swaps these or omits the step would silently change schedule frequency.
         let bi = parse_fuzzy_schedule("bi-weekly").unwrap();
         assert!(matches!(bi, FuzzySchedule::BiWeekly));
-        let bi_cron = generate_cron(&bi, "test/workflow");
+        let bi_cron = generate_cron(&bi, "test/workflow").unwrap();
         let bi_parts: Vec<&str> = bi_cron.split_whitespace().collect();
         assert_eq!(bi_parts.len(), 5, "Bi-weekly cron must have 5 fields");
         let bi_min: u32 = bi_parts[0].parse().expect("minute field must be a number");
@@ -1488,7 +1498,7 @@ mod tests {
 
         let tri = parse_fuzzy_schedule("tri-weekly").unwrap();
         assert!(matches!(tri, FuzzySchedule::TriWeekly));
-        let tri_cron = generate_cron(&tri, "test/workflow");
+        let tri_cron = generate_cron(&tri, "test/workflow").unwrap();
         let tri_parts: Vec<&str> = tri_cron.split_whitespace().collect();
         assert_eq!(tri_parts.len(), 5, "Tri-weekly cron must have 5 fields");
         let tri_min: u32 = tri_parts[0].parse().expect("minute field must be a number");
@@ -1508,13 +1518,13 @@ mod tests {
         };
         // FNV-1a("test/workflow") = 718355327; total_minutes = 718355327 % 1440 = 1247
         // → hour = 20, minute = 47
-        let cron1 = generate_cron(&schedule, "test/workflow");
+        let cron1 = generate_cron(&schedule, "test/workflow").unwrap();
         assert_eq!(
             cron1, "47 20 * * *",
             "Cron for test/workflow should be deterministically pinned"
         );
 
-        let cron3 = generate_cron(&schedule, "other/workflow");
+        let cron3 = generate_cron(&schedule, "other/workflow").unwrap();
         assert_ne!(
             cron1, cron3,
             "Different workflow IDs should produce different crons"
@@ -1529,7 +1539,7 @@ mod tests {
         };
         // FNV-1a("test") = 2949673445; total_minutes = 2949673445 % 1440 = 485
         // → minute = 5, hour = 8
-        let cron = generate_cron(&schedule, "test");
+        let cron = generate_cron(&schedule, "test").unwrap();
         let parts: Vec<&str> = cron.split_whitespace().collect();
         assert_eq!(parts.len(), 5, "Cron should have 5 fields");
 
@@ -1565,7 +1575,7 @@ mod tests {
         // scattered time must NOT be pinned to the specified hour (14).
         // The cron expression must be deterministic for a given workflow key.
         let schedule = parse_fuzzy_schedule("daily between 14:00 and 14:00").unwrap();
-        let cron = generate_cron(&schedule, "test/agent");
+        let cron = generate_cron(&schedule, "test/agent").unwrap();
         // FNV-1a("test/agent")=196813323; offset=196813323%1440=1323;
         // scattered=(840+1323)%1440=723 → hour=12, min=3
         assert_eq!(
@@ -1580,7 +1590,7 @@ mod tests {
         // scattered time must NOT be pinned to the specified hour (09).
         // The cron expression must be deterministic for a given workflow key.
         let schedule = parse_fuzzy_schedule("weekly on monday between 09:00 and 09:00").unwrap();
-        let cron = generate_cron(&schedule, "test/agent");
+        let cron = generate_cron(&schedule, "test/agent").unwrap();
         // FNV-1a("test/agent")=196813323; offset=196813323%1440=1323;
         // scattered=(540+1323)%1440=423 → hour=7, min=3; day-of-week=1 (Monday)
         assert_eq!(
@@ -1637,6 +1647,8 @@ mod tests {
             ("0 9 * * Funday", "unsupported value"),
             ("Noon 9 * * *", "unsupported value"),
             ("$(MINUTE) 9 * * *", "unsupported characters"),
+            ("*/2/3 9 * * *", "more than one step separator"),
+            ("0,,15 9 * * *", "empty list item"),
         ];
 
         for (cron, expected) in cases {

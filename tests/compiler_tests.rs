@@ -3761,6 +3761,51 @@ Run on multiple schedules.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn test_schedule_list_rejects_entry_without_cron() {
+    let source = r#"---
+name: "Invalid Schedule List Agent"
+description: "Agent with an invalid schedule list entry"
+on:
+  schedule:
+    - cron: daily
+    - branches:
+        - release/*
+---
+
+## Invalid Schedule List Agent
+"#;
+
+    let (ok, _, stderr) = compile_inline_source("invalid-schedule-list", source);
+    assert!(!ok, "Compiler should reject a schedule entry without cron");
+    assert!(
+        stderr.contains("Failed to parse YAML front matter"),
+        "Compiler should report invalid schedule front matter: {stderr}"
+    );
+}
+
+#[test]
+fn test_schedule_options_rejects_unknown_timezone() {
+    let source = r#"---
+name: "Invalid Schedule Options Agent"
+description: "Agent with an unsupported schedule option"
+on:
+  schedule:
+    run: daily around 09:00
+    timezone: America/Los_Angeles
+---
+
+## Invalid Schedule Options Agent
+"#;
+
+    let (ok, _, stderr) = compile_inline_source("invalid-schedule-options", source);
+    assert!(!ok, "Compiler should reject unknown schedule options");
+    assert!(
+        stderr.contains("Failed to parse YAML front matter"),
+        "Compiler should report invalid schedule front matter: {stderr}"
+    );
+}
+
 /// Test that network.allowed with a bare '*' fails compilation
 #[test]
 fn test_network_allow_bare_wildcard_fails() {

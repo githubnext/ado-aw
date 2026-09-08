@@ -224,6 +224,7 @@ pub struct ScheduleEntryRef<'a> {
 }
 
 #[derive(Debug, Deserialize, Clone, SanitizeConfig)]
+#[serde(deny_unknown_fields)]
 pub struct ScheduleOptions {
     /// Fuzzy schedule expression (e.g., "daily around 14:00")
     pub run: String,
