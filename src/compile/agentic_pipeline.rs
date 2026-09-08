@@ -4966,6 +4966,12 @@ shell_script! {
     /// sidecar only through a one-shot FIFO material document. The sidecar
     /// retains the request credential in memory and writes only rotating
     /// federated assertions to the private Agent.TempDirectory mount.
+    ///
+    /// This deliberately remains one authenticated IR task: AzureCLI scopes
+    /// `idToken` and the service-principal metadata to its script process.
+    /// Splitting validation, FIFO creation, container startup, material
+    /// transfer, and readiness checking across pipeline steps would require
+    /// persisting or exporting those credentials across the task boundary.
     START_AZURE_WIF_REFRESH {
         interpreter: Bash,
         bindings: [
@@ -5106,7 +5112,7 @@ fn start_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Result<Vec<Step>
             .bind_text("CLIENT_VARIABLE", client_variable.as_str())
             .bind_text("TENANT_VARIABLE", tenant_variable.as_str())
             .render();
-        let mut task = AzureCliV3::new(
+        let task = AzureCliV3::new(
             AzureCliV3Connection::AzureRm(auth.service_connection.as_str().to_string()),
             ScriptType::Bash,
             ScriptLocation::Inline(script),
@@ -5114,11 +5120,8 @@ fn start_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Result<Vec<Step>
         .add_spn_to_environment(true)
         .visible_az_login(false)
         .with_display_name(format!("Start Azure auth refresher ({server_name})"))
-        .into_step();
-        task.env.insert(
-            "SYSTEM_ACCESSTOKEN".to_string(),
-            EnvValue::secret("System.AccessToken"),
-        );
+        .into_step()
+        .with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
         steps.push(Step::Task(task));
     }
     Ok(steps)
