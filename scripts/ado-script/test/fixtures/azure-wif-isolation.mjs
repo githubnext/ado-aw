@@ -1,10 +1,10 @@
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { runRefresher } from "./refresher.mjs";
 
 async function main() {
-  const { runRefresher } = await import("./refresher.mjs");
   const state = "/state";
   const owner = 10001;
   fs.chmodSync("/inputs", 0o755);

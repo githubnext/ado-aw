@@ -123,12 +123,12 @@ docker() { [ "$1" = rm ] || return 1; }
 ${setup.replaceAll("$(Agent.TempDirectory)", "/state")}
 `);
       copyFileSync(bundle, join(directory, "refresher.mjs"));
-      copyFileSync(join(testDir, "fixtures/azure-wif-isolation.cjs"), join(directory, "worker.cjs"));
+      copyFileSync(join(testDir, "fixtures/azure-wif-isolation.mjs"), join(directory, "worker.mjs"));
       docker("volume", "create", volume);
       volumeCreated = true;
       docker("create", "--name", producer, "--network", "none",
         "--mount", `type=volume,source=${volume},target=/state`,
-        image, "node", "/inputs/worker.cjs");
+        image, "node", "/inputs/worker.mjs");
       containerCreated = true;
       docker("cp", `${directory}${process.platform === "win32" ? "\\." : "/."}`, `${producer}:/inputs`);
       docker("start", producer);
