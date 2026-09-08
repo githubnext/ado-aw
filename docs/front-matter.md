@@ -154,7 +154,7 @@ on:                            # trigger configuration (unified under on: key)
     paths:
       include: ["src/**"]
       exclude: ["docs/**"]
-  schedule: daily around 14:00 # fuzzy schedule - see docs/schedule-syntax.md
+  schedule: daily on weekdays  # fuzzy, raw cron, or list - see docs/schedule-syntax.md
   pipeline:
     name: "Build Pipeline"     # source pipeline name
     project: "OtherProject"    # optional: project name if different
