@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::sanitize::{SanitizeConfig, SanitizeContent};
-use crate::secure::{GithubTemporaryId, WorkItemTemporaryId};
+use crate::secure::{GithubTemporaryId, PullRequestTemporaryId, WorkItemTemporaryId};
 
 /// Trait for tool results that include a name field
 pub trait ToolResult: Serialize {
@@ -57,6 +57,14 @@ pub struct ResolvedGithubIssue {
 pub struct ResolvedWorkItem {
     pub id: u64,
     pub url: String,
+}
+
+/// An Azure DevOps pull request created earlier in the same Stage 3 execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPullRequest {
+    pub id: u64,
+    pub url: String,
+    pub target: AdoRepositoryTarget,
 }
 
 /// Trusted compiler/source metadata for one checked-out repository alias.
@@ -274,6 +282,8 @@ pub struct ExecutionContext {
     pub resolved_github_issues: Arc<Mutex<HashMap<String, ResolvedGithubIssue>>>,
     /// Temporary work-item IDs resolved by successful `create-work-item` calls.
     pub resolved_work_items: Arc<Mutex<HashMap<String, ResolvedWorkItem>>>,
+    /// Temporary pull-request IDs resolved by successful `create-pull-request` calls.
+    pub resolved_pull_requests: Arc<Mutex<HashMap<String, ResolvedPullRequest>>>,
 }
 
 impl ExecutionContext {
@@ -381,6 +391,41 @@ impl ExecutionContext {
             .lock()
             .map_err(|_| anyhow::anyhow!("temporary work-item map lock poisoned"))?;
         Ok(work_items.get(&temporary_id.canonical()).cloned())
+    }
+
+    pub fn has_resolved_pull_request(
+        &self,
+        temporary_id: &PullRequestTemporaryId,
+    ) -> anyhow::Result<bool> {
+        let pull_requests = self
+            .resolved_pull_requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary pull-request map lock poisoned"))?;
+        Ok(pull_requests.contains_key(&temporary_id.canonical()))
+    }
+
+    pub fn register_resolved_pull_request(
+        &self,
+        temporary_id: &PullRequestTemporaryId,
+        pull_request: ResolvedPullRequest,
+    ) -> anyhow::Result<()> {
+        register_resolved_reference(
+            &self.resolved_pull_requests,
+            temporary_id.canonical(),
+            pull_request,
+            "temporary pull-request map lock poisoned",
+        )
+    }
+
+    pub fn resolve_pull_request(
+        &self,
+        temporary_id: &PullRequestTemporaryId,
+    ) -> anyhow::Result<Option<ResolvedPullRequest>> {
+        let pull_requests = self
+            .resolved_pull_requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary pull-request map lock poisoned"))?;
+        Ok(pull_requests.get(&temporary_id.canonical()).cloned())
     }
 }
 
@@ -496,6 +541,7 @@ impl ExecutionContext {
             uploaded_pipeline_artifact_keys: Arc::new(Mutex::new(HashSet::new())),
             resolved_github_issues: Arc::new(Mutex::new(HashMap::new())),
             resolved_work_items: Arc::new(Mutex::new(HashMap::new())),
+            resolved_pull_requests: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -576,6 +622,17 @@ impl ExecutionResult {
             budget_exhausted: false,
             message: message.into(),
             data: None,
+        }
+    }
+
+    /// Create a warning result with additional data.
+    pub fn warning_with_data(message: impl Into<String>, data: serde_json::Value) -> Self {
+        Self {
+            success: true,
+            warning: true,
+            budget_exhausted: false,
+            message: message.into(),
+            data: Some(data),
         }
     }
 
@@ -970,6 +1027,52 @@ mod tests {
         assert!(r.is_warning(), "warning result should have warning=true");
         assert_eq!(r.message, "PR created but auto-complete failed");
         assert!(r.data.is_none());
+    }
+
+    #[test]
+    fn warning_with_data_preserves_structured_result() {
+        let r = ExecutionResult::warning_with_data(
+            "some reviewers failed",
+            serde_json::json!({"added": ["one"], "failed": ["two"]}),
+        );
+        assert!(r.success);
+        assert!(r.is_warning());
+        assert_eq!(
+            r.data.as_ref().unwrap()["failed"],
+            serde_json::json!(["two"])
+        );
+    }
+
+    #[test]
+    fn pull_request_registry_resolves_and_rejects_duplicates() {
+        let ctx = ExecutionContext::default();
+        let temporary_id = PullRequestTemporaryId::parse("aw_pr123").unwrap();
+        let resolved = ResolvedPullRequest {
+            id: 42,
+            url: "https://example.test/pr/42".to_string(),
+            target: AdoRepositoryTarget {
+                alias: "self".to_string(),
+                organization: "org".to_string(),
+                organization_url: "https://dev.azure.com/org".to_string(),
+                project: "project".to_string(),
+                repository: "repo".to_string(),
+                repository_id: Some("repo-id".to_string()),
+                cross_organization: false,
+            },
+        };
+
+        assert!(!ctx.has_resolved_pull_request(&temporary_id).unwrap());
+        ctx.register_resolved_pull_request(&temporary_id, resolved.clone())
+            .unwrap();
+        assert!(ctx.has_resolved_pull_request(&temporary_id).unwrap());
+        assert_eq!(
+            ctx.resolve_pull_request(&temporary_id).unwrap(),
+            Some(resolved.clone())
+        );
+        assert!(
+            ctx.register_resolved_pull_request(&temporary_id, resolved)
+                .is_err()
+        );
     }
 
     #[test]

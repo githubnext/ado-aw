@@ -304,6 +304,11 @@ validated_string! {
     WorkItemTemporaryId, "temporary_id", validate_temporary_id
 }
 
+validated_string! {
+    /// A temporary Azure DevOps pull-request identifier used to link safe outputs in one run.
+    PullRequestTemporaryId, "temporary_id", validate_temporary_id
+}
+
 impl GithubTemporaryId {
     /// Canonical map/reference form with the leading `#`.
     pub fn canonical(&self) -> String {
@@ -316,6 +321,17 @@ impl GithubTemporaryId {
 }
 
 impl WorkItemTemporaryId {
+    /// Canonical map/reference form with the leading `#`.
+    pub fn canonical(&self) -> String {
+        if self.as_str().starts_with('#') {
+            self.as_str().to_string()
+        } else {
+            format!("#{}", self.as_str())
+        }
+    }
+}
+
+impl PullRequestTemporaryId {
     /// Canonical map/reference form with the leading `#`.
     pub fn canonical(&self) -> String {
         if self.as_str().starts_with('#') {

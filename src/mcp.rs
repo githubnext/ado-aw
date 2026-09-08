@@ -25,18 +25,18 @@ use crate::safe_outputs::{
     MissingToolParams, MissingToolResult, NoopParams, NoopResult,
     PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
     RemoveGithubIssueLabelsParams, RemoveGithubIssueLabelsResult, ReplyToPrCommentParams,
-    ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueFieldParams,
-    SetGithubIssueFieldResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
-    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UnassignGithubIssueFromUserParams,
-    UnassignGithubIssueFromUserResult, UpdateGithubIssueParams, UpdateGithubIssueResult,
-    UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
-    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
-    UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
-    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
+    ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult, ResolvePrThreadParams,
+    ResolvePrThreadResult, SetGithubIssueFieldParams, SetGithubIssueFieldResult,
+    SetGithubIssueTypeParams, SetGithubIssueTypeResult, SubmitPrReviewParams, SubmitPrReviewResult,
+    ToolResult, UnassignGithubIssueFromUserParams, UnassignGithubIssueFromUserResult,
+    UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePrParams, UpdatePrResult,
+    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
+    UploadBuildAttachmentParams, UploadBuildAttachmentResult, UploadPipelineArtifactParams,
+    UploadPipelineArtifactResult, UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
+    Validate, anyhow_to_mcp_error,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
-use crate::secure::WorkItemTemporaryId;
+use crate::secure::{PullRequestTemporaryId, WorkItemTemporaryId};
 
 /// Sanitize a title into a safe branch name slug.
 /// Only allows alphanumeric characters and dashes, collapses multiple dashes,
@@ -220,6 +220,8 @@ pub struct SafeOutputs {
     custom_proposal_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes create-work-item temporary-ID allocation and proposal append.
     create_work_item_proposal_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes create-pull-request temporary-ID allocation and proposal append.
+    create_pr_proposal_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Resolve which git directory to use for patch generation.
@@ -537,8 +539,7 @@ impl SafeOutputs {
                     WorkItemTemporaryId::parse(format!("#aw_{}", generate_short_id())).ok()?;
                 let canonical = candidate.canonical();
                 let collision = existing.iter().any(|proposal| {
-                    proposal.get("name").and_then(Value::as_str)
-                        == Some(CreateWorkItemResult::NAME)
+                    proposal.get("name").and_then(Value::as_str) == Some(CreateWorkItemResult::NAME)
                         && proposal.get("temporary_id").and_then(Value::as_str)
                             == Some(canonical.as_str())
                 });
@@ -636,6 +637,7 @@ impl SafeOutputs {
             tool_router,
             custom_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
             create_work_item_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
+            create_pr_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -1078,7 +1080,8 @@ and only the fields you want to update."
         name = "create-pull-request",
         description = "Create a new pull request to propose code changes. This tool captures all \
 changes in the repository (both committed and uncommitted) and creates a PR from them. \
-Use 'self' for the pipeline's own repository, or a repository alias from the checkout list."
+Use 'self' for the pipeline's own repository, or a repository alias from the checkout list. \
+Returns a generated temporary_id that can be passed as pull_request_id to later update-pr calls."
     )]
     async fn create_pr(
         &self,
@@ -1131,7 +1134,31 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
             format!("agent/{}-{}", title_slug, short_id)
         };
 
-        // Create the result with patch file reference and integrity hash
+        const MAX_ID_ATTEMPTS: usize = 16;
+        let _guard = self.create_pr_proposal_lock.lock().await;
+        let existing = self
+            .read_safe_output_file()
+            .await
+            .map_err(anyhow_to_mcp_error)?;
+        let temporary_id = (0..MAX_ID_ATTEMPTS)
+            .find_map(|_| {
+                let candidate =
+                    PullRequestTemporaryId::parse(format!("#aw_{}", generate_short_id())).ok()?;
+                let canonical = candidate.canonical();
+                let collision = existing.iter().any(|proposal| {
+                    proposal.get("name").and_then(Value::as_str) == Some(CreatePrResult::NAME)
+                        && proposal.get("temporary_id").and_then(Value::as_str)
+                            == Some(canonical.as_str())
+                });
+                (!collision).then_some(candidate)
+            })
+            .ok_or_else(|| {
+                anyhow_to_mcp_error(anyhow::anyhow!(
+                    "Failed to allocate a unique create-pull-request temporary ID"
+                ))
+            })?;
+
+        // Create the result with patch file reference, temporary ID, and integrity hash
         let result = CreatePrResult {
             name: CreatePrResult::NAME.to_string(),
             title: sanitized.title.clone(),
@@ -1140,18 +1167,25 @@ Use 'self' for the pipeline's own repository, or a repository alias from the che
             patch_file: patch_filename,
             repository: repository.to_string(),
             agent_labels: sanitized.labels,
-            agent_reviewers: sanitized.reviewers,
+            temporary_id: temporary_id.clone(),
             base_commit: Some(merge_base),
             patch_sha256,
         };
 
         // Write to safe outputs
-        let _ = self.write_safe_output_file(&result).await;
+        self.write_safe_output_file(&result)
+            .await
+            .map_err(anyhow_to_mcp_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "PR request saved for repository '{}'. Patch file: {}. Changes will be pushed and PR created during safe output processing.",
-            repository, result.patch_file
-        ))]))
+        let canonical = temporary_id.canonical();
+        let mut response = CallToolResult::success(vec![Content::text(format!(
+            "PR request saved for repository '{}'. Patch file: {}. Use temporary ID {} as pull_request_id in later update-pr calls.",
+            repository, result.patch_file, canonical
+        ))]);
+        response.structured_content = Some(serde_json::json!({
+            "temporary_id": canonical,
+        }));
+        Ok(response)
     }
 
     #[tool(
@@ -1838,6 +1872,31 @@ mod tests {
         (safe_outputs, temp_dir)
     }
 
+    fn initialize_git_repo_with_change(path: &std::path::Path) {
+        use std::process::Command;
+
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command should run");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+        std::fs::write(path.join("file.txt"), "before\n").unwrap();
+        run(&["add", "file.txt"]);
+        run(&["commit", "-m", "initial"]);
+        std::fs::write(path.join("file.txt"), "after\n").unwrap();
+    }
+
     fn valid_create_work_item_params(suffix: &str) -> CreateWorkItemParams {
         CreateWorkItemParams {
             title: format!("Create work item {suffix}"),
@@ -2044,6 +2103,30 @@ mod tests {
         let proposals = safe_outputs.read_safe_output_file().await.unwrap();
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0]["name"], "create-work-item");
+        assert_eq!(proposals[0]["temporary_id"], temporary_id);
+    }
+
+    #[tokio::test]
+    async fn create_pr_returns_and_persists_generated_temporary_id() {
+        let (safe_outputs, temp_dir) = create_test_safe_outputs().await;
+        initialize_git_repo_with_change(temp_dir.path());
+
+        let response = safe_outputs
+            .create_pr(Parameters(CreatePrParams {
+                title: "Update test file".to_string(),
+                description: "Update the test file through a generated pull request.".to_string(),
+                repository: None,
+                labels: Vec::new(),
+            }))
+            .await
+            .unwrap();
+
+        let structured = response.structured_content.expect("structured response");
+        let temporary_id = structured["temporary_id"].as_str().unwrap();
+        assert!(PullRequestTemporaryId::parse(temporary_id).is_ok());
+        let proposals = safe_outputs.read_safe_output_file().await.unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0]["name"], "create-pull-request");
         assert_eq!(proposals[0]["temporary_id"], temporary_id);
     }
 
@@ -2594,7 +2677,7 @@ safe-outputs:
     }
 
     #[tokio::test]
-    async fn test_create_pr_schema_accepts_reviewers() {
+    async fn test_create_pr_schema_excludes_internal_and_inline_reviewer_fields() {
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled = vec!["create-pull-request".to_string()];
         let so = SafeOutputs::new(temp_dir.path(), temp_dir.path(), Some(&enabled), None)
@@ -2607,7 +2690,8 @@ safe-outputs:
             .expect("create-pull-request should be enabled");
         let schema = serde_json::to_value(&tool.input_schema).unwrap();
         let properties = schema["properties"].as_object().unwrap();
-        assert!(properties.contains_key("reviewers"));
+        assert!(!properties.contains_key("temporary_id"));
+        assert!(!properties.contains_key("reviewers"));
     }
 
     #[tokio::test]

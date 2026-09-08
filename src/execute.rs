@@ -1354,6 +1354,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_safe_outputs_follows_temporary_pr_reference() {
+        use crate::safe_outputs::{AdoRepositoryTarget, ResolvedPullRequest};
+        use crate::secure::PullRequestTemporaryId;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(
+                "/Target%20Project/_apis/git/repositories/repo-id/pullRequests/42",
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+        tokio::fs::write(
+            &safe_output_path,
+            r##"{"name":"update-pr","pull_request_id":"#aw_pr123","operation":"update-description","description":"Updated through the temporary reference."}
+"##,
+        )
+        .await
+        .unwrap();
+
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert("update-pr".to_string(), serde_json::json!({"max": 1}));
+        let ctx = ExecutionContext {
+            access_token: Some("test-token".to_string()),
+            tool_configs,
+            ..Default::default()
+        };
+        let temporary_id = PullRequestTemporaryId::parse("#aw_pr123").unwrap();
+        ctx.register_resolved_pull_request(
+            &temporary_id,
+            ResolvedPullRequest {
+                id: 42,
+                url: "https://example.test/pr/42".to_string(),
+                target: AdoRepositoryTarget {
+                    alias: "target".to_string(),
+                    organization: "target-org".to_string(),
+                    organization_url: server.uri(),
+                    project: "Target Project".to_string(),
+                    repository: "target-repo".to_string(),
+                    repository_id: Some("repo-id".to_string()),
+                    cross_organization: true,
+                },
+            },
+        )
+        .unwrap();
+
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success, "{}", results[0].message);
+        assert_eq!(results[0].data.as_ref().unwrap()["pull_request_id"], 42);
+    }
+
+    #[tokio::test]
     async fn test_execute_safe_outputs_empty_file_returns_empty() {
         let temp_dir = tempfile::tempdir().unwrap();
         let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
