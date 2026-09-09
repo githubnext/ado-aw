@@ -426,13 +426,25 @@ export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
       );
     }
   },
-  cleanup: async (_ctx, state) => {
+  cleanup: async (_ctx, state, records) => {
     const teardown = new Teardown();
     if (state.prId !== undefined) {
       const prId = state.prId;
       teardown.add("abandon PR", () =>
         state.rest.abandonPullRequest(state.repo, prId),
       );
+    } else if (records !== undefined) {
+      const created = records.find(
+        (record) =>
+          record.name === "create_pull_request" &&
+          record.status === "succeeded",
+      );
+      if (created !== undefined) {
+        teardown.add("recover and abandon PR", async () => {
+          const prId = numResult(created, "pull_request_id");
+          await state.rest.abandonPullRequest(state.repo, prId);
+        });
+      }
     }
     await teardown
       .add("delete source branch", () =>

@@ -1303,7 +1303,7 @@ safe-outputs:
   update-pr:
     allowed-operations: []          # Optional — restrict which operations are permitted (empty = all)
     allowed-repositories: []        # Optional — restrict which repos can be updated
-    allowed-reviewers: []           # REQUIRED for add-reviewers — empty rejects all reviewers; ["*"] permits any valid reviewer
+    allowed-reviewers: []           # Optional — non-empty list restricts reviewers; empty or ["*"] permits any valid reviewer
     max-reviewers: 3                # Maximum reviewers in one add-reviewers call (default: 3)
     allowed-votes: []               # REQUIRED for vote operation — empty rejects all votes
     delete-source-branch: true      # For set-auto-complete (default: true)
@@ -1311,17 +1311,21 @@ safe-outputs:
     max: 1                          # Maximum per run (default: 1)
 ```
 
-Reviewer allowlisting uses case-insensitive exact matching. Non-GUID reviewer
-values must also exactly match an Azure DevOps identity email, account name, or
-display name; fuzzy Identity Picker results are not selected. Reviewer identity
-or API failures return a warning with structured `added` and `failed` arrays.
-Invalid configuration, disallowed reviewers, and unresolved PR references fail
-before reviewer writes begin.
+When `allowed-reviewers` is omitted or empty, any otherwise-valid reviewer is
+permitted, matching gh-aw's reviewer policy. A non-empty list restricts
+reviewers using case-insensitive exact matching; `["*"]` is an explicit
+unrestricted form. Non-GUID reviewer values must also exactly match an Azure
+DevOps identity email, account name, or display name; fuzzy Identity Picker
+results are not selected. Reviewer identity or API failures return a warning
+with structured `added` and `failed` arrays. Invalid configuration, disallowed
+reviewers, and unresolved PR references fail before reviewer writes begin.
 
 Temporary PR references are resolved in safe-output proposal order, so
 `create-pull-request` must appear before its `update-pr` entries. They are
 in-memory references scoped to one SafeOutputs job: automatic and manually
 reviewed safe outputs execute in separate jobs and cannot share a temporary ID.
+When both tools are configured, the compiler therefore requires them to have
+the same effective `require-approval` setting.
 Each follow-up call counts against `update-pr.max`.
 
 Example agent call sequence:

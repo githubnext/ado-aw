@@ -2352,6 +2352,11 @@ fn require_same_approval_lane(
              effective require-approval setting so temporary work-item IDs remain in one \
              SafeOutputs job"
         ),
+        "create-pull-request" => anyhow::bail!(
+            "safe-outputs.create-pull-request and safe-outputs.{consumer} must have the same \
+             effective require-approval setting so temporary pull-request IDs remain in one \
+             SafeOutputs job"
+        ),
         _ => anyhow::bail!(
             "safe-outputs.{producer} and safe-outputs.{consumer} must have the same effective \
              require-approval setting"
@@ -2966,6 +2971,31 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
             );
         }
     }
+    Ok(())
+}
+
+/// Validate configuration shared by create-pull-request and update-pr.
+pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    if front_matter
+        .safe_outputs
+        .contains_key("create-pull-request")
+        && front_matter.safe_outputs.contains_key("update-pr")
+    {
+        require_same_approval_lane(front_matter, "create-pull-request", "update-pr")?;
+    }
+
+    if let Some(config) = front_matter.safe_outputs.get("update-pr")
+        && let Some(max_reviewers) = config
+            .as_object()
+            .and_then(|object| object.get("max-reviewers"))
+            .and_then(serde_json::Value::as_u64)
+    {
+        anyhow::ensure!(
+            max_reviewers > 0,
+            "safe-outputs.update-pr.max-reviewers must be greater than zero"
+        );
+    }
+
     Ok(())
 }
 
@@ -6116,6 +6146,108 @@ safe-outputs:
             .unwrap_err()
             .to_string();
         assert!(error.contains("same effective require-approval"));
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_pull_request_tools() {
+        for (create_approval, update_approval) in [(true, false), (false, true)] {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-pull-request:
+    require-approval: {create_approval}
+  update-pr:
+    require-approval: {update_approval}
+    allowed-operations:
+      - update-description
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_pull_request_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("temporary pull-request IDs")
+                    && error.contains("same effective require-approval"),
+                "error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_matching_pull_request_approval_lanes() {
+        for approval in [true, false] {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-pull-request:
+    require-approval: {approval}
+  update-pr:
+    require-approval: {approval}
+    allowed-operations:
+      - update-description
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            assert!(validate_pull_request_outputs_config(&fm).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_validate_pull_request_approval_lane_uses_effective_section_default() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  require-approval: true
+  create-pull-request: {}
+  update-pr:
+    allowed-operations:
+      - update-description
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_pull_request_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_reviewers() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: 0
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_pull_request_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("max-reviewers must be greater than zero"));
+    }
+
+    #[test]
+    fn test_validate_allows_omitted_reviewer_allowlist() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_pull_request_outputs_config(&fm).is_ok());
     }
 
     #[test]

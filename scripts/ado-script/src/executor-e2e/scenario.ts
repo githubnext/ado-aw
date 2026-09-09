@@ -186,8 +186,17 @@ export interface Scenario<State = unknown> {
     record: ExecutedRecord,
     records: ExecutedRecord[],
   ): Promise<void>;
-  /** Best-effort teardown of everything setup/execute created. */
-  cleanup(ctx: ScenarioContext, state: State): Promise<void>;
+  /**
+   * Best-effort teardown of everything setup/execute created.
+   *
+   * `records` is present whenever `runExecute()` returned, including when the
+   * primary tool reported failure before `assert()` could populate `state`.
+   */
+  cleanup(
+    ctx: ScenarioContext,
+    state: State,
+    records?: ExecutedRecord[],
+  ): Promise<void>;
 }
 
 /** Outcome of running one scenario. */

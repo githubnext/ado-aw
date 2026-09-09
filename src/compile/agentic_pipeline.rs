@@ -183,6 +183,7 @@ fn validate_pipeline_front_matter(
     common::validate_comment_target(front_matter)?;
     common::validate_update_work_item_target(front_matter)?;
     common::validate_submit_pr_review_events(front_matter)?;
+    common::validate_pull_request_outputs_config(front_matter)?;
     common::validate_update_pr_votes(front_matter)?;
     common::validate_resolve_pr_thread_statuses(front_matter)?;
     common::validate_ado_aw_debug_config(front_matter)?;

@@ -246,7 +246,7 @@ pub struct UpdatePrConfig {
     pub allowed_votes: Vec<String>,
 
     /// Case-insensitive exact allowlist for model-selected reviewers.
-    /// Empty rejects all reviewers; a literal "*" allows any valid reviewer.
+    /// Empty or a literal "*" allows any valid reviewer.
     #[serde(default, rename = "allowed-reviewers")]
     pub allowed_reviewers: Vec<String>,
 
@@ -500,16 +500,11 @@ fn validate_and_normalize_reviewers(
             "update-pr.max-reviewers must be greater than zero",
         ));
     }
-    let allow_any = config
-        .allowed_reviewers
-        .iter()
-        .any(|allowed| allowed == "*");
-    if config.allowed_reviewers.is_empty() {
-        return Err(ExecutionResult::failure(
-            "add-reviewers requires allowed-reviewers to be configured; use \
-             allowed-reviewers: [\"*\"] to permit any valid reviewer",
-        ));
-    }
+    let allow_any = config.allowed_reviewers.is_empty()
+        || config
+            .allowed_reviewers
+            .iter()
+            .any(|allowed| allowed == "*");
 
     let mut normalized = Vec::new();
     for reviewer in reviewers {
@@ -1071,15 +1066,15 @@ async fn lookup_reviewer_id(
         return Some(reviewer.to_string());
     }
 
-    let identity_url = format!(
-        "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
-        vssps_base,
-        utf8_percent_encode(reviewer, PATH_SEGMENT),
-    );
+    let identity_url = format!("{}/_apis/identities", vssps_base);
     debug!("Resolving identity for '{}': {}", reviewer, identity_url);
 
     match crate::safe_outputs::authenticate_ado_request(
-        client.get(&identity_url),
+        client.get(&identity_url).query(&[
+            ("searchFilter", "General"),
+            ("filterValue", reviewer),
+            ("api-version", "7.1"),
+        ]),
         token,
         connection_type,
     )
@@ -1380,10 +1375,12 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_policy_is_default_deny_and_supports_explicit_wildcard() {
+    fn reviewer_policy_allows_omitted_allowlist_and_explicit_wildcard() {
         let reviewers = vec!["owner@example.com".to_string()];
-        let denied = validate_and_normalize_reviewers(&reviewers, &UpdatePrConfig::default());
-        assert!(denied.unwrap_err().message.contains("allowed-reviewers"));
+        assert_eq!(
+            validate_and_normalize_reviewers(&reviewers, &UpdatePrConfig::default()).unwrap(),
+            reviewers
+        );
 
         let config = UpdatePrConfig {
             allowed_reviewers: vec!["*".to_string()],
@@ -1393,6 +1390,18 @@ mod tests {
             validate_and_normalize_reviewers(&reviewers, &config).unwrap(),
             reviewers
         );
+    }
+
+    #[test]
+    fn reviewer_policy_restricts_non_empty_allowlist() {
+        let result = validate_and_normalize_reviewers(
+            &["other@example.com".to_string()],
+            &UpdatePrConfig {
+                allowed_reviewers: vec!["owner@example.com".to_string()],
+                ..Default::default()
+            },
+        );
+        assert!(result.unwrap_err().message.contains("allowed-reviewers"));
     }
 
     #[test]
@@ -1577,6 +1586,39 @@ mod tests {
         )
         .await;
         assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_identity_lookup_encodes_filter_as_one_query_parameter() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "owner+alerts&team=core@example.com";
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("searchFilter", "General"))
+            .and(query_param("filterValue", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "exact-id",
+                    "properties": {"Mail": {"$value": reviewer}}
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert_eq!(id.as_deref(), Some("exact-id"));
     }
 
     #[test]
