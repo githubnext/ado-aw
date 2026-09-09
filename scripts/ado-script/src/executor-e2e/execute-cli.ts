@@ -120,6 +120,13 @@ export interface RunExecuteResult {
   records: ExecutedRecord[];
   /** The record matching `tool` (dashes -> underscores), if any. */
   record?: ExecutedRecord;
+  /**
+   * Directory holding `safe_outputs.ndjson` and the executor-written
+   * `safe-outputs-executed.ndjson`. Exposed so a post-execute phase (e.g. the
+   * conclusion reporter, which consumes the executed manifest) can run against
+   * exactly the files this invocation produced.
+   */
+  safeOutputDir: string;
 }
 
 /** Parse `safe-outputs-executed.ndjson` content into typed records. */
@@ -233,7 +240,7 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
   const snake = opts.tool.replaceAll("-", "_");
   const record = records.find((r) => r.name === snake);
 
-  return { exitCode, stdout, stderr, records, record };
+  return { exitCode, stdout, stderr, records, record, safeOutputDir };
 }
 
 /** Append a truncated snapshot of a subprocess's output to a timeout message. */
@@ -244,12 +251,18 @@ export function partialOutput(stdout: string, stderr: string): string {
   return parts.join("");
 }
 
-function spawnCollect(
+/**
+ * Spawn a child process, collect stdout/stderr, and reject when it exceeds the
+ * harness timeout. Shared with the conclusion-bundle runner so both child
+ * processes get identical hang protection and output capture.
+ */
+export function spawnCollect(
   cmd: string,
   args: string[],
   env: NodeJS.ProcessEnv,
+  label = "ado-aw execute",
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  // Guard against a hung `ado-aw execute` blocking the whole suite: kill the
+  // Guard against a hung child blocking the whole suite: kill the
   // child after a bounded timeout and surface a meaningful error instead of
   // waiting for the ADO job-level timeout.
   const timeoutMs = Number(process.env.EXECUTOR_E2E_EXECUTE_TIMEOUT_MS) || 600_000;
@@ -273,7 +286,7 @@ function spawnCollect(
       if (timedOut) {
         // Include any accumulated output so a hung run is diagnosable from the
         // error/issue body rather than only from the raw ADO logs.
-        reject(new Error(`ado-aw execute timed out after ${timeoutMs}ms${partialOutput(stdout, stderr)}`));
+        reject(new Error(`${label} timed out after ${timeoutMs}ms${partialOutput(stdout, stderr)}`));
         return;
       }
       resolve({ exitCode: code ?? -1, stdout, stderr });
