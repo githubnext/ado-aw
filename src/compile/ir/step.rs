@@ -182,6 +182,12 @@ impl TaskStep {
         self.inputs.insert(key.into(), value.into());
         self
     }
+
+    /// Add (or replace) an env-var binding.
+    pub fn with_env(mut self, key: impl Into<String>, value: EnvValue) -> Self {
+        self.env.insert(key.into(), value);
+        self
+    }
 }
 
 /// A `- checkout: …` step.
@@ -257,6 +263,19 @@ mod tests {
         );
         assert_eq!(s.outputs.len(), 1, "should have exactly one output");
         assert_eq!(s.outputs[0].name, "AW_OUT", "output name should be AW_OUT");
+    }
+
+    #[test]
+    fn task_step_builder_composes_inputs_and_env() {
+        let s = TaskStep::new("AzureCLI@3", "Azure CLI")
+            .with_input("scriptType", "bash")
+            .with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
+
+        assert_eq!(s.inputs.get("scriptType").map(String::as_str), Some("bash"));
+        assert_eq!(
+            s.env.get("SYSTEM_ACCESSTOKEN"),
+            Some(&EnvValue::secret("System.AccessToken"))
+        );
     }
 
     #[test]

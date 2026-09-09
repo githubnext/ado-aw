@@ -3,7 +3,7 @@
 `ado-script` is the umbrella name for the TypeScript workspace at
 [`scripts/ado-script/`](../scripts/ado-script/). It produces small,
 ncc-bundled Node programs that the **compiler injects into every emitted
-pipeline** as runtime helpers. Today it produces thirteen bundles:
+pipeline** as runtime helpers. Today it produces the following shipped bundles:
 
 - `gate.js` — trigger-filter gate evaluator (Setup job).
 - `import.js` — runtime prompt resolver described in
@@ -88,6 +88,16 @@ pipeline** as runtime helpers. Today it produces thirteen bundles:
   shell-local or in masked `SYSTEM_ACCESSTOKEN` env and spawned-git
   `GIT_CONFIG_*`, never argv or `.git/config`. Runs outside AWF. See
   [`safe-outputs.md`](safe-outputs.md#create-pull-request).
+- `azure-wif-refresh.js` — long-lived trusted sidecar for
+  `mcp-servers.<name>.azure-auth`. It receives the initial Azure Pipelines
+  workload-identity assertion and `System.AccessToken` in a one-shot stdin
+  document, requests replacement assertions from `System.OidcRequestUri` using
+  the runtime service-connection GUID, and atomically rotates a mode-0644 file
+  inside a private mode-0700 host directory mounted read-only into
+  the target MCP container. Request credentials remain in sidecar memory and
+  never enter the agent, MCP environment, Docker arguments, logs, status
+  documents, or artifacts. See
+  [`mcp.md`](mcp.md#renewable-azure-workload-identity).
 
 > **Internal-only.** `ado-script` is not a user-facing front-matter
 > feature. Authors never write an `ado-script:` block in their agent

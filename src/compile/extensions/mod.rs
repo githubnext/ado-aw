@@ -825,6 +825,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // emits before the Copilot run. Same loose-coupling pattern as
                 // `github_app_token_active`.
                 prepare_pr_base_active: front_matter.create_pr_config().is_some(),
+                azure_mcp_auth_active: front_matter.has_azure_authenticated_mcp_servers(),
                 pr_trigger_for_synth,
                 supply_chain: front_matter.supply_chain().cloned(),
             }

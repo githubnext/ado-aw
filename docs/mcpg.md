@@ -93,7 +93,12 @@ no bridge-gateway resolution, and no `host.docker.internal` mapping.
    internal request through Squid.
 5. MCPG routes tool calls to the appropriate upstream (SafeOutputs or custom
    MCPs). Detection is unaffected — it never attaches to MCPG.
-6. After the agent completes, MCPG (and any stdio children it spawned,
+6. For a custom stdio MCP with `azure-auth`, a separate trusted
+   `azure-wif-refresh.js` sidecar rotates a federated assertion beneath
+   `$(Agent.TempDirectory)`. MCPG mounts only its token directory read-only into
+   the target MCP container and forwards non-secret client/tenant IDs through
+   its typed launch environment.
+7. After the agent completes, MCPG (and any stdio children it spawned,
    including SafeOutputs) are stopped.
 
 ## MCPG Configuration Format
@@ -163,6 +168,9 @@ The MCPG is automatically configured in generated standalone pipelines:
 1. **Config Generation**: The compiler generates `mcpg-config.json` from the agent's `mcp-servers:` front matter, including the compiler-owned `safeoutputs` stdio entry above.
 2. **MCPG Start**: The MCPG Docker container (`awmg-mcpg`) starts on Docker's bridge network, published to the host at `127.0.0.1:8080`, with config via stdin and the Docker socket mounted so it can spawn stdio children (including SafeOutputs) on demand.
 3. **Agent Execution**: AWF runs the Agent rootlessly with `--network-isolation --topology-attach awmg-mcpg`, attaching the MCPG container to `awf-net`; copilot connects to MCPG at `awmg-mcpg:8080` over HTTP, and reaches SafeOutputs tools transparently through MCPG's stdio routing.
-4. **Cleanup**: MCPG and any stdio children it spawned (including SafeOutputs) are stopped after the agent completes (condition: always).
+4. **Cleanup**: MCPG and any stdio children it spawned (including SafeOutputs)
+   are stopped after the agent completes (condition: always). Renewable Azure
+   assertion sidecars are then stopped and their private
+   `$(Agent.TempDirectory)/ado-aw-azure-auth/` directories removed.
 
 The MCPG config is written to `$(Agent.TempDirectory)/staging/mcpg-config.json` in its own pipeline step, making it easy to inspect and debug. SafeOutputs is always run with the `ado-aw mcp` stdio subcommand through MCPG.

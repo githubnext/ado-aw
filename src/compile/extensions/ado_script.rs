@@ -298,6 +298,9 @@ pub(crate) const GITHUB_APP_TOKEN_PATH: &str = "/tmp/ado-aw-scripts/ado-script/g
 /// the containerized SafeOutputs MCP server can compute a diff base on
 /// shallow-default agent pools.
 pub(crate) const PREPARE_PR_BASE_PATH: &str = "/tmp/ado-aw-scripts/ado-script/prepare-pr-base.js";
+/// Path to the renewable Azure workload-identity assertion sidecar bundle.
+pub(crate) const AZURE_WIF_REFRESH_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/azure-wif-refresh.js";
 const RELEASE_BASE_URL: &str = "https://github.com/githubnext/ado-aw/releases/download";
 
 /// Single always-on extension that owns all `ado-script` bundle wiring.
@@ -379,6 +382,9 @@ pub struct AdoScriptExtension {
     /// emitted by `build_agent_job`, not this extension, so the flag drives the
     /// shared bundle download.
     pub prepare_pr_base_active: bool,
+    /// Whether any user-defined stdio MCP server configures `azure-auth`.
+    /// Drives Agent-job bundle delivery for `azure-wif-refresh.js`.
+    pub azure_mcp_auth_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -1162,6 +1168,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.safe_outputs_summary_active
             || self.github_app_token_active
             || self.prepare_pr_base_active
+            || self.azure_mcp_auth_active
         {
             agent_prepare_steps
                 .extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
@@ -1369,6 +1376,7 @@ mod tests {
             safe_outputs_summary_active: false,
             github_app_token_active: false,
             prepare_pr_base_active: false,
+            azure_mcp_auth_active: false,
             pr_trigger_for_synth: None,
             supply_chain: None,
         }
@@ -1448,6 +1456,7 @@ mod tests {
             safe_outputs_summary_active: false,
             github_app_token_active: false,
             prepare_pr_base_active: false,
+            azure_mcp_auth_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1507,6 +1516,7 @@ mod tests {
             safe_outputs_summary_active: false,
             github_app_token_active: false,
             prepare_pr_base_active: false,
+            azure_mcp_auth_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -2267,6 +2277,7 @@ mod tests {
             safe_outputs_summary_active: false,
             github_app_token_active: false,
             prepare_pr_base_active: false,
+            azure_mcp_auth_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -2742,6 +2753,20 @@ mod tests {
         assert!(decl.agent_prepare_steps.is_empty());
     }
 
+    #[test]
+    fn declarations_agent_prepare_download_fires_for_azure_mcp_auth() {
+        let mut ext = ext_with(None, None, true);
+        ext.azure_mcp_auth_active = true;
+        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
+        let ctx = CompileContext::for_test(&fm);
+        let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
+        assert_eq!(steps.len(), 2, "install + download only");
+        assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
+        assert!(
+            matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Download ado-aw scripts"))
+        );
+    }
+
     /// `declarations()` setup_steps must surface a typed
     /// `Step::Task(UseNode@1)` followed by `Step::Bash` (download)
     /// followed by the typed gate `Step::Bash` when a PR gate is
@@ -2802,6 +2827,7 @@ mod tests {
             safe_outputs_summary_active: false,
             github_app_token_active: false,
             prepare_pr_base_active: false,
+            azure_mcp_auth_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

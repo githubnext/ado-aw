@@ -72,6 +72,9 @@ use super::common::{
     HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
     image_ref,
 };
+use super::container_invocation::{
+    DockerMount, DockerRun, DockerTmpfs, ShellWord,
+};
 use super::custom_tools::{CustomToolDefinition, collect_custom_tool_definitions};
 use super::extensions::ado_script as paths;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
@@ -83,7 +86,9 @@ use super::ir::output::{OutputDecl, OutputRef};
 use super::ir::step::{
     BashStep, CheckoutRepo, CheckoutStep, DownloadStep, PublishStep, Step, SubmodulesOpt, TaskStep,
 };
-use super::ir::tasks::azure_cli::{AzureCli, ScriptLocation, ScriptType};
+use super::ir::tasks::azure_cli::{
+    AzureCli, AzureCliV3, AzureCliV3Connection, ScriptLocation, ScriptType,
+};
 use super::ir::tasks::docker_installer::DockerInstaller;
 use super::ir::tasks::download_package::DownloadPackage;
 use super::ir::tasks::download_pipeline_artifact::{
@@ -151,6 +156,21 @@ fn copilot_byom_exclude_keys(is_copilot: bool, engine_config: &EngineConfig) -> 
         keys.push(crate::compile::types::PROVIDER_BEARER_TOKEN_VAR.to_string());
     }
     keys
+}
+
+fn awf_exclude_keys(
+    front_matter: &FrontMatter,
+    is_copilot: bool,
+    engine_config: &EngineConfig,
+) -> Result<Vec<String>> {
+    let mut keys = copilot_byom_exclude_keys(is_copilot, engine_config);
+    for (server_name, _, _) in front_matter.azure_authenticated_mcp_servers() {
+        keys.push(super::mcpg::azure_auth_client_variable(server_name)?.into_inner());
+        keys.push(super::mcpg::azure_auth_tenant_variable(server_name)?.into_inner());
+    }
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
 }
 
 /// Shared back-end for the three IR-driven target compilers
@@ -243,7 +263,7 @@ fn fanout_extension_declarations(
 
 /// Bundle of engine-derived values computed once per pipeline compile:
 /// prompt invocations, install steps, composed env blocks, and the
-/// Copilot BYOM/BYOK exclusion keys for both the Agent and Detection
+/// provider/MCP identity exclusion keys for both the Agent and Detection
 /// engines. Split out of [`build_pipeline_context`] purely to keep that
 /// function's cognitive complexity manageable — behaviour is unchanged.
 struct EngineSetup {
@@ -304,10 +324,10 @@ fn build_engine_setup(
     // future non-Copilot engine whose env happens to contain a COPILOT_PROVIDER_*
     // key is never treated as a Copilot provider credential.
     let is_copilot = matches!(ctx.engine, crate::engine::Engine::Copilot);
-    let byom_exclude_keys = copilot_byom_exclude_keys(is_copilot, &front_matter.engine);
+    let byom_exclude_keys = awf_exclude_keys(front_matter, is_copilot, &front_matter.engine)?;
     let detection_is_copilot = matches!(detection_engine, crate::engine::Engine::Copilot);
     let detection_byom_exclude_keys =
-        copilot_byom_exclude_keys(detection_is_copilot, detection_engine_config);
+        awf_exclude_keys(front_matter, detection_is_copilot, detection_engine_config)?;
     let detection_engine_env = if detection_is_copilot {
         crate::engine::copilot_detection_env(detection_engine_config)?
     } else {
@@ -845,8 +865,8 @@ pub(crate) struct StandaloneCtx {
     /// `{{#runtime-import ...}}` marker).
     pub(crate) agent_content_value: String,
     pub(crate) debug_pipeline: bool,
-    /// Actual provider credential env keys present to pass to AWF `--exclude-env`;
-    /// empty for non-BYOM. AWF's API proxy itself is always enabled.
+    /// Provider credential and internal MCP identity env keys excluded from AWF.
+    /// AWF's API proxy itself is always enabled.
     pub(crate) byom_exclude_keys: Vec<String>,
     pub(crate) detection_byom_exclude_keys: Vec<String>,
     /// Validated inherited/overridden custom env for Detection.
@@ -1260,7 +1280,12 @@ fn build_agent_job(
     // 14. AWF path step (when extensions declare path prepends)
     push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml)?;
 
-    // 14a. Credential-isolated Azure DevOps policy engine.
+    // 14a. Renewable Azure workload-identity assertions for user-defined
+    //      stdio MCP servers. The ado-script bundle was delivered by the
+    //      always-on extension above when this feature is active.
+    steps.extend(start_azure_wif_refresh_steps(front_matter)?);
+
+    // 14b. Credential-isolated Azure DevOps policy engine.
     //
     //      Must precede MCPG: the Azure DevOps MCP is redirected at the
     //      engine's container address, and that address does not exist until
@@ -1400,7 +1425,11 @@ fn build_agent_job(
     // 20. Stop MCPG and SafeOutputs
     steps.push(Step::Bash(stop_mcpg_step()));
 
-    // 20a. Stop the policy engine, then remove its network. `--rm` only fires
+    // 20a. Stop renewable Azure assertion sidecars after MCPG has stopped its
+    //      stdio children and released their read-only token mounts.
+    steps.extend(stop_azure_wif_refresh_steps(front_matter));
+
+    // 20b. Stop the policy engine, then remove its network. `--rm` only fires
     //      on a clean exit, so an OOM or SIGKILL would otherwise leave the
     //      container — and the credential it holds in memory — running past
     //      the job.
@@ -4169,7 +4198,10 @@ shell_script! {
     START_MCPG {
         interpreter: Bash,
         bindings: [MCPG_CONTAINER, MCPG_IMAGE, MCPG_PORT, MCPG_DOMAIN],
-        externals: [MCP_GATEWAY_API_KEY, ADO_PROXY_IP, MCPG_ENV_NAMES],
+        externals: [
+            MCP_GATEWAY_API_KEY, ADO_PROXY_IP,
+            MCPG_ENV_NAMES, MCPG_REQUIRED_ENV_NAMES
+        ],
         fragments: [],
         body: r###"
 # Substitute runtime values into MCPG config
@@ -4181,6 +4213,43 @@ MCPG_CONFIG=$(sed \
   -e "s|\${MCP_GATEWAY_API_KEY}|$MCP_GATEWAY_API_KEY|g" \
   -e "s|\${ADO_PROXY_IP}|${ADO_PROXY_IP:-}|g" \
   /tmp/awf-tools/staging/mcpg-config.json)
+
+: "${MCPG_REQUIRED_ENV_NAMES:=}"
+# Required internal bindings are produced by earlier authenticated setup tasks.
+# Refuse to launch MCPG with empty identity metadata, then replace only exact
+# JSON string placeholders so values remain correctly escaped.
+# shellcheck disable=SC2086
+for MCPG_ENV_NAME in $MCPG_REQUIRED_ENV_NAMES; do
+  MCPG_ENV_VALUE="${!MCPG_ENV_NAME:-}"
+  # shellcheck disable=SC2016 # '$(' is a literal unresolved ADO macro prefix.
+  if [ -z "$MCPG_ENV_VALUE" ] || [[ "$MCPG_ENV_VALUE" == '$('* ]]; then
+    echo "##vso[task.complete result=Failed]required MCPG environment variable '$MCPG_ENV_NAME' is empty"
+    exit 1
+  fi
+done
+if [ -n "$MCPG_REQUIRED_ENV_NAMES" ]; then
+  MCPG_CONFIG=$(printf '%s' "$MCPG_CONFIG" | python3 -c '
+import json
+import os
+import sys
+
+replacements = {
+    "$" + "{" + name + "}": os.environ[name]
+    for name in os.environ["MCPG_REQUIRED_ENV_NAMES"].split()
+}
+
+def replace(value):
+    if isinstance(value, str):
+        return replacements.get(value, value)
+    if isinstance(value, list):
+        return [replace(item) for item in value]
+    if isinstance(value, dict):
+        return {key: replace(item) for key, item in value.items()}
+    return value
+
+json.dump(replace(json.load(sys.stdin)), sys.stdout, separators=(",", ":"))
+')
+fi
 
 # A client redirected at an empty address would resolve the real
 # Azure DevOps instead of the policy engine, quietly restoring the
@@ -4313,6 +4382,15 @@ fn start_mcpg_step(
         .with_env(
             "MCPG_ENV_NAMES",
             EnvValue::literal(mcpg_launch_env.names().collect::<Vec<_>>().join(" ")),
+        )
+        .with_env(
+            "MCPG_REQUIRED_ENV_NAMES",
+            EnvValue::literal(
+                mcpg_launch_env
+                    .required_names()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
         );
     for (name, value) in mcpg_launch_env.iter() {
         step = step.with_env(name, value.clone());
@@ -4333,11 +4411,13 @@ fn awf_image_flags(supply_chain: Option<&SupplyChainConfig>) -> String {
     block
 }
 
-/// Build AWF environment-exclusion flag lines for a Copilot BYOM/BYOK run.
+/// Build AWF environment-exclusion flag lines for provider credentials and
+/// compiler-owned MCP identity variables.
 ///
-/// `exclude_keys` are the provider credential env keys present in `engine.env`
-/// (canonical uppercase `COPILOT_PROVIDER_*` names). AWF 0.27.32+ always enables
-/// its API proxy, so only one `--exclude-env <key>` line is needed per key.
+/// `exclude_keys` includes provider credential env keys present in `engine.env`
+/// and the generated client/tenant ID keys for Azure-authenticated MCPs.
+/// AWF 0.27.32+ always enables its API proxy, so only one `--exclude-env <key>`
+/// line is needed per key.
 ///
 /// How the credential reaches the provider without reaching the agent: AWF's
 /// api-proxy sidecar reads the *real*
@@ -4373,8 +4453,7 @@ shell_script! {
     /// - `topology_attach` — one `--topology-attach` line per trusted peer
     ///   (MCPG always, ado-proxy when the policy engine is enabled)
     /// - `image_flags` — `--image-tag` plus optional `--image-registry`
-    /// - `exclude_env` — one `--exclude-env <key>` line per BYOM/BYOK secret
-    ///   AWF's api-proxy sidecar strips out of the agent env
+    /// - `exclude_env` — provider credentials and internal MCP identity keys
     /// - `awf_mounts` — the compiler-supplied chain of `--mount "…"` args
     /// - `routed_engine_run` — the single-quoted `NO_PROXY` prefix + engine
     ///   command that AWF invokes inside the sandbox
@@ -4929,6 +5008,254 @@ fn stop_mcpg_step() -> BashStep {
         .with_condition(Condition::Always)
 }
 
+shell_script! {
+    /// Start one trusted Azure workload-identity refresh sidecar.
+    ///
+    /// AzureCLI@3 supplies the initial `idToken`, client ID and tenant ID.
+    /// `System.AccessToken` is explicitly mapped onto the task and reaches the
+    /// sidecar only through a one-shot FIFO material document. The sidecar
+    /// retains the request credential in memory and writes only rotating
+    /// federated assertions to the private Agent.TempDirectory mount.
+    ///
+    /// This deliberately remains one authenticated IR task: AzureCLI scopes
+    /// `idToken` and the service-principal metadata to its script process.
+    /// Splitting validation, FIFO creation, container startup, material
+    /// transfer, and readiness checking across pipeline steps would require
+    /// persisting or exporting those credentials across the task boundary.
+    START_AZURE_WIF_REFRESH {
+        interpreter: Bash,
+        bindings: [
+            AGENT_TEMP, RUNTIME_ID, REFRESH_CONTAINER, REFRESH_IMAGE,
+            REFRESH_BUNDLE, CLIENT_VARIABLE, TENANT_VARIABLE
+        ],
+        externals: [
+            SYSTEM_ACCESSTOKEN, SYSTEM_OIDCREQUESTURI
+        ],
+        fragments: [run_container],
+        fragment_uses: [
+            run_container => [
+                REFRESH_CONTAINER, REFRESH_IMAGE, REFRESH_BUNDLE
+            ],
+        ],
+        body: r###"
+set -euo pipefail
+
+AZURE_WIF_ID_TOKEN=$(printenv idToken || true)
+AZURE_WIF_CLIENT_ID=$(printenv servicePrincipalId || true)
+AZURE_WIF_TENANT_ID=$(printenv tenantId || true)
+AZURE_WIF_SERVICE_CONNECTION_ID=$(printenv AZURESUBSCRIPTION_SERVICE_CONNECTION_ID || true)
+GUID_RE='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+if [ -z "$AZURE_WIF_ID_TOKEN" ] \
+   || ! [[ "$AZURE_WIF_CLIENT_ID" =~ $GUID_RE ]] \
+   || ! [[ "$AZURE_WIF_TENANT_ID" =~ $GUID_RE ]] \
+   || ! [[ "$AZURE_WIF_SERVICE_CONNECTION_ID" =~ $GUID_RE ]]; then
+  echo "##vso[task.complete result=Failed]azure-auth requires an ARM workload-identity service connection that exposes idToken, servicePrincipalId and tenantId"
+  exit 1
+fi
+if [ -z "${SYSTEM_ACCESSTOKEN:-}" ]; then
+  echo "##vso[task.complete result=Failed]System.AccessToken is unavailable for Azure workload-identity refresh"
+  exit 1
+fi
+if [ -z "${SYSTEM_OIDCREQUESTURI:-}" ]; then
+  echo "##vso[task.complete result=Failed]System.OidcRequestUri is unavailable for Azure workload-identity refresh"
+  exit 1
+fi
+
+umask 077
+AUTH_ROOT="$AGENT_TEMP/ado-aw-azure-auth"
+AUTH_DIR="$AUTH_ROOT/$RUNTIME_ID"
+docker rm -f "$REFRESH_CONTAINER" >/dev/null 2>&1 || true
+rm -rf "$AUTH_DIR"
+mkdir -p "$AUTH_DIR/token.d"
+chmod 700 "$AUTH_ROOT" "$AUTH_DIR"
+# Only token.d is mounted into the MCP container, whose UID may differ from
+# the runner's. Private parents protect the host path, not the mounted view.
+chmod 755 "$AUTH_DIR/token.d"
+MATERIAL_FIFO="$AUTH_DIR/material"
+mkfifo -m 600 "$MATERIAL_FIFO"
+
+# ado-aw:fragment run_container
+
+# The short-lived encoder inherits the AzureCLI task environment and writes
+# directly to the FIFO. Credentials never become process arguments or files.
+MATERIAL_STATUS=0
+MATERIAL_FIFO="$MATERIAL_FIFO" \
+AZURE_WIF_ID_TOKEN="$AZURE_WIF_ID_TOKEN" \
+AZURE_WIF_SERVICE_CONNECTION_ID="$AZURE_WIF_SERVICE_CONNECTION_ID" \
+SYSTEM_ACCESSTOKEN="$SYSTEM_ACCESSTOKEN" \
+SYSTEM_OIDCREQUESTURI="$SYSTEM_OIDCREQUESTURI" \
+timeout 60s node -e '
+const fs = require("node:fs");
+const env = process.env;
+const required = [
+  "AZURE_WIF_ID_TOKEN", "AZURE_WIF_SERVICE_CONNECTION_ID",
+  "SYSTEM_ACCESSTOKEN", "SYSTEM_OIDCREQUESTURI", "MATERIAL_FIFO"
+];
+for (const name of required) {
+  if (!env[name]) throw new Error(`missing ${name}`);
+}
+const material = {
+  initialIdToken: env.AZURE_WIF_ID_TOKEN,
+  systemAccessToken: env.SYSTEM_ACCESSTOKEN,
+  oidcRequestUri: env.SYSTEM_OIDCREQUESTURI,
+  serviceConnectionId: env.AZURE_WIF_SERVICE_CONNECTION_ID,
+  tokenPath: "/var/lib/ado-aw-azure-auth/token.d/token",
+  readyPath: "/var/lib/ado-aw-azure-auth/ready.json",
+  statusPath: "/var/lib/ado-aw-azure-auth/status.json"
+};
+fs.writeFileSync(env.MATERIAL_FIFO, JSON.stringify(material));
+' || MATERIAL_STATUS=$?
+rm -f "$MATERIAL_FIFO"
+if [ "$MATERIAL_STATUS" -ne 0 ]; then
+  echo "##vso[task.logissue type=error]Failed to hand Azure workload-identity material to refresher"
+  docker logs "$REFRESH_CONTAINER" 2>&1 || true
+  exit 1
+fi
+
+printf '##vso[task.setvariable variable=%s]%s\n' "$CLIENT_VARIABLE" "$AZURE_WIF_CLIENT_ID"
+printf '##vso[task.setvariable variable=%s]%s\n' "$TENANT_VARIABLE" "$AZURE_WIF_TENANT_ID"
+
+READY=false
+for _i in $(seq 1 30); do
+  if [ -s "$AUTH_DIR/token.d/token" ] \
+     && [ -s "$AUTH_DIR/ready.json" ] \
+     && jq -e '.state == "ready"' "$AUTH_DIR/ready.json" >/dev/null 2>&1; then
+    READY=true
+    break
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' "$REFRESH_CONTAINER" 2>/dev/null || true)" != "true" ]; then
+    break
+  fi
+  sleep 1
+done
+if [ "$READY" != "true" ]; then
+  echo "##vso[task.logissue type=error]Azure workload-identity refresher failed to become ready"
+  docker logs "$REFRESH_CONTAINER" 2>&1 || true
+  exit 1
+fi
+"###,
+    }
+}
+
+fn azure_wif_refresh_container_invocation() -> Result<String> {
+    DockerRun::new(ShellWord::variable("REFRESH_IMAGE")?)
+        .detached()
+        .name(ShellWord::variable("REFRESH_CONTAINER")?)
+        .network(ShellWord::literal("bridge")?)
+        .user(ShellWord::current_user())
+        .cap_drop_all()
+        .no_new_privileges()
+        .read_only()
+        .tmpfs(DockerTmpfs::new("/tmp", "rw,nosuid,nodev,noexec")?)
+        .pids_limit(64)
+        .entrypoint(ShellWord::literal("sh")?)
+        .mount(DockerMount::read_only(
+            ShellWord::variable("REFRESH_BUNDLE")?,
+            "/app/azure-wif-refresh.js",
+        )?)
+        .mount(DockerMount::read_write(
+            ShellWord::variable("AUTH_DIR")?,
+            "/var/lib/ado-aw-azure-auth",
+        )?)
+        .command_arg(ShellWord::literal("-c")?)
+        .command_arg(ShellWord::literal(
+            "exec node /app/azure-wif-refresh.js < /var/lib/ado-aw-azure-auth/material",
+        )?)
+        .discard_stdout()
+        .render_bash()
+}
+
+fn start_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Result<Vec<Step>> {
+    let mut steps = Vec::new();
+    for (server_name, _, auth) in front_matter.azure_authenticated_mcp_servers() {
+        let runtime_id = super::mcpg::azure_auth_runtime_id(server_name).to_ascii_lowercase();
+        let client_variable = super::mcpg::azure_auth_client_variable(server_name)?;
+        let tenant_variable = super::mcpg::azure_auth_tenant_variable(server_name)?;
+        let script = ShellScript::new(&START_AZURE_WIF_REFRESH)
+            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+            .bind_text("RUNTIME_ID", &runtime_id)
+            .bind_text(
+                "REFRESH_CONTAINER",
+                super::mcpg::azure_auth_container_name(server_name),
+            )
+            .bind_text("REFRESH_IMAGE", ADO_PROXY_IMAGE)
+            .bind_text("REFRESH_BUNDLE", paths::AZURE_WIF_REFRESH_PATH)
+            .bind_text("CLIENT_VARIABLE", client_variable.as_str())
+            .bind_text("TENANT_VARIABLE", tenant_variable.as_str())
+            .fragment(
+                "run_container",
+                azure_wif_refresh_container_invocation()?,
+            )
+            .render();
+        let task = AzureCliV3::new(
+            AzureCliV3Connection::AzureRm(auth.service_connection.as_str().to_string()),
+            ScriptType::Bash,
+            ScriptLocation::Inline(script),
+        )
+        .add_spn_to_environment(true)
+        .visible_az_login(false)
+        .with_display_name(format!("Start Azure auth refresher ({server_name})"))
+        .into_step()
+        .with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret("System.AccessToken"));
+        steps.push(Step::Task(task));
+    }
+    Ok(steps)
+}
+
+shell_script! {
+    /// Stop one Azure workload-identity refresh sidecar and delete its private
+    /// assertion directory. The step is idempotent for partial startup paths.
+    STOP_AZURE_WIF_REFRESH {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP, RUNTIME_ID, REFRESH_CONTAINER],
+        externals: [],
+        fragments: [],
+        body: r###"
+REFRESH_FAILED=false
+STATUS_PATH="$AGENT_TEMP/ado-aw-azure-auth/$RUNTIME_ID/status.json"
+if [ -s "$STATUS_PATH" ] && jq -e '.state == "unhealthy"' "$STATUS_PATH" >/dev/null 2>&1; then
+  echo "##vso[task.logissue type=error]Azure workload-identity refresher reported an unhealthy state"
+  REFRESH_FAILED=true
+fi
+if docker inspect "$REFRESH_CONTAINER" >/dev/null 2>&1 \
+   && [ "$(docker inspect -f '{{.State.Running}}' "$REFRESH_CONTAINER")" != "true" ]; then
+  echo "##vso[task.logissue type=error]Azure workload-identity refresher exited before cleanup"
+  REFRESH_FAILED=true
+fi
+if [ "$REFRESH_FAILED" = "true" ]; then
+  docker logs "$REFRESH_CONTAINER" 2>&1 || true
+fi
+docker stop --time 10 "$REFRESH_CONTAINER" >/dev/null 2>&1 || true
+docker rm -f "$REFRESH_CONTAINER" >/dev/null 2>&1 || true
+rm -rf "$AGENT_TEMP/ado-aw-azure-auth/$RUNTIME_ID"
+if [ "$REFRESH_FAILED" = "true" ]; then
+  exit 1
+fi
+"###,
+    }
+}
+
+fn stop_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Vec<Step> {
+    front_matter
+        .azure_authenticated_mcp_servers()
+        .into_iter()
+        .map(|(server_name, _, _)| {
+            let runtime_id = super::mcpg::azure_auth_runtime_id(server_name).to_ascii_lowercase();
+            Step::Bash(
+                ShellScript::new(&STOP_AZURE_WIF_REFRESH)
+                    .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+                    .bind_text("RUNTIME_ID", &runtime_id)
+                    .bind_text(
+                        "REFRESH_CONTAINER",
+                        super::mcpg::azure_auth_container_name(server_name),
+                    )
+                    .into_step(format!("Stop Azure auth refresher ({server_name})"))
+                    .with_condition(Condition::Always),
+            )
+        })
+        .collect()
+}
+
 /// Start the `ado-proxy` policy engine as a host container.
 ///
 /// Mirrors [`start_mcpg_step`]: an ordinary bridge-networked container started
@@ -5008,7 +5335,7 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
         )
         .fragment(
             "run_container",
-            phase_body(&START_ADO_PROXY_RUN_CONTAINER),
+            ado_proxy_run_container_phase(),
         )
         .fragment(
             "handover_material",
@@ -5034,6 +5361,76 @@ fn phase_body(def: &crate::compile::shell::ShellScriptDef) -> String {
     // is defence-in-depth), then dedent the raw body.
     let body = def.body.trim_start_matches('\n');
     crate::compile::shell::dedent(body).trim().to_string()
+}
+
+fn ado_proxy_run_container_phase() -> String {
+    ShellScript::new(&START_ADO_PROXY_RUN_CONTAINER)
+        .fragment(
+            "container_invocation",
+            ado_proxy_container_invocation()
+                .render_bash()
+                .expect("compiler-owned ado-proxy container invocation must be valid"),
+        )
+        .render()
+        .trim()
+        .to_string()
+}
+
+fn ado_proxy_container_invocation() -> DockerRun {
+    DockerRun::new(
+        ShellWord::variable("PROXY_IMAGE")
+            .expect("compiler-owned shell variable must be valid"),
+    )
+    .detached()
+    .name(
+        ShellWord::variable("PROXY_CONTAINER")
+            .expect("compiler-owned shell variable must be valid"),
+    )
+    .network(
+        ShellWord::variable("PROXY_NETWORK")
+            .expect("compiler-owned shell variable must be valid"),
+    )
+    .entrypoint(ShellWord::literal("sh").expect("static entrypoint must be valid"))
+    .mount(
+        DockerMount::read_only(
+            ShellWord::variable("PROXY_SCRIPT_PATH")
+                .expect("compiler-owned shell variable must be valid"),
+            "/app/ado-proxy.js",
+        )
+        .expect("static ado-proxy bundle mount must be valid"),
+    )
+    .mount(
+        DockerMount::read_only(
+            ShellWord::variable("PROXY_DIR")
+                .expect("compiler-owned shell variable must be valid")
+                .with_literal("/policy")
+                .expect("static policy suffix must be valid"),
+            "/etc/ado-proxy",
+        )
+        .expect("static ado-proxy policy mount must be valid"),
+    )
+    .mount(
+        DockerMount::read_write(
+            ShellWord::variable("AZ_WRAPPER_DIR")
+                .expect("compiler-owned shell variable must be valid"),
+            "/var/lib/ado-proxy",
+        )
+        .expect("static ado-proxy CA mount must be valid"),
+    )
+    .mount(
+        DockerMount::read_write(
+            ShellWord::literal("/tmp/gh-aw/ado-proxy-logs")
+                .expect("static log path must be valid"),
+            "/var/log/ado-proxy",
+        )
+        .expect("static ado-proxy log mount must be valid"),
+    )
+    .command_arg(ShellWord::literal("-c").expect("static command flag must be valid"))
+    .command_arg(
+        ShellWord::variable("CONTAINER_ENTRYPOINT")
+            .expect("compiler-owned shell variable must be valid"),
+    )
+    .discard_stdout()
 }
 
 /// The one-liner passed to the container's `sh -c`. Kept in sync with the
@@ -5227,7 +5624,13 @@ shell_script! {
             PROXY_CONTAINER, PROXY_NETWORK, PROXY_SCRIPT_PATH,
             PROXY_DIR, PROXY_IMAGE, CONTAINER_ENTRYPOINT, AZ_WRAPPER_DIR
         ],
-        fragments: [],
+        fragments: [container_invocation],
+        fragment_uses: [
+            container_invocation => [
+                PROXY_CONTAINER, PROXY_NETWORK, PROXY_SCRIPT_PATH,
+                PROXY_DIR, PROXY_IMAGE, CONTAINER_ENTRYPOINT, AZ_WRAPPER_DIR
+            ],
+        ],
         body: r###"
 # Remove any container left behind by an interrupted run.
 docker rm -f "$PROXY_CONTAINER" 2>/dev/null || true
@@ -5241,17 +5644,7 @@ mkdir -p /tmp/gh-aw/ado-proxy-logs
 # A container-local FIFO preserves the stdin-only custody contract:
 # material is streamed through `docker exec -i`, never written to a
 # runner path, container layer, argv, or environment.
-docker run -d \
-  --name "$PROXY_CONTAINER" \
-  --network "$PROXY_NETWORK" \
-  --entrypoint sh \
-  -v "$PROXY_SCRIPT_PATH:/app/ado-proxy.js:ro" \
-  -v "$PROXY_DIR/policy:/etc/ado-proxy:ro" \
-  -v "$AZ_WRAPPER_DIR:/var/lib/ado-proxy" \
-  -v /tmp/gh-aw/ado-proxy-logs:/var/log/ado-proxy \
-  "$PROXY_IMAGE" \
-  -c "$CONTAINER_ENTRYPOINT" \
-  >/dev/null
+# ado-aw:fragment container_invocation
 "###,
     }
 }
@@ -7343,6 +7736,120 @@ safe-outputs:
         .0
     }
 
+    fn azure_auth_fm() -> FrontMatter {
+        crate::compile::parse_markdown(
+            "---\nname: t\ndescription: x\nmcp-servers:\n  kusto:\n    container: node:22-slim\n    azure-auth:\n      service-connection: my-arm-sc\n---\n",
+        )
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn azure_auth_identity_exclusions_are_independent_of_the_engine() {
+        let fm = azure_auth_fm();
+        let client = super::super::mcpg::azure_auth_client_variable("kusto").unwrap();
+        let tenant = super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap();
+        for is_copilot in [true, false] {
+            let keys = awf_exclude_keys(&fm, is_copilot, &fm.engine).unwrap();
+            assert_eq!(keys, vec![client.as_str(), tenant.as_str()]);
+        }
+        let plain = test_front_matter("name: t\ndescription: d\n");
+        assert!(awf_exclude_keys(&plain, true, &plain.engine).unwrap().is_empty());
+    }
+
+    #[test]
+    fn azure_auth_identity_exclusions_preserve_provider_credentials() {
+        let fm = azure_auth_fm();
+        let provider = test_front_matter(
+            "name: t\ndescription: d\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_API_KEY: fake-key\n",
+        );
+        let keys = awf_exclude_keys(&fm, true, &provider.engine).unwrap();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&"COPILOT_PROVIDER_API_KEY".to_string()));
+        assert!(keys.contains(
+            &super::super::mcpg::azure_auth_client_variable("kusto").unwrap().into_inner()
+        ));
+        assert!(keys.contains(
+            &super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap().into_inner()
+        ));
+    }
+
+    #[test]
+    fn azure_auth_refresher_uses_typed_azure_cli_v3_and_stdin_custody() {
+        let steps = start_azure_wif_refresh_steps(&azure_auth_fm()).unwrap();
+        let [Step::Task(task)] = steps.as_slice() else {
+            panic!("expected one AzureCLI@3 task");
+        };
+        assert_eq!(task.task, "AzureCLI@3");
+        assert_eq!(
+            task.inputs.get("connectionType").map(String::as_str),
+            Some("azureRM")
+        );
+        assert_eq!(
+            task.inputs.get("azureSubscription").map(String::as_str),
+            Some("my-arm-sc")
+        );
+        assert_eq!(
+            task.inputs.get("addSpnToEnvironment").map(String::as_str),
+            Some("true")
+        );
+        assert!(matches!(
+            task.env.get("SYSTEM_ACCESSTOKEN"),
+            Some(EnvValue::Secret(name)) if name == "System.AccessToken"
+        ));
+        let script = task.inputs.get("inlineScript").unwrap();
+        assert!(script.contains("mkfifo -m 600"));
+        assert!(script.contains("docker run \\\n  -d \\"));
+        assert!(!script.contains("  --rm \\"));
+        assert!(script.contains("azure-wif-refresh.js"));
+        assert!(script.contains("fs.writeFileSync(env.MATERIAL_FIFO"));
+        assert!(script.contains("SYSTEM_OIDCREQUESTURI"));
+        assert!(script.contains("AZURESUBSCRIPTION_SERVICE_CONNECTION_ID"));
+        assert!(script.contains("$AUTH_DIR/token.d/token"));
+        assert!(!script.contains("-e SYSTEM_ACCESSTOKEN"));
+        assert!(!script.contains("--token"));
+        assert!(script.contains("AGENT_TEMP='$(Agent.TempDirectory)'"));
+        assert!(script.contains("chmod 700 \"$AUTH_ROOT\" \"$AUTH_DIR\""));
+        assert!(script.contains("chmod 755 \"$AUTH_DIR/token.d\""));
+    }
+
+    #[test]
+    fn credential_container_launches_lower_from_typed_invocations() {
+        let has_raw_docker_run = |body: &str| {
+            body.lines()
+                .map(str::trim_start)
+                .any(|line| line.starts_with("docker run"))
+        };
+        assert!(!has_raw_docker_run(START_AZURE_WIF_REFRESH.body));
+        assert!(
+            START_AZURE_WIF_REFRESH
+                .fragment_uses
+                .iter()
+                .any(|(name, _)| *name == "run_container")
+        );
+        assert!(!has_raw_docker_run(START_ADO_PROXY_RUN_CONTAINER.body));
+        assert!(
+            START_ADO_PROXY_RUN_CONTAINER
+                .fragment_uses
+                .iter()
+                .any(|(name, _)| *name == "container_invocation")
+        );
+    }
+
+    #[test]
+    fn azure_auth_refresher_cleanup_is_always_and_scoped() {
+        let steps = stop_azure_wif_refresh_steps(&azure_auth_fm());
+        let [Step::Bash(step)] = steps.as_slice() else {
+            panic!("expected one cleanup bash step");
+        };
+        assert_eq!(step.condition, Some(Condition::Always));
+        assert!(step.script.contains("docker rm -f \"$REFRESH_CONTAINER\""));
+        assert!(
+            step.script
+                .contains("rm -rf \"$AGENT_TEMP/ado-aw-azure-auth/$RUNTIME_ID\"")
+        );
+    }
+
     // ── start_ado_proxy_step / stop_ado_proxy_step ──────────────────────────
 
     #[test]
@@ -7395,7 +7902,7 @@ safe-outputs:
             step.script
         );
         assert!(
-            step.script.contains("docker run -d")
+            step.script.contains("docker run \\\n  -d \\")
                 && step.script.contains("mkfifo \"$MATERIAL_FIFO\""),
             "the container must be detached from the Bash task before material handover"
         );
@@ -7415,9 +7922,9 @@ safe-outputs:
     #[test]
     fn ado_proxy_container_lifecycle_is_independent_of_the_start_task() {
         let script = start_ado_proxy_step(&proxy_fm()).script;
-        assert!(script.contains("docker run -d"));
+        assert!(script.contains("docker run \\\n  -d \\"));
         assert!(
-            !script.contains("docker run -i --rm"),
+            !script.contains("  --rm \\"),
             "attached --rm containers disappear when Azure Pipelines cleans up task STDIO"
         );
         assert!(script.contains("docker logs --tail 200"));
@@ -7482,7 +7989,7 @@ safe-outputs:
         assert!(script.contains("--public-ca-file /var/lib/ado-proxy/ado-proxy-ca.pem"));
         assert!(
             script.contains(&format!("AZ_WRAPPER_DIR='{AZ_WRAPPER_DIR}'"))
-                && script.contains("-v \"$AZ_WRAPPER_DIR:/var/lib/ado-proxy\""),
+                && script.contains("-v \"${AZ_WRAPPER_DIR}:/var/lib/ado-proxy:rw\""),
             "the wrapper directory must be bound and mounted at /var/lib/ado-proxy: {script}"
         );
         assert!(
@@ -7534,18 +8041,18 @@ safe-outputs:
         let script = start_ado_proxy_step(&proxy_fm()).script;
         assert_eq!(ADO_PROXY_IMAGE, common::ADO_MCP_IMAGE);
         // The image and the bundle path both reach the body through bindings,
-        // so the docker invocation references them as `$PROXY_IMAGE` and
-        // `$PROXY_SCRIPT_PATH` while the concrete values live in the prelude.
+        // so the docker invocation references them as `${PROXY_IMAGE}` and
+        // `${PROXY_SCRIPT_PATH}` while the concrete values live in the prelude.
         assert!(
             script.contains(&format!("PROXY_IMAGE='{ADO_PROXY_IMAGE}'"))
-                && script.contains("\"$PROXY_IMAGE\" \\"),
+                && script.contains("\"${PROXY_IMAGE}\" \\"),
             "docker run must reuse the bound $PROXY_IMAGE: {script}"
         );
         assert!(
             script.contains(&format!(
                 "PROXY_SCRIPT_PATH='{}'",
                 paths::ADO_PROXY_PATH
-            )) && script.contains("\"$PROXY_SCRIPT_PATH:/app/ado-proxy.js:ro\""),
+            )) && script.contains("\"${PROXY_SCRIPT_PATH}:/app/ado-proxy.js:ro\""),
             "docker run must mount the bound ado-proxy bundle: {script}"
         );
     }
@@ -7634,6 +8141,10 @@ safe-outputs:
             step.env.get("MCPG_ENV_NAMES"),
             Some(EnvValue::Literal(value)) if value == "DEBUG DEST_TOKEN"
         ));
+        assert!(
+            step.script
+                .contains(r#""$" + "{" + name + "}": os.environ[name]"#)
+        );
         assert!(step.script.contains("MCPG_DOCKER_ENV_ARGS+=(-e"));
         assert!(step.script.contains("\"${MCPG_DOCKER_ENV_ARGS[@]}\""));
         assert!(!step.script.contains("DEST_TOKEN=\"$SOURCE_TOKEN\""));

@@ -411,6 +411,49 @@ fragment defines must be declared in the consumer's `externals:`, which forces
 the inter-phase contract somewhere a reviewer can see it. Declaring a fragment
 without marking it (or vice versa) is a test failure, not a silent no-op.
 
+A fragment generated from typed IR declares the variables it consumes through
+`fragment_uses:`. This keeps registry-wide shellcheck coverage accurate without
+adding fake no-op reads to the emitted script:
+
+```rust
+fragments: [run_container],
+fragment_uses: [
+    run_container => [CONTAINER, IMAGE],
+],
+```
+
+### Compiler-owned container invocations
+
+Use `compile::container_invocation::DockerRun` for a compiler-owned
+`docker run` command, especially when the container handles credentials. It
+models the image, lifecycle, name, network, user, hardening flags, mounts,
+entrypoint, and command arguments as typed values, then lowers to a shell
+fragment at the final boundary.
+
+`DockerRun` intentionally has no raw argument escape hatch. Add a typed field
+and validation when a compiler-owned container needs a new Docker capability;
+do not insert a hand-authored flag into a `shell_script!` body. `Docker@2`
+remains the separate typed ADO task for image build/push/login/logout actions.
+
+Keep orchestration and control flow in registered shell. Only the security-
+sensitive command construction belongs in the container invocation IR:
+
+```rust
+let run = DockerRun::new(ShellWord::variable("IMAGE")?)
+    .detached()
+    .name(ShellWord::variable("CONTAINER")?)
+    .read_only()
+    .mount(DockerMount::read_only(
+        ShellWord::variable("BUNDLE")?,
+        "/app/bundle.js",
+    )?)
+    .render_bash()?;
+
+ShellScript::new(&START_CONTAINER)
+    .fragment("run_container", run)
+    .into_step("Start container")
+```
+
 ### Reviewing the scripts as files
 
 ```bash

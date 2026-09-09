@@ -95,6 +95,9 @@ mcp-servers:
       CUSTOM_TOKEN:
         pipeline-variable: CUSTOM_TOKEN  # ADO pipeline/variable-group/same-job source
       STATIC_CONFIG: "value"    # literal value embedded in MCPG config
+    azure-auth:                 # optional renewable Azure workload identity
+      service-connection: my-arm-service-connection
+      mount-path: /var/run/ado-aw/azure # optional; token is written below this path
     allowed:
       - custom_function_1
       - custom_function_2
