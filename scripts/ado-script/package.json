@@ -47,6 +47,6 @@
     "@vercel/ncc": "^0.38.4",
     "json-schema-to-typescript": "^15.0.4",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.11"
   }
 }
