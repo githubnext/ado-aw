@@ -171,6 +171,111 @@ fn milestone_is_allowed(
         })
 }
 
+/// Result of resolving (or creating) the milestone to assign: `(number,
+/// title, created)`.
+type ResolvedMilestone = (u64, String, bool);
+
+/// Resolve an explicitly numbered milestone request against the already
+/// fetched milestone list, checking the allow-list policy.
+///
+/// Returns `Ok(Err(result))` for any policy/not-found failure so callers can
+/// propagate it as an `ExecutionResult` without an early `return` of their
+/// own.
+fn resolve_milestone_by_number(
+    config: &AssignGithubIssueMilestoneConfig,
+    milestones: &[crate::safe_outputs::github_api::GithubMilestone],
+    target_repo: &str,
+    requested_number: u64,
+) -> anyhow::Result<Result<ResolvedMilestone, ExecutionResult>> {
+    let Some(milestone) = milestones
+        .iter()
+        .find(|milestone| milestone.number == requested_number)
+    else {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "GitHub milestone #{requested_number} does not exist in {target_repo}"
+        ))));
+    };
+    if !milestone_is_allowed(config, Some(milestone.number), &milestone.title) {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "GitHub milestone #{} ('{}') is not in the allowed list",
+            milestone.number,
+            crate::sanitize::neutralize_pipeline_commands(&milestone.title)
+        ))));
+    }
+    Ok(Ok((milestone.number, milestone.title.clone(), false)))
+}
+
+/// Resolve a milestone request by title: matches an existing milestone,
+/// disambiguates duplicates, and auto-creates a new milestone when
+/// `auto-create` is enabled and no existing milestone matches.
+async fn resolve_milestone_by_title(
+    client: &GithubClient,
+    config: &AssignGithubIssueMilestoneConfig,
+    milestones: &[crate::safe_outputs::github_api::GithubMilestone],
+    target_repo: &str,
+    requested_title: &str,
+) -> anyhow::Result<Result<ResolvedMilestone, ExecutionResult>> {
+    let matches: Vec<_> = milestones
+        .iter()
+        .filter(|milestone| milestone.title == requested_title)
+        .collect();
+    if matches.len() > 1 {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "multiple GitHub milestones in {} have the exact title '{}'; use \
+                 milestone_number to disambiguate",
+            target_repo,
+            crate::sanitize::neutralize_pipeline_commands(requested_title)
+        ))));
+    }
+    if let Some(milestone) = matches.first() {
+        if !milestone_is_allowed(config, Some(milestone.number), &milestone.title) {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "GitHub milestone '{}' (#{}) is not in the allowed list",
+                crate::sanitize::neutralize_pipeline_commands(&milestone.title),
+                milestone.number
+            ))));
+        }
+        return Ok(Ok((milestone.number, milestone.title.clone(), false)));
+    }
+
+    if !milestone_is_allowed(config, None, requested_title) {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "GitHub milestone '{}' is not in the allowed list",
+            crate::sanitize::neutralize_pipeline_commands(requested_title)
+        ))));
+    }
+    if !config.auto_create {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "GitHub milestone '{}' does not exist in {} and auto-create is false",
+            crate::sanitize::neutralize_pipeline_commands(requested_title),
+            target_repo
+        ))));
+    }
+
+    let response = client
+        .send(
+            Method::POST,
+            client.milestones_url(target_repo)?,
+            Some(&serde_json::json!({ "title": requested_title })),
+        )
+        .await?;
+    let response = match response.require_success("Failed to create GitHub milestone") {
+        Ok(response) => response,
+        Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+    };
+    let payload: serde_json::Value = response.json("Failed to parse created GitHub milestone")?;
+    let Some(number) = payload
+        .get("number")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|number| *number > 0)
+    else {
+        return Ok(Err(ExecutionResult::failure(
+            "GitHub create milestone response contained no positive milestone number",
+        )));
+    };
+    Ok(Ok((number, requested_title.to_string(), true)))
+}
+
 #[async_trait::async_trait]
 impl Executor for AssignGithubIssueMilestoneResult {
     fn dry_run_summary(&self) -> String {
@@ -238,92 +343,25 @@ impl Executor for AssignGithubIssueMilestoneResult {
             Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
         };
 
-        let (milestone_number, milestone_title, created) = if let Some(requested_number) =
-            self.milestone_number
-        {
-            let Some(milestone) = milestones
-                .iter()
-                .find(|milestone| milestone.number == requested_number)
-            else {
-                return Ok(ExecutionResult::failure(format!(
-                    "GitHub milestone #{requested_number} does not exist in {}",
-                    target.repository
-                )));
-            };
-            if !milestone_is_allowed(&config, Some(milestone.number), &milestone.title) {
-                return Ok(ExecutionResult::failure(format!(
-                    "GitHub milestone #{} ('{}') is not in the allowed list",
-                    milestone.number,
-                    crate::sanitize::neutralize_pipeline_commands(&milestone.title)
-                )));
-            }
-            (milestone.number, milestone.title.clone(), false)
+        let resolved = if let Some(requested_number) = self.milestone_number {
+            resolve_milestone_by_number(&config, &milestones, &target.repository, requested_number)?
         } else {
             let requested_title = self
                 .milestone_title
                 .as_deref()
                 .expect("validated result has a milestone title");
-            let matches: Vec<_> = milestones
-                .iter()
-                .filter(|milestone| milestone.title == requested_title)
-                .collect();
-            if matches.len() > 1 {
-                return Ok(ExecutionResult::failure(format!(
-                    "multiple GitHub milestones in {} have the exact title '{}'; use \
-                         milestone_number to disambiguate",
-                    target.repository,
-                    crate::sanitize::neutralize_pipeline_commands(requested_title)
-                )));
-            }
-            if let Some(milestone) = matches.first() {
-                if !milestone_is_allowed(&config, Some(milestone.number), &milestone.title) {
-                    return Ok(ExecutionResult::failure(format!(
-                        "GitHub milestone '{}' (#{}) is not in the allowed list",
-                        crate::sanitize::neutralize_pipeline_commands(&milestone.title),
-                        milestone.number
-                    )));
-                }
-                (milestone.number, milestone.title.clone(), false)
-            } else {
-                if !milestone_is_allowed(&config, None, requested_title) {
-                    return Ok(ExecutionResult::failure(format!(
-                        "GitHub milestone '{}' is not in the allowed list",
-                        crate::sanitize::neutralize_pipeline_commands(requested_title)
-                    )));
-                }
-                if !config.auto_create {
-                    return Ok(ExecutionResult::failure(format!(
-                        "GitHub milestone '{}' does not exist in {} and auto-create is false",
-                        crate::sanitize::neutralize_pipeline_commands(requested_title),
-                        target.repository
-                    )));
-                }
-                let response = client
-                    .send(
-                        Method::POST,
-                        client.milestones_url(&target.repository)?,
-                        Some(&serde_json::json!({ "title": requested_title })),
-                    )
-                    .await?;
-                let response = match response.require_success("Failed to create GitHub milestone") {
-                    Ok(response) => response,
-                    Err(error) => {
-                        return Ok(ExecutionResult::failure(error.to_string()));
-                    }
-                };
-                let payload: serde_json::Value =
-                    response.json("Failed to parse created GitHub milestone")?;
-                let Some(number) = payload
-                    .get("number")
-                    .and_then(serde_json::Value::as_u64)
-                    .filter(|number| *number > 0)
-                else {
-                    return Ok(ExecutionResult::failure(
-                        "GitHub create milestone response contained no positive milestone number",
-                    ));
-                };
-                (number, requested_title.to_string(), true)
-            }
+            resolve_milestone_by_title(
+                &client,
+                &config,
+                &milestones,
+                &target.repository,
+                requested_title,
+            )
+            .await?
+        };
+        let (milestone_number, milestone_title, created) = match resolved {
+            Ok(resolved) => resolved,
+            Err(result) => return Ok(result),
         };
 
         let issue_url = client.issue_url(&target.repository, target.number)?;
