@@ -10940,3 +10940,148 @@ fn test_template_targets_emit_no_top_level_trigger() {
         );
     }
 }
+
+/// A `mounts:` entry that maps the host Docker socket into a container MCP
+/// must surface `validate_mount_source`'s container-escape warning on
+/// stderr during `compile`. `validate_mount_source` itself is unit-tested in
+/// `src/compile/common.rs`, but nothing previously exercised the full
+/// front-matter → compile → stderr path, so a regression that dropped the
+/// `eprintln!` call in `validate_stdio_mcp` (or stopped iterating
+/// `opts.mounts`) would go unnoticed.
+#[test]
+fn test_compile_warns_on_docker_socket_mount() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcp-docker-sock-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Docker Socket Mount Test\"\ndescription: \"Tests docker.sock mount warning\"\nmcp-servers:\n  my-tool:\n    container: \"ghcr.io/example/my-tool:latest\"\n    mounts:\n      - \"/var/run/docker.sock:/var/run/docker.sock:rw\"\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("docker-sock-mcp.md");
+    let output_path = temp_dir.join("docker-sock-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed (mount warnings are non-fatal): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("exposes the Docker socket"),
+        "expected a Docker-socket container-escape warning on stderr, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// A Docker arg smuggling `--privileged` into a container MCP must surface
+/// `validate_docker_args`'s elevated-privileges warning on stderr during
+/// `compile`. This exercises the full front-matter → `validate_stdio_mcp` →
+/// stderr path for `args:` (as opposed to `mounts:`), guarding against a
+/// regression that stopped iterating `opts.args` or dropped the warning
+/// `eprintln!`.
+#[test]
+fn test_compile_warns_on_privileged_docker_arg() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcp-privileged-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Privileged Docker Arg Test\"\ndescription: \"Tests --privileged arg warning\"\nmcp-servers:\n  my-tool:\n    container: \"ghcr.io/example/my-tool:latest\"\n    args: [\"--privileged\"]\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("privileged-mcp.md");
+    let output_path = temp_dir.join("privileged-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed (docker-arg warnings are non-fatal): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("grants elevated privileges"),
+        "expected an elevated-privileges warning on stderr, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// A `-v`/`--volume` Docker arg smuggling a sensitive host mount (bypassing
+/// the dedicated `mounts:` field) must surface **both**
+/// `validate_docker_args`'s bypass warning and the delegated
+/// `validate_mount_source` sensitive-path warning on stderr during
+/// `compile`. This exercises the args→mounts delegation path in
+/// `validate_docker_args` (`src/validate.rs`), which is unit-tested with a
+/// safe `/data` mount in `src/compile/common.rs` but never against a
+/// genuinely sensitive source path end-to-end through the compiler.
+#[test]
+fn test_compile_warns_on_volume_arg_smuggling_sensitive_mount() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcp-volume-arg-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Volume Arg Smuggling Test\"\ndescription: \"Tests -v arg bypassing mounts validation\"\nmcp-servers:\n  my-tool:\n    container: \"ghcr.io/example/my-tool:latest\"\n    args: [\"-v\", \"/etc:/host-etc:ro\"]\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("volume-arg-mcp.md");
+    let output_path = temp_dir.join("volume-arg-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed (docker-arg warnings are non-fatal): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bypasses mounts validation"),
+        "expected a mounts-bypass warning on stderr, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("sensitive host path"),
+        "expected the delegated sensitive-path warning on stderr, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
