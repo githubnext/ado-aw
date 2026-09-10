@@ -2016,6 +2016,30 @@ pub async fn download_build_artifact(
         )
     })?;
 
+    let artifact_dir = prepare_artifact_extraction_dir(dest_dir, &artifact.name)?;
+
+    debug!(
+        "Downloading build artifact '{}' from {}",
+        artifact.name, download_url
+    );
+
+    let resp = auth
+        .apply(client.get(download_url))
+        .send()
+        .await
+        .with_context(|| format!("Failed to download build artifact '{}'", artifact.name))?;
+
+    let resp = check_artifact_download_status(resp, artifact, dest_dir).await?;
+
+    let temp_zip = stream_artifact_to_temp_zip(resp, artifact, dest_dir).await?;
+    extract_artifact_zip(temp_zip, artifact, &artifact_dir)
+}
+
+/// Create (or reset) the directory an artifact will be extracted into.
+fn prepare_artifact_extraction_dir(
+    dest_dir: &std::path::Path,
+    artifact_name: &str,
+) -> Result<std::path::PathBuf> {
     std::fs::create_dir_all(dest_dir).with_context(|| {
         format!(
             "Failed to create artifact destination directory '{}'",
@@ -2023,7 +2047,7 @@ pub async fn download_build_artifact(
         )
     })?;
 
-    let artifact_dir = dest_dir.join(&artifact.name);
+    let artifact_dir = dest_dir.join(artifact_name);
     if artifact_dir.exists() {
         std::fs::remove_dir_all(&artifact_dir).with_context(|| {
             format!(
@@ -2039,40 +2063,48 @@ pub async fn download_build_artifact(
         )
     })?;
 
-    debug!(
-        "Downloading build artifact '{}' from {}",
-        artifact.name, download_url
-    );
+    Ok(artifact_dir)
+}
 
-    let mut resp = auth
-        .apply(client.get(download_url))
-        .send()
-        .await
-        .with_context(|| format!("Failed to download build artifact '{}'", artifact.name))?;
-
+/// Validate the HTTP status of the artifact download response, returning a
+/// structured error (with PAT-scope guidance on 401/403) on failure.
+async fn check_artifact_download_status(
+    resp: reqwest::Response,
+    artifact: &BuildArtifact,
+    dest_dir: &std::path::Path,
+) -> Result<reqwest::Response> {
     let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let run_id_hint = artifact.source.as_deref().unwrap_or("<build-id>");
-            return Err(anyhow::anyhow!(
-                "ADO API returned {} when downloading build artifact '{}': {}. This call requires PAT scopes Build (Read) and Build Artifacts (Read). As a manual alternative, try `az pipelines runs artifact download --run-id {} --artifact-name {} --path {}`.",
-                status,
-                artifact.name,
-                body,
-                run_id_hint,
-                artifact.name,
-                dest_dir.display()
-            ));
-        }
-        anyhow::bail!(
-            "ADO API returned {} when downloading build artifact '{}': {}",
-            status,
-            artifact.name,
-            body
-        );
+    if status.is_success() {
+        return Ok(resp);
     }
 
+    let body = resp.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        let run_id_hint = artifact.source.as_deref().unwrap_or("<build-id>");
+        return Err(anyhow::anyhow!(
+            "ADO API returned {} when downloading build artifact '{}': {}. This call requires PAT scopes Build (Read) and Build Artifacts (Read). As a manual alternative, try `az pipelines runs artifact download --run-id {} --artifact-name {} --path {}`.",
+            status,
+            artifact.name,
+            body,
+            run_id_hint,
+            artifact.name,
+            dest_dir.display()
+        ));
+    }
+    anyhow::bail!(
+        "ADO API returned {} when downloading build artifact '{}': {}",
+        status,
+        artifact.name,
+        body
+    );
+}
+
+/// Stream the artifact download response into a temp zip file under `dest_dir`.
+async fn stream_artifact_to_temp_zip(
+    mut resp: reqwest::Response,
+    artifact: &BuildArtifact,
+    dest_dir: &std::path::Path,
+) -> Result<tempfile::NamedTempFile> {
     let mut temp_zip = tempfile::Builder::new()
         .prefix(&format!(".tmp-{}-", artifact.id))
         .suffix(".zip")
@@ -2103,6 +2135,99 @@ pub async fn download_build_artifact(
         )
     })?;
 
+    Ok(temp_zip)
+}
+
+/// Determine whether every entry in the archive shares the artifact name as
+/// its top-level path component (i.e. the zip has a single repeated root
+/// directory that should be stripped on extraction).
+fn artifact_zip_has_repeated_root(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    artifact_name: &str,
+) -> Result<bool> {
+    (0..archive.len()).try_fold(true, |all_match, index| {
+        let entry = archive.by_index(index).with_context(|| {
+            format!("Failed to read zip entry {index} from build artifact '{artifact_name}'")
+        })?;
+        let entry_name = entry.name().to_string();
+        let relative_path = entry.enclosed_name().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Refusing to extract unsafe path '{}' from build artifact '{}'",
+                entry_name,
+                artifact_name
+            )
+        })?;
+        Ok::<_, anyhow::Error>(
+            all_match
+                && relative_path
+                    .components()
+                    .next()
+                    .is_some_and(|component| component.as_os_str() == artifact_name),
+        )
+    })
+}
+
+/// Extract a single zip entry to `artifact_dir`, stripping the repeated root
+/// component when `repeated_root` is true.
+fn extract_zip_entry(
+    entry: &mut zip::read::ZipFile<std::fs::File>,
+    artifact_name: &str,
+    artifact_dir: &std::path::Path,
+    repeated_root: bool,
+) -> Result<()> {
+    let entry_name = entry.name().to_string();
+    let relative_path = entry
+        .enclosed_name()
+        .map(|path| path.to_owned())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Refusing to extract unsafe path '{}' from build artifact '{}'",
+                entry_name,
+                artifact_name
+            )
+        })?;
+    let relative_path = if repeated_root {
+        relative_path
+            .strip_prefix(artifact_name)
+            .expect("repeated artifact root was validated")
+    } else {
+        relative_path.as_path()
+    };
+    let output_path = artifact_dir.join(relative_path);
+
+    if entry.is_dir() {
+        std::fs::create_dir_all(&output_path).with_context(|| {
+            format!(
+                "Failed to create extracted directory '{}'",
+                output_path.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent directory '{}'", parent.display()))?;
+    }
+
+    let mut output = std::fs::File::create(&output_path).with_context(|| {
+        format!(
+            "Failed to create extracted file '{}'",
+            output_path.display()
+        )
+    })?;
+    std::io::copy(entry, &mut output).with_context(|| {
+        format!("Failed to extract '{entry_name}' from build artifact '{artifact_name}'")
+    })?;
+    Ok(())
+}
+
+/// Open the downloaded temp zip and extract its contents into `artifact_dir`.
+fn extract_artifact_zip(
+    temp_zip: tempfile::NamedTempFile,
+    artifact: &BuildArtifact,
+    artifact_dir: &std::path::Path,
+) -> Result<()> {
     let archive_file = temp_zip.reopen().with_context(|| {
         format!(
             "Failed to reopen temp zip for build artifact '{}'",
@@ -2116,29 +2241,7 @@ pub async fn download_build_artifact(
         )
     })?;
 
-    let repeated_root = (0..archive.len()).try_fold(true, |all_match, index| {
-        let entry = archive.by_index(index).with_context(|| {
-            format!(
-                "Failed to read zip entry {} from build artifact '{}'",
-                index, artifact.name
-            )
-        })?;
-        let entry_name = entry.name().to_string();
-        let relative_path = entry.enclosed_name().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Refusing to extract unsafe path '{}' from build artifact '{}'",
-                entry_name,
-                artifact.name
-            )
-        })?;
-        Ok::<_, anyhow::Error>(
-            all_match
-                && relative_path
-                    .components()
-                    .next()
-                    .is_some_and(|component| component.as_os_str() == artifact.name.as_str()),
-        )
-    })?;
+    let repeated_root = artifact_zip_has_repeated_root(&mut archive, &artifact.name)?;
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).with_context(|| {
@@ -2147,54 +2250,7 @@ pub async fn download_build_artifact(
                 index, artifact.name
             )
         })?;
-        let entry_name = entry.name().to_string();
-        let relative_path = entry
-            .enclosed_name()
-            .map(|path| path.to_owned())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Refusing to extract unsafe path '{}' from build artifact '{}'",
-                    entry_name,
-                    artifact.name
-                )
-            })?;
-        let relative_path = if repeated_root {
-            relative_path
-                .strip_prefix(&artifact.name)
-                .expect("repeated artifact root was validated")
-        } else {
-            relative_path.as_path()
-        };
-        let output_path = artifact_dir.join(relative_path);
-
-        if entry.is_dir() {
-            std::fs::create_dir_all(&output_path).with_context(|| {
-                format!(
-                    "Failed to create extracted directory '{}'",
-                    output_path.display()
-                )
-            })?;
-            continue;
-        }
-
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create parent directory '{}'", parent.display())
-            })?;
-        }
-
-        let mut output = std::fs::File::create(&output_path).with_context(|| {
-            format!(
-                "Failed to create extracted file '{}'",
-                output_path.display()
-            )
-        })?;
-        std::io::copy(&mut entry, &mut output).with_context(|| {
-            format!(
-                "Failed to extract '{}' from build artifact '{}'",
-                entry_name, artifact.name
-            )
-        })?;
+        extract_zip_entry(&mut entry, &artifact.name, artifact_dir, repeated_root)?;
     }
 
     Ok(())
