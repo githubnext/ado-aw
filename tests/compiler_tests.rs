@@ -1689,6 +1689,61 @@ Vote on pull requests.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Test that temporary PR producers and consumers cannot be split across the
+/// automatic and manually reviewed SafeOutputs jobs.
+#[test]
+fn test_pull_request_temporary_id_tools_require_matching_approval_lanes() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-prlane-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("pr-lane-agent.md");
+    let test_content = r#"---
+name: "PR Lane Agent"
+description: "Agent that creates and then updates a pull request"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  create-pull-request:
+    require-approval: true
+  update-pr:
+    require-approval: false
+    allowed-operations:
+      - update-description
+---
+
+## PR Lane Agent
+
+Create and update pull requests.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("pr-lane-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should reject temporary PR tools in different approval lanes"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("temporary pull-request IDs")
+            && stderr.contains("same effective require-approval"),
+        "Unexpected compiler error: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 /// Test that update-pr compiles successfully whether the vote operation is made
 /// unreachable via `allowed-operations` (excluding "vote") or is reachable but
 /// backed by a non-empty `allowed-votes` list. Both configurations satisfy

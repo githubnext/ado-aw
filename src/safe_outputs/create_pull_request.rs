@@ -8,6 +8,7 @@ use tokio::process::Command;
 
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, PATH_SEGMENT, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::secure::PullRequestTemporaryId;
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
@@ -231,6 +232,7 @@ fn identity_picker_url(organization: &str) -> String {
 
 /// Parameters for creating a pull request
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePrParams {
     /// Title for the pull request; should be concise and descriptive
     pub title: String,
@@ -284,6 +286,7 @@ struct CreatePrResultFields {
     repository: String,
     #[serde(default)]
     agent_labels: Vec<String>,
+    temporary_id: PullRequestTemporaryId,
     #[serde(skip_serializing_if = "Option::is_none")]
     base_commit: Option<String>,
     /// SHA-256 hex digest of the patch file, recorded at staging time.
@@ -311,6 +314,8 @@ tool_result! {
         /// Agent-provided labels (validated against allowed-labels at execution time)
         #[serde(default)]
         agent_labels: Vec<String>,
+        /// Temporary identifier for later safe outputs in the same run
+        temporary_id: PullRequestTemporaryId,
         /// Base commit SHA recorded at patch generation time (merge-base of HEAD and
         /// the upstream branch). When present, Stage 3 uses this as the parent commit
         /// for the ADO Push API, ensuring the patch applies cleanly even if the target
@@ -695,6 +700,12 @@ impl Executor for CreatePrResult {
             Err(failure) => return Ok(failure),
         };
         debug!("Resolved repository ID: {}", target.repository_locator());
+        if ctx.has_resolved_pull_request(&self.temporary_id)? {
+            return Ok(ExecutionResult::failure(format!(
+                "temporary_id '{}' was already used in this run",
+                self.temporary_id.canonical()
+            )));
+        }
 
         let resolved_target_branch =
             config.resolve_target_branch(&repository_alias, &ctx.repo_refs);
@@ -1282,7 +1293,7 @@ impl Executor for CreatePrResult {
         }
 
         let pr_data: serde_json::Value = pr_response.json().await?;
-        let pr_id = pr_data["pullRequestId"].as_i64().unwrap_or(0);
+        let pr_id = pr_data["pullRequestId"].as_u64().unwrap_or(0);
         let pr_web_url = pr_data["url"].as_str().unwrap_or("");
         info!("Pull request created: #{} - {}", pr_id, pr_web_url);
 
@@ -1295,7 +1306,36 @@ impl Executor for CreatePrResult {
             pr_id,
             token,
             connection_type: ctx.write_connection_type,
+            reviewers: &config.reviewers,
         };
+        if pr_id == 0 {
+            return Ok(ExecutionResult::failure(
+                "Azure DevOps create-pull-request response contained no positive pull request ID",
+            ));
+        }
+        if let Err(error) = ctx.register_resolved_pull_request(
+            &self.temporary_id,
+            crate::safe_outputs::ResolvedPullRequest {
+                id: pr_id,
+                url: pr_web_url.to_string(),
+                target: target.clone(),
+            },
+        ) {
+            return Ok(ExecutionResult::failure_with_data(
+                format!(
+                    "Created pull request #{} but failed to register temporary_id '{}': {}",
+                    pr_id,
+                    self.temporary_id.canonical(),
+                    crate::sanitize::neutralize_pipeline_commands(&error.to_string())
+                ),
+                serde_json::json!({
+                    "pull_request_id": pr_id,
+                    "url": pr_web_url,
+                    "temporary_id": self.temporary_id.canonical(),
+                    "repository": target.display_name(),
+                }),
+            ));
+        }
         set_pr_completion_options(&pr_ctx, pr_data["createdBy"]["id"].as_str()).await;
         add_reviewers_to_pr(&pr_ctx).await;
 
@@ -1314,7 +1354,8 @@ impl Executor for CreatePrResult {
                 "url": pr_web_url,
                 "source_branch": source_branch,
                 "target_branch": target_branch,
-                "draft": config.draft
+                "draft": config.draft,
+                "temporary_id": self.temporary_id.canonical(),
             }),
         ))
     }
@@ -1711,9 +1752,10 @@ struct PrContext<'a> {
     client: &'a reqwest::Client,
     config: &'a CreatePrConfig,
     target: &'a crate::safe_outputs::result::AdoRepositoryTarget,
-    pr_id: i64,
+    pr_id: u64,
     token: &'a str,
     connection_type: Option<crate::compile::types::WriteConnectionType>,
+    reviewers: &'a [String],
 }
 
 /// Set PR completion options (delete-source-branch, squash-merge) and optionally
@@ -1776,11 +1818,11 @@ async fn set_pr_completion_options(ctx: &PrContext<'_>, pr_created_by_id: Option
 /// issues a `PUT` for each one. Logs a warning if a reviewer cannot be resolved or
 /// if the API call fails; does not abort the overall PR creation.
 async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
-    if ctx.config.reviewers.is_empty() {
+    if ctx.reviewers.is_empty() {
         return;
     }
-    debug!("Adding {} reviewers", ctx.config.reviewers.len());
-    for reviewer in &ctx.config.reviewers {
+    debug!("Adding {} reviewers", ctx.reviewers.len());
+    for reviewer in ctx.reviewers {
         debug!("Adding reviewer: {}", reviewer);
 
         // Resolve reviewer identity (email/name -> ID)
@@ -2493,6 +2535,26 @@ mod tests {
     }
 
     #[test]
+    fn test_params_reject_internal_and_inline_reviewer_fields() {
+        assert!(
+            serde_json::from_value::<CreatePrParams>(serde_json::json!({
+                "title": "Valid title",
+                "description": "A sufficiently long description.",
+                "temporary_id": "#aw_pr123"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CreatePrParams>(serde_json::json!({
+                "title": "Valid title",
+                "description": "A sufficiently long description.",
+                "reviewers": ["owner@example.com"]
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn test_validate_params_rejects_repository_pipeline_command() {
         let params = CreatePrParams {
             title: "Fix bug in parser".to_string(),
@@ -2513,6 +2575,7 @@ mod tests {
             patch_file: "/tmp/test.patch".to_string(),
             repository: "##vso[task.setvariable variable=x]y".to_string(),
             agent_labels: vec![],
+            temporary_id: PullRequestTemporaryId::parse("#aw_test1").unwrap(),
             base_commit: None,
             patch_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_string(),
@@ -2689,6 +2752,7 @@ mod tests {
             patch_file: "patch.diff".to_string(),
             repository: "cross-org-repo".to_string(),
             agent_labels: vec![],
+            temporary_id: PullRequestTemporaryId::parse("#aw_test1").unwrap(),
             base_commit: None,
             patch_sha256: "deadbeef".to_string(),
         };
@@ -2720,6 +2784,7 @@ mod tests {
             patch_file: "patch.diff".to_string(),
             repository: "cross-org-repo".to_string(),
             agent_labels: vec![],
+            temporary_id: PullRequestTemporaryId::parse("#aw_test2").unwrap(),
             base_commit: None,
             patch_sha256: "deadbeef".to_string(),
         };
@@ -2746,6 +2811,7 @@ mod tests {
             patch_file: "patch.diff".to_string(),
             repository: "cross-org-repo".to_string(),
             agent_labels: vec!["unapproved".to_string()],
+            temporary_id: PullRequestTemporaryId::parse("#aw_test3").unwrap(),
             base_commit: None,
             patch_sha256: "deadbeef".to_string(),
         };
@@ -2768,6 +2834,7 @@ mod tests {
             patch_file: "patch.diff".to_string(),
             repository: "not-checked-out".to_string(),
             agent_labels: vec![],
+            temporary_id: PullRequestTemporaryId::parse("#aw_test4").unwrap(),
             base_commit: None,
             patch_sha256: "deadbeef".to_string(),
         };
@@ -2816,6 +2883,7 @@ mod tests {
             patch_file: "patch.diff".to_string(),
             repository: "cross-org-repo".to_string(),
             agent_labels: vec![],
+            temporary_id: PullRequestTemporaryId::parse("#aw_test5").unwrap(),
             base_commit: None,
             patch_sha256: "deadbeef".to_string(),
         };
@@ -3404,6 +3472,7 @@ index 0000000..abcdefg
             patch_file: patch_file.to_string(),
             repository: "self".to_string(),
             agent_labels: vec![],
+            temporary_id: PullRequestTemporaryId::parse("#aw_hash1").unwrap(),
             base_commit: None,
             patch_sha256: wrong_hash,
         };
@@ -3444,6 +3513,9 @@ index 0000000..abcdefg
                 std::collections::HashMap::new(),
             )),
             resolved_work_items: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            resolved_pull_requests: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             triggered_by_build_id: None,

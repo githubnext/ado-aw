@@ -26,6 +26,8 @@ describe("scenario registry", () => {
     expect(ids).toContain("create-pull-request");
     expect(ids).toContain("create-pull-request-self-multi-checkout");
     expect(ids).toContain("create-pull-request-cross-org");
+    expect(ids).toContain("create-pull-request-temporary-id-handoff");
+    expect(ids).toContain("create-pull-request-add-reviewers");
     expect(ids).toContain("create-branch-cross-org");
     expect(ids).toContain("create-git-tag-cross-org");
   });

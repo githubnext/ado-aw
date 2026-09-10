@@ -5,10 +5,13 @@ use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
-use super::{PATH_SEGMENT, resolve_repo_name};
+use super::result::AdoRepositoryTarget;
+use super::{PATH_SEGMENT, canonical_repository_alias, resolve_repository_write_target};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::secure::PullRequestTemporaryId;
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
@@ -33,6 +36,33 @@ const VALID_VOTES: &[&str] = &[
 
 /// Valid merge strategy values accepted by ADO's completionOptions.mergeStrategy
 const VALID_MERGE_STRATEGIES: &[&str] = &["squash", "noFastForward", "rebase", "rebaseMerge"];
+const DEFAULT_MAX_REVIEWERS: usize = 3;
+const MAX_REVIEWER_LEN: usize = 256;
+
+/// Positive Azure DevOps pull-request ID or a same-run temporary ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PullRequestReference {
+    Number(u64),
+    Temporary(PullRequestTemporaryId),
+}
+
+impl fmt::Display for PullRequestReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Number(id) => write!(formatter, "{id}"),
+            Self::Temporary(temporary_id) => formatter.write_str(&temporary_id.canonical()),
+        }
+    }
+}
+
+impl_temporary_reference_deserialize!(
+    PullRequestReference,
+    PullRequestTemporaryId,
+    expecting = "a positive pull-request ID or #aw_ temporary ID",
+    negative = "pull_request_id must be positive",
+    quoted_out_of_range = "quoted pull_request_id is outside the u64 range",
+);
 
 /// Map a vote string to its ADO numeric value
 fn vote_to_ado_value(vote: &str) -> Option<i32> {
@@ -49,8 +79,8 @@ fn vote_to_ado_value(vote: &str) -> Option<i32> {
 /// Parameters for updating a pull request
 #[derive(Deserialize, JsonSchema)]
 pub struct UpdatePrParams {
-    /// Pull request ID (must be positive)
-    pub pull_request_id: i32,
+    /// Positive pull request ID or a temporary ID from create-pull-request.
+    pub pull_request_id: PullRequestReference,
 
     /// Repository alias: "self" for the pipeline repo, or an alias from the checkout list
     #[serde(default)]
@@ -74,10 +104,9 @@ pub struct UpdatePrParams {
 
 impl Validate for UpdatePrParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(
-            self.pull_request_id > 0,
-            "pull_request_id must be a positive integer"
-        );
+        if let PullRequestReference::Number(id) = self.pull_request_id {
+            ensure!(id > 0, "pull_request_id must be positive");
+        }
         if let Some(repository) = &self.repository {
             reject_pipeline_injection(repository, "repository")?;
         }
@@ -97,6 +126,19 @@ impl Validate for UpdatePrParams {
                     !reviewers.is_empty(),
                     "reviewers list must not be empty for add-reviewers operation"
                 );
+                ensure!(
+                    reviewers.len() <= 100,
+                    "reviewers list must contain at most 100 entries"
+                );
+                for reviewer in reviewers {
+                    let reviewer = reviewer.trim();
+                    ensure!(!reviewer.is_empty(), "reviewer must not be empty");
+                    ensure!(
+                        reviewer.len() <= MAX_REVIEWER_LEN,
+                        "reviewer must be {MAX_REVIEWER_LEN} characters or fewer"
+                    );
+                    reject_pipeline_injection(reviewer, "update-pr.reviewer")?;
+                }
             }
             "add-labels" => {
                 let labels = self
@@ -141,7 +183,7 @@ tool_result! {
     params = UpdatePrParams,
     /// Result of updating a pull request
     pub struct UpdatePrResult {
-        pull_request_id: i32,
+        pull_request_id: PullRequestReference,
         repository: Option<String>,
         operation: String,
         reviewers: Option<Vec<String>>,
@@ -203,6 +245,16 @@ pub struct UpdatePrConfig {
     #[serde(default, rename = "allowed-votes")]
     pub allowed_votes: Vec<String>,
 
+    /// Case-insensitive exact allowlist for model-selected reviewers.
+    /// Empty or a literal "*" allows any valid reviewer.
+    #[serde(default, rename = "allowed-reviewers")]
+    pub allowed_reviewers: Vec<String>,
+
+    /// Maximum reviewers accepted by one add-reviewers operation.
+    #[serde(default = "default_max_reviewers", rename = "max-reviewers")]
+    #[sanitize_config(skip)]
+    pub max_reviewers: usize,
+
     /// Whether to delete the source branch after merge (for set-auto-complete, default: true)
     #[serde(default = "default_true", rename = "delete-source-branch")]
     pub delete_source_branch: bool,
@@ -220,14 +272,117 @@ fn default_merge_strategy() -> String {
     "squash".to_string()
 }
 
+fn default_max_reviewers() -> usize {
+    DEFAULT_MAX_REVIEWERS
+}
+
 impl Default for UpdatePrConfig {
     fn default() -> Self {
         Self {
             allowed_operations: Vec::new(),
             allowed_repositories: Vec::new(),
             allowed_votes: Vec::new(),
+            allowed_reviewers: Vec::new(),
+            max_reviewers: default_max_reviewers(),
             delete_source_branch: true,
             merge_strategy: "squash".to_string(),
+        }
+    }
+}
+
+struct UpdatePrContext<'a> {
+    client: &'a reqwest::Client,
+    target: AdoRepositoryTarget,
+    pr_id: u64,
+    token: &'a str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
+}
+
+impl UpdatePrContext<'_> {
+    fn repository_api_base(&self) -> String {
+        format!(
+            "{}/{}/_apis/git/repositories/{}",
+            self.target.organization_url,
+            utf8_percent_encode(&self.target.project, PATH_SEGMENT),
+            utf8_percent_encode(self.target.repository_locator(), PATH_SEGMENT),
+        )
+    }
+}
+
+fn repository_is_allowed(config: &UpdatePrConfig, alias: &str) -> bool {
+    config.allowed_repositories.is_empty()
+        || config
+            .allowed_repositories
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(alias))
+}
+
+fn resolve_update_pr_target(
+    reference: &PullRequestReference,
+    requested_repository: Option<&str>,
+    config: &UpdatePrConfig,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<Result<(u64, AdoRepositoryTarget), ExecutionResult>> {
+    match reference {
+        PullRequestReference::Number(id) => {
+            if *id == 0 {
+                return Ok(Err(ExecutionResult::failure(
+                    "pull_request_id must be positive",
+                )));
+            }
+            let selector = requested_repository.unwrap_or("self");
+            let Some(alias) = canonical_repository_alias(selector, ctx) else {
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "Repository '{}' is not in the allowed repository list",
+                    crate::sanitize::neutralize_pipeline_commands(selector)
+                ))));
+            };
+            if !repository_is_allowed(config, &alias) {
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "Repository '{}' is not in the allowed-repositories list: [{}]",
+                    alias,
+                    config.allowed_repositories.join(", ")
+                ))));
+            }
+            let target = match resolve_repository_write_target(Some(&alias), ctx) {
+                Ok(target) => target,
+                Err(error) => return Ok(Err(error)),
+            };
+            Ok(Ok((*id, target)))
+        }
+        PullRequestReference::Temporary(temporary_id) => {
+            let Some(resolved) = ctx.resolve_pull_request(temporary_id)? else {
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "temporary pull-request ID '{}' has not been resolved; \
+                     create-pull-request must succeed earlier in the same SafeOutputs job",
+                    temporary_id.canonical()
+                ))));
+            };
+            if let Some(selector) = requested_repository {
+                let Some(alias) = canonical_repository_alias(selector, ctx) else {
+                    return Ok(Err(ExecutionResult::failure(format!(
+                        "Repository '{}' is not in the allowed repository list",
+                        crate::sanitize::neutralize_pipeline_commands(selector)
+                    ))));
+                };
+                if !alias.eq_ignore_ascii_case(&resolved.target.alias) {
+                    return Ok(Err(ExecutionResult::failure(format!(
+                        "temporary pull-request ID '{}' resolved to repository '{}', which does \
+                         not match requested repository '{}'",
+                        temporary_id.canonical(),
+                        resolved.target.alias,
+                        crate::sanitize::neutralize_pipeline_commands(selector)
+                    ))));
+                }
+            }
+            if !repository_is_allowed(config, &resolved.target.alias) {
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "Repository '{}' is not in the allowed-repositories list: [{}]",
+                    resolved.target.alias,
+                    config.allowed_repositories.join(", ")
+                ))));
+            }
+            Ok(Ok((resolved.id, resolved.target)))
         }
     }
 }
@@ -248,20 +403,10 @@ impl Executor for UpdatePrResult {
             self.pull_request_id, self.operation
         );
 
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
         let token = ctx
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        debug!("ADO org: {}, project: {}", org_url, project);
-
         let config: UpdatePrConfig = ctx.get_tool_config("update-pr")?;
         debug!("Config: {:?}", config);
 
@@ -276,58 +421,35 @@ impl Executor for UpdatePrResult {
             )));
         }
 
-        // Validate repository against allowed-repositories
-        let repo_alias = self.repository.as_deref().unwrap_or("self");
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&repo_alias.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list: [{}]",
-                repo_alias,
-                config.allowed_repositories.join(", ")
-            )));
-        }
-
-        // Resolve repo name
-        let repo_name = match resolve_repo_name(self.repository.as_deref(), ctx) {
-            Ok(name) => name,
+        let (pr_id, target) = match resolve_update_pr_target(
+            &self.pull_request_id,
+            self.repository.as_deref(),
+            &config,
+            ctx,
+        )? {
+            Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
-        debug!("Resolved repository: {}", repo_name);
+        debug!("Resolved PR target: {} #{}", target.display_name(), pr_id);
 
         let client = reqwest::Client::new();
-        let encoded_project = utf8_percent_encode(project, PATH_SEGMENT).to_string();
-        let base_url = format!(
-            "{}/{}/_apis/git/repositories",
-            org_url.trim_end_matches('/'),
-            encoded_project,
-        );
+        let operation_ctx = UpdatePrContext {
+            client: &client,
+            target,
+            pr_id,
+            token,
+            connection_type: ctx.write_connection_type,
+        };
 
         match self.operation.as_str() {
             "set-auto-complete" => {
-                self.execute_set_auto_complete(
-                    &client, &base_url, &repo_name, token, org_url, &config,
-                )
-                .await
-            }
-            "vote" => {
-                self.execute_vote(&client, &base_url, &repo_name, token, org_url, &config)
+                self.execute_set_auto_complete(&operation_ctx, &config)
                     .await
             }
-            "add-reviewers" => {
-                self.execute_add_reviewers(&client, &base_url, &repo_name, token, org_url)
-                    .await
-            }
-            "add-labels" => {
-                self.execute_add_labels(&client, &base_url, &repo_name, token)
-                    .await
-            }
-            "update-description" => {
-                self.execute_update_description(&client, &base_url, &repo_name, token)
-                    .await
-            }
+            "vote" => self.execute_vote(&operation_ctx, &config).await,
+            "add-reviewers" => self.execute_add_reviewers(&operation_ctx, &config).await,
+            "add-labels" => self.execute_add_labels(&operation_ctx).await,
+            "update-description" => self.execute_update_description(&operation_ctx).await,
             _ => Ok(ExecutionResult::failure(format!(
                 "Unknown operation: {}",
                 self.operation
@@ -342,6 +464,79 @@ enum ReviewerAddResult {
     Failed(String),
 }
 
+fn reviewer_execution_result(
+    pr_id: u64,
+    added: Vec<String>,
+    failed: Vec<String>,
+) -> ExecutionResult {
+    let mut message = format!("Added {} reviewer(s) to PR #{}", added.len(), pr_id);
+    if !failed.is_empty() {
+        message.push_str(&format!(
+            " ({} failed: {})",
+            failed.len(),
+            failed.join(", ")
+        ));
+    }
+    let has_failures = !failed.is_empty();
+    let data = serde_json::json!({
+        "pull_request_id": pr_id,
+        "operation": "add-reviewers",
+        "added": added,
+        "failed": failed,
+    });
+    if has_failures {
+        ExecutionResult::warning_with_data(message, data)
+    } else {
+        ExecutionResult::success_with_data(message, data)
+    }
+}
+
+fn validate_and_normalize_reviewers(
+    reviewers: &[String],
+    config: &UpdatePrConfig,
+) -> Result<Vec<String>, ExecutionResult> {
+    if config.max_reviewers == 0 {
+        return Err(ExecutionResult::failure(
+            "update-pr.max-reviewers must be greater than zero",
+        ));
+    }
+    let allow_any = config.allowed_reviewers.is_empty()
+        || config
+            .allowed_reviewers
+            .iter()
+            .any(|allowed| allowed == "*");
+
+    let mut normalized = Vec::new();
+    for reviewer in reviewers {
+        let reviewer = reviewer.trim();
+        if !allow_any
+            && !config
+                .allowed_reviewers
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(reviewer))
+        {
+            return Err(ExecutionResult::failure(format!(
+                "Reviewer '{}' is not in update-pr.allowed-reviewers",
+                crate::sanitize::neutralize_pipeline_commands(reviewer)
+            )));
+        }
+        if !normalized
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(reviewer))
+        {
+            normalized.push(reviewer.to_string());
+        }
+    }
+    if normalized.len() > config.max_reviewers {
+        return Err(ExecutionResult::failure(format!(
+            "add-reviewers requested {} unique reviewers, exceeding max-reviewers: {}",
+            normalized.len(),
+            config.max_reviewers
+        )));
+    }
+    Ok(normalized)
+}
+
 impl UpdatePrResult {
     /// Set auto-complete on a pull request.
     ///
@@ -350,11 +545,7 @@ impl UpdatePrResult {
     /// Uses the agent's own identity (not the PR creator) for proper audit trail.
     async fn execute_set_auto_complete(
         &self,
-        client: &reqwest::Client,
-        base_url: &str,
-        repo_name: &str,
-        token: &str,
-        org_url: &str,
+        operation_ctx: &UpdatePrContext<'_>,
         config: &UpdatePrConfig,
     ) -> anyhow::Result<ExecutionResult> {
         // Validate merge_strategy before any network I/O
@@ -366,16 +557,19 @@ impl UpdatePrResult {
             )));
         }
 
-        let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
-
         // Resolve the agent's identity via connection data
-        let connection_url = format!("{}/_apis/connectiondata", org_url.trim_end_matches('/'));
-        let conn_response = client
-            .get(&connection_url)
-            .basic_auth("", Some(token))
-            .send()
-            .await
-            .context("Failed to fetch connection data for auto-complete identity")?;
+        let connection_url = format!(
+            "{}/_apis/connectiondata",
+            operation_ctx.target.organization_url.trim_end_matches('/')
+        );
+        let conn_response = crate::safe_outputs::authenticate_ado_request(
+            operation_ctx.client.get(&connection_url),
+            operation_ctx.token,
+            operation_ctx.connection_type,
+        )
+        .send()
+        .await
+        .context("Failed to fetch connection data for auto-complete identity")?;
 
         if !conn_response.status().is_success() {
             let status = conn_response.status();
@@ -403,8 +597,9 @@ impl UpdatePrResult {
 
         // PATCH to set auto-complete using the agent's identity
         let patch_url = format!(
-            "{}/{}/pullRequests/{}?api-version=7.1",
-            base_url, encoded_repo, self.pull_request_id
+            "{}/pullRequests/{}?api-version=7.1",
+            operation_ctx.repository_api_base(),
+            operation_ctx.pr_id
         );
         let patch_body = serde_json::json!({
             "autoCompleteSetBy": {
@@ -416,22 +611,24 @@ impl UpdatePrResult {
             }
         });
 
-        info!("Setting auto-complete on PR #{}", self.pull_request_id);
-        let response = client
-            .patch(&patch_url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&patch_body)
-            .send()
-            .await
-            .context("Failed to set auto-complete on PR")?;
+        info!("Setting auto-complete on PR #{}", operation_ctx.pr_id);
+        let response = crate::safe_outputs::authenticate_ado_request(
+            operation_ctx.client.patch(&patch_url),
+            operation_ctx.token,
+            operation_ctx.connection_type,
+        )
+        .header("Content-Type", "application/json")
+        .json(&patch_body)
+        .send()
+        .await
+        .context("Failed to set auto-complete on PR")?;
 
         if response.status().is_success() {
-            info!("Auto-complete set on PR #{}", self.pull_request_id);
+            info!("Auto-complete set on PR #{}", operation_ctx.pr_id);
             Ok(ExecutionResult::success_with_data(
-                format!("Auto-complete set on PR #{}", self.pull_request_id),
+                format!("Auto-complete set on PR #{}", operation_ctx.pr_id),
                 serde_json::json!({
-                    "pull_request_id": self.pull_request_id,
+                    "pull_request_id": operation_ctx.pr_id,
                     "operation": "set-auto-complete",
                 }),
             ))
@@ -443,7 +640,7 @@ impl UpdatePrResult {
                 .unwrap_or_else(|_| "Unknown error".to_string());
             Ok(ExecutionResult::failure(format!(
                 "Failed to set auto-complete on PR #{} (HTTP {}): {}",
-                self.pull_request_id, status, error_body
+                operation_ctx.pr_id, status, error_body
             )))
         }
     }
@@ -454,11 +651,7 @@ impl UpdatePrResult {
     /// PUTs the vote to the reviewers endpoint.
     async fn execute_vote(
         &self,
-        client: &reqwest::Client,
-        base_url: &str,
-        repo_name: &str,
-        token: &str,
-        org_url: &str,
+        operation_ctx: &UpdatePrContext<'_>,
         config: &UpdatePrConfig,
     ) -> anyhow::Result<ExecutionResult> {
         let vote_str = self
@@ -492,15 +685,20 @@ impl UpdatePrResult {
 
         // Resolve the current user identity.
         // Use the org URL for connection data — supports vanity domains and national clouds.
-        let connection_url = format!("{}/_apis/connectiondata", org_url.trim_end_matches('/'));
+        let connection_url = format!(
+            "{}/_apis/connectiondata",
+            operation_ctx.target.organization_url.trim_end_matches('/')
+        );
         debug!("Connection data URL: {}", connection_url);
 
-        let conn_response = client
-            .get(&connection_url)
-            .basic_auth("", Some(token))
-            .send()
-            .await
-            .context("Failed to fetch connection data")?;
+        let conn_response = crate::safe_outputs::authenticate_ado_request(
+            operation_ctx.client.get(&connection_url),
+            operation_ctx.token,
+            operation_ctx.connection_type,
+        )
+        .send()
+        .await
+        .context("Failed to fetch connection data")?;
 
         if !conn_response.status().is_success() {
             let status = conn_response.status();
@@ -530,17 +728,19 @@ impl UpdatePrResult {
         // Positive votes (approve=10, approve-with-suggestions=5) are blocked when
         // the authenticated user is also the PR author.
         if vote_value > 0 {
-            let encoded_repo_check = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
             let pr_url = format!(
-                "{}/{}/pullRequests/{}?api-version=7.1",
-                base_url, encoded_repo_check, self.pull_request_id
+                "{}/pullRequests/{}?api-version=7.1",
+                operation_ctx.repository_api_base(),
+                operation_ctx.pr_id
             );
-            let pr_response = client
-                .get(&pr_url)
-                .basic_auth("", Some(token))
-                .send()
-                .await
-                .context("Failed to fetch PR for self-approval check")?;
+            let pr_response = crate::safe_outputs::authenticate_ado_request(
+                operation_ctx.client.get(&pr_url),
+                operation_ctx.token,
+                operation_ctx.connection_type,
+            )
+            .send()
+            .await
+            .context("Failed to fetch PR for self-approval check")?;
 
             if pr_response.status().is_success() {
                 let pr_body: serde_json::Value = pr_response
@@ -557,7 +757,7 @@ impl UpdatePrResult {
                     return Ok(ExecutionResult::failure(format!(
                         "Self-approval blocked: the authenticated identity created PR #{} \
                          and cannot cast a positive vote ('{}') on it",
-                        self.pull_request_id, vote_str
+                        operation_ctx.pr_id, vote_str
                     )));
                 }
             } else {
@@ -568,17 +768,18 @@ impl UpdatePrResult {
                     .unwrap_or_else(|_| "Unknown error".to_string());
                 return Ok(ExecutionResult::failure(format!(
                     "Failed to fetch PR #{} for self-approval check (HTTP {}): {}",
-                    self.pull_request_id, status, error_body
+                    operation_ctx.pr_id, status, error_body
                 )));
             }
         }
 
         // PUT vote to reviewers endpoint
-        let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
         let encoded_user_id = utf8_percent_encode(user_id, PATH_SEGMENT).to_string();
         let vote_url = format!(
-            "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
-            base_url, encoded_repo, self.pull_request_id, encoded_user_id
+            "{}/pullRequests/{}/reviewers/{}?api-version=7.1",
+            operation_ctx.repository_api_base(),
+            operation_ctx.pr_id,
+            encoded_user_id
         );
         let vote_body = serde_json::json!({
             "vote": vote_value
@@ -586,29 +787,31 @@ impl UpdatePrResult {
 
         info!(
             "Voting '{}' ({}) on PR #{}",
-            vote_str, vote_value, self.pull_request_id
+            vote_str, vote_value, operation_ctx.pr_id
         );
-        let response = client
-            .put(&vote_url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&vote_body)
-            .send()
-            .await
-            .context("Failed to submit vote")?;
+        let response = crate::safe_outputs::authenticate_ado_request(
+            operation_ctx.client.put(&vote_url),
+            operation_ctx.token,
+            operation_ctx.connection_type,
+        )
+        .header("Content-Type", "application/json")
+        .json(&vote_body)
+        .send()
+        .await
+        .context("Failed to submit vote")?;
 
         if response.status().is_success() {
             info!(
                 "Vote '{}' submitted on PR #{}",
-                vote_str, self.pull_request_id
+                vote_str, operation_ctx.pr_id
             );
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Vote '{}' submitted on PR #{}",
-                    vote_str, self.pull_request_id
+                    vote_str, operation_ctx.pr_id
                 ),
                 serde_json::json!({
-                    "pull_request_id": self.pull_request_id,
+                    "pull_request_id": operation_ctx.pr_id,
                     "operation": "vote",
                     "vote": vote_str,
                     "vote_value": vote_value,
@@ -622,7 +825,7 @@ impl UpdatePrResult {
                 .unwrap_or_else(|_| "Unknown error".to_string());
             Ok(ExecutionResult::failure(format!(
                 "Failed to submit vote on PR #{} (HTTP {}): {}",
-                self.pull_request_id, status, error_body
+                operation_ctx.pr_id, status, error_body
             )))
         }
     }
@@ -633,23 +836,23 @@ impl UpdatePrResult {
     /// the reviewers endpoint with vote 0.
     async fn execute_add_reviewers(
         &self,
-        client: &reqwest::Client,
-        base_url: &str,
-        repo_name: &str,
-        token: &str,
-        org_url: &str,
+        operation_ctx: &UpdatePrContext<'_>,
+        config: &UpdatePrConfig,
     ) -> anyhow::Result<ExecutionResult> {
-        let reviewers = self
+        let requested_reviewers = self
             .reviewers
             .as_ref()
             .context("reviewers list is required for add-reviewers operation")?;
+        let reviewers = match validate_and_normalize_reviewers(requested_reviewers, config) {
+            Ok(reviewers) => reviewers,
+            Err(failure) => return Ok(failure),
+        };
 
-        let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
         let mut added = Vec::new();
         let mut failed = Vec::new();
 
         // Derive VSSPS base URL once, before the loop.
-        let trimmed_org = org_url.trim_end_matches('/');
+        let trimmed_org = operation_ctx.target.organization_url.trim_end_matches('/');
         let vssps_base = trimmed_org.replace("://dev.azure.com/", "://vssps.dev.azure.com/");
         if vssps_base == trimmed_org {
             return Ok(ExecutionResult::failure(format!(
@@ -661,15 +864,15 @@ impl UpdatePrResult {
             )));
         }
 
-        for reviewer in reviewers {
+        for reviewer in &reviewers {
             match resolve_and_add_reviewer(
-                client,
+                operation_ctx.client,
                 &vssps_base,
-                base_url,
-                &encoded_repo,
-                self.pull_request_id,
+                &operation_ctx.repository_api_base(),
+                operation_ctx.pr_id,
                 reviewer,
-                token,
+                operation_ctx.token,
+                operation_ctx.connection_type,
             )
             .await
             {
@@ -680,35 +883,11 @@ impl UpdatePrResult {
             }
         }
 
-        if added.is_empty() && !failed.is_empty() {
-            Ok(ExecutionResult::failure(format!(
-                "Failed to add any reviewers to PR #{}: {}",
-                self.pull_request_id,
-                failed.join(", ")
-            )))
-        } else {
-            let mut message = format!(
-                "Added {} reviewer(s) to PR #{}",
-                added.len(),
-                self.pull_request_id
-            );
-            if !failed.is_empty() {
-                message.push_str(&format!(
-                    " ({} failed: {})",
-                    failed.len(),
-                    failed.join(", ")
-                ));
-            }
-            Ok(ExecutionResult::success_with_data(
-                message,
-                serde_json::json!({
-                    "pull_request_id": self.pull_request_id,
-                    "operation": "add-reviewers",
-                    "added": added,
-                    "failed": failed,
-                }),
-            ))
-        }
+        Ok(reviewer_execution_result(
+            operation_ctx.pr_id,
+            added,
+            failed,
+        ))
     }
 
     /// Add labels to a pull request.
@@ -716,20 +895,17 @@ impl UpdatePrResult {
     /// For each label, POSTs to the labels endpoint.
     async fn execute_add_labels(
         &self,
-        client: &reqwest::Client,
-        base_url: &str,
-        repo_name: &str,
-        token: &str,
+        operation_ctx: &UpdatePrContext<'_>,
     ) -> anyhow::Result<ExecutionResult> {
         let labels = self
             .labels
             .as_ref()
             .context("labels list is required for add-labels operation")?;
 
-        let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
         let labels_url = format!(
-            "{}/{}/pullRequests/{}/labels?api-version=7.1",
-            base_url, encoded_repo, self.pull_request_id
+            "{}/pullRequests/{}/labels?api-version=7.1",
+            operation_ctx.repository_api_base(),
+            operation_ctx.pr_id
         );
 
         let mut added = Vec::new();
@@ -740,18 +916,20 @@ impl UpdatePrResult {
                 "name": label
             });
 
-            debug!("Adding label '{}' to PR #{}", label, self.pull_request_id);
-            let response = client
-                .post(&labels_url)
-                .header("Content-Type", "application/json")
-                .basic_auth("", Some(token))
-                .json(&label_body)
-                .send()
-                .await;
+            debug!("Adding label '{}' to PR #{}", label, operation_ctx.pr_id);
+            let response = crate::safe_outputs::authenticate_ado_request(
+                operation_ctx.client.post(&labels_url),
+                operation_ctx.token,
+                operation_ctx.connection_type,
+            )
+            .header("Content-Type", "application/json")
+            .json(&label_body)
+            .send()
+            .await;
 
             match response {
                 Ok(resp) if resp.status().is_success() => {
-                    info!("Added label '{}' to PR #{}", label, self.pull_request_id);
+                    info!("Added label '{}' to PR #{}", label, operation_ctx.pr_id);
                     added.push(label.clone());
                 }
                 Ok(resp) => {
@@ -762,14 +940,14 @@ impl UpdatePrResult {
                         .unwrap_or_else(|_| "Unknown error".to_string());
                     warn!(
                         "Failed to add label '{}' to PR #{} (HTTP {}): {}",
-                        label, self.pull_request_id, status, error_body
+                        label, operation_ctx.pr_id, status, error_body
                     );
                     failed.push(format!("{} (HTTP {})", label, status));
                 }
                 Err(e) => {
                     warn!(
                         "Request failed for label '{}' on PR #{}: {}",
-                        label, self.pull_request_id, e
+                        label, operation_ctx.pr_id, e
                     );
                     failed.push(format!("{} (request error)", label));
                 }
@@ -779,14 +957,14 @@ impl UpdatePrResult {
         if added.is_empty() && !failed.is_empty() {
             Ok(ExecutionResult::failure(format!(
                 "Failed to add any labels to PR #{}: {}",
-                self.pull_request_id,
+                operation_ctx.pr_id,
                 failed.join(", ")
             )))
         } else {
             let mut message = format!(
                 "Added {} label(s) to PR #{}",
                 added.len(),
-                self.pull_request_id
+                operation_ctx.pr_id
             );
             if !failed.is_empty() {
                 message.push_str(&format!(
@@ -798,7 +976,7 @@ impl UpdatePrResult {
             Ok(ExecutionResult::success_with_data(
                 message,
                 serde_json::json!({
-                    "pull_request_id": self.pull_request_id,
+                    "pull_request_id": operation_ctx.pr_id,
                     "operation": "add-labels",
                     "added": added,
                     "failed": failed,
@@ -810,20 +988,17 @@ impl UpdatePrResult {
     /// Update the description of a pull request.
     async fn execute_update_description(
         &self,
-        client: &reqwest::Client,
-        base_url: &str,
-        repo_name: &str,
-        token: &str,
+        operation_ctx: &UpdatePrContext<'_>,
     ) -> anyhow::Result<ExecutionResult> {
         let description = self
             .description
             .as_ref()
             .context("description is required for update-description operation")?;
 
-        let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
         let patch_url = format!(
-            "{}/{}/pullRequests/{}?api-version=7.1",
-            base_url, encoded_repo, self.pull_request_id
+            "{}/pullRequests/{}?api-version=7.1",
+            operation_ctx.repository_api_base(),
+            operation_ctx.pr_id
         );
         let patch_body = serde_json::json!({
             "description": description
@@ -831,24 +1006,26 @@ impl UpdatePrResult {
 
         info!(
             "Updating description on PR #{} ({} chars)",
-            self.pull_request_id,
+            operation_ctx.pr_id,
             description.len()
         );
-        let response = client
-            .patch(&patch_url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&patch_body)
-            .send()
-            .await
-            .context("Failed to update PR description")?;
+        let response = crate::safe_outputs::authenticate_ado_request(
+            operation_ctx.client.patch(&patch_url),
+            operation_ctx.token,
+            operation_ctx.connection_type,
+        )
+        .header("Content-Type", "application/json")
+        .json(&patch_body)
+        .send()
+        .await
+        .context("Failed to update PR description")?;
 
         if response.status().is_success() {
-            info!("Description updated on PR #{}", self.pull_request_id);
+            info!("Description updated on PR #{}", operation_ctx.pr_id);
             Ok(ExecutionResult::success_with_data(
-                format!("Description updated on PR #{}", self.pull_request_id),
+                format!("Description updated on PR #{}", operation_ctx.pr_id),
                 serde_json::json!({
-                    "pull_request_id": self.pull_request_id,
+                    "pull_request_id": operation_ctx.pr_id,
                     "operation": "update-description",
                 }),
             ))
@@ -860,7 +1037,7 @@ impl UpdatePrResult {
                 .unwrap_or_else(|_| "Unknown error".to_string());
             Ok(ExecutionResult::failure(format!(
                 "Failed to update description on PR #{} (HTTP {}): {}",
-                self.pull_request_id, status, error_body
+                operation_ctx.pr_id, status, error_body
             )))
         }
     }
@@ -874,28 +1051,73 @@ async fn lookup_reviewer_id(
     vssps_base: &str,
     reviewer: &str,
     token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
 ) -> Option<String> {
-    let identity_url = format!(
-        "{}/_apis/identities?searchFilter=General&filterValue={}&api-version=7.1",
-        vssps_base,
-        utf8_percent_encode(reviewer, PATH_SEGMENT),
-    );
+    if reviewer.len() == 36
+        && reviewer
+            .chars()
+            .filter(|character| *character == '-')
+            .count()
+            == 4
+        && reviewer
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || character == '-')
+    {
+        return Some(reviewer.to_string());
+    }
+
+    let identity_url = format!("{}/_apis/identities", vssps_base);
     debug!("Resolving identity for '{}': {}", reviewer, identity_url);
 
-    match client
-        .get(&identity_url)
-        .basic_auth("", Some(token))
-        .send()
-        .await
+    match crate::safe_outputs::authenticate_ado_request(
+        client.get(&identity_url).query(&[
+            ("searchFilter", "General"),
+            ("filterValue", reviewer),
+            ("api-version", "7.1"),
+        ]),
+        token,
+        connection_type,
+    )
+    .send()
+    .await
     {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            body.get("value")
+            let matching_ids = body
+                .get("value")
                 .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|entry| entry.get("id"))
-                .and_then(|id| id.as_str())
-                .map(|s| s.to_string())
+                .into_iter()
+                .flatten()
+                .filter(|identity| {
+                    let direct_match = ["providerDisplayName", "customDisplayName", "displayName"]
+                        .iter()
+                        .filter_map(|field| identity.get(field).and_then(serde_json::Value::as_str))
+                        .any(|value| value.eq_ignore_ascii_case(reviewer));
+                    let property_match = ["Account", "Mail"]
+                        .iter()
+                        .filter_map(|field| {
+                            identity
+                                .get("properties")
+                                .and_then(|properties| properties.get(field))
+                                .and_then(|property| property.get("$value"))
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .any(|value| value.eq_ignore_ascii_case(reviewer));
+                    direct_match || property_match
+                })
+                .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+                .collect::<std::collections::HashSet<_>>();
+            if matching_ids.len() == 1 {
+                matching_ids.into_iter().next().map(str::to_string)
+            } else {
+                if matching_ids.len() > 1 {
+                    warn!(
+                        "Identity lookup for '{}' returned multiple exact matches",
+                        reviewer
+                    );
+                }
+                None
+            }
         }
         Ok(resp) => {
             warn!(
@@ -917,27 +1139,29 @@ async fn lookup_reviewer_id(
 /// with a short reason string on any HTTP or transport error.
 async fn add_reviewer_to_pr(
     client: &reqwest::Client,
-    base_url: &str,
-    encoded_repo: &str,
-    pr_id: i32,
+    repository_api_base: &str,
+    pr_id: u64,
     reviewer_id: &str,
     reviewer: &str,
     token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
 ) -> ReviewerAddResult {
     let reviewer_url = format!(
-        "{}/{}/pullRequests/{}/reviewers/{}?api-version=7.1",
-        base_url, encoded_repo, pr_id, reviewer_id,
+        "{}/pullRequests/{}/reviewers/{}?api-version=7.1",
+        repository_api_base, pr_id, reviewer_id,
     );
     let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
 
     debug!("Adding reviewer '{}' to PR #{}", reviewer, pr_id);
-    let response = client
-        .put(&reviewer_url)
-        .header("Content-Type", "application/json")
-        .basic_auth("", Some(token))
-        .json(&reviewer_body)
-        .send()
-        .await;
+    let response = crate::safe_outputs::authenticate_ado_request(
+        client.put(&reviewer_url),
+        token,
+        connection_type,
+    )
+    .header("Content-Type", "application/json")
+    .json(&reviewer_body)
+    .send()
+    .await;
 
     match response {
         Ok(resp) if resp.status().is_success() => {
@@ -972,24 +1196,26 @@ async fn add_reviewer_to_pr(
 async fn resolve_and_add_reviewer(
     client: &reqwest::Client,
     vssps_base: &str,
-    base_url: &str,
-    encoded_repo: &str,
-    pr_id: i32,
+    repository_api_base: &str,
+    pr_id: u64,
     reviewer: &str,
     token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
 ) -> ReviewerAddResult {
-    let Some(reviewer_id) = lookup_reviewer_id(client, vssps_base, reviewer, token).await else {
+    let Some(reviewer_id) =
+        lookup_reviewer_id(client, vssps_base, reviewer, token, connection_type).await
+    else {
         warn!("Could not resolve identity for '{}', skipping", reviewer);
         return ReviewerAddResult::Failed("identity not found".to_string());
     };
     add_reviewer_to_pr(
         client,
-        base_url,
-        encoded_repo,
+        repository_api_base,
         pr_id,
         &reviewer_id,
         reviewer,
         token,
+        connection_type,
     )
     .await
 }
@@ -1011,15 +1237,24 @@ mod tests {
             "operation": "set-auto-complete"
         }"#;
         let params: UpdatePrParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.pull_request_id, 42);
+        assert_eq!(params.pull_request_id, PullRequestReference::Number(42));
         assert_eq!(params.operation, "set-auto-complete");
         assert!(params.repository.is_none());
     }
 
     #[test]
+    fn pull_request_reference_accepts_quoted_numbers_and_temporary_ids() {
+        let quoted: PullRequestReference = serde_json::from_str("\"42\"").unwrap();
+        let temporary: PullRequestReference = serde_json::from_str("\"#aw_pr123\"").unwrap();
+        assert_eq!(quoted, PullRequestReference::Number(42));
+        assert!(matches!(temporary, PullRequestReference::Temporary(_)));
+        assert!(serde_json::from_str::<PullRequestReference>("\"not-an-id\"").is_err());
+    }
+
+    #[test]
     fn test_params_converts_to_result() {
         let params = UpdatePrParams {
-            pull_request_id: 42,
+            pull_request_id: PullRequestReference::Number(42),
             repository: Some("self".to_string()),
             operation: "set-auto-complete".to_string(),
             reviewers: None,
@@ -1029,14 +1264,14 @@ mod tests {
         };
         let result: UpdatePrResult = params.try_into().unwrap();
         assert_eq!(result.name, "update-pr");
-        assert_eq!(result.pull_request_id, 42);
+        assert_eq!(result.pull_request_id, PullRequestReference::Number(42));
         assert_eq!(result.operation, "set-auto-complete");
     }
 
     #[test]
     fn test_validation_rejects_zero_pr_id() {
         let params = UpdatePrParams {
-            pull_request_id: 0,
+            pull_request_id: PullRequestReference::Number(0),
             repository: None,
             operation: "set-auto-complete".to_string(),
             reviewers: None,
@@ -1051,7 +1286,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_invalid_operation() {
         let params = UpdatePrParams {
-            pull_request_id: 1,
+            pull_request_id: PullRequestReference::Number(1),
             repository: None,
             operation: "delete-pr".to_string(),
             reviewers: None,
@@ -1067,7 +1302,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_vote_without_value() {
         let params = UpdatePrParams {
-            pull_request_id: 1,
+            pull_request_id: PullRequestReference::Number(1),
             repository: None,
             operation: "vote".to_string(),
             reviewers: None,
@@ -1082,7 +1317,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_reviewers_without_list() {
         let params = UpdatePrParams {
-            pull_request_id: 1,
+            pull_request_id: PullRequestReference::Number(1),
             repository: None,
             operation: "add-reviewers".to_string(),
             reviewers: None,
@@ -1097,7 +1332,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_repository_pipeline_command() {
         let params = UpdatePrParams {
-            pull_request_id: 1,
+            pull_request_id: PullRequestReference::Number(1),
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
             operation: "set-auto-complete".to_string(),
             reviewers: None,
@@ -1112,7 +1347,7 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = UpdatePrParams {
-            pull_request_id: 99,
+            pull_request_id: PullRequestReference::Number(99),
             repository: Some("self".to_string()),
             operation: "vote".to_string(),
             reviewers: None,
@@ -1134,7 +1369,256 @@ mod tests {
         assert!(config.allowed_operations.is_empty());
         assert!(config.allowed_repositories.is_empty());
         assert!(config.allowed_votes.is_empty());
+        assert!(config.allowed_reviewers.is_empty());
+        assert_eq!(config.max_reviewers, DEFAULT_MAX_REVIEWERS);
         assert_eq!(config.merge_strategy, "squash");
+    }
+
+    #[test]
+    fn reviewer_policy_allows_omitted_allowlist_and_explicit_wildcard() {
+        let reviewers = vec!["owner@example.com".to_string()];
+        assert_eq!(
+            validate_and_normalize_reviewers(&reviewers, &UpdatePrConfig::default()).unwrap(),
+            reviewers
+        );
+
+        let config = UpdatePrConfig {
+            allowed_reviewers: vec!["*".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_and_normalize_reviewers(&reviewers, &config).unwrap(),
+            reviewers
+        );
+    }
+
+    #[test]
+    fn reviewer_policy_restricts_non_empty_allowlist() {
+        let result = validate_and_normalize_reviewers(
+            &["other@example.com".to_string()],
+            &UpdatePrConfig {
+                allowed_reviewers: vec!["owner@example.com".to_string()],
+                ..Default::default()
+            },
+        );
+        assert!(result.unwrap_err().message.contains("allowed-reviewers"));
+    }
+
+    #[test]
+    fn reviewer_policy_deduplicates_and_enforces_limit() {
+        let config = UpdatePrConfig {
+            allowed_reviewers: vec![
+                "Owner@example.com".to_string(),
+                "other@example.com".to_string(),
+            ],
+            max_reviewers: 2,
+            ..Default::default()
+        };
+        let reviewers = validate_and_normalize_reviewers(
+            &[
+                "owner@example.com".to_string(),
+                "OWNER@example.com".to_string(),
+            ],
+            &config,
+        )
+        .unwrap();
+        assert_eq!(reviewers, ["owner@example.com"]);
+
+        let too_many = validate_and_normalize_reviewers(
+            &[
+                "owner@example.com".to_string(),
+                "other@example.com".to_string(),
+                "third@example.com".to_string(),
+            ],
+            &UpdatePrConfig {
+                allowed_reviewers: vec!["*".to_string()],
+                max_reviewers: 2,
+                ..Default::default()
+            },
+        );
+        assert!(too_many.unwrap_err().message.contains("max-reviewers"));
+    }
+
+    #[test]
+    fn reviewer_results_warn_for_partial_and_total_failures() {
+        let partial = reviewer_execution_result(
+            42,
+            vec!["added@example.com".to_string()],
+            vec!["failed@example.com (HTTP 403)".to_string()],
+        );
+        assert!(partial.success);
+        assert!(partial.is_warning());
+        assert_eq!(
+            partial.data.as_ref().unwrap()["added"][0],
+            "added@example.com"
+        );
+
+        let total = reviewer_execution_result(
+            42,
+            Vec::new(),
+            vec!["failed@example.com (identity not found)".to_string()],
+        );
+        assert!(total.success);
+        assert!(total.is_warning());
+        assert_eq!(
+            total.data.as_ref().unwrap()["failed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let success =
+            reviewer_execution_result(42, vec!["added@example.com".to_string()], Vec::new());
+        assert!(success.success);
+        assert!(!success.is_warning());
+    }
+
+    #[test]
+    fn temporary_reference_resolves_exact_registered_target() {
+        let temporary_id = PullRequestTemporaryId::parse("#aw_pr123").unwrap();
+        let ctx = ExecutionContext::default();
+        let target = AdoRepositoryTarget {
+            alias: "tools".to_string(),
+            organization: "other-org".to_string(),
+            organization_url: "https://dev.azure.com/other-org".to_string(),
+            project: "Other Project".to_string(),
+            repository: "tools".to_string(),
+            repository_id: Some("repo-id".to_string()),
+            cross_organization: true,
+        };
+        ctx.register_resolved_pull_request(
+            &temporary_id,
+            crate::safe_outputs::ResolvedPullRequest {
+                id: 42,
+                url: "https://example.test/pr/42".to_string(),
+                target: target.clone(),
+            },
+        )
+        .unwrap();
+
+        let resolved = resolve_update_pr_target(
+            &PullRequestReference::Temporary(temporary_id),
+            None,
+            &UpdatePrConfig::default(),
+            &ctx,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(resolved, (42, target));
+    }
+
+    #[tokio::test]
+    async fn reviewer_identity_lookup_requires_exact_match() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    {
+                        "id": "wrong-id",
+                        "providerDisplayName": "Similar Person",
+                        "properties": {"Mail": {"$value": "similar@example.com"}}
+                    },
+                    {
+                        "id": "exact-id",
+                        "providerDisplayName": "Exact Person",
+                        "properties": {"Mail": {"$value": "owner@example.com"}}
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "owner@example.com",
+            "token",
+            None,
+        )
+        .await;
+        assert_eq!(id.as_deref(), Some("exact-id"));
+
+        let missing = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "missing@example.com",
+            "token",
+            None,
+        )
+        .await;
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_identity_lookup_rejects_ambiguous_exact_matches() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    {
+                        "id": "first-id",
+                        "properties": {"Mail": {"$value": "owner@example.com"}}
+                    },
+                    {
+                        "id": "second-id",
+                        "properties": {"Mail": {"$value": "owner@example.com"}}
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "owner@example.com",
+            "token",
+            None,
+        )
+        .await;
+        assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_identity_lookup_encodes_filter_as_one_query_parameter() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "owner+alerts&team=core@example.com";
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("searchFilter", "General"))
+            .and(query_param("filterValue", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{
+                    "id": "exact-id",
+                    "properties": {"Mail": {"$value": reviewer}}
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert_eq!(id.as_deref(), Some("exact-id"));
     }
 
     #[test]
@@ -1148,6 +1632,9 @@ allowed-repositories:
 allowed-votes:
   - approve
   - reject
+allowed-reviewers:
+  - owner@example.com
+max-reviewers: 2
 "#;
         let config: UpdatePrConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.allowed_operations.len(), 2);
@@ -1163,6 +1650,8 @@ allowed-votes:
         );
         assert_eq!(config.allowed_repositories.len(), 1);
         assert_eq!(config.allowed_votes.len(), 2);
+        assert_eq!(config.allowed_reviewers, ["owner@example.com"]);
+        assert_eq!(config.max_reviewers, 2);
     }
 
     #[test]
