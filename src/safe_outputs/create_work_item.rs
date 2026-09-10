@@ -359,6 +359,190 @@ fn artifact_link_op(project: &str, repository_id: &str, branch: &str) -> serde_j
     })
 }
 
+/// Merge validated agent-provided tags with the operator-configured tags,
+/// deduplicating case-insensitively and returning the merged list.
+fn merge_tags(config_tags: &[String], agent_tags: &[String]) -> Vec<String> {
+    let mut all_tags = config_tags.to_vec();
+    for tag in agent_tags {
+        if !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            all_tags.push(tag.clone());
+        }
+    }
+    all_tags
+}
+
+/// Check agent-provided tags against the operator-configured allowlist (if any).
+///
+/// Returns `Err(message)` describing the disallowed tags when the check fails.
+fn check_allowed_tags(tags: &[String], allowed_tags: &[String]) -> Result<(), String> {
+    if tags.is_empty() || allowed_tags.is_empty() {
+        return Ok(());
+    }
+    let disallowed: Vec<_> = tags
+        .iter()
+        .filter(|tag| {
+            !allowed_tags
+                .iter()
+                .any(|pattern| super::tag_matches_pattern(tag, pattern))
+        })
+        .collect();
+    if disallowed.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Agent-provided tags not in allowed-tags: {}",
+        disallowed
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// Build the JSON Patch document used to create the work item, applying the
+/// title/description, optional configured fields, tags, and custom fields.
+///
+/// Returns `Err(message)` when the resulting field set is invalid (e.g.
+/// duplicate fields).
+fn build_patch_document(
+    config: &CreateWorkItemConfig,
+    title: &str,
+    description_with_stats: &str,
+    all_tags: &[String],
+) -> Result<Vec<serde_json::Value>, String> {
+    let description_field = description_field_for(config);
+    validate_patch_fields(config, description_field, !all_tags.is_empty())
+        .map_err(|error| error.to_string())?;
+
+    let mut patch_doc = vec![
+        field_op("System.Title", title),
+        field_op(description_field, description_with_stats),
+        // Tell Azure DevOps the description is markdown
+        serde_json::json!({
+            "op": "add",
+            "path": format!("/multilineFieldsFormat/{description_field}"),
+            "value": "Markdown"
+        }),
+    ];
+
+    if let Some(area_path) = &config.area_path {
+        patch_doc.push(field_op("System.AreaPath", area_path));
+    }
+    if let Some(iteration_path) = &config.iteration_path {
+        patch_doc.push(field_op("System.IterationPath", iteration_path));
+    }
+    if let Some(assignee) = config.assignee.as_deref() {
+        let assignee = super::normalize_work_item_assignee(
+            assignee,
+            "safe-outputs.create-work-item.assignee",
+        )
+        .map_err(|error| error.to_string())?;
+        patch_doc.push(field_op("System.AssignedTo", assignee));
+    }
+    // Merge static config tags with validated agent-provided tags (dedup, case-insensitive)
+    if !all_tags.is_empty() {
+        patch_doc.push(field_op("System.Tags", all_tags.join("; ")));
+    }
+
+    // Add any custom fields
+    for (field, value) in sorted_custom_fields(&config.custom_fields) {
+        patch_doc.push(field_op(field, value));
+    }
+
+    Ok(patch_doc)
+}
+
+/// Handle a successful (HTTP 2xx) work item creation response: parse the
+/// body, register the resolved temporary ID, and build the final result.
+async fn handle_creation_success(
+    response: reqwest::Response,
+    ctx: &ExecutionContext,
+    temporary_id: &WorkItemTemporaryId,
+    title: &str,
+    project: &str,
+    work_item_type: &str,
+    artifact_link_included: Option<String>,
+) -> anyhow::Result<ExecutionResult> {
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse response JSON")?;
+
+    let Some(work_item_id) = body
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .filter(|id| *id > 0)
+    else {
+        return Ok(ExecutionResult::failure(
+            "Azure DevOps create-work-item response contained no positive work-item ID",
+        ));
+    };
+    let work_item_url = body
+        .get("_links")
+        .and_then(|l| l.get("html"))
+        .and_then(|h| h.get("href"))
+        .and_then(|h| h.as_str())
+        .unwrap_or("");
+
+    info!("Work item created: #{} - {}", work_item_id, work_item_url);
+
+    if let Err(error) = ctx.register_resolved_work_item(
+        temporary_id,
+        crate::safe_outputs::ResolvedWorkItem {
+            id: work_item_id,
+            url: work_item_url.to_string(),
+        },
+    ) {
+        return Ok(ExecutionResult::failure_with_data(
+            format!(
+                "Created work item #{} but failed to register temporary_id '{}': {}",
+                work_item_id,
+                temporary_id.canonical(),
+                crate::sanitize::neutralize_pipeline_commands(&error.to_string())
+            ),
+            serde_json::json!({
+                "id": work_item_id,
+                "url": work_item_url,
+                "temporary_id": temporary_id.canonical(),
+            }),
+        ));
+    }
+
+    let message = match &artifact_link_included {
+        Some(link_msg) => format!(
+            "Created work item #{}: {} (artifact link: {})",
+            work_item_id, title, link_msg
+        ),
+        None => format!("Created work item #{}: {}", work_item_id, title),
+    };
+
+    Ok(ExecutionResult::success_with_data(
+        message,
+        serde_json::json!({
+            "id": work_item_id,
+            "url": work_item_url,
+            "project": project,
+            "type": work_item_type,
+            "artifact_link": artifact_link_included,
+            "temporary_id": temporary_id.canonical(),
+        }),
+    ))
+}
+
+/// Handle a non-success HTTP response from the work item creation request.
+async fn handle_creation_failure(response: reqwest::Response) -> ExecutionResult {
+    let status = response.status();
+    let error_body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    ExecutionResult::failure(format!(
+        "Failed to create work item (HTTP {}): {}",
+        status, error_body
+    ))
+}
+
 /// Resolve the artifact link patch op and a human-readable status message.
 ///
 /// Returns `Ok(None)` when artifact linking is disabled.
@@ -503,27 +687,8 @@ impl Executor for CreateWorkItemResult {
         }
 
         // Validate agent-provided tags against allowed-tags (if configured)
-        if !self.tags.is_empty() && !config.allowed_tags.is_empty() {
-            let disallowed: Vec<_> = self
-                .tags
-                .iter()
-                .filter(|tag| {
-                    !config
-                        .allowed_tags
-                        .iter()
-                        .any(|pattern| super::tag_matches_pattern(tag, pattern))
-                })
-                .collect();
-            if !disallowed.is_empty() {
-                return Ok(ExecutionResult::failure(format!(
-                    "Agent-provided tags not in allowed-tags: {}",
-                    disallowed
-                        .iter()
-                        .map(|t| t.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
+        if let Err(message) = check_allowed_tags(&self.tags, &config.allowed_tags) {
+            return Ok(ExecutionResult::failure(message));
         }
 
         // Build the Azure DevOps REST API URL for creating work items
@@ -537,58 +702,20 @@ impl Executor for CreateWorkItemResult {
         );
         debug!("API URL: {}", url);
 
-        let description_field = description_field_for(&config);
-        let mut all_tags = config.tags.clone();
-        for tag in &self.tags {
-            if !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
-                all_tags.push(tag.clone());
-            }
-        }
+        let all_tags = merge_tags(&config.tags, &self.tags);
 
         // Build the patch document for work item creation
         let description_with_stats =
             crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
-        if let Err(error) = validate_patch_fields(&config, description_field, !all_tags.is_empty())
-        {
-            return Ok(ExecutionResult::failure(error.to_string()));
-        }
-        let mut patch_doc = vec![
-            field_op("System.Title", &self.title),
-            field_op(description_field, &description_with_stats),
-            // Tell Azure DevOps the description is markdown
-            serde_json::json!({
-                "op": "add",
-                "path": format!("/multilineFieldsFormat/{description_field}"),
-                "value": "Markdown"
-            }),
-        ];
-
-        // Add optional configured fields
-        if let Some(area_path) = &config.area_path {
-            patch_doc.push(field_op("System.AreaPath", area_path));
-        }
-        if let Some(iteration_path) = &config.iteration_path {
-            patch_doc.push(field_op("System.IterationPath", iteration_path));
-        }
-        if let Some(assignee) = config.assignee.as_deref() {
-            let assignee = match super::normalize_work_item_assignee(
-                assignee,
-                "safe-outputs.create-work-item.assignee",
-            ) {
-                Ok(assignee) => assignee,
-                Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-            };
-            patch_doc.push(field_op("System.AssignedTo", assignee));
-        }
-        // Merge static config tags with validated agent-provided tags (dedup, case-insensitive)
-        if !all_tags.is_empty() {
-            patch_doc.push(field_op("System.Tags", all_tags.join("; ")));
-        }
-
-        // Add any custom fields
-        for (field, value) in sorted_custom_fields(&config.custom_fields) {
-            patch_doc.push(field_op(field, value));
-        }
+        let mut patch_doc = match build_patch_document(
+            &config,
+            &self.title,
+            &description_with_stats,
+            &all_tags,
+        ) {
+            Ok(patch_doc) => patch_doc,
+            Err(message) => return Ok(ExecutionResult::failure(message)),
+        };
 
         // Create HTTP client (needed for both work item creation and optional repo lookup)
         let client = reqwest::Client::new();
@@ -626,81 +753,18 @@ impl Executor for CreateWorkItemResult {
             .context("Failed to send request to Azure DevOps")?;
 
         if response.status().is_success() {
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse response JSON")?;
-
-            let Some(work_item_id) = body
-                .get("id")
-                .and_then(|v| v.as_u64())
-                .filter(|id| *id > 0)
-            else {
-                return Ok(ExecutionResult::failure(
-                    "Azure DevOps create-work-item response contained no positive work-item ID",
-                ));
-            };
-            let work_item_url = body
-                .get("_links")
-                .and_then(|l| l.get("html"))
-                .and_then(|h| h.get("href"))
-                .and_then(|h| h.as_str())
-                .unwrap_or("");
-
-            info!("Work item created: #{} - {}", work_item_id, work_item_url);
-
-            if let Err(error) = ctx.register_resolved_work_item(
+            handle_creation_success(
+                response,
+                ctx,
                 &self.temporary_id,
-                crate::safe_outputs::ResolvedWorkItem {
-                    id: work_item_id,
-                    url: work_item_url.to_string(),
-                },
-            ) {
-                return Ok(ExecutionResult::failure_with_data(
-                    format!(
-                        "Created work item #{} but failed to register temporary_id '{}': {}",
-                        work_item_id,
-                        self.temporary_id.canonical(),
-                        crate::sanitize::neutralize_pipeline_commands(&error.to_string())
-                    ),
-                    serde_json::json!({
-                        "id": work_item_id,
-                        "url": work_item_url,
-                        "temporary_id": self.temporary_id.canonical(),
-                    }),
-                ));
-            }
-
-            let message = match &artifact_link_included {
-                Some(link_msg) => format!(
-                    "Created work item #{}: {} (artifact link: {})",
-                    work_item_id, self.title, link_msg
-                ),
-                None => format!("Created work item #{}: {}", work_item_id, self.title),
-            };
-
-            Ok(ExecutionResult::success_with_data(
-                message,
-                serde_json::json!({
-                    "id": work_item_id,
-                    "url": work_item_url,
-                    "project": project,
-                    "type": config.work_item_type,
-                    "artifact_link": artifact_link_included,
-                    "temporary_id": self.temporary_id.canonical(),
-                }),
-            ))
+                &self.title,
+                project,
+                &config.work_item_type,
+                artifact_link_included,
+            )
+            .await
         } else {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-
-            Ok(ExecutionResult::failure(format!(
-                "Failed to create work item (HTTP {}): {}",
-                status, error_body
-            )))
+            Ok(handle_creation_failure(response).await)
         }
     }
 }
