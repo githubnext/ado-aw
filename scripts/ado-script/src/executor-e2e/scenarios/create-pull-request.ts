@@ -32,6 +32,7 @@ import type {
   Scenario,
   ScenarioContext,
 } from "../scenario.js";
+import { SkipError } from "../scenario.js";
 import { partialOutput } from "../execute-cli.js";
 import { detBody, numResult, strResult, Teardown } from "./common.js";
 import {
@@ -69,6 +70,24 @@ interface CreatePrScenarioOptions {
 
 const CREATE_PR_TEMPORARY_ID = "#aw_prcreate";
 const HANDOFF_TEMPORARY_ID = "#aw_prhandoff";
+const REVIEWERS_TEMPORARY_ID = "#aw_prreviewers";
+
+interface AddReviewersState extends CreatePrState {
+  reviewer: string;
+  reviewerId: string;
+}
+
+export function resolveExecutorE2eReviewer(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const reviewer = env.EXECUTOR_E2E_REVIEWER?.trim();
+  if (!reviewer || /^\$\([^)]+\)$/.test(reviewer)) {
+    throw new SkipError(
+      "create-pull-request-add-reviewers: EXECUTOR_E2E_REVIEWER is unavailable; run from Azure Pipelines with Build.RequestedForEmail",
+    );
+  }
+  return reviewer;
+}
 
 function runGit(
   args: string[],
@@ -346,6 +365,51 @@ function executedRecordForTool(
   return record;
 }
 
+function stringArrayResult(record: ExecutedRecord, key: string): string[] {
+  const value = record.result?.[key];
+  if (
+    !Array.isArray(value) ||
+    !value.every((entry): entry is string => typeof entry === "string")
+  ) {
+    throw new Error(
+      `executor result.${key} is not a string array (got ${JSON.stringify(value)})`,
+    );
+  }
+  return value;
+}
+
+async function cleanupTemporaryPrHandoff(
+  state: CreatePrState,
+  records?: ExecutedRecord[],
+): Promise<void> {
+  const teardown = new Teardown();
+  if (state.prId !== undefined) {
+    const prId = state.prId;
+    teardown.add("abandon PR", () =>
+      state.rest.abandonPullRequest(state.repo, prId),
+    );
+  } else if (records !== undefined) {
+    const created = records.find(
+      (record) =>
+        record.name === "create_pull_request" && record.status === "succeeded",
+    );
+    if (created !== undefined) {
+      teardown.add("recover and abandon PR", async () => {
+        const prId = numResult(created, "pull_request_id");
+        await state.rest.abandonPullRequest(state.repo, prId);
+      });
+    }
+  }
+  await teardown
+    .add("delete source branch", () =>
+      state.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`),
+    )
+    .add("remove local checkout", () =>
+      rm(state.sourcesDir, { recursive: true, force: true }),
+    )
+    .run();
+}
+
 /**
  * Runs create-pull-request and update-pr in one executor process. This is the
  * production handoff shape: the create result registers the real PR under a
@@ -426,35 +490,122 @@ export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
       );
     }
   },
-  cleanup: async (_ctx, state, records) => {
-    const teardown = new Teardown();
-    if (state.prId !== undefined) {
-      const prId = state.prId;
-      teardown.add("abandon PR", () =>
-        state.rest.abandonPullRequest(state.repo, prId),
+  cleanup: async (_ctx, state, records) =>
+    cleanupTemporaryPrHandoff(state, records),
+};
+
+/**
+ * Creates a PR and adds the pipeline requester as its reviewer in one
+ * executor invocation, proving temporary-ID handoff and live reviewer state.
+ */
+export const createPullRequestAddReviewers: Scenario<AddReviewersState> = {
+  id: "create-pull-request-add-reviewers",
+  tool: "update-pr",
+  targetsAdoRepo: true,
+  setup: async (ctx) => {
+    const reviewer = resolveExecutorE2eReviewer();
+    const reviewerId = await ctx.rest.resolveIdentityId(reviewer);
+    if (!reviewerId) {
+      throw new SkipError(
+        `create-pull-request-add-reviewers: reviewer '${reviewer}' did not resolve to exactly one ADO identity`,
       );
-    } else if (records !== undefined) {
-      const created = records.find(
-        (record) =>
-          record.name === "create_pull_request" &&
-          record.status === "succeeded",
-      );
-      if (created !== undefined) {
-        teardown.add("recover and abandon PR", async () => {
-          const prId = numResult(created, "pull_request_id");
-          await state.rest.abandonPullRequest(state.repo, prId);
-        });
-      }
     }
-    await teardown
-      .add("delete source branch", () =>
-        state.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`),
-      )
-      .add("remove local checkout", () =>
-        rm(state.sourcesDir, { recursive: true, force: true }),
-      )
-      .run();
+    const state = await setupCreatePullRequest(ctx, {
+      id: "create-pull-request-add-reviewers",
+      repositorySelector: "named",
+      patchRelPath: "create-pr-add-reviewers.patch",
+      changedFileSuffix: "-add-reviewers",
+    });
+    return { ...state, reviewer, reviewerId };
   },
+  config: (_ctx, state) => ({
+    "allowed-operations": ["add-reviewers"],
+    "allowed-repositories": [state.repo],
+    "allowed-reviewers": [state.reviewer],
+    "max-reviewers": 1,
+    max: 1,
+  }),
+  priorEntries: async (ctx, state): Promise<PriorEntry[]> => [
+    {
+      tool: "create-pull-request",
+      config: {
+        "target-branch": state.targetBranch,
+        "allowed-repositories": [state.repo],
+        "delete-source-branch": true,
+        "if-no-changes": "error",
+        "include-stats": false,
+      },
+      entry: {
+        title: `${ctx.prefix("create-pull-request-add-reviewers")} (do not merge)`,
+        description: detBody(ctx, "create-pull-request-add-reviewers"),
+        source_branch: state.sourceBranch,
+        patch_file: state.patchRelPath,
+        repository: state.repositorySelector,
+        agent_labels: [],
+        temporary_id: REVIEWERS_TEMPORARY_ID,
+        base_commit: state.baseCommit,
+        patch_sha256: state.patchSha256,
+      },
+    },
+  ],
+  files: async (_ctx, state) => ({ [state.patchRelPath]: state.patchContent }),
+  env: async (_ctx, state) => ({
+    BUILD_SOURCESDIRECTORY: state.sourcesDir,
+  }),
+  ndjson: async (_ctx, state) => ({
+    pull_request_id: REVIEWERS_TEMPORARY_ID,
+    operation: "add-reviewers",
+    reviewers: [state.reviewer],
+  }),
+  assert: async (_ctx, state, record, records) => {
+    const created = executedRecordForTool(records, "create-pull-request");
+    const createdPrId = numResult(created, "pull_request_id");
+    state.prId = createdPrId;
+    if (strResult(created, "temporary_id") !== REVIEWERS_TEMPORARY_ID) {
+      throw new Error(
+        `create-pull-request reported the wrong temporary_id for reviewer handoff`,
+      );
+    }
+
+    const updatedPrId = numResult(record, "pull_request_id");
+    if (updatedPrId !== createdPrId) {
+      throw new Error(
+        `temporary_id '${REVIEWERS_TEMPORARY_ID}' resolved to PR #${updatedPrId}, but create-pull-request filed #${createdPrId}`,
+      );
+    }
+    if (strResult(record, "operation") !== "add-reviewers") {
+      throw new Error("update-pr reported an unexpected operation");
+    }
+    const failed = stringArrayResult(record, "failed");
+    if (failed.length !== 0) {
+      throw new Error(`add-reviewers reported failures: ${failed.join(", ")}`);
+    }
+    const added = stringArrayResult(record, "added");
+    if (
+      !added.some(
+        (reviewer) =>
+          reviewer.toLowerCase() === state.reviewer.toLowerCase(),
+      )
+    ) {
+      throw new Error(
+        `add-reviewers result did not include configured identity '${state.reviewer}'`,
+      );
+    }
+
+    const reviewers = await state.rest.listReviewers(state.repo, createdPrId);
+    if (
+      !reviewers.some(
+        (reviewer) =>
+          reviewer.id.toLowerCase() === state.reviewerId.toLowerCase(),
+      )
+    ) {
+      throw new Error(
+        `PR #${createdPrId} does not contain reviewer identity '${state.reviewerId}'`,
+      );
+    }
+  },
+  cleanup: async (_ctx, state, records) =>
+    cleanupTemporaryPrHandoff(state, records),
 };
 
 export const createPullRequestScenarios: Scenario<unknown>[] = [
@@ -462,4 +613,5 @@ export const createPullRequestScenarios: Scenario<unknown>[] = [
   createPullRequestSelfMultiCheckout,
   createPullRequestCrossOrg,
   createPullRequestTemporaryIdHandoff,
+  createPullRequestAddReviewers,
 ];
