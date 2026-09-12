@@ -457,8 +457,8 @@ ShellScript::new(&START_CONTAINER)
 ### Reviewing the scripts as files
 
 ```bash
-cargo run -- export-bash-scripts --out /tmp/ado-aw-shell
-cargo run -- export-bash-scripts --out /tmp/ado-aw-shell --format json
+cargo run -- export-bash-scripts --output /tmp/ado-aw-shell
+cargo run -- export-bash-scripts --output /tmp/ado-aw-shell --format json
 ```
 
 Writes one `.sh` per registered script with a provenance header naming the
