@@ -254,43 +254,9 @@ impl Executor for UploadBuildAttachmentResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        // Resolve the current run's build ID. A build attachment can only ever
-        // be added to the *current* job's timeline record (see module docs), so
-        // `build_id`, when the agent supplies it, must match the current run.
-        let current_build_id: Option<i64> = match ctx.build_id {
-            Some(current) => {
-                Some(i64::try_from(current).context("BUILD_BUILDID value overflows i64")?)
-            }
-            None => None,
-        };
-        let effective_build_id: i64 = match (self.build_id, current_build_id) {
-            // Agent supplied a build_id that differs from the current run — not
-            // possible for a build attachment; fail with a clear message.
-            (Some(requested), Some(current)) if requested != current => {
-                return Ok(ExecutionResult::failure(format!(
-                    "build_id {requested} does not match the current build ({current}). Build \
-                     attachments can only be added to the current run — omit build_id (or set it \
-                     to {current}) to attach to this build."
-                )));
-            }
-            (Some(requested), Some(_current)) => requested,
-            // Agent supplied a build_id but the current build is unknown; we
-            // cannot prove it targets the current run, so refuse.
-            (Some(requested), None) => {
-                return Ok(ExecutionResult::failure(format!(
-                    "build_id {requested} was specified but the current build id (BUILD_BUILDID) \
-                     is not set, so it cannot be confirmed to target the current run. Build \
-                     attachments can only be added to the current run — omit build_id."
-                )));
-            }
-            (None, Some(current)) => current,
-            (None, None) => {
-                return Ok(ExecutionResult::failure(
-                    "Cannot attach a build attachment: BUILD_BUILDID is not set, so the current \
-                     run cannot be determined."
-                        .to_string(),
-                ));
-            }
+        let effective_build_id = match self.resolve_effective_build_id(ctx)? {
+            Ok(id) => id,
+            Err(failure) => return Ok(failure),
         };
 
         info!(
@@ -310,13 +276,150 @@ impl Executor for UploadBuildAttachmentResult {
             config.allowed_artifact_names
         );
 
+        let final_name = match self.resolve_final_artifact_name(&config) {
+            Ok(name) => name,
+            Err(failure) => return Ok(failure),
+        };
+
+        if let Err(failure) = self.check_extension_allowed(&config) {
+            return Ok(failure);
+        }
+
+        let attachment_type = match resolve_attachment_type(&config) {
+            Ok(t) => t,
+            Err(failure) => return Ok(failure),
+        };
+        debug!("Attachment type: {}", attachment_type);
+
+        let staged = match self.resolve_and_verify_staged_file(ctx, &config)? {
+            Ok(staged) => staged,
+            Err(failure) => return Ok(failure),
+        };
+
+        if ctx.dry_run {
+            return Ok(ExecutionResult::success(format!(
+                "[dry-run] would attach '{}' ({} bytes) as artifact '{}' to the current build #{}",
+                self.file_path, staged.file_size, final_name, effective_build_id,
+            )));
+        }
+
+        // Read the file bytes for upload (after the dry-run guard to avoid
+        // reading up to 50 MB into memory only to discard it).  Uses async I/O
+        // to avoid blocking the tokio runtime for large files.
+        let file_bytes = tokio::fs::read(&staged.canonical_path)
+            .await
+            .context("Failed to read file contents")?;
+
+        // SHA-256 integrity check: verify the staged file hasn't been swapped
+        // between stages.  This catches same-size replacements that the size
+        // check alone would miss.
+        let live_hash = crate::hash::sha256_hex(&file_bytes);
+        if live_hash != self.staged_sha256 {
+            return Ok(ExecutionResult::failure(format!(
+                "Staged file SHA-256 mismatch: expected {} (recorded at Stage 1), got {} — \
+                 the file may have been tampered with between stages",
+                self.staged_sha256, live_hash
+            )));
+        }
+
+        let ado_ctx = match resolve_ado_upload_context(ctx) {
+            Ok(c) => c,
+            Err(e) => return Err(e),
+        };
+
+        let url = build_attachment_url(&ado_ctx, attachment_type, &final_name);
+        debug!("Attachment URL: {}", url);
+
+        self.upload_attachment(
+            &ado_ctx,
+            &url,
+            file_bytes,
+            staged.file_size,
+            effective_build_id,
+            attachment_type,
+            &final_name,
+        )
+        .await
+    }
+}
+
+/// Coordinates resolved from `ExecutionContext` that are required to build
+/// and authenticate the timeline-attachment upload request.
+struct AdoUploadContext<'a> {
+    org_url: &'a str,
+    project: &'a str,
+    token: &'a str,
+    project_id: &'a str,
+    plan_id: &'a str,
+    timeline_id: &'a str,
+    record_id: &'a str,
+}
+
+/// Result of resolving and integrity-checking the staged file on disk.
+struct StagedFile {
+    canonical_path: std::path::PathBuf,
+    file_size: u64,
+}
+
+impl UploadBuildAttachmentResult {
+    /// Resolves the current run's build ID. A build attachment can only ever
+    /// be added to the *current* job's timeline record (see module docs), so
+    /// `build_id`, when the agent supplies it, must match the current run.
+    ///
+    /// Returns `Ok(Ok(id))` on success, `Ok(Err(failure_result))` for a
+    /// validation failure that should be surfaced as an `ExecutionResult`,
+    /// and `Err` only for an unexpected numeric overflow.
+    fn resolve_effective_build_id(
+        &self,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<Result<i64, ExecutionResult>> {
+        let current_build_id: Option<i64> = match ctx.build_id {
+            Some(current) => {
+                Some(i64::try_from(current).context("BUILD_BUILDID value overflows i64")?)
+            }
+            None => None,
+        };
+        let result = match (self.build_id, current_build_id) {
+            // Agent supplied a build_id that differs from the current run — not
+            // possible for a build attachment; fail with a clear message.
+            (Some(requested), Some(current)) if requested != current => {
+                Err(ExecutionResult::failure(format!(
+                    "build_id {requested} does not match the current build ({current}). Build \
+                     attachments can only be added to the current run — omit build_id (or set it \
+                     to {current}) to attach to this build."
+                )))
+            }
+            (Some(requested), Some(_current)) => Ok(requested),
+            // Agent supplied a build_id but the current build is unknown; we
+            // cannot prove it targets the current run, so refuse.
+            (Some(requested), None) => Err(ExecutionResult::failure(format!(
+                "build_id {requested} was specified but the current build id (BUILD_BUILDID) \
+                 is not set, so it cannot be confirmed to target the current run. Build \
+                 attachments can only be added to the current run — omit build_id."
+            ))),
+            (None, Some(current)) => Ok(current),
+            (None, None) => Err(ExecutionResult::failure(
+                "Cannot attach a build attachment: BUILD_BUILDID is not set, so the current \
+                 run cannot be determined."
+                    .to_string(),
+            )),
+        };
+        Ok(result)
+    }
+
+    /// Applies the operator-configured name-prefix and validates the
+    /// resulting artifact name (charset, length, and allow-list).
+    fn resolve_final_artifact_name(
+        &self,
+        config: &UploadBuildAttachmentConfig,
+    ) -> Result<String, ExecutionResult> {
         // Validate name-prefix length before applying. A long prefix would
         // be caught later by the final_name.len() > 100 check, but rejecting
         // early gives operators a clearer error message.
         if let Some(prefix) = &config.name_prefix
             && prefix.len() > 50
         {
-            return Ok(ExecutionResult::failure(format!(
+            return Err(ExecutionResult::failure(format!(
                 "name-prefix '{}...' is too long ({} chars, max 50)",
                 prefix.chars().take(20).collect::<String>(),
                 prefix.len()
@@ -334,7 +437,7 @@ impl Executor for UploadBuildAttachmentResult {
             || final_name.len() > 100
             || !is_valid_artifact_name(&final_name)
         {
-            return Ok(ExecutionResult::failure(format!(
+            return Err(ExecutionResult::failure(format!(
                 "Resolved artifact name '{}' is not a valid Azure DevOps artifact name",
                 final_name
             )));
@@ -348,60 +451,60 @@ impl Executor for UploadBuildAttachmentResult {
                 .iter()
                 .any(|pattern| super::name_matches_pattern(&final_name, pattern));
             if !allowed {
-                return Ok(ExecutionResult::failure(format!(
+                return Err(ExecutionResult::failure(format!(
                     "Artifact name '{}' is not in the allowed list",
                     final_name
                 )));
             }
         }
 
-        // Validate file extension against allowed-extensions (if configured).
-        // Uses Path::extension() for a precise match rather than suffix
-        // matching on the full path — this prevents "log" from matching
-        // filenames like "catalog" when the operator omits the leading dot.
-        if !config.allowed_extensions.is_empty() {
-            let file_ext = std::path::Path::new(&self.file_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let has_valid_ext = config
-                .allowed_extensions
-                .iter()
-                .any(|ext| ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext));
-            if !has_valid_ext {
-                return Ok(ExecutionResult::failure(format!(
-                    "File '{}' has an extension not in the allowed list: {:?}",
-                    self.file_path, config.allowed_extensions
-                )));
-            }
-        }
+        Ok(final_name)
+    }
 
-        // Resolve the attachment type. Operator config wins; otherwise use the
-        // default. Re-validate the charset defensively even though
-        // `SanitizeConfig` strips control characters, because the type is
-        // interpolated into a URL path segment.
-        let attachment_type = config
-            .attachment_type
-            .as_deref()
-            .unwrap_or(DEFAULT_ATTACHMENT_TYPE);
-        if attachment_type.is_empty()
-            || attachment_type.starts_with('.')
-            || attachment_type.len() > 100
-            || !is_valid_artifact_name(attachment_type)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "attachment-type '{}' is not a valid value (must be non-empty, ≤100 chars, no leading '.', alphanumeric/'-'/'_'/'.')",
-                attachment_type
-            )));
+    /// Validates the proposed file's extension against `allowed-extensions`
+    /// (if configured). Uses `Path::extension()` for a precise match rather
+    /// than suffix matching on the full path — this prevents "log" from
+    /// matching filenames like "catalog" when the operator omits the leading
+    /// dot.
+    fn check_extension_allowed(
+        &self,
+        config: &UploadBuildAttachmentConfig,
+    ) -> Result<(), ExecutionResult> {
+        if config.allowed_extensions.is_empty() {
+            return Ok(());
         }
-        debug!("Attachment type: {}", attachment_type);
+        let file_ext = std::path::Path::new(&self.file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let has_valid_ext = config
+            .allowed_extensions
+            .iter()
+            .any(|ext| ext.trim_start_matches('.').eq_ignore_ascii_case(file_ext));
+        if has_valid_ext {
+            Ok(())
+        } else {
+            Err(ExecutionResult::failure(format!(
+                "File '{}' has an extension not in the allowed list: {:?}",
+                self.file_path, config.allowed_extensions
+            )))
+        }
+    }
 
-        // Resolve the staged file inside the safe-outputs working directory.
-        // Stage 1 (MCP) copied the agent's file there under `self.staged_file`;
-        // the sandbox workspace where the original lived is no longer
-        // accessible. Canonicalize and verify it stays inside
-        // `working_directory` so a malicious staged_file value can't escape
-        // (defense in depth — MCP generates the name itself).
+    /// Resolves the staged file inside the safe-outputs working directory,
+    /// verifying it stays within `working_directory`, is not a directory,
+    /// and matches the size recorded at Stage 1.
+    ///
+    /// Stage 1 (MCP) copied the agent's file there under `self.staged_file`;
+    /// the sandbox workspace where the original lived is no longer
+    /// accessible. Canonicalize and verify it stays inside
+    /// `working_directory` so a malicious staged_file value can't escape
+    /// (defense in depth — MCP generates the name itself).
+    fn resolve_and_verify_staged_file(
+        &self,
+        ctx: &ExecutionContext,
+        config: &UploadBuildAttachmentConfig,
+    ) -> anyhow::Result<Result<StagedFile, ExecutionResult>> {
         let staged_path = ctx.working_directory.join(&self.staged_file);
         debug!("Staged file path: {}", staged_path.display());
 
@@ -413,20 +516,20 @@ impl Executor for UploadBuildAttachmentResult {
             .canonicalize()
             .context("Failed to canonicalize working directory")?;
         if !canonical.starts_with(&canonical_base) {
-            return Ok(ExecutionResult::failure(format!(
+            return Ok(Err(ExecutionResult::failure(format!(
                 "Staged file '{}' resolves outside the safe-outputs directory",
                 self.staged_file
-            )));
+            ))));
         }
 
         // Reject directories defensively — the staged entry must always be a
         // single file (Stage 1 only copies single files).
         let metadata = std::fs::metadata(&canonical).context("Failed to read file metadata")?;
         if metadata.is_dir() {
-            return Ok(ExecutionResult::failure(format!(
+            return Ok(Err(ExecutionResult::failure(format!(
                 "Staged path '{}' is a directory; upload-build-attachment only supports single files",
                 self.staged_file
-            )));
+            ))));
         }
         let file_size = metadata.len();
         debug!("File size: {} bytes", file_size);
@@ -435,117 +538,48 @@ impl Executor for UploadBuildAttachmentResult {
         // recorded in Stage 1. A mismatch means the staged file was modified
         // between stages — fail hard rather than uploading tampered content.
         if file_size != self.file_size {
-            return Ok(ExecutionResult::failure(format!(
+            return Ok(Err(ExecutionResult::failure(format!(
                 "Staged file size ({} bytes) differs from size recorded at Stage 1 ({} bytes) — \
                  the file may have been modified between stages",
                 file_size, self.file_size
-            )));
+            ))));
         }
 
         if file_size > config.max_file_size {
-            return Ok(ExecutionResult::failure(format!(
+            return Ok(Err(ExecutionResult::failure(format!(
                 "File size ({} bytes) exceeds maximum allowed size ({} bytes)",
                 file_size, config.max_file_size
-            )));
+            ))));
         }
 
-        if ctx.dry_run {
-            return Ok(ExecutionResult::success(format!(
-                "[dry-run] would attach '{}' ({} bytes) as artifact '{}' to the current build #{}",
-                self.file_path, file_size, final_name, effective_build_id,
-            )));
-        }
+        Ok(Ok(StagedFile {
+            canonical_path: canonical,
+            file_size,
+        }))
+    }
 
-        // Read the file bytes for upload (after the dry-run guard to avoid
-        // reading up to 50 MB into memory only to discard it).  Uses async I/O
-        // to avoid blocking the tokio runtime for large files.
-        let file_bytes = tokio::fs::read(&canonical)
-            .await
-            .context("Failed to read file contents")?;
-
-        // SHA-256 integrity check: verify the staged file hasn't been swapped
-        // between stages.  This catches same-size replacements that the size
-        // check alone would miss.
-        let live_hash = crate::hash::sha256_hex(&file_bytes);
-        if live_hash != self.staged_sha256 {
-            return Ok(ExecutionResult::failure(format!(
-                "Staged file SHA-256 mismatch: expected {} (recorded at Stage 1), got {} — \
-                 the file may have been tampered with between stages",
-                self.staged_sha256, live_hash
-            )));
-        }
-
-        // Resolve the ADO API context (collection URL, token) and the current
-        // job's timeline coordinates. A build attachment is a DistributedTask
-        // **timeline attachment** on the running job's record (the same object
-        // `##vso[task.addattachment]` creates), so we need the plan / timeline /
-        // record IDs of the current run — these come from the auto-injected
-        // SYSTEM_* predefined variables and only exist for the current job.
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
-        let token = ctx
-            .access_token
-            .as_ref()
-            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        // The DistributedTask hub route's `{scopeIdentifier}` is the **project
-        // GUID** (SYSTEM_TEAMPROJECTID), not the project name — the name routes
-        // but is rejected with HTTP 400.
-        let project_id = ctx.ado_project_id.as_ref().context(
-            "SYSTEM_TEAMPROJECTID is not set — required as the scope identifier for the build \
-             attachment (timeline attachment) API",
-        )?;
-        let plan_id = ctx.plan_id.as_ref().context(
-            "SYSTEM_PLANID is not set — required to attach to the current build (build attachments \
-             are written to the current job's timeline record)",
-        )?;
-        let timeline_id = ctx.timeline_id.as_ref().context(
-            "SYSTEM_TIMELINEID is not set — required to attach to the current build (build \
-             attachments are written to the current job's timeline record)",
-        )?;
-        let record_id = ctx.job_id.as_ref().context(
-            "SYSTEM_JOBID is not set — required to attach to the current build (build attachments \
-             are written to the current job's timeline record)",
-        )?;
-        debug!(
-            "ADO org: {}, project: {} ({})",
-            org_url, project, project_id
-        );
-
-        // Build the DistributedTask timeline-attachment URL. This is the write
-        // side of a build attachment — the object is read back via the Build ▸
-        // Attachments Get/List API by `{type}`/`{name}`. The `build` hub covers
-        // build/YAML pipelines. The route's `{scopeIdentifier}` is the project
-        // **GUID**; released api-version is 7.1.
-        // PUT {org}/{projectId}/_apis/distributedtask/hubs/build/plans/{planId}
-        //     /timelines/{timelineId}/records/{recordId}
-        //     /attachments/{type}/{name}?api-version=7.1
-        let url = format!(
-            "{}/{}/_apis/distributedtask/hubs/build/plans/{}/timelines/{}/records/{}/attachments/{}/{}?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project_id, PATH_SEGMENT),
-            utf8_percent_encode(plan_id, PATH_SEGMENT),
-            utf8_percent_encode(timeline_id, PATH_SEGMENT),
-            utf8_percent_encode(record_id, PATH_SEGMENT),
-            utf8_percent_encode(attachment_type, PATH_SEGMENT),
-            utf8_percent_encode(&final_name, PATH_SEGMENT),
-        );
-        debug!("Attachment URL: {}", url);
-
+    /// Sends the timeline-attachment PUT request and translates the response
+    /// into an `ExecutionResult`.
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_attachment(
+        &self,
+        ado_ctx: &AdoUploadContext<'_>,
+        url: &str,
+        file_bytes: Vec<u8>,
+        file_size: u64,
+        effective_build_id: i64,
+        attachment_type: &str,
+        final_name: &str,
+    ) -> anyhow::Result<ExecutionResult> {
         let client = reqwest::Client::new();
         info!(
             "Uploading {} bytes to build #{} as attachment '{}/{}'",
             file_size, effective_build_id, attachment_type, final_name
         );
         let response = client
-            .put(&url)
+            .put(url)
             .header("Content-Type", "application/octet-stream")
-            .basic_auth("", Some(token))
+            .basic_auth("", Some(ado_ctx.token))
             .body(file_bytes)
             .send()
             .await
@@ -586,7 +620,7 @@ impl Executor for UploadBuildAttachmentResult {
                     "file_path": self.file_path,
                     "size_bytes": file_size,
                     "attachment_url": attachment_url,
-                    "project": project,
+                    "project": ado_ctx.project,
                 }),
             ))
         } else {
@@ -601,6 +635,109 @@ impl Executor for UploadBuildAttachmentResult {
             )))
         }
     }
+}
+
+/// Resolves the attachment type from operator config, falling back to the
+/// default. Re-validates the charset defensively even though `SanitizeConfig`
+/// strips control characters, because the type is interpolated into a URL
+/// path segment.
+fn resolve_attachment_type(
+    config: &UploadBuildAttachmentConfig,
+) -> Result<&str, ExecutionResult> {
+    let attachment_type = config
+        .attachment_type
+        .as_deref()
+        .unwrap_or(DEFAULT_ATTACHMENT_TYPE);
+    if attachment_type.is_empty()
+        || attachment_type.starts_with('.')
+        || attachment_type.len() > 100
+        || !is_valid_artifact_name(attachment_type)
+    {
+        return Err(ExecutionResult::failure(format!(
+            "attachment-type '{}' is not a valid value (must be non-empty, ≤100 chars, no leading '.', alphanumeric/'-'/'_'/'.')",
+            attachment_type
+        )));
+    }
+    Ok(attachment_type)
+}
+
+/// Resolves the ADO API context (collection URL, token) and the current
+/// job's timeline coordinates. A build attachment is a DistributedTask
+/// **timeline attachment** on the running job's record (the same object
+/// `##vso[task.addattachment]` creates), so we need the plan / timeline /
+/// record IDs of the current run — these come from the auto-injected
+/// SYSTEM_* predefined variables and only exist for the current job.
+fn resolve_ado_upload_context(ctx: &ExecutionContext) -> anyhow::Result<AdoUploadContext<'_>> {
+    let org_url = ctx
+        .ado_org_url
+        .as_deref()
+        .context("AZURE_DEVOPS_ORG_URL not set")?;
+    let project = ctx
+        .ado_project
+        .as_deref()
+        .context("SYSTEM_TEAMPROJECT not set")?;
+    let token = ctx
+        .access_token
+        .as_deref()
+        .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
+    // The DistributedTask hub route's `{scopeIdentifier}` is the **project
+    // GUID** (SYSTEM_TEAMPROJECTID), not the project name — the name routes
+    // but is rejected with HTTP 400.
+    let project_id = ctx.ado_project_id.as_deref().context(
+        "SYSTEM_TEAMPROJECTID is not set — required as the scope identifier for the build \
+         attachment (timeline attachment) API",
+    )?;
+    let plan_id = ctx.plan_id.as_deref().context(
+        "SYSTEM_PLANID is not set — required to attach to the current build (build attachments \
+         are written to the current job's timeline record)",
+    )?;
+    let timeline_id = ctx.timeline_id.as_deref().context(
+        "SYSTEM_TIMELINEID is not set — required to attach to the current build (build \
+         attachments are written to the current job's timeline record)",
+    )?;
+    let record_id = ctx.job_id.as_deref().context(
+        "SYSTEM_JOBID is not set — required to attach to the current build (build attachments \
+         are written to the current job's timeline record)",
+    )?;
+    debug!(
+        "ADO org: {}, project: {} ({})",
+        org_url, project, project_id
+    );
+
+    Ok(AdoUploadContext {
+        org_url,
+        project,
+        token,
+        project_id,
+        plan_id,
+        timeline_id,
+        record_id,
+    })
+}
+
+/// Builds the DistributedTask timeline-attachment URL. This is the write
+/// side of a build attachment — the object is read back via the Build ▸
+/// Attachments Get/List API by `{type}`/`{name}`. The `build` hub covers
+/// build/YAML pipelines. The route's `{scopeIdentifier}` is the project
+/// **GUID**; released api-version is 7.1.
+/// PUT {org}/{projectId}/_apis/distributedtask/hubs/build/plans/{planId}
+///     /timelines/{timelineId}/records/{recordId}
+///     /attachments/{type}/{name}?api-version=7.1
+fn build_attachment_url(
+    ado_ctx: &AdoUploadContext<'_>,
+    attachment_type: &str,
+    final_name: &str,
+) -> String {
+    format!(
+        "{}/{}/_apis/distributedtask/hubs/build/plans/{}/timelines/{}/records/{}/attachments/{}/{}?api-version=7.1",
+        ado_ctx.org_url.trim_end_matches('/'),
+        utf8_percent_encode(ado_ctx.project_id, PATH_SEGMENT),
+        utf8_percent_encode(ado_ctx.plan_id, PATH_SEGMENT),
+        utf8_percent_encode(ado_ctx.timeline_id, PATH_SEGMENT),
+        utf8_percent_encode(ado_ctx.record_id, PATH_SEGMENT),
+        utf8_percent_encode(attachment_type, PATH_SEGMENT),
+        utf8_percent_encode(final_name, PATH_SEGMENT),
+    )
 }
 
 #[cfg(test)]
