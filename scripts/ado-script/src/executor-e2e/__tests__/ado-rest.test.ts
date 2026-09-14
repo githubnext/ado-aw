@@ -19,6 +19,79 @@ describe("AdoRest.workItemTypeExists", () => {
     vi.unstubAllGlobals();
   });
 
+  describe("AdoRest.resolveIdentityId", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("passes GUID identities through without a request", async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(
+        new AdoRest(options).resolveIdentityId(
+          "01234567-89ab-cdef-0123-456789abcdef",
+        ),
+      ).resolves.toBe("01234567-89ab-cdef-0123-456789abcdef");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("encodes the identity query and accepts one case-insensitive exact match", async () => {
+      const fetchMock = stubFetch(
+        () =>
+          new Response(
+            JSON.stringify({
+              value: [
+                {
+                  id: "reviewer-id",
+                  displayName: "Near Match",
+                  properties: {
+                    Mail: { $value: "REQUESTER+E2E@example.com" },
+                  },
+                },
+              ],
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          ),
+      );
+
+      await expect(
+        new AdoRest(options).resolveIdentityId("requester+e2e@example.com"),
+      ).resolves.toBe("reviewer-id");
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(
+        "https://vssps.dev.azure.com/org/_apis/identities?searchFilter=General&filterValue=requester%2Be2e%40example.com&api-version=7.1",
+      );
+    });
+
+    it("rejects ambiguous exact matches", async () => {
+      stubFetch(
+        () =>
+          new Response(
+            JSON.stringify({
+              value: [
+                { id: "one", providerDisplayName: "owner@example.com" },
+                {
+                  id: "two",
+                  properties: { Account: { $value: "OWNER@example.com" } },
+                },
+              ],
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          ),
+      );
+
+      await expect(
+        new AdoRest(options).resolveIdentityId("owner@example.com"),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   describe("AdoRest authentication", () => {
     afterEach(() => {
       vi.unstubAllGlobals();
