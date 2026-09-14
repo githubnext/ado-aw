@@ -892,6 +892,87 @@ async fn audit_pipeline_artifact_layouts_are_equivalent_end_to_end() {
     let trace: Value = serde_json::from_slice(&trace.stdout).expect("trace JSON");
     assert_eq!(trace["build_id"], 630125);
 
+    let step_trace_cache = TempDir::new().expect("create step trace cache");
+    let step_trace = Command::new(binary())
+        .current_dir(workspace.path())
+        .env("CI", "1")
+        .env("TMPDIR", step_trace_cache.path())
+        .env("ADO_AW_TEST_ORG_URL", flat_server.uri())
+        .args([
+            "trace",
+            "630125",
+            "--step",
+            "threatAnalysis",
+            "--json",
+            "--org",
+            "test-org",
+            "--project",
+            "test-project",
+            "--pat",
+            "test-pat",
+        ])
+        .output()
+        .await
+        .expect("run trace --step");
+    assert!(
+        step_trace.status.success(),
+        "trace --step should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&step_trace.stdout),
+        String::from_utf8_lossy(&step_trace.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&step_trace.stderr)
+            .contains("requested step was not found in the local IR graph"),
+        "trace --step for a step present in the local IR graph should not warn: stderr={}",
+        String::from_utf8_lossy(&step_trace.stderr)
+    );
+    let step_trace: Value =
+        serde_json::from_slice(&step_trace.stdout).expect("trace --step JSON");
+    assert_eq!(step_trace["build_id"], 630125);
+    assert_eq!(step_trace["step"]["step"], "threatAnalysis");
+    assert_eq!(step_trace["step"]["location"]["job"], "Detection");
+
+    let missing_step_cache = TempDir::new().expect("create missing-step trace cache");
+    let missing_step_trace = Command::new(binary())
+        .current_dir(workspace.path())
+        .env("CI", "1")
+        .env("TMPDIR", missing_step_cache.path())
+        .env("ADO_AW_TEST_ORG_URL", flat_server.uri())
+        .args([
+            "trace",
+            "630125",
+            "--step",
+            "does-not-exist",
+            "--json",
+            "--org",
+            "test-org",
+            "--project",
+            "test-project",
+            "--pat",
+            "test-pat",
+        ])
+        .output()
+        .await
+        .expect("run trace --step for a missing step");
+    assert!(
+        missing_step_trace.status.success(),
+        "trace --step for an unknown step id should still exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&missing_step_trace.stdout),
+        String::from_utf8_lossy(&missing_step_trace.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&missing_step_trace.stderr)
+            .contains("requested step was not found in the local IR graph"),
+        "trace --step for an unknown step id should warn on stderr: stderr={}",
+        String::from_utf8_lossy(&missing_step_trace.stderr)
+    );
+    let missing_step_trace: Value = serde_json::from_slice(&missing_step_trace.stdout)
+        .expect("trace --step (missing) JSON");
+    assert!(
+        missing_step_trace["step"].is_null(),
+        "trace --step for an unknown step id should omit the step section: {missing_step_trace}"
+    );
+
     let mcp_cache = TempDir::new().expect("create MCP cache");
     let responses = run_mcp_author(workspace.path(), mcp_cache.path(), &flat_server).await;
     let audit_build = responses
