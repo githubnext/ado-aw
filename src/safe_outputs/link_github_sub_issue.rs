@@ -8,10 +8,10 @@ use serde_json::Value;
 
 use crate::safe_outputs::{
     ExecutionContext, ExecutionResult, Executor, GithubClient, GithubIssueNumber,
-    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities, Validate,
-    resolve_github_issue_target, validate_github_mutation_filter_config,
-    validate_github_mutation_filters, validate_github_repository,
-    validate_github_target_capability,
+    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities, GithubTargetMetadata,
+    ResolvedGithubIssueTarget, Validate, resolve_github_issue_target,
+    validate_github_mutation_filter_config, validate_github_mutation_filters,
+    validate_github_repository, validate_github_target_capability,
 };
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
@@ -143,74 +143,18 @@ impl Executor for LinkGithubSubIssueResult {
         if let Err(error) = validate_link_github_sub_issue_config(&config) {
             return Ok(ExecutionResult::failure(error.to_string()));
         }
-        let policy =
-            GithubRepositoryPolicy::new(config.target_repo.as_deref(), &config.allowed_repos);
-        let parent = match resolve_github_issue_target(
-            &self.parent_issue_number,
-            self.repository.as_deref(),
-            policy,
-            ctx,
-        )? {
-            Ok(target) => target,
+
+        let (parent, sub_issue) = match self.resolve_targets(ctx, &config)? {
+            Ok(targets) => targets,
             Err(result) => return Ok(result),
         };
-        let sub_issue = match resolve_github_issue_target(
-            &self.sub_issue_number,
-            self.repository.as_deref(),
-            policy,
-            ctx,
-        )? {
-            Ok(target) => target,
-            Err(result) => return Ok(result),
-        };
-        if !parent
-            .repository
-            .eq_ignore_ascii_case(&sub_issue.repository)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "parent issue repository '{}' and sub-issue repository '{}' must be the same",
-                parent.repository, sub_issue.repository
-            )));
-        }
-        if parent.number == sub_issue.number {
-            return Ok(ExecutionResult::failure(
-                "parent_issue_number and sub_issue_number resolved to the same GitHub issue",
-            ));
-        }
 
         let client = GithubClient::new(&ctx.github_api_url, token)?;
-        let parent_metadata = match client.get_issue(&parent.repository, parent.number).await? {
-            Ok(metadata) => metadata,
-            Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-        };
-        let sub_metadata = match client
-            .get_issue(&sub_issue.repository, sub_issue.number)
-            .await?
-        {
-            Ok(metadata) => metadata,
-            Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-        };
-        for metadata in [&parent_metadata, &sub_metadata] {
-            if let Err(result) =
-                validate_github_target_capability(metadata, GithubTargetCapabilities::ISSUES_ONLY)
-            {
-                return Ok(result);
-            }
-        }
-        let parent_filters = GithubMutationFilters {
-            required_labels: &config.parent_required_labels,
-            required_title_prefix: config.parent_title_prefix.as_deref(),
-        };
-        let sub_filters = GithubMutationFilters {
-            required_labels: &config.sub_required_labels,
-            required_title_prefix: config.sub_title_prefix.as_deref(),
-        };
-        if let Err(result) = validate_github_mutation_filters(&parent_metadata, parent_filters) {
-            return Ok(result);
-        }
-        if let Err(result) = validate_github_mutation_filters(&sub_metadata, sub_filters) {
-            return Ok(result);
-        }
+        let (parent_metadata, sub_metadata) =
+            match fetch_and_validate_metadata(&client, &parent, &sub_issue, &config).await? {
+                Ok(metadata) => metadata,
+                Err(result) => return Ok(result),
+            };
         let Some(parent_node_id) = parent_metadata.node_id.as_deref() else {
             return Ok(ExecutionResult::failure(format!(
                 "GitHub parent issue {}#{} has no GraphQL node ID; sub-issues are unsupported or unavailable",
@@ -224,102 +168,223 @@ impl Executor for LinkGithubSubIssueResult {
             )));
         };
 
-        let preflight = match client
-            .graphql(
-                "Check GitHub sub-issue parent",
-                GET_SUB_ISSUE_PARENT,
-                serde_json::json!({ "id": sub_node_id }),
-            )
-            .await?
+        if let Some(result) =
+            check_existing_parent(&client, sub_node_id, parent_node_id, &parent, &sub_issue)
+                .await?
         {
-            Ok(data) => data,
-            Err(error) => {
-                return Ok(ExecutionResult::failure(format!(
-                    "GitHub sub-issues are unsupported or unavailable: {error}"
-                )));
-            }
+            return Ok(result);
+        }
+
+        link_sub_issue(&client, parent_node_id, sub_node_id, &parent, &sub_issue).await
+    }
+}
+
+impl LinkGithubSubIssueResult {
+    /// Resolves the parent and sub-issue targets and checks they refer to the
+    /// same repository and to two distinct issues.
+    fn resolve_targets(
+        &self,
+        ctx: &ExecutionContext,
+        config: &LinkGithubSubIssueConfig,
+    ) -> anyhow::Result<
+        Result<(ResolvedGithubIssueTarget, ResolvedGithubIssueTarget), ExecutionResult>,
+    > {
+        let policy =
+            GithubRepositoryPolicy::new(config.target_repo.as_deref(), &config.allowed_repos);
+        let parent = match resolve_github_issue_target(
+            &self.parent_issue_number,
+            self.repository.as_deref(),
+            policy,
+            ctx,
+        )? {
+            Ok(target) => target,
+            Err(result) => return Ok(Err(result)),
         };
-        if let Some(existing) = match parse_existing_parent(&preflight) {
-            Ok(parent) => parent,
-            Err(message) => return Ok(ExecutionResult::failure(message)),
-        } {
-            let same_parent = existing.id == parent_node_id;
-            if same_parent {
-                info!(
-                    "GitHub issue {}#{} is already a sub-issue of #{}",
-                    parent.repository, sub_issue.number, parent.number
-                );
-                return Ok(ExecutionResult::success_with_data(
-                    format!(
-                        "GitHub issue {}#{} is already a sub-issue of #{}",
-                        parent.repository, sub_issue.number, parent.number
-                    ),
-                    serde_json::json!({
-                        "parent_issue_number": parent.number,
-                        "sub_issue_number": sub_issue.number,
-                        "target_repo": parent.repository,
-                        "already_linked": true,
-                    }),
-                ));
-            }
-            let existing_target = format!("{}#{}", existing.repository, existing.number);
-            return Ok(ExecutionResult::failure(format!(
-                "GitHub issue {}#{} is already linked to a different parent ({existing_target}); refusing to replace it",
-                sub_issue.repository, sub_issue.number
+        let sub_issue = match resolve_github_issue_target(
+            &self.sub_issue_number,
+            self.repository.as_deref(),
+            policy,
+            ctx,
+        )? {
+            Ok(target) => target,
+            Err(result) => return Ok(Err(result)),
+        };
+        if !parent
+            .repository
+            .eq_ignore_ascii_case(&sub_issue.repository)
+        {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "parent issue repository '{}' and sub-issue repository '{}' must be the same",
+                parent.repository, sub_issue.repository
+            ))));
+        }
+        if parent.number == sub_issue.number {
+            return Ok(Err(ExecutionResult::failure(
+                "parent_issue_number and sub_issue_number resolved to the same GitHub issue",
             )));
         }
+        Ok(Ok((parent, sub_issue)))
+    }
+}
 
-        debug!(
-            "Linking GitHub issue {}#{} as a sub-issue of #{}",
-            parent.repository, sub_issue.number, parent.number
-        );
-        let mutation = match client
-            .graphql(
-                "Link GitHub sub-issue",
-                ADD_SUB_ISSUE,
-                serde_json::json!({
-                    "parentId": parent_node_id,
-                    "subIssueId": sub_node_id,
-                }),
-            )
-            .await?
+/// Fetches parent and sub-issue metadata and validates capability and mutation filters.
+async fn fetch_and_validate_metadata(
+    client: &GithubClient,
+    parent: &ResolvedGithubIssueTarget,
+    sub_issue: &ResolvedGithubIssueTarget,
+    config: &LinkGithubSubIssueConfig,
+) -> anyhow::Result<Result<(GithubTargetMetadata, GithubTargetMetadata), ExecutionResult>> {
+    let parent_metadata = match client.get_issue(&parent.repository, parent.number).await? {
+        Ok(metadata) => metadata,
+        Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+    };
+    let sub_metadata = match client
+        .get_issue(&sub_issue.repository, sub_issue.number)
+        .await?
+    {
+        Ok(metadata) => metadata,
+        Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+    };
+    for metadata in [&parent_metadata, &sub_metadata] {
+        if let Err(result) =
+            validate_github_target_capability(metadata, GithubTargetCapabilities::ISSUES_ONLY)
         {
-            Ok(data) => data,
-            Err(error) => {
-                return Ok(ExecutionResult::failure(format!(
-                    "GitHub addSubIssue mutation is unsupported or failed: {error}"
-                )));
-            }
-        };
-        let mutated_parent = mutation
-            .pointer("/addSubIssue/issue/number")
-            .and_then(Value::as_u64);
-        let mutated_sub = mutation
-            .pointer("/addSubIssue/subIssue/number")
-            .and_then(Value::as_u64);
-        if mutated_parent != Some(parent.number) || mutated_sub != Some(sub_issue.number) {
-            return Ok(ExecutionResult::failure(
-                "GitHub addSubIssue response did not identify the requested parent and sub-issue",
-            ));
+            return Ok(Err(result));
         }
+    }
+    let parent_filters = GithubMutationFilters {
+        required_labels: &config.parent_required_labels,
+        required_title_prefix: config.parent_title_prefix.as_deref(),
+    };
+    let sub_filters = GithubMutationFilters {
+        required_labels: &config.sub_required_labels,
+        required_title_prefix: config.sub_title_prefix.as_deref(),
+    };
+    if let Err(result) = validate_github_mutation_filters(&parent_metadata, parent_filters) {
+        return Ok(Err(result));
+    }
+    if let Err(result) = validate_github_mutation_filters(&sub_metadata, sub_filters) {
+        return Ok(Err(result));
+    }
+    Ok(Ok((parent_metadata, sub_metadata)))
+}
 
+/// Checks whether the sub-issue already has a parent, returning an early
+/// result (success if already linked to the same parent, failure if linked
+/// to a different one) or `None` if linking should proceed.
+async fn check_existing_parent(
+    client: &GithubClient,
+    sub_node_id: &str,
+    parent_node_id: &str,
+    parent: &ResolvedGithubIssueTarget,
+    sub_issue: &ResolvedGithubIssueTarget,
+) -> anyhow::Result<Option<ExecutionResult>> {
+    let preflight = match client
+        .graphql(
+            "Check GitHub sub-issue parent",
+            GET_SUB_ISSUE_PARENT,
+            serde_json::json!({ "id": sub_node_id }),
+        )
+        .await?
+    {
+        Ok(data) => data,
+        Err(error) => {
+            return Ok(Some(ExecutionResult::failure(format!(
+                "GitHub sub-issues are unsupported or unavailable: {error}"
+            ))));
+        }
+    };
+    let Some(existing) = (match parse_existing_parent(&preflight) {
+        Ok(parent) => parent,
+        Err(message) => return Ok(Some(ExecutionResult::failure(message))),
+    }) else {
+        return Ok(None);
+    };
+
+    if existing.id == parent_node_id {
         info!(
-            "Linked GitHub issue {}#{} as a sub-issue of #{}",
+            "GitHub issue {}#{} is already a sub-issue of #{}",
             parent.repository, sub_issue.number, parent.number
         );
-        Ok(ExecutionResult::success_with_data(
+        return Ok(Some(ExecutionResult::success_with_data(
             format!(
-                "Linked GitHub issue {}#{} as a sub-issue of #{}",
+                "GitHub issue {}#{} is already a sub-issue of #{}",
                 parent.repository, sub_issue.number, parent.number
             ),
             serde_json::json!({
                 "parent_issue_number": parent.number,
                 "sub_issue_number": sub_issue.number,
                 "target_repo": parent.repository,
-                "already_linked": false,
+                "already_linked": true,
             }),
-        ))
+        )));
     }
+    let existing_target = format!("{}#{}", existing.repository, existing.number);
+    Ok(Some(ExecutionResult::failure(format!(
+        "GitHub issue {}#{} is already linked to a different parent ({existing_target}); refusing to replace it",
+        sub_issue.repository, sub_issue.number
+    ))))
+}
+
+/// Performs the `addSubIssue` mutation and validates the response identifies
+/// the requested parent and sub-issue.
+async fn link_sub_issue(
+    client: &GithubClient,
+    parent_node_id: &str,
+    sub_node_id: &str,
+    parent: &ResolvedGithubIssueTarget,
+    sub_issue: &ResolvedGithubIssueTarget,
+) -> anyhow::Result<ExecutionResult> {
+    debug!(
+        "Linking GitHub issue {}#{} as a sub-issue of #{}",
+        parent.repository, sub_issue.number, parent.number
+    );
+    let mutation = match client
+        .graphql(
+            "Link GitHub sub-issue",
+            ADD_SUB_ISSUE,
+            serde_json::json!({
+                "parentId": parent_node_id,
+                "subIssueId": sub_node_id,
+            }),
+        )
+        .await?
+    {
+        Ok(data) => data,
+        Err(error) => {
+            return Ok(ExecutionResult::failure(format!(
+                "GitHub addSubIssue mutation is unsupported or failed: {error}"
+            )));
+        }
+    };
+    let mutated_parent = mutation
+        .pointer("/addSubIssue/issue/number")
+        .and_then(Value::as_u64);
+    let mutated_sub = mutation
+        .pointer("/addSubIssue/subIssue/number")
+        .and_then(Value::as_u64);
+    if mutated_parent != Some(parent.number) || mutated_sub != Some(sub_issue.number) {
+        return Ok(ExecutionResult::failure(
+            "GitHub addSubIssue response did not identify the requested parent and sub-issue",
+        ));
+    }
+
+    info!(
+        "Linked GitHub issue {}#{} as a sub-issue of #{}",
+        parent.repository, sub_issue.number, parent.number
+    );
+    Ok(ExecutionResult::success_with_data(
+        format!(
+            "Linked GitHub issue {}#{} as a sub-issue of #{}",
+            parent.repository, sub_issue.number, parent.number
+        ),
+        serde_json::json!({
+            "parent_issue_number": parent.number,
+            "sub_issue_number": sub_issue.number,
+            "target_repo": parent.repository,
+            "already_linked": false,
+        }),
+    ))
 }
 
 pub(crate) fn validate_link_github_sub_issue_config(
