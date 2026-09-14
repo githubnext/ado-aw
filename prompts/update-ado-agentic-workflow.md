@@ -11,7 +11,7 @@ Apply requested changes to an existing `ado-aw` workflow source file with minima
 - Read the entire source file before editing.
 - Modify only requested behavior.
 - Preserve unrelated structure and intent.
-- For model defaults, follow `src/engine.rs` (`DEFAULT_COPILOT_MODEL`) instead of hardcoding prompt-local defaults.
+- For model defaults, follow `src/engine.rs`: ado-aw currently has no compiler-selected default and omits `--model` unless `engine.model` is configured.
 - Do not perform external side effects without explicit user consent.
 
 ### Output Format

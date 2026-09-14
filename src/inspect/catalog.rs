@@ -6,7 +6,7 @@ use std::fmt;
 use serde::Serialize;
 
 use crate::compile::{ADO_MCP_VERSION, AWF_VERSION, MCPG_VERSION};
-use crate::engine::{COPILOT_CLI_VERSION, DEFAULT_COPILOT_MODEL};
+use crate::engine::COPILOT_CLI_VERSION;
 use crate::safe_outputs::{ALL_KNOWN_SAFE_OUTPUTS, ALWAYS_ON_TOOLS, DEBUG_ONLY_TOOLS};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -32,7 +32,7 @@ pub struct ToolCatalogEntry {
 /// Pinned semver versions the compiler embeds, surfaced so CI and tooling can
 /// read them deterministically instead of scraping the Rust source. Only
 /// genuine semver version constants are included — container image references
-/// and the default model name are intentionally excluded.
+/// and model names are intentionally excluded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VersionCatalog {
     /// Pinned GitHub Copilot CLI version (`engine::COPILOT_CLI_VERSION`).
@@ -380,7 +380,6 @@ fn models() -> Vec<String> {
     // No KNOWN_MODELS registry exists yet; keep this list aligned with
     // prompts/create-ado-agentic-workflow.md step 2.
     vec![
-        DEFAULT_COPILOT_MODEL.to_string(),
         "claude-haiku-4.5".to_string(),
         "claude-opus-4.5".to_string(),
         "claude-opus-4.6".to_string(),
@@ -388,7 +387,6 @@ fn models() -> Vec<String> {
         "claude-opus-4.8-fast".to_string(),
         "claude-opus-5".to_string(),
         "claude-sonnet-4.5".to_string(),
-        "claude-sonnet-4.6".to_string(),
         "claude-sonnet-5".to_string(),
         "gpt-3.5-turbo".to_string(),
         "gpt-4".to_string(),

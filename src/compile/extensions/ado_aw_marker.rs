@@ -221,7 +221,7 @@ struct CompileMetadata {
     compiler_version: String,
     target: String,
     engine: String,
-    model: String,
+    model: Option<String>,
     agent_name: String,
     custom_components: Vec<CustomComponentProvenance>,
     custom_jobs: Vec<CustomJobMetadata>,
@@ -249,12 +249,9 @@ impl CompileMetadata {
                     let effective = ctx.front_matter.effective_detection_engine(&config);
                     let engine = crate::engine::get_engine(effective.engine_id())?;
                     let model = match engine {
-                        crate::engine::Engine::Copilot => effective
-                            .model()
-                            .unwrap_or(crate::engine::DEFAULT_COPILOT_MODEL)
-                            .to_string(),
+                        crate::engine::Engine::Copilot => effective.model().map(str::to_string),
                     };
-                    (Some(effective.engine_id().to_string()), Some(model))
+                    (Some(effective.engine_id().to_string()), model)
                 } else {
                     (None, None)
                 };
@@ -277,12 +274,9 @@ impl CompileMetadata {
             target: ctx.front_matter.target.as_str().to_string(),
             engine: ctx.front_matter.engine.engine_id().to_string(),
             model: match ctx.engine {
-                crate::engine::Engine::Copilot => ctx
-                    .front_matter
-                    .engine
-                    .model()
-                    .unwrap_or(crate::engine::DEFAULT_COPILOT_MODEL)
-                    .to_string(),
+                crate::engine::Engine::Copilot => {
+                    ctx.front_matter.engine.model().map(str::to_string)
+                }
             },
             agent_name: ctx.agent_name.to_string(),
             custom_components,
@@ -314,7 +308,6 @@ impl CompileMetadata {
             "compiler_version": &self.compiler_version,
             "target": &self.target,
             "engine": &self.engine,
-            "model": &self.model,
             "agent_name": &self.agent_name,
             "build_id": "$(Build.BuildId)",
             "source_version": "$(Build.SourceVersion)",
@@ -335,6 +328,9 @@ impl CompileMetadata {
                 "detection_engine".to_string(),
                 serde_json::Value::String(engine.clone()),
             );
+        }
+        if let Some(model) = &self.model {
+            object.insert("model".to_string(), serde_json::Value::String(model.clone()));
         }
         if let Some(model) = &self.detection_model {
             object.insert(
@@ -595,11 +591,8 @@ mod tests {
             step.script
         );
         assert!(
-            step.script.contains(&format!(
-                "\"model\":\"{}\"",
-                crate::engine::DEFAULT_COPILOT_MODEL
-            )),
-            "step missing default model field:\n{}",
+            !step.script.contains("\"model\""),
+            "step should omit model when no model is configured:\n{}",
             step.script
         );
         assert!(
@@ -632,6 +625,29 @@ mod tests {
         );
         assert!(!step.script.contains("detection_model"));
         assert!(!step.script.contains("threat_detection_enabled"));
+    }
+
+    #[test]
+    fn explicit_model_emits_aw_info_model_metadata() {
+        let fm =
+            parse_fm("name: t\ndescription: x\nengine:\n  id: copilot\n  model: some-model\n");
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        let step = bash_step(&steps[1]);
+        assert!(
+            step.script.contains("\"model\":\"some-model\""),
+            "step missing explicit model field:\n{}",
+            step.script
+        );
     }
 
     #[test]

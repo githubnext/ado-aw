@@ -251,9 +251,6 @@ fn resolve_provider_base_url_host(engine_config: &EngineConfig) -> ProviderBaseU
     }
 }
 
-/// Default model used by the Copilot engine when no model is specified in front matter.
-pub const DEFAULT_COPILOT_MODEL: &str = "claude-opus-4.7";
-
 /// Default pinned version of the Copilot CLI.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
 pub const COPILOT_CLI_VERSION: &str = "1.0.70";
@@ -662,19 +659,20 @@ fn copilot_args(
 
     // Validate model name to prevent shell injection — copilot_params are embedded
     // inside a single-quoted bash string in the AWF command.
-    let model = engine_config.model().unwrap_or(DEFAULT_COPILOT_MODEL);
-    if model.is_empty()
-        || !model
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
-    {
-        anyhow::bail!(
-            "Model name '{}' contains invalid characters. \
-             Only ASCII alphanumerics, '.', '_', ':', and '-' are allowed.",
-            model
-        );
+    if let Some(model) = engine_config.model() {
+        if model.is_empty()
+            || !model
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+        {
+            anyhow::bail!(
+                "Model name '{}' contains invalid characters. \
+                 Only ASCII alphanumerics, '.', '_', ':', and '-' are allowed.",
+                model
+            );
+        }
+        params.push(format!("--model {}", model));
     }
-    params.push(format!("--model {}", model));
     if let Some(0) = engine_config.timeout_minutes() {
         eprintln!(
             "Warning: Agent '{}' has timeout-minutes: 0, which means no time is allowed. \
@@ -1404,8 +1402,8 @@ mod tests {
         let params = Engine::Copilot
             .args(&front_matter, &declarations_for(&front_matter))
             .unwrap();
-        // Default engine (copilot) uses default model (claude-opus-4.7)
-        assert!(params.contains("--model claude-opus-4.7"));
+        // Default engine (copilot) lets the Copilot CLI choose its default model.
+        assert!(!params.contains("--model "));
         assert!(params.contains("--disable-builtin-mcps"));
     }
 
@@ -1419,6 +1417,20 @@ mod tests {
             .args(&front_matter, &declarations_for(&front_matter))
             .unwrap();
         assert!(params.contains("--model gpt-5"));
+    }
+
+    #[test]
+    fn copilot_engine_rejects_invalid_explicit_model() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  model: \"gpt-5 && curl evil.example\"\n---\n",
+        )
+        .unwrap();
+        let err = Engine::Copilot
+            .args(&front_matter, &declarations_for(&front_matter))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Model name"), "{err}");
+        assert!(err.contains("invalid characters"), "{err}");
     }
 
     #[test]
@@ -1511,7 +1523,7 @@ mod tests {
         let params = engine
             .args(&front_matter, &declarations_for(&front_matter))
             .unwrap();
-        assert!(params.contains("--model claude-opus-4.7"));
+        assert!(!params.contains("--model "));
     }
 
     #[test]
