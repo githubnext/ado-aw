@@ -628,6 +628,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_model_emits_aw_info_model_metadata() {
+        let fm =
+            parse_fm("name: t\ndescription: x\nengine:\n  id: copilot\n  model: some-model\n");
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        let step = bash_step(&steps[1]);
+        assert!(
+            step.script.contains("\"model\":\"some-model\""),
+            "step missing explicit model field:\n{}",
+            step.script
+        );
+    }
+
+    #[test]
     fn explicit_threat_detection_emits_detector_metadata() {
         let fm = parse_fm(
             "name: t\ndescription: x\nengine:\n  id: copilot\n  model: agent-model\n\
