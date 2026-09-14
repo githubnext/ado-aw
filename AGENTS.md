@@ -623,7 +623,7 @@ the directive and it's inert at runtime.
 To review the generated shell as ordinary files:
 
 ```bash
-cargo run -- export-bash-scripts --out /tmp/ado-aw-shell
+cargo run -- export-bash-scripts --output /tmp/ado-aw-shell
 ```
 
 ### Markdown-only smoke suite
