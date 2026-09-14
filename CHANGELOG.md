@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.52.0](https://github.com/githubnext/ado-aw/compare/v0.51.0...v0.52.0) (2026-09-14)
+
+
+### Features
+
+* **mcp:** refresh Azure identity for long-running tasks ([#2097](https://github.com/githubnext/ado-aw/issues/2097)) ([a0997ac](https://github.com/githubnext/ado-aw/commit/a0997ac5d77e9a9a8634b22f304fde028cce044c))
+* **schedule:** support weekday and raw cron schedules ([#2098](https://github.com/githubnext/ado-aw/issues/2098)) ([61b72dc](https://github.com/githubnext/ado-aw/commit/61b72dc04d3023f3e6a2e27e832e44fa6f4f35ec))
+
+
+### Bug Fixes
+
+* **engine:** omit default Copilot model flag ([#2164](https://github.com/githubnext/ado-aw/issues/2164)) ([89c4950](https://github.com/githubnext/ado-aw/commit/89c49508877b8214b2891b49f37cb4ea9397cae5))
+
 ## [0.51.0](https://github.com/githubnext/ado-aw/compare/v0.50.0...v0.51.0) (2026-09-02)
 
 
