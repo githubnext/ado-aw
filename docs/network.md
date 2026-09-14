@@ -6,7 +6,7 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 Network isolation is provided by AWF (Agentic Workflow Firewall), which provides L7 (HTTP/HTTPS) egress control using Squid proxy and Docker containers. AWF restricts network access to an allowlist of approved domains.
 
-Generated pipelines run AWF v0.27.32+ in **strict topology mode**: both the Agent and Detection jobs invoke AWF rootlessly with an explicit `--network-isolation` flag — there is no `sudo`, `--enable-host-access`, or `--legacy-security` fallback, and no author-facing knob to opt back into the legacy topology. The Agent additionally passes `--topology-attach awmg-mcpg` so the trusted MCPG container is attached to AWF's internal `awf-net`, and appends that hostname to `NO_PROXY`/`no_proxy` so MCP traffic bypasses Squid; Detection has no MCPG attachment. See [`docs/mcpg.md`](mcpg.md) for the MCPG topology and [`docs/mcp.md`](mcp.md) for MCP server configuration.
+Generated pipelines run AWF v0.27.32+ in **strict topology mode**: both the Agent and Detection jobs invoke AWF rootlessly with an explicit `--network-isolation` flag — there is no `sudo`, `--enable-host-access`, or `--legacy-security` fallback, and no author-facing knob to opt back into the legacy topology. The Agent additionally passes `--topology-attach awmg-mcpg` so the trusted MCPG container is attached to AWF's internal `awf-net`, and appends that hostname to `NO_PROXY`/`no_proxy` so MCP traffic bypasses Squid; when the credential-isolated `ado-proxy` sidecar is enabled (`permissions.read` is configured), the Agent passes a second `--topology-attach awmg-ado-proxy` and adds that hostname to `NO_PROXY`/`no_proxy` too. Detection has no MCPG/ado-proxy attachment. See [`docs/mcpg.md`](mcpg.md) for the MCPG topology, [`docs/mcp.md`](mcp.md) for MCP server configuration, and [`docs/ado-proxy-design.md`](ado-proxy-design.md) for the ado-proxy sidecar.
 
 The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github.com/githubnext/ado-aw/releases) with SHA256 checksum verification. The AWF binary is distributed via [GitHub Releases](https://github.com/github/gh-aw-firewall/releases) with SHA256 checksum verification. Docker is sourced via the `DockerInstaller@0` ADO task.
 
@@ -212,7 +212,7 @@ Available ecosystem identifiers include:
 |------------|------------|
 | `default-safe-outputs` | `defaults` + `dev-tools` + `github` + `local` — the standard set of domains needed for most safe-output execution scenarios |
 
-Additional ecosystems: `bazel`, `chrome`, `clojure`, `dart`, `deno`, `elixir`, `fonts`, `github-actions`, `haskell`, `julia`, `kotlin`, `latex`, `lean`, `lua`, `node-cdns`, `ocaml`, `perl`, `php`, `playwright`, `powershell`, `python-native`, `r`, `scala`, `zig`.
+Additional ecosystems: `bazel`, `chrome`, `clojure`, `copilot-vendor`, `dart`, `deno`, `elixir`, `fonts`, `github-actions`, `haskell`, `julia`, `kotlin`, `latex`, `lean`, `lua`, `node-cdns`, `ocaml`, `perl`, `php`, `playwright`, `powershell`, `python-native`, `r`, `scala`, `zig`.
 
 The full domain lists for direct identifiers are defined in `src/data/ecosystem_domains.json`. Compound identifiers are defined in `src/ecosystem_domains.rs`.
 
