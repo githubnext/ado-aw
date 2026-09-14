@@ -224,7 +224,11 @@ The extension trait lives in `src/compile/extensions/mod.rs` and now has exactly
 pub trait CompilerExtension {
     fn name(&self) -> &str;
     fn phase(&self) -> ExtensionPhase;
-    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations>;
+    /// Default returns `Ok(Declarations::default())` — override when the
+    /// extension contributes steps, hosts, tools, or other signals.
+    fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
+        Ok(Declarations::default())
+    }
 }
 ```
 
