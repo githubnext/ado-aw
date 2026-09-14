@@ -4669,7 +4669,6 @@ fn assert_aw_info_step_present(
         "\"schema\":\"ado-aw/aw_info/1\"".to_string(),
         format!("\"target\":\"{expected_target}\""),
         "\"engine\":\"copilot\"".to_string(),
-        "\"model\":\"claude-opus-4.7\"".to_string(),
         format!("\"agent_name\":\"{expected_agent_name}\""),
         "\"build_id\":\"$(Build.BuildId)\"".to_string(),
         "\"source_version\":\"$(Build.SourceVersion)\"".to_string(),
@@ -4681,6 +4680,10 @@ fn assert_aw_info_step_present(
             "{fixture_name}: compiled YAML missing aw_info fragment {expected_fragment}"
         );
     }
+    assert!(
+        !compiled.contains("\"model\""),
+        "{fixture_name}: compiled YAML should omit aw_info model when no model is configured"
+    );
 }
 
 fn compile_fixture_with_inlined_imports(fixture_name: &str) -> String {

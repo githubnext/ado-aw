@@ -14,7 +14,7 @@ target: standalone # Optional: "standalone" (default), "1es", "job", or "stage".
 engine: copilot # Engine identifier. Defaults to copilot. Currently only 'copilot' (GitHub Copilot CLI) is supported.
 # engine:                        # Alternative object format (with additional options)
 #   id: copilot
-#   model: claude-opus-4.7
+#   model: gpt-5-mini
 #   timeout-minutes: 30
 workspace: repo # Optional: "root", "repo" (alias: "self"), or a checked-out repository alias. If not specified, defaults to "root" when no additional repositories are listed in `repos:`, and to "repo" when one or more additional repos are checked out. See "Workspace Defaults" below.
 pool:                          # Optional pool configuration

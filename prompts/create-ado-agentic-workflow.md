@@ -10,7 +10,7 @@ Create one new `ado-aw` workflow source file (`.md` with YAML front matter + mar
 ### Constraints
 - Produce exactly one workflow source file unless the user asks for more.
 - Prefer minimal, safe configuration.
-- For default model behavior, follow compiler truth in `src/engine.rs` (`DEFAULT_COPILOT_MODEL`) instead of hardcoding assumptions.
+- For default model behavior, follow compiler truth in `src/engine.rs` (`DEFAULT_COPILOT_MODEL`, currently no compiler-selected default) instead of hardcoding assumptions.
 - Do not perform external side effects unless the user explicitly asks.
 
 ### Output Format

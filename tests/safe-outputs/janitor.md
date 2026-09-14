@@ -8,7 +8,6 @@ pool:
   name: AZS-1ES-L-Playground-ubuntu-22.04
 engine:
   id: copilot
-  model: claude-sonnet-4.6
   timeout-minutes: 30
 permissions:
   read: agent-playground-read

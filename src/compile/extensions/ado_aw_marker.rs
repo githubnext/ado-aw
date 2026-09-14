@@ -221,7 +221,7 @@ struct CompileMetadata {
     compiler_version: String,
     target: String,
     engine: String,
-    model: String,
+    model: Option<String>,
     agent_name: String,
     custom_components: Vec<CustomComponentProvenance>,
     custom_jobs: Vec<CustomJobMetadata>,
@@ -251,10 +251,10 @@ impl CompileMetadata {
                     let model = match engine {
                         crate::engine::Engine::Copilot => effective
                             .model()
-                            .unwrap_or(crate::engine::DEFAULT_COPILOT_MODEL)
-                            .to_string(),
+                            .or(crate::engine::DEFAULT_COPILOT_MODEL)
+                            .map(str::to_string),
                     };
-                    (Some(effective.engine_id().to_string()), Some(model))
+                    (Some(effective.engine_id().to_string()), model)
                 } else {
                     (None, None)
                 };
@@ -281,8 +281,8 @@ impl CompileMetadata {
                     .front_matter
                     .engine
                     .model()
-                    .unwrap_or(crate::engine::DEFAULT_COPILOT_MODEL)
-                    .to_string(),
+                    .or(crate::engine::DEFAULT_COPILOT_MODEL)
+                    .map(str::to_string),
             },
             agent_name: ctx.agent_name.to_string(),
             custom_components,
@@ -314,7 +314,6 @@ impl CompileMetadata {
             "compiler_version": &self.compiler_version,
             "target": &self.target,
             "engine": &self.engine,
-            "model": &self.model,
             "agent_name": &self.agent_name,
             "build_id": "$(Build.BuildId)",
             "source_version": "$(Build.SourceVersion)",
@@ -335,6 +334,9 @@ impl CompileMetadata {
                 "detection_engine".to_string(),
                 serde_json::Value::String(engine.clone()),
             );
+        }
+        if let Some(model) = &self.model {
+            object.insert("model".to_string(), serde_json::Value::String(model.clone()));
         }
         if let Some(model) = &self.detection_model {
             object.insert(
@@ -595,11 +597,8 @@ mod tests {
             step.script
         );
         assert!(
-            step.script.contains(&format!(
-                "\"model\":\"{}\"",
-                crate::engine::DEFAULT_COPILOT_MODEL
-            )),
-            "step missing default model field:\n{}",
+            !step.script.contains("\"model\""),
+            "step should omit model when no model is configured:\n{}",
             step.script
         );
         assert!(

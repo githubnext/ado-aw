@@ -13,7 +13,7 @@ engine: copilot
 # Object format with additional options
 engine:
   id: copilot
-  model: claude-opus-4.7
+  model: gpt-5-mini
   timeout-minutes: 30
 ```
 
@@ -22,7 +22,7 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
-| `model` | string | `claude-opus-4.7` | AI model to use (e.g., `claude-sonnet-4.6`). The compiler passes the value directly to the Copilot CLI `--model` flag — any model identifier the Copilot CLI accepts is valid. |
+| `model` | string | *(none)* | AI model to use (e.g., `gpt-5-mini`). When omitted, the compiler does not emit `--model` and the Copilot CLI chooses its own default. When set, the compiler passes the value directly to the Copilot CLI `--model` flag — any model identifier the Copilot CLI accepts is valid. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 | `version` | string | *(none)* | Engine CLI version to install (e.g., `"1.0.70"`, `"latest"`). Overrides the pinned `COPILOT_CLI_VERSION`. Set to `"latest"` to use the newest available version. |
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
@@ -52,7 +52,7 @@ used by the separate Detection job:
 ```yaml
 engine:
   id: copilot
-  model: claude-opus-4.7
+  model: gpt-5-mini
   version: "1.0.70"
   args: [--reasoning-effort=high]
   env:
