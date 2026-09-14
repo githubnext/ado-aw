@@ -4658,11 +4658,26 @@ fn assert_aw_info_step_present(
         compiled.contains("cat >\"$AGENT_TEMP/staging/aw_info.json\" <<'AW_INFO_EOF'"),
         "{fixture_name}: compiled YAML missing quoted heredoc aw_info write step"
     );
+    let aw_info_opener = "cat >\"$AGENT_TEMP/staging/aw_info.json\" <<'AW_INFO_EOF'";
+    let aw_info_after_opener = compiled
+        .find(aw_info_opener)
+        .expect("aw_info heredoc opener should exist")
+        + aw_info_opener.len();
+    let aw_info_json = &compiled[aw_info_after_opener..];
+    let aw_info_start = aw_info_json
+        .find('\n')
+        .expect("aw_info heredoc opener should end with a newline")
+        + 1;
+    let aw_info_json = &aw_info_json[aw_info_start..];
+    let aw_info_end = aw_info_json
+        .find("AW_INFO_EOF")
+        .expect("aw_info heredoc terminator should exist");
+    let aw_info_json = &aw_info_json[..aw_info_end];
     // Softer suffix check on the source path: fixtures compile under
     // a temp-dir prefix, so we can only assert the path ends with the
     // expected suffix, not an exact match. Mirrors `assert_marker_step_present`.
     assert!(
-        compiled.contains("\"source\":\"") && compiled.contains(expected_source_suffix),
+        aw_info_json.contains("\"source\":\"") && aw_info_json.contains(expected_source_suffix),
         "{fixture_name}: compiled YAML aw_info source does not include suffix {expected_source_suffix}"
     );
     for expected_fragment in [
@@ -4676,12 +4691,12 @@ fn assert_aw_info_step_present(
         "\"build_definition_id\":\"$(System.DefinitionId)\"".to_string(),
     ] {
         assert!(
-            compiled.contains(&expected_fragment),
+            aw_info_json.contains(&expected_fragment),
             "{fixture_name}: compiled YAML missing aw_info fragment {expected_fragment}"
         );
     }
     assert!(
-        !compiled.contains("\"model\""),
+        !aw_info_json.contains("\"model\":"),
         "{fixture_name}: compiled YAML should omit aw_info model when no model is configured"
     );
 }

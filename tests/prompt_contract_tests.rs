@@ -88,8 +88,9 @@ fn prompts_align_model_default_to_code_truth() {
     ] {
         let content = read(rel);
         assert!(
-            content.contains("DEFAULT_COPILOT_MODEL"),
-            "{rel} should anchor model defaults to src/engine.rs"
+            content.contains("no compiler-selected default")
+                && content.contains("omits `--model` unless `engine.model` is configured"),
+            "{rel} should anchor model defaults to src/engine.rs behavior"
         );
     }
 }

@@ -249,10 +249,7 @@ impl CompileMetadata {
                     let effective = ctx.front_matter.effective_detection_engine(&config);
                     let engine = crate::engine::get_engine(effective.engine_id())?;
                     let model = match engine {
-                        crate::engine::Engine::Copilot => effective
-                            .model()
-                            .or(crate::engine::DEFAULT_COPILOT_MODEL)
-                            .map(str::to_string),
+                        crate::engine::Engine::Copilot => effective.model().map(str::to_string),
                     };
                     (Some(effective.engine_id().to_string()), model)
                 } else {
@@ -277,12 +274,9 @@ impl CompileMetadata {
             target: ctx.front_matter.target.as_str().to_string(),
             engine: ctx.front_matter.engine.engine_id().to_string(),
             model: match ctx.engine {
-                crate::engine::Engine::Copilot => ctx
-                    .front_matter
-                    .engine
-                    .model()
-                    .or(crate::engine::DEFAULT_COPILOT_MODEL)
-                    .map(str::to_string),
+                crate::engine::Engine::Copilot => {
+                    ctx.front_matter.engine.model().map(str::to_string)
+                }
             },
             agent_name: ctx.agent_name.to_string(),
             custom_components,
