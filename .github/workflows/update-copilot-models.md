@@ -121,14 +121,12 @@ names from memory.
 ## Step 2 — Read the Current Model List
 
 Read `src/inspect/catalog.rs` and locate the `models()` function. Extract every
-string literal inside that function. Call this set `catalog_models`. Read
-`src/engine.rs` and confirm `DEFAULT_COPILOT_MODEL` is `None`; ado-aw no
-longer passes a compiler-selected default model when front matter omits
-`engine.model`.
+string literal inside that function. Call this set `catalog_models`. The first
+entry is `DEFAULT_COPILOT_MODEL`; read its current value from `src/engine.rs`
+(look for the line `pub const DEFAULT_COPILOT_MODEL: &str = "...";`).
 
-The **current tracked set** is `catalog_models`. It contains only explicit model
-identifiers the compiler can surface to users; there is no synthetic default
-entry.
+The **current tracked set** is `catalog_models`, and the `DEFAULT_COPILOT_MODEL`
+value is always its first entry.
 
 > `prompts/create-ado-agentic-workflow.md` is deliberately **not** tracked. It
 > no longer carries a model table — it defers to compiler truth in
@@ -143,7 +141,8 @@ Compute:
 - **New models** (`new_models`): identifiers in `api_models` absent from
   `catalog_models`.
 - **Gone models** (`gone_models`): identifiers in `catalog_models` no longer in
-  `api_models`.
+  `api_models`, **excluding** the `DEFAULT_COPILOT_MODEL` entry (never
+  auto-remove the default).
 
 If both are empty, **stop** — emit a `noop` safe output with the message
 `"Copilot model list is current; no changes needed."` and exit.
@@ -154,8 +153,11 @@ The point of these is to refuse to act on a malformed response, **not** to cap
 legitimate drift. The catalog may be many models behind, so a large
 `new_models` set is expected and fine.
 
-- If `gone_models` would remove more than half of the current entries, treat it
-  as suspect and emit `report-incomplete` instead of a PR.
+- If `api_models` does **not** contain the current `DEFAULT_COPILOT_MODEL`
+  value, the response is not describing the models this workflow's own engine
+  uses. Emit `report-incomplete` and stop.
+- If `gone_models` would remove more than half of the current non-default
+  entries, treat it as suspect and emit `report-incomplete` instead of a PR.
 
 ### Check for an existing open PR
 
@@ -185,10 +187,12 @@ Edit `src/inspect/catalog.rs` and open a PR.
 Locate the `models()` function. Its body is a `vec![...]` literal.
 
 Rules:
-1. Add a `.to_string()` call for each identifier in `new_models`.
-2. Remove the `.to_string()` line for each identifier in `gone_models`.
-3. Keep entries sorted alphabetically by the string value.
-4. Do **not** change any other line in the file.
+1. The very first entry **must** remain `DEFAULT_COPILOT_MODEL.to_string()` —
+   do not touch it.
+2. Add a `.to_string()` call for each identifier in `new_models`.
+3. Remove the `.to_string()` line for each identifier in `gone_models`.
+4. Keep all non-default entries sorted alphabetically by the string value.
+5. Do **not** change any other line in the file.
 
 Also update the comment immediately above the `vec![...]` if needed to keep it
 accurate (the comment currently says
@@ -217,11 +221,13 @@ available through the Copilot API proxy.
 **Removed:**
 <bullet per gone model, or "None." if empty>
 
-### Note on default model selection
+### Note on `DEFAULT_COPILOT_MODEL`
 
-This PR does **not** change default model selection in `src/engine.rs`. ado-aw
-does not pass `--model` unless front matter explicitly sets `engine.model`, so
-the installed Copilot CLI chooses its own default.
+This PR does **not** change the `DEFAULT_COPILOT_MODEL` constant in
+`src/engine.rs`. Choosing a new default is an opinionated, human decision that
+weighs stability, pricing, and capability trade-offs. If one of the newly added
+models is a strong candidate for the default, please update `src/engine.rs`
+manually after review.
 
 ### Source
 
@@ -239,7 +245,7 @@ this workflow's engine.
 
 ## What This Workflow Does NOT Change
 
-- Default model selection in `src/engine.rs`.
+- `DEFAULT_COPILOT_MODEL` in `src/engine.rs` — requires a human decision.
 - Test fixture data (`src/audit/analyzers/otel.rs`,
   `src/audit/render/console.rs`) — those strings record what a real past run
   observed; they are intentionally historical and must not be auto-bumped.
