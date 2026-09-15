@@ -413,141 +413,191 @@ fn add_report_findings(
     findings: &mut Vec<Finding>,
 ) {
     for report in reports {
-        if let Some(component) = &report.component_provenance {
-            let missing = [
-                ("source", component.source.trim().is_empty()),
-                ("sha", component.sha.trim().is_empty()),
-                (
-                    "manifest_digest",
-                    component.manifest_digest.trim().is_empty(),
-                ),
-                ("schema_digest", component.schema_digest.trim().is_empty()),
-            ]
-            .into_iter()
-            .filter_map(|(name, missing)| missing.then_some(name))
-            .collect::<Vec<_>>();
-            if !missing.is_empty() {
-                findings.push(Finding {
-                    category: String::from("safe_outputs"),
-                    severity: Severity::High,
-                    title: format!(
-                        "Incomplete custom component provenance for {}",
-                        report.tool
-                    ),
-                    description: format!(
-                        "The compile-time aw_info marker is missing {} for custom tool '{}'.",
-                        missing.join(", "),
-                        report.tool
-                    ),
-                    impact: Some(String::from(
-                        "The exact custom component revision or schema cannot be independently identified.",
-                    )),
-                });
-            }
-        }
-
-        if let (Some(expected), Some(actual)) =
-            (report.expected_job_id.as_deref(), report.ado_job.as_ref())
-            && stable_ado_job_identity_matches(actual, expected) == Some(false)
-        {
-            findings.push(Finding {
-                category: String::from("safe_outputs"),
-                severity: Severity::High,
-                title: format!("Custom job identity mismatch for {}", report.tool),
-                description: format!(
-                    "Custom tool '{}' was compiled for ADO job '{}', but the correlated timeline job identifies as '{}'.",
-                    report.tool,
-                    expected,
-                    best_ado_job_identity(actual)
-                ),
-                impact: Some(String::from(
-                    "The observed job may not be the compiler-approved executor for these proposals.",
-                )),
-            });
-        }
-
         let ran = report.ado_job.as_ref().is_some_and(custom_job_ran);
-        if ran && report.proposed_count == 0 {
-            findings.push(Finding {
-                category: String::from("safe_outputs"),
-                severity: Severity::High,
-                title: format!("Custom job ran without proposals for {}", report.tool),
-                description: format!(
-                    "The custom ADO job for '{}' started even though the Agent artifact contains no proposals for that tool.",
-                    report.tool
-                ),
-                impact: Some(String::from(
-                    "The compiler-generated proposal gate and the observed runtime state are inconsistent.",
-                )),
-            });
-        }
 
-        if ran
-            && audit
-                .detection_analysis
-                .as_ref()
-                .is_some_and(|analysis| !analysis.safe_to_process)
-        {
-            findings.push(Finding {
-                category: String::from("safe_outputs"),
-                severity: Severity::High,
-                title: format!("Custom job ran after unsafe detection for {}", report.tool),
-                description: format!(
-                    "The custom ADO job for '{}' started even though threat detection marked the safe-output batch unsafe.",
-                    report.tool
-                ),
-                impact: Some(String::from(
-                    "A custom write-capable job appears to have bypassed the aggregate detection gate.",
-                )),
-            });
-        }
-
-        if ran
-            && matches!(
-                report.approval_path.as_deref(),
-                Some("manual_review" | "post_review_dependency")
-            )
-            && !manual_review_succeeded(&audit.jobs)
-        {
-            findings.push(Finding {
-                category: String::from("safe_outputs"),
-                severity: Severity::High,
-                title: format!("Custom reviewed job ran without approval for {}", report.tool),
-                description: format!(
-                    "The custom ADO job for '{}' is on the '{}' path, but no successful ManualReview job is present.",
-                    report.tool,
-                    report.approval_path.as_deref().unwrap_or_default()
-                ),
-                impact: Some(String::from(
-                    "The observed execution state is inconsistent with the compiler's manual-review gate.",
-                )),
-            });
-        }
-
-        if report.proposed_count > 0
-            && report.ado_job.is_none()
-            && custom_job_should_have_appeared(audit, report)
-        {
-            findings.push(Finding {
-                category: String::from("safe_outputs"),
-                severity: Severity::High,
-                title: format!("Expected custom job missing for {}", report.tool),
-                description: format!(
-                    "{} proposal(s) were recorded for custom tool '{}', detection allowed processing, but the expected custom ADO job{} is absent from the timeline.",
-                    report.proposed_count,
-                    report.tool,
-                    report
-                        .expected_job_id
-                        .as_deref()
-                        .map(|id| format!(" '{id}'"))
-                        .unwrap_or_default()
-                ),
-                impact: Some(String::from(
-                    "The custom proposals have no corresponding job-level execution outcome.",
-                )),
-            });
-        }
+        findings.extend(incomplete_provenance_finding(report));
+        findings.extend(job_identity_mismatch_finding(report));
+        findings.extend(ran_without_proposals_finding(report, ran));
+        findings.extend(ran_after_unsafe_detection_finding(audit, report, ran));
+        findings.extend(ran_without_approval_finding(audit, report, ran));
+        findings.extend(expected_job_missing_finding(audit, report));
     }
+}
+
+/// The compile-time `aw_info` marker for a custom component should record its
+/// full provenance; flag any report missing part of that record.
+fn incomplete_provenance_finding(report: &CustomSafeOutputJobAudit) -> Option<Finding> {
+    let component = report.component_provenance.as_ref()?;
+    let missing = [
+        ("source", component.source.trim().is_empty()),
+        ("sha", component.sha.trim().is_empty()),
+        (
+            "manifest_digest",
+            component.manifest_digest.trim().is_empty(),
+        ),
+        ("schema_digest", component.schema_digest.trim().is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(name, missing)| missing.then_some(name))
+    .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return None;
+    }
+
+    Some(Finding {
+        category: String::from("safe_outputs"),
+        severity: Severity::High,
+        title: format!(
+            "Incomplete custom component provenance for {}",
+            report.tool
+        ),
+        description: format!(
+            "The compile-time aw_info marker is missing {} for custom tool '{}'.",
+            missing.join(", "),
+            report.tool
+        ),
+        impact: Some(String::from(
+            "The exact custom component revision or schema cannot be independently identified.",
+        )),
+    })
+}
+
+/// The compiled expected ADO job identity for a custom tool should match the
+/// correlated timeline job; flag any mismatch.
+fn job_identity_mismatch_finding(report: &CustomSafeOutputJobAudit) -> Option<Finding> {
+    let expected = report.expected_job_id.as_deref()?;
+    let actual = report.ado_job.as_ref()?;
+    if stable_ado_job_identity_matches(actual, expected) != Some(false) {
+        return None;
+    }
+
+    Some(Finding {
+        category: String::from("safe_outputs"),
+        severity: Severity::High,
+        title: format!("Custom job identity mismatch for {}", report.tool),
+        description: format!(
+            "Custom tool '{}' was compiled for ADO job '{}', but the correlated timeline job identifies as '{}'.",
+            report.tool,
+            expected,
+            best_ado_job_identity(actual)
+        ),
+        impact: Some(String::from(
+            "The observed job may not be the compiler-approved executor for these proposals.",
+        )),
+    })
+}
+
+/// A custom job that ran without any recorded proposals for its tool
+/// indicates the compiler-generated proposal gate did not hold.
+fn ran_without_proposals_finding(report: &CustomSafeOutputJobAudit, ran: bool) -> Option<Finding> {
+    if !ran || report.proposed_count != 0 {
+        return None;
+    }
+
+    Some(Finding {
+        category: String::from("safe_outputs"),
+        severity: Severity::High,
+        title: format!("Custom job ran without proposals for {}", report.tool),
+        description: format!(
+            "The custom ADO job for '{}' started even though the Agent artifact contains no proposals for that tool.",
+            report.tool
+        ),
+        impact: Some(String::from(
+            "The compiler-generated proposal gate and the observed runtime state are inconsistent.",
+        )),
+    })
+}
+
+/// A custom job that ran after threat detection marked the batch unsafe
+/// indicates the aggregate detection gate was bypassed.
+fn ran_after_unsafe_detection_finding(
+    audit: &AuditData,
+    report: &CustomSafeOutputJobAudit,
+    ran: bool,
+) -> Option<Finding> {
+    let unsafe_detected = audit
+        .detection_analysis
+        .as_ref()
+        .is_some_and(|analysis| !analysis.safe_to_process);
+    if !ran || !unsafe_detected {
+        return None;
+    }
+
+    Some(Finding {
+        category: String::from("safe_outputs"),
+        severity: Severity::High,
+        title: format!("Custom job ran after unsafe detection for {}", report.tool),
+        description: format!(
+            "The custom ADO job for '{}' started even though threat detection marked the safe-output batch unsafe.",
+            report.tool
+        ),
+        impact: Some(String::from(
+            "A custom write-capable job appears to have bypassed the aggregate detection gate.",
+        )),
+    })
+}
+
+/// A reviewed custom job that ran without a successful `ManualReview` job
+/// indicates the compiler's manual-review gate was bypassed.
+fn ran_without_approval_finding(
+    audit: &AuditData,
+    report: &CustomSafeOutputJobAudit,
+    ran: bool,
+) -> Option<Finding> {
+    let is_reviewed_path = matches!(
+        report.approval_path.as_deref(),
+        Some("manual_review" | "post_review_dependency")
+    );
+    if !ran || !is_reviewed_path || manual_review_succeeded(&audit.jobs) {
+        return None;
+    }
+
+    Some(Finding {
+        category: String::from("safe_outputs"),
+        severity: Severity::High,
+        title: format!("Custom reviewed job ran without approval for {}", report.tool),
+        description: format!(
+            "The custom ADO job for '{}' is on the '{}' path, but no successful ManualReview job is present.",
+            report.tool,
+            report.approval_path.as_deref().unwrap_or_default()
+        ),
+        impact: Some(String::from(
+            "The observed execution state is inconsistent with the compiler's manual-review gate.",
+        )),
+    })
+}
+
+/// Proposals with no corresponding job-level execution outcome indicate the
+/// expected custom ADO job is missing from the timeline.
+fn expected_job_missing_finding(
+    audit: &AuditData,
+    report: &CustomSafeOutputJobAudit,
+) -> Option<Finding> {
+    if report.proposed_count == 0
+        || report.ado_job.is_some()
+        || !custom_job_should_have_appeared(audit, report)
+    {
+        return None;
+    }
+
+    Some(Finding {
+        category: String::from("safe_outputs"),
+        severity: Severity::High,
+        title: format!("Expected custom job missing for {}", report.tool),
+        description: format!(
+            "{} proposal(s) were recorded for custom tool '{}', detection allowed processing, but the expected custom ADO job{} is absent from the timeline.",
+            report.proposed_count,
+            report.tool,
+            report
+                .expected_job_id
+                .as_deref()
+                .map(|id| format!(" '{id}'"))
+                .unwrap_or_default()
+        ),
+        impact: Some(String::from(
+            "The custom proposals have no corresponding job-level execution outcome.",
+        )),
+    })
 }
 
 fn custom_job_should_have_appeared(audit: &AuditData, report: &CustomSafeOutputJobAudit) -> bool {
