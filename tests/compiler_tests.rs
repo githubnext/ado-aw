@@ -7668,6 +7668,74 @@ fn compile_inline_source(name: &str, source: &str) -> (bool, String, String) {
     (output.status.success(), compiled, stderr)
 }
 
+#[test]
+fn update_pr_max_reviewers_requires_a_positive_usize() {
+    for (label, value) in [
+        ("negative", "-1"),
+        ("fractional", "1.5"),
+        ("string", "\"2\""),
+        ("zero", "0"),
+    ] {
+        let source = format!(
+            r#"---
+name: "Invalid max reviewers"
+description: "Exercises update-pr validation"
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: {value}
+---
+
+## Agent
+"#
+        );
+        let (ok, _, stderr) =
+            compile_inline_source(&format!("update-pr-max-reviewers-{label}"), &source);
+        assert!(!ok, "{label} max-reviewers should not compile");
+        assert!(
+            stderr.contains(
+                "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+            ),
+            "{label}: {stderr}"
+        );
+    }
+
+    let overflow = r#"---
+name: "Invalid max reviewers"
+description: "Exercises update-pr validation"
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: 18446744073709551616
+---
+
+## Agent
+"#;
+    let (ok, _, stderr) = compile_inline_source("update-pr-max-reviewers-overflow", overflow);
+    assert!(!ok, "overflow max-reviewers should not compile");
+    assert!(
+        stderr.contains("safe-outputs.update-pr.max-reviewers"),
+        "overflow: {stderr}"
+    );
+
+    let valid = r#"---
+name: "Valid max reviewers"
+description: "Exercises update-pr validation"
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: 3
+---
+
+## Agent
+"#;
+    let (ok, _, stderr) = compile_inline_source("update-pr-max-reviewers-valid", valid);
+    assert!(ok, "positive max-reviewers should compile: {stderr}");
+}
+
 /// Extract a single `- job: <name>` block from compiled YAML, from its header
 /// up to (but not including) the next top-level job header. Used to assert that
 /// a step lands in the expected job.

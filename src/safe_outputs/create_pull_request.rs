@@ -3455,6 +3455,72 @@ index 0000000..abcdefg
     }
 
     #[tokio::test]
+    async fn test_executor_rejects_duplicate_temporary_id_before_creating_pr() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let temporary_id = PullRequestTemporaryId::parse("#aw_duplicate1").unwrap();
+        let registered_pull_request = crate::safe_outputs::ResolvedPullRequest {
+            id: 42,
+            url: "https://example.test/pr/42".to_string(),
+            target: crate::safe_outputs::result::AdoRepositoryTarget {
+                alias: "self".to_string(),
+                organization: "test".to_string(),
+                organization_url: server.uri(),
+                project: "TestProject".to_string(),
+                repository: "test-repo".to_string(),
+                repository_id: Some("repo-id".to_string()),
+                cross_organization: false,
+            },
+        };
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("test".to_string()),
+            ado_project: Some("TestProject".to_string()),
+            access_token: Some("fake-token".to_string()),
+            repository_id: Some("repo-id".to_string()),
+            repository_name: Some("test-repo".to_string()),
+            ..Default::default()
+        };
+        ctx.register_resolved_pull_request(&temporary_id, registered_pull_request.clone())
+            .unwrap();
+
+        let mut result = CreatePrResult {
+            name: CreatePrResult::NAME.to_string(),
+            title: "Test duplicate PR".to_string(),
+            description: "Description of the duplicate PR".to_string(),
+            source_branch: "agent/test-duplicate-pr".to_string(),
+            patch_file: "missing.patch".to_string(),
+            repository: "self".to_string(),
+            agent_labels: vec![],
+            temporary_id: temporary_id.clone(),
+            base_commit: None,
+            patch_sha256: "deadbeef".to_string(),
+        };
+
+        let outcome = result.execute_sanitized(&ctx).await.unwrap();
+
+        assert!(!outcome.success);
+        assert!(
+            outcome.message.contains("already used in this run"),
+            "expected duplicate temporary ID failure, got: {}",
+            outcome.message
+        );
+        assert_eq!(
+            ctx.resolve_pull_request(&temporary_id).unwrap(),
+            Some(registered_pull_request)
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("wiremock request history should be available")
+                .is_empty(),
+            "duplicate temporary ID must fail before opening another PR"
+        );
+    }
+
+    #[tokio::test]
     async fn test_executor_rejects_patch_sha256_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let patch_file = "test-repo-20260501.patch";

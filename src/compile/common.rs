@@ -2984,15 +2984,21 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
         require_same_approval_lane(front_matter, "create-pull-request", "update-pr")?;
     }
 
-    if let Some(config) = front_matter.safe_outputs.get("update-pr")
-        && let Some(max_reviewers) = config
-            .as_object()
-            .and_then(|object| object.get("max-reviewers"))
-            .and_then(serde_json::Value::as_u64)
+    if let Some(max_reviewers) = front_matter
+        .safe_outputs
+        .get("update-pr")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get("max-reviewers"))
     {
+        let max_reviewers =
+            serde_json::from_value::<usize>(max_reviewers.clone()).map_err(|_| {
+                anyhow::anyhow!(
+                    "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                )
+            })?;
         anyhow::ensure!(
             max_reviewers > 0,
-            "safe-outputs.update-pr.max-reviewers must be greater than zero"
+            "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
         );
     }
 
@@ -6217,7 +6223,7 @@ safe-outputs:
     }
 
     #[test]
-    fn test_validate_rejects_zero_max_reviewers() {
+    fn test_validate_rejects_invalid_max_reviewers() {
         let yaml = r#"---
 name: test
 description: test
@@ -6225,14 +6231,47 @@ safe-outputs:
   update-pr:
     allowed-operations:
       - add-reviewers
-    max-reviewers: 0
+---
+"#;
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("2"),
+            serde_json::json!(0),
+        ] {
+            let (mut fm, _) = parse_markdown(yaml).unwrap();
+            fm.safe_outputs
+                .get_mut("update-pr")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("max-reviewers".to_string(), value.clone());
+            let error = validate_pull_request_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(
+                    "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                ),
+                "value {value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_positive_max_reviewers() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: 3
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let error = validate_pull_request_outputs_config(&fm)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("max-reviewers must be greater than zero"));
+        assert!(validate_pull_request_outputs_config(&fm).is_ok());
     }
 
     #[test]

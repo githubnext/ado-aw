@@ -11,7 +11,7 @@ use super::result::AdoRepositoryTarget;
 use super::{PATH_SEGMENT, canonical_repository_alias, resolve_repository_write_target};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
-use crate::secure::PullRequestTemporaryId;
+use crate::secure::{Guid, PullRequestTemporaryId};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
@@ -832,8 +832,8 @@ impl UpdatePrResult {
 
     /// Add reviewers to a pull request.
     ///
-    /// For each reviewer email, resolves the identity via VSSPS, then PUTs to
-    /// the reviewers endpoint with vote 0.
+    /// Resolves and verifies each reviewer identity via VSSPS, then PUTs to the
+    /// reviewers endpoint with vote 0.
     async fn execute_add_reviewers(
         &self,
         operation_ctx: &UpdatePrContext<'_>,
@@ -1053,17 +1053,47 @@ async fn lookup_reviewer_id(
     token: &str,
     connection_type: Option<crate::compile::types::WriteConnectionType>,
 ) -> Option<String> {
-    if reviewer.len() == 36
-        && reviewer
-            .chars()
-            .filter(|character| *character == '-')
-            .count()
-            == 4
-        && reviewer
-            .chars()
-            .all(|character| character.is_ascii_hexdigit() || character == '-')
-    {
-        return Some(reviewer.to_string());
+    if let Ok(reviewer_id) = Guid::parse(reviewer) {
+        let identity_url = format!("{}/_apis/identities/{}", vssps_base, reviewer_id);
+        debug!(
+            "Verifying reviewer identity GUID '{}': {}",
+            reviewer, identity_url
+        );
+        return match crate::safe_outputs::authenticate_ado_request(
+            client.get(&identity_url).query(&[("api-version", "7.1")]),
+            token,
+            connection_type,
+        )
+        .send()
+        .await
+        {
+            Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+                Ok(body) => body
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| id.eq_ignore_ascii_case(reviewer_id.as_str()))
+                    .map(str::to_string),
+                Err(error) => {
+                    warn!(
+                        "Identity lookup for GUID '{}' returned invalid JSON: {}",
+                        reviewer, error
+                    );
+                    None
+                }
+            },
+            Ok(resp) => {
+                warn!(
+                    "Identity lookup for GUID '{}' returned HTTP {}",
+                    reviewer,
+                    resp.status()
+                );
+                None
+            }
+            Err(e) => {
+                warn!("Identity lookup for GUID '{}' failed: {}", reviewer, e);
+                None
+            }
+        };
     }
 
     let identity_url = format!("{}/_apis/identities", vssps_base);
@@ -1330,6 +1360,65 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_more_than_100_reviewers() {
+        let params = UpdatePrParams {
+            pull_request_id: PullRequestReference::Number(1),
+            repository: None,
+            operation: "add-reviewers".to_string(),
+            reviewers: Some(vec!["reviewer@example.com".to_string(); 101]),
+            labels: None,
+            vote: None,
+            description: None,
+        };
+
+        let error = params.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("reviewers list must contain at most 100 entries"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn test_validation_rejects_overlong_reviewer() {
+        let params = UpdatePrParams {
+            pull_request_id: PullRequestReference::Number(1),
+            repository: None,
+            operation: "add-reviewers".to_string(),
+            reviewers: Some(vec!["a".repeat(MAX_REVIEWER_LEN + 1)]),
+            labels: None,
+            vote: None,
+            description: None,
+        };
+
+        let error = params.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("reviewer must be 256 characters or fewer"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn test_validation_rejects_reviewer_pipeline_command() {
+        let params = UpdatePrParams {
+            pull_request_id: PullRequestReference::Number(1),
+            repository: None,
+            operation: "add-reviewers".to_string(),
+            reviewers: Some(vec![
+                "##vso[task.setvariable variable=REVIEWER]attacker@example.com".to_string(),
+            ]),
+            labels: None,
+            vote: None,
+            description: None,
+        };
+
+        let error = params.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("update-pr.reviewer") && error.contains("ADO pipeline command"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
     fn test_validation_rejects_repository_pipeline_command() {
         let params = UpdatePrParams {
             pull_request_id: PullRequestReference::Number(1),
@@ -1508,6 +1597,110 @@ mod tests {
         assert_eq!(resolved, (42, target));
     }
 
+    #[test]
+    fn temporary_reference_rejects_unresolved_id() {
+        let temporary_id = PullRequestTemporaryId::parse("#aw_pr123").unwrap();
+        let result = resolve_update_pr_target(
+            &PullRequestReference::Temporary(temporary_id),
+            None,
+            &UpdatePrConfig::default(),
+            &ExecutionContext::default(),
+        )
+        .unwrap()
+        .unwrap_err();
+
+        assert!(
+            result
+                .message
+                .contains("temporary pull-request ID '#aw_pr123' has not been resolved"),
+            "got: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn temporary_reference_rejects_requested_repository_mismatch() {
+        let temporary_id = PullRequestTemporaryId::parse("#aw_pr123").unwrap();
+        let ctx = ExecutionContext::default();
+        ctx.register_resolved_pull_request(
+            &temporary_id,
+            crate::safe_outputs::ResolvedPullRequest {
+                id: 42,
+                url: "https://example.test/pr/42".to_string(),
+                target: AdoRepositoryTarget {
+                    alias: "tools".to_string(),
+                    organization: "other-org".to_string(),
+                    organization_url: "https://dev.azure.com/other-org".to_string(),
+                    project: "Other Project".to_string(),
+                    repository: "tools".to_string(),
+                    repository_id: Some("repo-id".to_string()),
+                    cross_organization: true,
+                },
+            },
+        )
+        .unwrap();
+
+        let result = resolve_update_pr_target(
+            &PullRequestReference::Temporary(temporary_id),
+            Some("self"),
+            &UpdatePrConfig::default(),
+            &ctx,
+        )
+        .unwrap()
+        .unwrap_err();
+
+        assert!(
+            result.message.contains(
+                "resolved to repository 'tools', which does not match requested repository 'self'"
+            ),
+            "got: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn temporary_reference_rejects_allowed_repositories_exclusion() {
+        let temporary_id = PullRequestTemporaryId::parse("#aw_pr123").unwrap();
+        let ctx = ExecutionContext::default();
+        ctx.register_resolved_pull_request(
+            &temporary_id,
+            crate::safe_outputs::ResolvedPullRequest {
+                id: 42,
+                url: "https://example.test/pr/42".to_string(),
+                target: AdoRepositoryTarget {
+                    alias: "tools".to_string(),
+                    organization: "other-org".to_string(),
+                    organization_url: "https://dev.azure.com/other-org".to_string(),
+                    project: "Other Project".to_string(),
+                    repository: "tools".to_string(),
+                    repository_id: Some("repo-id".to_string()),
+                    cross_organization: true,
+                },
+            },
+        )
+        .unwrap();
+
+        let result = resolve_update_pr_target(
+            &PullRequestReference::Temporary(temporary_id),
+            None,
+            &UpdatePrConfig {
+                allowed_repositories: vec!["self".to_string()],
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .unwrap()
+        .unwrap_err();
+
+        assert!(
+            result
+                .message
+                .contains("Repository 'tools' is not in the allowed-repositories list: [self]"),
+            "got: {}",
+            result.message
+        );
+    }
+
     #[tokio::test]
     async fn reviewer_identity_lookup_requires_exact_match() {
         use wiremock::matchers::{method, path};
@@ -1552,6 +1745,91 @@ mod tests {
         )
         .await;
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_guid_lookup_verifies_existing_identity() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "12345678-1234-1234-1234-1234567890ab";
+        Mock::given(method("GET"))
+            .and(path(format!("/_apis/identities/{reviewer}")))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "12345678-1234-1234-1234-1234567890AB",
+                "displayName": "Exact Person"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert_eq!(id.as_deref(), Some("12345678-1234-1234-1234-1234567890AB"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_guid_lookup_rejects_missing_identity() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "12345678-1234-1234-1234-1234567890ab";
+        Mock::given(method("GET"))
+            .and(path(format!("/_apis/identities/{reviewer}")))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_guid_like_reviewer_uses_exact_identity_lookup() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "12345678-1234-1234-1234-1234567890ag";
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("searchFilter", "General"))
+            .and(query_param("filterValue", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert!(id.is_none());
     }
 
     #[tokio::test]
