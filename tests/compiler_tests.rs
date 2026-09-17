@@ -1939,6 +1939,45 @@ Call the noop tool exactly once.
 }
 
 #[test]
+fn test_runtime_import_frontmatter_prompt_uses_attached_copilot_prompt_flag() {
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("runtime_imports_standalone.md");
+    let fixture = fs::read_to_string(&fixture_path).expect("fixture should be readable");
+    assert!(
+        fixture.starts_with("---"),
+        "regression fixture should produce a runtime-import prompt beginning with frontmatter"
+    );
+
+    let compiled = compile_fixture("runtime_imports_standalone.md");
+    let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
+    let detection = extract_job_block(&compiled, "Detection").expect("Detection job should exist");
+
+    assert!(
+        compiled.contains("{{#runtime-import runtime_imports_standalone.md}}"),
+        "agent prompt should runtime-import the full markdown fixture: {compiled}"
+    );
+    assert!(
+        agent.contains("/tmp/awf-tools/copilot --prompt=\"$(cat /tmp/awf-tools/agent-prompt.md)\""),
+        "agent job should pass prompt using attached form: {agent}"
+    );
+    assert!(
+        detection.contains(
+            "/tmp/awf-tools/copilot --prompt=\"$(cat \
+             /tmp/awf-tools/threat-analysis-prompt.md)\""
+        ),
+        "detection job should pass prompt using attached form: {detection}"
+    );
+    assert!(
+        !compiled.contains("--prompt \"$(cat "),
+        "compiled pipeline should not pass prompt as a separate option value: {compiled}"
+    );
+
+    exercise_attached_prompt_with_pinned_copilot_cli(&fixture);
+}
+
+#[test]
 fn test_compiled_agent_job_copilot_invocation_supports_representative_cli_variants() {
     let compiled = compile_inline_agent(
         "copilot-cli-safeoutputs-matrix",
@@ -9519,6 +9558,109 @@ fn compile_inline_agent_with_env(tag: &str, content: &str, env: &[(&str, &str)])
     let compiled = fs::read_to_string(&output_path).expect("Compiled YAML should exist");
     let _ = fs::remove_dir_all(&temp_dir);
     compiled
+}
+
+fn exercise_attached_prompt_with_pinned_copilot_cli(prompt: &str) {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ado-aw-copilot-cli-prompt-regression-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).expect("Failed to create Copilot CLI regression temp dir");
+
+    let prompt_path = temp_dir.join("agent-prompt.md");
+    fs::write(&prompt_path, prompt).expect("Failed to write Copilot CLI regression prompt");
+
+    let Some(copilot_path) = pinned_copilot_cli_for_test(&temp_dir) else {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return;
+    };
+
+    let command = format!(
+        "{} --prompt=\"$(cat {})\" --allow-all-tools --version",
+        shell_single_quote(copilot_path.to_str().expect("Copilot path should be UTF-8")),
+        shell_single_quote(prompt_path.to_str().expect("prompt path should be UTF-8")),
+    );
+    let output = std::process::Command::new("bash")
+        .args(["-c", &command])
+        .output()
+        .expect("Failed to run Copilot CLI regression command");
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    assert!(
+        output.status.success(),
+        "attached --prompt= form should parse a prompt beginning with '---'.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn pinned_copilot_cli_for_test(temp_dir: &std::path::Path) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("ADO_AW_TEST_COPILOT_BIN") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+        eprintln!(
+            "Skipping pinned Copilot CLI regression: ADO_AW_TEST_COPILOT_BIN does not point to a file: {}",
+            path.display()
+        );
+        return None;
+    }
+
+    let version = pinned_copilot_cli_version_for_test();
+    let base_url = format!("https://github.com/github/copilot-cli/releases/download/v{version}");
+    let script = format!(
+        r#"set -euo pipefail
+download_dir="$1"
+tarball="$download_dir/copilot-linux-x64.tar.gz"
+checksums="$download_dir/SHA256SUMS.txt"
+curl -fsSL "{base_url}/copilot-linux-x64.tar.gz" -o "$tarball"
+curl -fsSL "{base_url}/SHA256SUMS.txt" -o "$checksums"
+expected="$(grep 'copilot-linux-x64.tar.gz$' "$checksums" | awk '{{print $1}}' | tr 'A-F' 'a-f')"
+actual="$(sha256sum "$tarball" | awk '{{print $1}}' | tr 'A-F' 'a-f')"
+test -n "$expected"
+test "$expected" = "$actual"
+tar -xzf "$tarball" -C "$download_dir"
+test -x "$download_dir/copilot"
+"#
+    );
+    let output = std::process::Command::new("bash")
+        .args(["-c", &script, "download-pinned-copilot", temp_dir.to_str()?])
+        .output()
+        .expect("Failed to run pinned Copilot CLI download command");
+    if !output.status.success() {
+        eprintln!(
+            "Skipping pinned Copilot CLI regression; unable to download v{version}.\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+
+    Some(temp_dir.join("copilot"))
+}
+
+fn pinned_copilot_cli_version_for_test() -> String {
+    let engine_rs = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("engine.rs"),
+    )
+    .expect("engine.rs should be readable");
+    let marker = "pub const COPILOT_CLI_VERSION: &str = \"";
+    let start = engine_rs
+        .find(marker)
+        .expect("COPILOT_CLI_VERSION should be declared")
+        + marker.len();
+    let end = engine_rs[start..]
+        .find('"')
+        .expect("COPILOT_CLI_VERSION should terminate");
+    engine_rs[start..start + end].to_string()
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 const GITHUB_APP_TOKEN_FM: &str = r#"
