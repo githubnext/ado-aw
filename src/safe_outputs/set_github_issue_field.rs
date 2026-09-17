@@ -9,10 +9,10 @@ use serde_json::Value;
 
 use crate::safe_outputs::{
     ExecutionContext, ExecutionResult, Executor, GithubClient, GithubIssueNumber,
-    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities, Validate,
-    resolve_github_issue_target, validate_github_mutation_filter_config,
-    validate_github_mutation_filters, validate_github_repository,
-    validate_github_target_capability,
+    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities,
+    ResolvedGithubIssueTarget, Validate, resolve_github_issue_target,
+    validate_github_mutation_filter_config, validate_github_mutation_filters,
+    validate_github_repository, validate_github_target_capability,
 };
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
@@ -220,52 +220,15 @@ impl Executor for SetGithubIssueFieldResult {
             )));
         };
 
-        let (owner, repo) = target
-            .repository
-            .split_once('/')
-            .expect("resolved GitHub repository is validated");
-        let discovery = match client
-            .graphql(
-                "Discover GitHub issue fields",
-                DISCOVER_ISSUE_FIELDS,
-                serde_json::json!({ "owner": owner, "repo": repo }),
-            )
+        let field = match self
+            .discover_and_select_field(&client, &target, &config)
             .await?
         {
-            Ok(data) => data,
-            Err(error) => {
-                return Ok(ExecutionResult::failure(format!(
-                    "GitHub issue fields are unsupported or unavailable: {error}"
-                )));
-            }
-        };
-        let fields = match parse_issue_fields(&discovery) {
-            Ok(fields) => fields,
-            Err(message) => return Ok(ExecutionResult::failure(message)),
-        };
-        let field = match select_issue_field(
-            &fields,
-            self.field_name.as_deref(),
-            self.field_node_id.as_deref(),
-        ) {
             Ok(field) => field,
-            Err(message) => return Ok(ExecutionResult::failure(message)),
+            Err(result) => return Ok(result),
         };
-        if is_builtin_issue_field(&field.name) {
-            return Ok(ExecutionResult::failure(format!(
-                "GitHub field '{}' is a built-in issue field; use its dedicated safe-output tool",
-                crate::sanitize::neutralize_pipeline_commands(&field.name)
-            )));
-        }
-        if !github_issue_field_is_allowed(&config.allowed_fields, &field.name) {
-            return Ok(ExecutionResult::failure(format!(
-                "GitHub issue field '{}' is not in allowed-fields: {}",
-                crate::sanitize::neutralize_pipeline_commands(&field.name),
-                config.allowed_fields.join(", ")
-            )));
-        }
 
-        let field_input = match coerce_field_value(field, &self.value) {
+        let field_input = match coerce_field_value(&field, &self.value) {
             Ok(input) => input,
             Err(message) => return Ok(ExecutionResult::failure(message)),
         };
@@ -273,31 +236,11 @@ impl Executor for SetGithubIssueFieldResult {
             "Setting GitHub issue field {} ({}) on {}#{}",
             field.name, field.kind, target.repository, target.number
         );
-        let mutation = match client
-            .graphql(
-                "Set GitHub issue field value",
-                SET_ISSUE_FIELD_VALUE,
-                serde_json::json!({
-                    "issueId": issue_node_id,
-                    "issueFields": [field_input],
-                }),
-            )
-            .await?
+
+        if let Err(result) =
+            apply_field_mutation(&client, issue_node_id, &field_input, &target).await?
         {
-            Ok(data) => data,
-            Err(error) => {
-                return Ok(ExecutionResult::failure(format!(
-                    "GitHub issue field mutation is unsupported or failed: {error}"
-                )));
-            }
-        };
-        let updated_number = mutation
-            .pointer("/setIssueFieldValue/issue/number")
-            .and_then(Value::as_u64);
-        if updated_number != Some(target.number) {
-            return Ok(ExecutionResult::failure(
-                "GitHub setIssueFieldValue response did not identify the updated issue",
-            ));
+            return Ok(result);
         }
 
         info!(
@@ -319,6 +262,103 @@ impl Executor for SetGithubIssueFieldResult {
             }),
         ))
     }
+}
+
+impl SetGithubIssueFieldResult {
+    /// Discover a repository's custom issue fields, select the one requested
+    /// by the agent, and enforce the built-in-field and allowed-fields
+    /// policies. Returns `Ok(Err(result))` for any policy or API failure that
+    /// should be surfaced to the caller as an [`ExecutionResult::failure`].
+    async fn discover_and_select_field(
+        &self,
+        client: &GithubClient,
+        target: &ResolvedGithubIssueTarget,
+        config: &SetGithubIssueFieldConfig,
+    ) -> anyhow::Result<Result<IssueField, ExecutionResult>> {
+        let (owner, repo) = target
+            .repository
+            .split_once('/')
+            .expect("resolved GitHub repository is validated");
+        let discovery = match client
+            .graphql(
+                "Discover GitHub issue fields",
+                DISCOVER_ISSUE_FIELDS,
+                serde_json::json!({ "owner": owner, "repo": repo }),
+            )
+            .await?
+        {
+            Ok(data) => data,
+            Err(error) => {
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "GitHub issue fields are unsupported or unavailable: {error}"
+                ))));
+            }
+        };
+        let fields = match parse_issue_fields(&discovery) {
+            Ok(fields) => fields,
+            Err(message) => return Ok(Err(ExecutionResult::failure(message))),
+        };
+        let field = match select_issue_field(
+            &fields,
+            self.field_name.as_deref(),
+            self.field_node_id.as_deref(),
+        ) {
+            Ok(field) => field,
+            Err(message) => return Ok(Err(ExecutionResult::failure(message))),
+        };
+        if is_builtin_issue_field(&field.name) {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "GitHub field '{}' is a built-in issue field; use its dedicated safe-output tool",
+                crate::sanitize::neutralize_pipeline_commands(&field.name)
+            ))));
+        }
+        if !github_issue_field_is_allowed(&config.allowed_fields, &field.name) {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "GitHub issue field '{}' is not in allowed-fields: {}",
+                crate::sanitize::neutralize_pipeline_commands(&field.name),
+                config.allowed_fields.join(", ")
+            ))));
+        }
+        Ok(Ok(field.clone()))
+    }
+}
+
+/// Send the `setIssueFieldValue` mutation and confirm the response identifies
+/// the expected issue. Returns `Ok(Err(result))` on any API or response-shape
+/// failure that should be surfaced as an [`ExecutionResult::failure`].
+async fn apply_field_mutation(
+    client: &GithubClient,
+    issue_node_id: &str,
+    field_input: &Value,
+    target: &ResolvedGithubIssueTarget,
+) -> anyhow::Result<Result<(), ExecutionResult>> {
+    let mutation = match client
+        .graphql(
+            "Set GitHub issue field value",
+            SET_ISSUE_FIELD_VALUE,
+            serde_json::json!({
+                "issueId": issue_node_id,
+                "issueFields": [field_input],
+            }),
+        )
+        .await?
+    {
+        Ok(data) => data,
+        Err(error) => {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "GitHub issue field mutation is unsupported or failed: {error}"
+            ))));
+        }
+    };
+    let updated_number = mutation
+        .pointer("/setIssueFieldValue/issue/number")
+        .and_then(Value::as_u64);
+    if updated_number != Some(target.number) {
+        return Ok(Err(ExecutionResult::failure(
+            "GitHub setIssueFieldValue response did not identify the updated issue",
+        )));
+    }
+    Ok(Ok(()))
 }
 
 fn github_issue_field_is_allowed(allowed_fields: &[String], field_name: &str) -> bool {

@@ -154,6 +154,23 @@ export async function runScenario<S>(
       });
     }
 
+    // ---- post-execute (optional; e.g. the Conclusion reporter) ----
+    if (scenario.postExecute) {
+      ctx.log(`[${scenarioId}] post-execute`);
+      try {
+        await scenario.postExecute(ctx, state, {
+          safeOutputDir: result.safeOutputDir,
+          records: result.records,
+        });
+      } catch (err) {
+        if (err instanceof SkipError) {
+          ctx.log(`[${scenarioId}] SKIPPED: ${err.message}`);
+          return finish({ ok: true, skipped: true, phase: "skipped", message: err.message });
+        }
+        return finish({ ok: false, phase: "post-execute", message: errMessage(err) });
+      }
+    }
+
     // ---- assert ----
     try {
       await scenario.assert(ctx, state, result.record, result.records);

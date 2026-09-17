@@ -103,6 +103,20 @@ Conclusion reports deduplicate by rendered work-item title. The job
 searches for an existing open work item with the same title; if it finds
 one, it appends a comment. Otherwise it creates a new work item.
 
+## Testing
+
+Unit coverage lives in
+`scripts/ado-script/src/conclusion/__tests__/index.test.ts` (manifest parsing,
+signal rendering, per-tool config).
+
+End-to-end coverage lives in the deterministic executor suite
+([`tests/executor-e2e/`](../tests/executor-e2e/README.md)): the `conclusion-*`
+scenarios run `ado-aw execute` for a `noop` / `missing-tool` / `missing-data`
+signal, then run the compiled `conclusion.js` over the resulting
+`safe-outputs-executed.ndjson`, and assert the filed Azure DevOps work item
+(title, type, tags, body), the append-on-duplicate-title path, and the
+`report-as-work-item: false` opt-out.
+
 ## Relationship to gh-aw
 
 This mirrors gh-aw's conclusion-job pattern: a single always-running

@@ -176,6 +176,80 @@ const ALLOWED_LABELS_ANY: &str = "*";
 /// hitting the API with an over-long string.
 const MAX_FINAL_TITLE_LEN: usize = 256;
 
+/// Validates agent-supplied `labels` against `config.allowed-labels`.
+///
+/// Default-deny semantics: an empty list means NO agent labels are
+/// accepted. Operators must opt in to unrestricted by setting
+/// `allowed-labels: ["*"]`. Static labels under `labels:` are always
+/// applied regardless and are not checked here.
+///
+/// Returns `Err(message)` with a ready-to-use failure message when any
+/// agent-supplied label is not covered by the allowlist.
+fn validate_agent_labels(
+    labels: &[String],
+    config: &CreateGithubIssueConfig,
+) -> Result<(), String> {
+    if labels.is_empty() {
+        return Ok(());
+    }
+    let allow_any = config
+        .allowed_labels
+        .iter()
+        .any(|p| p == ALLOWED_LABELS_ANY);
+    if allow_any {
+        return Ok(());
+    }
+    let disallowed: Vec<String> = labels
+        .iter()
+        .filter(|label| {
+            !config
+                .allowed_labels
+                .iter()
+                .any(|pattern| super::tag_matches_pattern(label, pattern))
+        })
+        .map(|label| {
+            // Neutralise pipeline-command sequences before we echo
+            // agent-supplied content into our own log line and the
+            // failure message.
+            crate::sanitize::neutralize_pipeline_commands(label)
+        })
+        .collect();
+    if disallowed.is_empty() {
+        return Ok(());
+    }
+    let msg = if config.allowed_labels.is_empty() {
+        format!(
+            "Agent-supplied labels rejected (no `allowed-labels` configured; \
+             set `allowed-labels: [\"*\"]` to permit any): {}",
+            disallowed.join(", ")
+        )
+    } else {
+        format!(
+            "Agent-supplied labels not in allowed-labels: {}",
+            disallowed.join(", ")
+        )
+    };
+    Err(msg)
+}
+
+/// Applies `config.title-prefix` (if any) and enforces
+/// [`MAX_FINAL_TITLE_LEN`] on the result.
+fn build_final_title(title: &str, config: &CreateGithubIssueConfig) -> Result<String, String> {
+    let final_title = match &config.title_prefix {
+        Some(prefix) => format!("{prefix}{title}"),
+        None => title.to_string(),
+    };
+    if final_title.len() > MAX_FINAL_TITLE_LEN {
+        return Err(format!(
+            "Final issue title exceeds {MAX_FINAL_TITLE_LEN} characters \
+             ({} chars after applying title-prefix). Shorten title-prefix \
+             or the agent title.",
+            final_title.len()
+        ));
+    }
+    Ok(final_title)
+}
+
 #[async_trait::async_trait]
 impl Executor for CreateGithubIssueResult {
     fn dry_run_summary(&self) -> String {
@@ -195,14 +269,11 @@ impl Executor for CreateGithubIssueResult {
             ));
         }
 
-        let token = match ctx.github_token.as_ref() {
-            Some(t) => t,
-            None => {
-                return Ok(ExecutionResult::failure(
-                    "ADO_AW_GITHUB_TOKEN is not set; configure safe-outputs.github-token \
-                     or safe-outputs.github-app",
-                ));
-            }
+        let Some(token) = ctx.github_token.as_ref() else {
+            return Ok(ExecutionResult::failure(
+                "ADO_AW_GITHUB_TOKEN is not set; configure safe-outputs.github-token \
+                 or safe-outputs.github-app",
+            ));
         };
 
         let config: CreateGithubIssueConfig = ctx.get_tool_config("create-github-issue")?;
@@ -230,63 +301,14 @@ impl Executor for CreateGithubIssueResult {
             )));
         }
 
-        // Validate agent-supplied labels against allowed-labels.
-        // Default-deny semantics: an empty list means NO agent labels are
-        // accepted. Operators must opt in to unrestricted by setting
-        // `allowed-labels: ["*"]`. Static labels under `labels:` are always
-        // applied regardless.
-        if !self.labels.is_empty() {
-            let allow_any = config
-                .allowed_labels
-                .iter()
-                .any(|p| p == ALLOWED_LABELS_ANY);
-            if !allow_any {
-                let disallowed: Vec<String> = self
-                    .labels
-                    .iter()
-                    .filter(|label| {
-                        !config
-                            .allowed_labels
-                            .iter()
-                            .any(|pattern| super::tag_matches_pattern(label, pattern))
-                    })
-                    .map(|label| {
-                        // Neutralise pipeline-command sequences before we
-                        // echo agent-supplied content into our own log line
-                        // and the failure message.
-                        crate::sanitize::neutralize_pipeline_commands(label)
-                    })
-                    .collect();
-                if !disallowed.is_empty() {
-                    let msg = if config.allowed_labels.is_empty() {
-                        format!(
-                            "Agent-supplied labels rejected (no `allowed-labels` configured; \
-                             set `allowed-labels: [\"*\"]` to permit any): {}",
-                            disallowed.join(", ")
-                        )
-                    } else {
-                        format!(
-                            "Agent-supplied labels not in allowed-labels: {}",
-                            disallowed.join(", ")
-                        )
-                    };
-                    return Ok(ExecutionResult::failure(msg));
-                }
-            }
+        if let Err(msg) = validate_agent_labels(&self.labels, &config) {
+            return Ok(ExecutionResult::failure(msg));
         }
 
-        let final_title = match &config.title_prefix {
-            Some(prefix) => format!("{}{}", prefix, self.title),
-            None => self.title.clone(),
+        let final_title = match build_final_title(&self.title, &config) {
+            Ok(title) => title,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
-        if final_title.len() > MAX_FINAL_TITLE_LEN {
-            return Ok(ExecutionResult::failure(format!(
-                "Final issue title exceeds {MAX_FINAL_TITLE_LEN} characters \
-                 ({} chars after applying title-prefix). Shorten title-prefix \
-                 or the agent title.",
-                final_title.len()
-            )));
-        }
         let body_with_footer = format!("{}\n\n{}", self.body, build_github_trace_footer(ctx));
         let all_labels = merge_github_values(&config.labels, &self.labels);
         let all_assignees = merge_github_values(&config.assignees, &self.assignees);
@@ -303,71 +325,83 @@ impl Executor for CreateGithubIssueResult {
         });
 
         let response = client.send(Method::POST, url, Some(&payload)).await?;
+        self.handle_issue_response(ctx, &target_repo, response)
+            .await
+    }
+}
 
-        let status = response.status;
-        if status.is_success() {
-            let body: serde_json::Value = response
-                .json("Failed to parse GitHub API response")
-                .map_err(anyhow::Error::new)?;
-            let Some(number) = body
-                .get("number")
-                .and_then(|v| v.as_u64())
-                .filter(|number| *number > 0)
-            else {
-                return Ok(ExecutionResult::failure(
-                    "GitHub create-github-issue response contained no positive issue number",
-                ));
-            };
-            let html_url = body
-                .get("html_url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            info!(
-                "Filed GitHub issue {}#{}: {}",
-                target_repo, number, html_url
-            );
-            if let Some(temporary_id) = &self.temporary_id
-                && let Err(error) = ctx.register_resolved_github_issue(
-                    temporary_id,
-                    crate::safe_outputs::ResolvedGithubIssue {
-                        repository: target_repo.clone(),
-                        number,
-                        url: html_url.clone(),
-                    },
-                )
-            {
-                return Ok(ExecutionResult::failure_with_data(
-                    format!(
-                        "Filed issue {}#{} but failed to register temporary_id '{}': {}",
-                        target_repo,
-                        number,
-                        temporary_id.canonical(),
-                        crate::sanitize::neutralize_pipeline_commands(&error.to_string())
-                    ),
-                    serde_json::json!({
-                        "number": number,
-                        "url": html_url,
-                        "target_repo": target_repo,
-                        "temporary_id": temporary_id.canonical(),
-                    }),
-                ));
-            }
-            Ok(ExecutionResult::success_with_data(
-                format!("Filed issue {}#{}: {}", target_repo, number, html_url),
+impl CreateGithubIssueResult {
+    /// Interprets the GitHub API response for the create-issue request,
+    /// registering the `temporary_id` (if any) on success.
+    async fn handle_issue_response(
+        &self,
+        ctx: &ExecutionContext,
+        target_repo: &str,
+        response: crate::safe_outputs::GithubResponse,
+    ) -> anyhow::Result<ExecutionResult> {
+        if !response.status.is_success() {
+            let error = response
+                .require_success("Failed to file GitHub issue")
+                .expect_err("non-success response must produce an API error");
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
+
+        let body: serde_json::Value = response
+            .json("Failed to parse GitHub API response")
+            .map_err(anyhow::Error::new)?;
+        let Some(number) = body
+            .get("number")
+            .and_then(|v| v.as_u64())
+            .filter(|number| *number > 0)
+        else {
+            return Ok(ExecutionResult::failure(
+                "GitHub create-github-issue response contained no positive issue number",
+            ));
+        };
+        let html_url = body
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        info!(
+            "Filed GitHub issue {}#{}: {}",
+            target_repo, number, html_url
+        );
+        if let Some(temporary_id) = &self.temporary_id
+            && let Err(error) = ctx.register_resolved_github_issue(
+                temporary_id,
+                crate::safe_outputs::ResolvedGithubIssue {
+                    repository: target_repo.to_string(),
+                    number,
+                    url: html_url.clone(),
+                },
+            )
+        {
+            return Ok(ExecutionResult::failure_with_data(
+                format!(
+                    "Filed issue {}#{} but failed to register temporary_id '{}': {}",
+                    target_repo,
+                    number,
+                    temporary_id.canonical(),
+                    crate::sanitize::neutralize_pipeline_commands(&error.to_string())
+                ),
                 serde_json::json!({
                     "number": number,
                     "url": html_url,
                     "target_repo": target_repo,
-                    "temporary_id": self.temporary_id.as_ref().map(GithubTemporaryId::canonical),
+                    "temporary_id": temporary_id.canonical(),
                 }),
-            ))
-        } else {
-            let error = response
-                .require_success("Failed to file GitHub issue")
-                .expect_err("non-success response must produce an API error");
-            Ok(ExecutionResult::failure(error.to_string()))
+            ));
         }
+        Ok(ExecutionResult::success_with_data(
+            format!("Filed issue {}#{}: {}", target_repo, number, html_url),
+            serde_json::json!({
+                "number": number,
+                "url": html_url,
+                "target_repo": target_repo,
+                "temporary_id": self.temporary_id.as_ref().map(GithubTemporaryId::canonical),
+            }),
+        ))
     }
 }
 
