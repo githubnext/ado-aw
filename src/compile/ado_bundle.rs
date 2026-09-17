@@ -13,8 +13,8 @@
 //! * [`Bundle`] enumerates every bundle, with its on-disk [`Bundle::path`] and
 //!   its [`Bundle::auth`] requirement.
 //! * [`apply_bundle_auth`] is the single chokepoint that projects
-//!   `SYSTEM_ACCESSTOKEN` into a step for every bearer-requiring bundle, so no
-//!   call site can forget it again.
+//!   `SYSTEM_ACCESSTOKEN` and marks it as bearer auth for every
+//!   bearer-requiring bundle, so no call site can forget either half again.
 //! * [`token_source_for`] unifies the `System.AccessToken` vs `SC_WRITE_TOKEN`
 //!   selection that was previously duplicated between the Conclusion job and
 //!   the Stage 3 executor.
@@ -227,16 +227,14 @@ impl Bundle {
 /// Project the bundle's auth env contract onto a step.
 ///
 /// For [`BundleAuth::Bearer`] bundles this maps `SYSTEM_ACCESSTOKEN` from the
-/// chosen [`TokenSource`]. For [`BundleAuth::None`] it is a no-op — the `token`
-/// argument is ignored (a `None`-auth bundle needs no bearer, and today no
-/// caller routes such a bundle through this function). This is the single
-/// guarantee that every bearer-requiring bundle step carries a token — the
-/// structural fix for the class of bug behind #1307.
+/// chosen [`TokenSource`] and sets `ADO_AW_ACCESS_TOKEN_KIND=bearer`, which the
+/// shared Node auth helper needs for both `System.AccessToken` and minted
+/// `SC_WRITE_TOKEN` values. For [`BundleAuth::None`] it is a no-op.
 pub fn apply_bundle_auth(step: BashStep, bundle: Bundle, token: TokenSource) -> BashStep {
     match bundle.auth() {
-        BundleAuth::Bearer => {
-            step.with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret(token.variable()))
-        }
+        BundleAuth::Bearer => step
+            .with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret(token.variable()))
+            .with_env("ADO_AW_ACCESS_TOKEN_KIND", EnvValue::literal("bearer")),
         BundleAuth::None => step,
     }
 }
@@ -292,15 +290,28 @@ mod tests {
             let step = BashStep::new("t", "node x\n");
             let out = apply_bundle_auth(step, *b, TokenSource::SystemAccessToken);
             let has_token = out.env.contains_key("SYSTEM_ACCESSTOKEN");
+            let has_token_kind = out.env.contains_key("ADO_AW_ACCESS_TOKEN_KIND");
             match b.auth() {
-                BundleAuth::Bearer => assert!(
-                    has_token,
-                    "{b:?} requires a bearer and apply_bundle_auth must project it"
-                ),
-                BundleAuth::None => assert!(
-                    !has_token,
-                    "{b:?} is None and must not carry SYSTEM_ACCESSTOKEN"
-                ),
+                BundleAuth::Bearer => {
+                    assert!(
+                        has_token,
+                        "{b:?} requires a bearer and apply_bundle_auth must project it"
+                    );
+                    assert!(
+                        has_token_kind,
+                        "{b:?} requires a bearer and apply_bundle_auth must mark its kind"
+                    );
+                }
+                BundleAuth::None => {
+                    assert!(
+                        !has_token,
+                        "{b:?} is None and must not carry SYSTEM_ACCESSTOKEN"
+                    );
+                    assert!(
+                        !has_token_kind,
+                        "{b:?} is None and must not carry ADO_AW_ACCESS_TOKEN_KIND"
+                    );
+                }
             }
         }
     }

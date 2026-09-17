@@ -36,7 +36,8 @@ describe("runConclusion", () => {
       await writeFile(
         bundle,
         `const keys = ["AW_SAFE_OUTPUT_DIR","AW_PIPELINE_NAME","AW_AGENT_RESULT",` +
-          `"AW_NOOP_TITLE_PREFIX","SYSTEM_TEAMPROJECT","SYSTEM_COLLECTIONURI","BUILD_BUILDID"];\n` +
+          `"AW_NOOP_TITLE_PREFIX","SYSTEM_TEAMPROJECT","SYSTEM_COLLECTIONURI",` +
+          `"ADO_AW_ACCESS_TOKEN_KIND","BUILD_BUILDID"];\n` +
           `console.log(JSON.stringify(Object.fromEntries(keys.map((k) => [k, process.env[k]]))));\n`,
         "utf8",
       );
@@ -60,6 +61,7 @@ describe("runConclusion", () => {
         AW_NOOP_TITLE_PREFIX: "[prefix]",
         SYSTEM_TEAMPROJECT: "P",
         SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
+        ADO_AW_ACCESS_TOKEN_KIND: "bearer",
         BUILD_BUILDID: "1",
       });
     } finally {

@@ -80,6 +80,7 @@ export async function runConclusion(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     SYSTEM_ACCESSTOKEN: opts.token,
+    ADO_AW_ACCESS_TOKEN_KIND: "bearer",
     SYSTEM_COLLECTIONURI: opts.orgUrl,
     SYSTEM_TEAMPROJECT: opts.project,
     BUILD_BUILDID: opts.buildId,
