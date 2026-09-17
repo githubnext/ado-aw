@@ -1890,10 +1890,25 @@ Call the noop tool exactly once.
 
     assert!(
         agent.contains(
-            "/tmp/awf-tools/copilot --prompt \"$(cat /tmp/awf-tools/agent-prompt.md)\" \
+            "/tmp/awf-tools/copilot --prompt=\"$(cat /tmp/awf-tools/agent-prompt.md)\" \
              --additional-mcp-config @/tmp/awf-tools/mcp-config.json"
         ),
         "agent job should pass compiler-emitted MCP config to Copilot CLI: {agent}"
+    );
+    assert!(
+        !agent.contains("--prompt \"$(cat "),
+        "agent job should not pass prompt as a separate option value: {agent}"
+    );
+    assert!(
+        detection.contains(
+            "/tmp/awf-tools/copilot --prompt=\"$(cat \
+             /tmp/awf-tools/threat-analysis-prompt.md)\""
+        ),
+        "detection job should pass prompt using attached form: {detection}"
+    );
+    assert!(
+        !detection.contains("--prompt \"$(cat "),
+        "detection job should not pass prompt as a separate option value: {detection}"
     );
     assert!(
         agent.contains("--allow-all-tools"),
@@ -5093,7 +5108,7 @@ fn test_1es_compiled_output_is_valid_yaml() {
         "1ES output should contain SafeOutputs references"
     );
     assert!(
-        compiled.contains("copilot --prompt"),
+        compiled.contains("copilot --prompt="),
         "1ES output should contain copilot invocation (engine_run substituted)"
     );
     assert!(
