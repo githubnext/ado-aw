@@ -128,35 +128,22 @@ impl AgentStats {
     /// Uses middle-dot separators for a lightweight single-line format
     /// that works across all ADO markdown surfaces.
     ///
-    /// When `ai_credits` is present and non-zero, the consumption segment
-    /// reads "{n} AI credits". Otherwise it falls back to "{input} in / {output} out"
-    /// for older Copilot CLI versions or non-Copilot engines that do not emit
-    /// `github.copilot.cost`.
+    /// When `ai_credits` is present and non-zero, includes an AI-credit
+    /// consumption segment. Older engines that do not emit
+    /// `github.copilot.cost` omit consumption from the footer.
     pub fn to_markdown(&self) -> String {
         let duration = format_duration(self.duration_seconds);
         let model = sanitize_for_markdown(self.model.as_deref().unwrap_or("unknown"));
         let name = sanitize_for_markdown(&self.agent_name);
 
-        let consumption = match self.ai_credits {
-            Some(credits) => format!("{credits} AI credits"),
-            None => format!(
-                "{} in / {} out",
-                format_number(self.input_tokens),
-                format_number(self.output_tokens)
-            ),
-        };
+        let mut segments = vec![format!("\u{1F916} {name}"), model];
+        if let Some(credits) = self.ai_credits {
+            segments.push(format!("{credits} AI credits"));
+        }
+        segments.push(format!("{} tool calls", self.tool_calls));
+        segments.push(duration);
 
-        format!(
-            "\n\n---\n\
-             \u{1F916} {name} \u{00B7} {model} \u{00B7} \
-             {consumption} \u{00B7} \
-             {tools} tool calls \u{00B7} {duration}\n",
-            name = name,
-            model = model,
-            consumption = consumption,
-            tools = self.tool_calls,
-            duration = duration,
-        )
+        format!("\n\n---\n{}\n", segments.join(" \u{00B7} "))
     }
 }
 
@@ -238,19 +225,6 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
-/// Format a number with comma separators (e.g., 45230 → "45,230").
-fn format_number(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,15 +247,6 @@ mod tests {
     fn test_format_duration_hours() {
         assert_eq!(format_duration(3600.0), "1h 0m 0s");
         assert_eq!(format_duration(7384.0), "2h 3m 4s");
-    }
-
-    #[test]
-    fn test_format_number() {
-        assert_eq!(format_number(0), "0");
-        assert_eq!(format_number(999), "999");
-        assert_eq!(format_number(1000), "1,000");
-        assert_eq!(format_number(45230), "45,230");
-        assert_eq!(format_number(1234567), "1,234,567");
     }
 
     #[test]
@@ -344,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_markdown_falls_back_to_tokens_when_no_credits() {
+    fn test_to_markdown_omits_consumption_when_no_credits() {
         let stats = AgentStats {
             agent_name: "Old Agent".to_string(),
             model: Some("gpt-4o".to_string()),
@@ -356,9 +321,9 @@ mod tests {
             turns: 3,
         };
         let md = stats.to_markdown();
-        assert!(md.contains("45,230 in"));
-        assert!(md.contains("12,450 out"));
-        assert!(!md.contains("AI credits"), "credits label should not appear on fallback path");
+        assert!(!md.contains("45,230 in"));
+        assert!(!md.contains("12,450 out"));
+        assert!(!md.contains("AI credits"));
     }
 
     #[test]
