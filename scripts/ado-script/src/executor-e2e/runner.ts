@@ -12,7 +12,12 @@ import { join } from "node:path";
 
 import { runExecute } from "./execute-cli.js";
 import { SkipError } from "./scenario.js";
-import type { Scenario, ScenarioContext, ScenarioResult } from "./scenario.js";
+import type {
+  ExecutedRecord,
+  Scenario,
+  ScenarioContext,
+  ScenarioResult,
+} from "./scenario.js";
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -29,6 +34,7 @@ export async function runScenario<S>(
 
   let state: S | undefined;
   let setupDone = false;
+  let executedRecords: ExecutedRecord[] | undefined;
 
   const finish = (partial: Omit<ScenarioResult, "tool" | "durationMs">): ScenarioResult => ({
     tool: scenarioId,
@@ -97,6 +103,7 @@ export async function runScenario<S>(
         extraEnv,
         log: ctx.log,
       });
+      executedRecords = result.records;
     } catch (err) {
       // e.g. the ado-aw execute child timed out or failed to spawn.
       return finish({ ok: false, phase: "execute", message: errMessage(err) });
@@ -170,7 +177,7 @@ export async function runScenario<S>(
     // a successful setup (SkipError or setup failure) leave setupDone false.
     if (setupDone) {
       try {
-        await scenario.cleanup(ctx, state as S);
+        await scenario.cleanup(ctx, state as S, executedRecords);
         ctx.log(`[${scenarioId}] cleanup done`);
       } catch (err) {
         ctx.log(`[${scenarioId}] cleanup WARNING: ${errMessage(err)}`);
