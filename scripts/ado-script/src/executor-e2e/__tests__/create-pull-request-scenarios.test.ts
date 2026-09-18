@@ -4,6 +4,7 @@ import type { ExecutedRecord, ScenarioContext } from "../scenario.js";
 import { SkipError } from "../scenario.js";
 import {
   createPullRequestAddReviewers,
+  createPullRequestAddReviewersGeneral,
   createPullRequestScenarios,
   resolveExecutorE2eReviewer,
 } from "../scenarios/create-pull-request.js";
@@ -39,8 +40,25 @@ const state = {
   executorToken: "token",
   repositorySelector: "agent-definitions",
   reviewer: "requester@example.com",
-  reviewerId: "reviewer-id",
+  reviewerId: "01234567-89ab-cdef-0123-456789abcdef",
 } as unknown as AddReviewersState;
+
+const reviewerVariants = [
+  {
+    name: "resolved GUID",
+    scenario: createPullRequestAddReviewers,
+    id: "create-pull-request-add-reviewers",
+    temporaryId: "#aw_prreviewers",
+    submittedReviewer: "01234567-89ab-cdef-0123-456789abcdef",
+  },
+  {
+    name: "raw configured email/name",
+    scenario: createPullRequestAddReviewersGeneral,
+    id: "create-pull-request-add-reviewers-general",
+    temporaryId: "#aw_prreviewersgeneral",
+    submittedReviewer: "requester@example.com",
+  },
+] as const;
 
 describe("resolveExecutorE2eReviewer", () => {
   it("trims the dedicated reviewer environment value", () => {
@@ -59,77 +77,96 @@ describe("resolveExecutorE2eReviewer", () => {
 });
 
 describe("create-pull-request add-reviewers handoff", () => {
-  it("is registered with the constrained reviewer policy", () => {
+  it("registers both reviewer variants with distinct live PR state", async () => {
     const ids = createPullRequestScenarios.map(
       (scenario) => scenario.id ?? scenario.tool,
     );
     expect(ids).toContain("create-pull-request-add-reviewers");
-    expect(createPullRequestAddReviewers.config(ctx, state)).toEqual({
-      "allowed-operations": ["add-reviewers"],
-      "allowed-repositories": ["agent-definitions"],
-      "allowed-reviewers": ["requester@example.com"],
-      "max-reviewers": 1,
-      max: 1,
-    });
-  });
+    expect(ids).toContain("create-pull-request-add-reviewers-general");
 
-  it("stages create first and submits the reviewer against its temporary ID", async () => {
-    const prior = await createPullRequestAddReviewers.priorEntries!(ctx, state);
-    expect(prior).toEqual([
-      expect.objectContaining({
-        tool: "create-pull-request",
-        entry: expect.objectContaining({
-          temporary_id: "#aw_prreviewers",
-          source_branch: "source",
-        }),
-      }),
-    ]);
-    await expect(
-      createPullRequestAddReviewers.ndjson(ctx, state),
-    ).resolves.toEqual({
-      pull_request_id: "#aw_prreviewers",
-      operation: "add-reviewers",
-      reviewers: ["requester@example.com"],
-    });
-  });
-
-  it("asserts temporary-ID resolution and live reviewer membership by identity ID", async () => {
-    const listReviewers = async () => [
-      { id: "REVIEWER-ID", vote: 0, displayName: "Requester" },
-    ];
-    const assertionState = {
+    const guidPrior = await createPullRequestAddReviewers.priorEntries!(
+      ctx,
+      state,
+    );
+    const generalState = {
       ...state,
-      rest: { listReviewers },
+      sourceBranch: "source-general",
+      patchRelPath: "create-pr-add-reviewers-general.patch",
     } as unknown as AddReviewersState;
-    const created: ExecutedRecord = {
-      name: "create_pull_request",
-      status: "succeeded",
-      result: {
-        pull_request_id: 42,
-        temporary_id: "#aw_prreviewers",
-      },
-    };
-    const updated: ExecutedRecord = {
-      name: "update_pr",
-      status: "succeeded",
-      result: {
-        pull_request_id: 42,
-        operation: "add-reviewers",
-        added: ["REQUESTER@example.com"],
-        failed: [],
-      },
-    };
-
-    await expect(
-      createPullRequestAddReviewers.assert(
+    const generalPrior =
+      await createPullRequestAddReviewersGeneral.priorEntries!(
         ctx,
-        assertionState,
-        updated,
-        [created, updated],
-      ),
-    ).resolves.toBeUndefined();
-    expect(assertionState.prId).toBe(42);
+        generalState,
+      );
+    expect(guidPrior[0]?.entry).toMatchObject({
+      temporary_id: "#aw_prreviewers",
+      source_branch: "source",
+      patch_file: "create-pr-add-reviewers.patch",
+    });
+    expect(generalPrior[0]?.entry).toMatchObject({
+      temporary_id: "#aw_prreviewersgeneral",
+      source_branch: "source-general",
+      patch_file: "create-pr-add-reviewers-general.patch",
+    });
   });
+
+  it.each(reviewerVariants)(
+    "configures and submits one $name reviewer",
+    async ({ scenario, temporaryId, submittedReviewer }) => {
+      expect(scenario.config(ctx, state)).toEqual({
+        "allowed-operations": ["add-reviewers"],
+        "allowed-repositories": ["agent-definitions"],
+        "allowed-reviewers": [submittedReviewer],
+        "max-reviewers": 1,
+        max: 1,
+      });
+      await expect(scenario.ndjson(ctx, state)).resolves.toEqual({
+        pull_request_id: temporaryId,
+        operation: "add-reviewers",
+        reviewers: [submittedReviewer],
+      });
+    },
+  );
+
+  it.each(reviewerVariants)(
+    "asserts $name temporary-ID resolution and live membership by resolved ID",
+    async ({ scenario, temporaryId, submittedReviewer }) => {
+      const listReviewers = async () => [
+        {
+          id: "01234567-89AB-CDEF-0123-456789ABCDEF",
+          vote: 0,
+          displayName: "Requester",
+        },
+      ];
+      const assertionState = {
+        ...state,
+        rest: { listReviewers },
+      } as unknown as AddReviewersState;
+      const created: ExecutedRecord = {
+        name: "create_pull_request",
+        status: "succeeded",
+        result: {
+          pull_request_id: 42,
+          temporary_id: temporaryId,
+        },
+      };
+      const updated: ExecutedRecord = {
+        name: "update_pr",
+        status: "succeeded",
+        result: {
+          pull_request_id: 42,
+          operation: "add-reviewers",
+          added: [submittedReviewer.toUpperCase()],
+          failed: [],
+        },
+      };
+
+      await expect(
+        scenario.assert(ctx, assertionState, updated, [created, updated]),
+      ).resolves.toBeUndefined();
+      expect(assertionState.prId).toBe(42);
+    },
+  );
 
   it.each([
     {
@@ -141,7 +178,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       updated: {
         pull_request_id: 42,
         operation: "add-reviewers",
-        added: ["requester@example.com"],
+        added: ["01234567-89ab-cdef-0123-456789abcdef"],
         failed: [],
       },
     },
@@ -154,7 +191,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       updated: {
         pull_request_id: 43,
         operation: "add-reviewers",
-        added: ["requester@example.com"],
+        added: ["01234567-89ab-cdef-0123-456789abcdef"],
         failed: [],
       },
     },
@@ -167,7 +204,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       updated: {
         pull_request_id: 42,
         operation: "update-description",
-        added: ["requester@example.com"],
+        added: ["01234567-89ab-cdef-0123-456789abcdef"],
         failed: [],
       },
     },
@@ -181,7 +218,7 @@ describe("create-pull-request add-reviewers handoff", () => {
         pull_request_id: 42,
         operation: "add-reviewers",
         added: [],
-        failed: ["requester@example.com (HTTP 403)"],
+        failed: ["01234567-89ab-cdef-0123-456789abcdef (HTTP 403)"],
       },
     },
     {
@@ -193,7 +230,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       updated: {
         pull_request_id: 42,
         operation: "add-reviewers",
-        added: ["someone@example.com"],
+        added: ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
         failed: [],
       },
     },
@@ -202,7 +239,11 @@ describe("create-pull-request add-reviewers handoff", () => {
       ...state,
       rest: {
         listReviewers: async () => [
-          { id: "reviewer-id", vote: 0, displayName: "Requester" },
+          {
+            id: "01234567-89ab-cdef-0123-456789abcdef",
+            vote: 0,
+            displayName: "Requester",
+          },
         ],
       },
     } as unknown as AddReviewersState;
@@ -248,7 +289,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       result: {
         pull_request_id: 42,
         operation: "add-reviewers",
-        added: ["requester@example.com"],
+        added: ["01234567-89ab-cdef-0123-456789abcdef"],
         failed: [],
       },
     };

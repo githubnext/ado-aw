@@ -130,19 +130,11 @@ export class AdoRest {
 
   /**
    * Resolve an identity using the same exact-match fields as update-pr's
-   * production add-reviewers implementation. GUIDs are already canonical ADO
-   * identity IDs and do not require a network lookup.
+   * production add-reviewers implementation. Canonical GUIDs are verified
+   * through the identityIds query; names and emails use exact field matching.
    */
   async resolveIdentityId(identity: string): Promise<string | undefined> {
     const value = identity.trim();
-    if (
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-        value,
-      )
-    ) {
-      return value;
-    }
-
     const vsspsBase = this.base.replace(
       "://dev.azure.com/",
       "://vssps.dev.azure.com/",
@@ -152,6 +144,27 @@ export class AdoRest {
         `cannot derive VSSPS identity endpoint from org URL '${this.base}'`,
       );
     }
+
+    if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        value,
+      )
+    ) {
+      const query = new URLSearchParams({
+        identityIds: value,
+        "api-version": "7.1",
+      });
+      const res = await this.request<{
+        value?: Array<{ id?: string }>;
+      }>(`${vsspsBase}/_apis/identities?${query.toString()}`);
+      const identities = res?.value ?? [];
+      if (identities.length !== 1) return undefined;
+      const id = identities[0]?.id;
+      return typeof id === "string" && asciiEqualsIgnoreCase(id, value)
+        ? id
+        : undefined;
+    }
+
     const query = new URLSearchParams({
       searchFilter: "General",
       filterValue: value,

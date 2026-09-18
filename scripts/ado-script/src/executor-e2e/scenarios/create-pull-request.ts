@@ -71,10 +71,19 @@ interface CreatePrScenarioOptions {
 const CREATE_PR_TEMPORARY_ID = "#aw_prcreate";
 const HANDOFF_TEMPORARY_ID = "#aw_prhandoff";
 const REVIEWERS_TEMPORARY_ID = "#aw_prreviewers";
+const REVIEWERS_GENERAL_TEMPORARY_ID = "#aw_prreviewersgeneral";
 
 interface AddReviewersState extends CreatePrState {
   reviewer: string;
   reviewerId: string;
+}
+
+interface AddReviewersScenarioOptions {
+  readonly id: string;
+  readonly temporaryId: string;
+  readonly patchRelPath: string;
+  readonly changedFileSuffix: string;
+  readonly submit: "configured-reviewer" | "resolved-id";
 }
 
 export function resolveExecutorE2eReviewer(
@@ -494,119 +503,161 @@ export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
     cleanupTemporaryPrHandoff(state, records),
 };
 
-/**
- * Creates a PR and adds the pipeline requester as its reviewer in one
- * executor invocation, proving temporary-ID handoff and live reviewer state.
- */
-export const createPullRequestAddReviewers: Scenario<AddReviewersState> = {
-  id: "create-pull-request-add-reviewers",
-  tool: "update-pr",
-  targetsAdoRepo: true,
-  setup: async (ctx) => {
-    const reviewer = resolveExecutorE2eReviewer();
-    const reviewerId = await ctx.rest.resolveIdentityId(reviewer);
-    if (!reviewerId) {
-      throw new SkipError(
-        `create-pull-request-add-reviewers: reviewer '${reviewer}' did not resolve to exactly one ADO identity`,
-      );
-    }
-    const state = await setupCreatePullRequest(ctx, {
-      id: "create-pull-request-add-reviewers",
-      repositorySelector: "named",
-      patchRelPath: "create-pr-add-reviewers.patch",
-      changedFileSuffix: "-add-reviewers",
-    });
-    return { ...state, reviewer, reviewerId };
-  },
-  config: (_ctx, state) => ({
-    "allowed-operations": ["add-reviewers"],
-    "allowed-repositories": [state.repo],
-    "allowed-reviewers": [state.reviewer],
-    "max-reviewers": 1,
-    max: 1,
-  }),
-  priorEntries: async (ctx, state): Promise<PriorEntry[]> => [
-    {
-      tool: "create-pull-request",
-      config: {
-        "target-branch": state.targetBranch,
-        "allowed-repositories": [state.repo],
-        "delete-source-branch": true,
-        "if-no-changes": "error",
-        "include-stats": false,
-      },
-      entry: {
-        title: `${ctx.prefix("create-pull-request-add-reviewers")} (do not merge)`,
-        description: detBody(ctx, "create-pull-request-add-reviewers"),
-        source_branch: state.sourceBranch,
-        patch_file: state.patchRelPath,
-        repository: state.repositorySelector,
-        agent_labels: [],
-        temporary_id: REVIEWERS_TEMPORARY_ID,
-        base_commit: state.baseCommit,
-        patch_sha256: state.patchSha256,
-      },
+function createPullRequestAddReviewersScenario(
+  options: AddReviewersScenarioOptions,
+): Scenario<AddReviewersState> {
+  const submittedReviewer = (state: AddReviewersState): string =>
+    options.submit === "resolved-id" ? state.reviewerId : state.reviewer;
+
+  return {
+    id: options.id,
+    tool: "update-pr",
+    targetsAdoRepo: true,
+    setup: async (ctx) => {
+      const reviewer = resolveExecutorE2eReviewer();
+      if (
+        options.submit === "configured-reviewer" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          reviewer,
+        )
+      ) {
+        throw new SkipError(
+          `${options.id}: EXECUTOR_E2E_REVIEWER must be an email or name to exercise searchFilter=General`,
+        );
+      }
+      const reviewerId = await ctx.rest.resolveIdentityId(reviewer);
+      if (!reviewerId) {
+        throw new SkipError(
+          `${options.id}: reviewer '${reviewer}' did not resolve to exactly one ADO identity`,
+        );
+      }
+      const state = await setupCreatePullRequest(ctx, {
+        id: options.id,
+        repositorySelector: "named",
+        patchRelPath: options.patchRelPath,
+        changedFileSuffix: options.changedFileSuffix,
+      });
+      return { ...state, reviewer, reviewerId };
     },
-  ],
-  files: async (_ctx, state) => ({ [state.patchRelPath]: state.patchContent }),
-  env: async (_ctx, state) => ({
-    BUILD_SOURCESDIRECTORY: state.sourcesDir,
-  }),
-  ndjson: async (_ctx, state) => ({
-    pull_request_id: REVIEWERS_TEMPORARY_ID,
-    operation: "add-reviewers",
-    reviewers: [state.reviewer],
-  }),
-  assert: async (_ctx, state, record, records) => {
-    const created = executedRecordForTool(records, "create-pull-request");
-    const createdPrId = numResult(created, "pull_request_id");
-    state.prId = createdPrId;
-    if (strResult(created, "temporary_id") !== REVIEWERS_TEMPORARY_ID) {
-      throw new Error(
-        `create-pull-request reported the wrong temporary_id for reviewer handoff`,
-      );
-    }
+    config: (_ctx, state) => ({
+      "allowed-operations": ["add-reviewers"],
+      "allowed-repositories": [state.repo],
+      "allowed-reviewers": [submittedReviewer(state)],
+      "max-reviewers": 1,
+      max: 1,
+    }),
+    priorEntries: async (ctx, state): Promise<PriorEntry[]> => [
+      {
+        tool: "create-pull-request",
+        config: {
+          "target-branch": state.targetBranch,
+          "allowed-repositories": [state.repo],
+          "delete-source-branch": true,
+          "if-no-changes": "error",
+          "include-stats": false,
+        },
+        entry: {
+          title: `${ctx.prefix(options.id)} (do not merge)`,
+          description: detBody(ctx, options.id),
+          source_branch: state.sourceBranch,
+          patch_file: state.patchRelPath,
+          repository: state.repositorySelector,
+          agent_labels: [],
+          temporary_id: options.temporaryId,
+          base_commit: state.baseCommit,
+          patch_sha256: state.patchSha256,
+        },
+      },
+    ],
+    files: async (_ctx, state) => ({
+      [state.patchRelPath]: state.patchContent,
+    }),
+    env: async (_ctx, state) => ({
+      BUILD_SOURCESDIRECTORY: state.sourcesDir,
+    }),
+    ndjson: async (_ctx, state) => ({
+      pull_request_id: options.temporaryId,
+      operation: "add-reviewers",
+      reviewers: [submittedReviewer(state)],
+    }),
+    assert: async (_ctx, state, record, records) => {
+      const created = executedRecordForTool(records, "create-pull-request");
+      const createdPrId = numResult(created, "pull_request_id");
+      state.prId = createdPrId;
+      if (strResult(created, "temporary_id") !== options.temporaryId) {
+        throw new Error(
+          `create-pull-request reported the wrong temporary_id for reviewer handoff`,
+        );
+      }
 
-    const updatedPrId = numResult(record, "pull_request_id");
-    if (updatedPrId !== createdPrId) {
-      throw new Error(
-        `temporary_id '${REVIEWERS_TEMPORARY_ID}' resolved to PR #${updatedPrId}, but create-pull-request filed #${createdPrId}`,
-      );
-    }
-    if (strResult(record, "operation") !== "add-reviewers") {
-      throw new Error("update-pr reported an unexpected operation");
-    }
-    const failed = stringArrayResult(record, "failed");
-    if (failed.length !== 0) {
-      throw new Error(`add-reviewers reported failures: ${failed.join(", ")}`);
-    }
-    const added = stringArrayResult(record, "added");
-    if (
-      !added.some(
-        (reviewer) =>
-          reviewer.toLowerCase() === state.reviewer.toLowerCase(),
-      )
-    ) {
-      throw new Error(
-        `add-reviewers result did not include configured identity '${state.reviewer}'`,
-      );
-    }
+      const updatedPrId = numResult(record, "pull_request_id");
+      if (updatedPrId !== createdPrId) {
+        throw new Error(
+          `temporary_id '${options.temporaryId}' resolved to PR #${updatedPrId}, but create-pull-request filed #${createdPrId}`,
+        );
+      }
+      if (strResult(record, "operation") !== "add-reviewers") {
+        throw new Error("update-pr reported an unexpected operation");
+      }
+      const failed = stringArrayResult(record, "failed");
+      if (failed.length !== 0) {
+        throw new Error(`add-reviewers reported failures: ${failed.join(", ")}`);
+      }
+      const expectedAdded = submittedReviewer(state);
+      const added = stringArrayResult(record, "added");
+      if (
+        !added.some(
+          (reviewer) =>
+            reviewer.toLowerCase() === expectedAdded.toLowerCase(),
+        )
+      ) {
+        throw new Error(
+          `add-reviewers result did not include submitted identity '${expectedAdded}'`,
+        );
+      }
 
-    const reviewers = await state.rest.listReviewers(state.repo, createdPrId);
-    if (
-      !reviewers.some(
-        (reviewer) =>
-          reviewer.id.toLowerCase() === state.reviewerId.toLowerCase(),
-      )
-    ) {
-      throw new Error(
-        `PR #${createdPrId} does not contain reviewer identity '${state.reviewerId}'`,
-      );
-    }
-  },
-  cleanup: async (_ctx, state, records) =>
-    cleanupTemporaryPrHandoff(state, records),
-};
+      const reviewers = await state.rest.listReviewers(state.repo, createdPrId);
+      if (
+        !reviewers.some(
+          (reviewer) =>
+            reviewer.id.toLowerCase() === state.reviewerId.toLowerCase(),
+        )
+      ) {
+        throw new Error(
+          `PR #${createdPrId} does not contain reviewer identity '${state.reviewerId}'`,
+        );
+      }
+    },
+    cleanup: async (_ctx, state, records) =>
+      cleanupTemporaryPrHandoff(state, records),
+  };
+}
+
+/**
+ * Submits the setup-resolved identity GUID so production verifies it through
+ * the VSSPS identityIds query before adding the reviewer.
+ */
+export const createPullRequestAddReviewers =
+  createPullRequestAddReviewersScenario({
+    id: "create-pull-request-add-reviewers",
+    temporaryId: REVIEWERS_TEMPORARY_ID,
+    patchRelPath: "create-pr-add-reviewers.patch",
+    changedFileSuffix: "-add-reviewers",
+    submit: "resolved-id",
+  });
+
+/**
+ * Submits the configured email/name unchanged so production resolves it via
+ * searchFilter=General exact matching before adding the reviewer.
+ */
+export const createPullRequestAddReviewersGeneral =
+  createPullRequestAddReviewersScenario({
+    id: "create-pull-request-add-reviewers-general",
+    temporaryId: REVIEWERS_GENERAL_TEMPORARY_ID,
+    patchRelPath: "create-pr-add-reviewers-general.patch",
+    changedFileSuffix: "-add-reviewers-general",
+    submit: "configured-reviewer",
+  });
 
 export const createPullRequestScenarios: Scenario<unknown>[] = [
   createPullRequest,
@@ -614,4 +665,5 @@ export const createPullRequestScenarios: Scenario<unknown>[] = [
   createPullRequestCrossOrg,
   createPullRequestTemporaryIdHandoff,
   createPullRequestAddReviewers,
+  createPullRequestAddReviewersGeneral,
 ];

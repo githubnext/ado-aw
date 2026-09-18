@@ -616,7 +616,7 @@ Multi-call operations preflight repository policy, filters, capability
 switches, and requested values before writing, so a denied later value cannot
 leave a partial mutation.
 
-### Temporary IDs and approval
+### Temporary IDs, approval, and staged mode
 
 Use a gh-aw-compatible temporary ID to refer to a newly created issue before
 its real number exists:
@@ -648,6 +648,13 @@ safe-outputs:
   set-github-issue-type:
     target-repo: octo-org/octo-repo
 ```
+
+They must also have exactly the same effective `staged` setting. A staged
+create previews issue creation and cannot supply a live issue to a consumer;
+conversely, a live create followed by a staged consumer splits creation from
+its preview-only follow-up. The compiler resolves the section-level
+`safe-outputs.staged` default and any per-tool override before comparing every
+configured consumer.
 
 The `ado-aw-safe-outputs` build-summary tab shows each proposal using the exact
 tool name, repository, target IDs, requested state, labels/users/field values,
@@ -893,7 +900,12 @@ job — that create is scoped by its own configuration — so they are not check
 against `target`. A temporary ID that cannot be traced to such a create is
 rejected before any request is sent. When both tools are configured they must
 have the same effective `require-approval` setting, so temporary-ID state stays
-within a single SafeOutputs job.
+within a single SafeOutputs job. `create-work-item` and every configured
+temporary-ID consumer must also have exactly the same effective `staged`
+setting: staged creation cannot produce the live work item required by a
+consumer, while staging only the consumer splits a live creation from its
+preview-only follow-up. Section-level defaults and per-tool overrides are
+resolved before comparison.
 
 ```json
 {"title":"Investigate build failure","description":"Detailed failure report long enough for validation."}
@@ -967,9 +979,9 @@ call returns the temporary ID used by the second:
 - `max` - Maximum assignments per run (default: 1).
 
 When both create and assign are configured, they must have the same effective
-`require-approval` setting so temporary-ID state remains in one SafeOutputs
-job. Unresolved, duplicate, reversed, or failed-create references fail before
-assignment.
+`require-approval` and `staged` settings so temporary-ID state remains in one
+SafeOutputs job and preview behavior stays consistent. Unresolved, duplicate,
+reversed, or failed-create references fail before assignment.
 
 `Agency` and `GitHub Copilot` are reserved non-assignable identities. They are
 rejected case-insensitively in static `create-work-item.assignee`,
@@ -1326,6 +1338,13 @@ in-memory references scoped to one SafeOutputs job: automatic and manually
 reviewed safe outputs execute in separate jobs and cannot share a temporary ID.
 When both tools are configured, the compiler therefore requires them to have
 the same effective `require-approval` setting.
+
+The two tools must also have the same effective `staged` setting. A staged
+`create-pull-request` previews creation instead of producing the live PR that
+`update-pr` would modify, while staging only `update-pr` would preview updates
+after live creation. The compiler rejects both split-process configurations.
+Section-level `safe-outputs.staged` defaults and per-tool `staged` overrides are
+resolved before this comparison.
 Each follow-up call counts against `update-pr.max`.
 
 Example agent call sequence:

@@ -562,7 +562,7 @@ async fn append_execution_record_impl(
         name: tool_name.replace('-', "_"),
         status,
         context: proposal_context.map(str::to_owned),
-        result: if status == "succeeded" {
+        result: if matches!(status, "succeeded" | "warning") {
             result.data.clone()
         } else {
             None
@@ -903,6 +903,59 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    async fn append_and_read_execution_record(result: ExecutionResult) -> Value {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        append_execution_record_impl(dir.path(), "update-pull-request", &result, Some("pr-42"))
+            .await
+            .expect("append execution record");
+        let contents = tokio::fs::read_to_string(dir.path().join(EXECUTED_NDJSON_FILENAME))
+            .await
+            .expect("read execution manifest");
+        serde_json::from_str(contents.trim()).expect("parse execution record")
+    }
+
+    #[tokio::test]
+    async fn execution_manifest_warning_preserves_result_and_error() {
+        let record = append_and_read_execution_record(ExecutionResult::warning_with_data(
+            "some reviewers could not be added",
+            serde_json::json!({"added": ["alice"], "failed": ["bob"]}),
+        ))
+        .await;
+
+        assert_eq!(record["status"], "warning");
+        assert_eq!(
+            record["result"],
+            serde_json::json!({"added": ["alice"], "failed": ["bob"]})
+        );
+        assert_eq!(record["error"], "some reviewers could not be added");
+    }
+
+    #[tokio::test]
+    async fn execution_manifest_success_preserves_result_without_error() {
+        let record = append_and_read_execution_record(ExecutionResult::success_with_data(
+            "pull request updated",
+            serde_json::json!({"pull_request_id": 42}),
+        ))
+        .await;
+
+        assert_eq!(record["status"], "succeeded");
+        assert_eq!(record["result"], serde_json::json!({"pull_request_id": 42}));
+        assert!(record["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn execution_manifest_failure_preserves_error_without_result() {
+        let record = append_and_read_execution_record(ExecutionResult::failure_with_data(
+            "permission denied",
+            serde_json::json!({"ignored": true}),
+        ))
+        .await;
+
+        assert_eq!(record["status"], "failed");
+        assert!(record["result"].is_null());
+        assert_eq!(record["error"], "permission denied");
+    }
 
     // ── extract_entry_context ─────────────────────────────────────────────────
 

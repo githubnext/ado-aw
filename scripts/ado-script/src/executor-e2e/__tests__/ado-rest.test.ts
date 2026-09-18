@@ -24,16 +24,62 @@ describe("AdoRest.workItemTypeExists", () => {
       vi.unstubAllGlobals();
     });
 
-    it("passes GUID identities through without a request", async () => {
-      const fetchMock = vi.fn();
-      vi.stubGlobal("fetch", fetchMock);
+    it("verifies GUID identities through the identityIds query", async () => {
+      const fetchMock = stubFetch(
+        () =>
+          new Response(
+            JSON.stringify({
+              value: [
+                { id: "01234567-89AB-CDEF-0123-456789ABCDEF" },
+              ],
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          ),
+      );
 
       await expect(
         new AdoRest(options).resolveIdentityId(
           "01234567-89ab-cdef-0123-456789abcdef",
         ),
-      ).resolves.toBe("01234567-89ab-cdef-0123-456789abcdef");
-      expect(fetchMock).not.toHaveBeenCalled();
+      ).resolves.toBe("01234567-89AB-CDEF-0123-456789ABCDEF");
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(
+        "https://vssps.dev.azure.com/org/_apis/identities?identityIds=01234567-89ab-cdef-0123-456789abcdef&api-version=7.1",
+      );
+    });
+
+    it.each([
+      {
+        name: "missing",
+        value: [],
+      },
+      {
+        name: "duplicate",
+        value: [
+          { id: "01234567-89ab-cdef-0123-456789abcdef" },
+          { id: "01234567-89ab-cdef-0123-456789abcdef" },
+        ],
+      },
+      {
+        name: "mismatched",
+        value: [{ id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }],
+      },
+    ])("rejects a $name GUID identity response", async ({ value }) => {
+      stubFetch(
+        () =>
+          new Response(JSON.stringify({ value }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+
+      await expect(
+        new AdoRest(options).resolveIdentityId(
+          "01234567-89ab-cdef-0123-456789abcdef",
+        ),
+      ).resolves.toBeUndefined();
     });
 
     it("encodes the identity query and accepts one case-insensitive exact match", async () => {

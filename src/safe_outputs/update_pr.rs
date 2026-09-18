@@ -1054,33 +1054,57 @@ async fn lookup_reviewer_id(
     connection_type: Option<crate::compile::types::WriteConnectionType>,
 ) -> Option<String> {
     if let Ok(reviewer_id) = Guid::parse(reviewer) {
-        let identity_url = format!("{}/_apis/identities/{}", vssps_base, reviewer_id);
+        let identity_url = format!("{}/_apis/identities", vssps_base);
         debug!(
             "Verifying reviewer identity GUID '{}': {}",
             reviewer, identity_url
         );
         return match crate::safe_outputs::authenticate_ado_request(
-            client.get(&identity_url).query(&[("api-version", "7.1")]),
+            client.get(&identity_url).query(&[
+                ("identityIds", reviewer_id.as_str()),
+                ("api-version", "7.1"),
+            ]),
             token,
             connection_type,
         )
         .send()
         .await
         {
-            Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-                Ok(body) => body
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|id| id.eq_ignore_ascii_case(reviewer_id.as_str()))
-                    .map(str::to_string),
-                Err(error) => {
-                    warn!(
-                        "Identity lookup for GUID '{}' returned invalid JSON: {}",
-                        reviewer, error
-                    );
-                    None
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        let Some(identities) =
+                            body.get("value").and_then(serde_json::Value::as_array)
+                        else {
+                            warn!(
+                                "Identity lookup for GUID '{}' response missing 'value' array",
+                                reviewer
+                            );
+                            return None;
+                        };
+                        if identities.len() != 1 {
+                            warn!(
+                                "Identity lookup for GUID '{}' returned {} identities",
+                                reviewer,
+                                identities.len()
+                            );
+                            return None;
+                        }
+                        identities[0]
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|id| id.eq_ignore_ascii_case(reviewer_id.as_str()))
+                            .map(str::to_string)
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Identity lookup for GUID '{}' returned invalid JSON: {}",
+                            reviewer, error
+                        );
+                        None
+                    }
                 }
-            },
+            }
             Ok(resp) => {
                 warn!(
                     "Identity lookup for GUID '{}' returned HTTP {}",
@@ -1755,11 +1779,15 @@ mod tests {
         let server = MockServer::start().await;
         let reviewer = "12345678-1234-1234-1234-1234567890ab";
         Mock::given(method("GET"))
-            .and(path(format!("/_apis/identities/{reviewer}")))
+            .and(path("/_apis/identities"))
+            .and(query_param("identityIds", reviewer))
             .and(query_param("api-version", "7.1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "12345678-1234-1234-1234-1234567890AB",
-                "displayName": "Exact Person"
+                "count": 1,
+                "value": [{
+                    "id": "12345678-1234-1234-1234-1234567890AB",
+                    "displayName": "Exact Person"
+                }]
             })))
             .expect(1)
             .mount(&server)
@@ -1784,9 +1812,13 @@ mod tests {
         let server = MockServer::start().await;
         let reviewer = "12345678-1234-1234-1234-1234567890ab";
         Mock::given(method("GET"))
-            .and(path(format!("/_apis/identities/{reviewer}")))
+            .and(path("/_apis/identities"))
+            .and(query_param("identityIds", reviewer))
             .and(query_param("api-version", "7.1"))
-            .respond_with(ResponseTemplate::new(404))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 0,
+                "value": []
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -1800,6 +1832,178 @@ mod tests {
         )
         .await;
         assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_guid_lookup_rejects_response_missing_value_array() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "12345678-1234-1234-1234-1234567890ab";
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("identityIds", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_guid_lookup_rejects_duplicate_identities() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "12345678-1234-1234-1234-1234567890ab";
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("identityIds", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 2,
+                "value": [
+                    {"id": reviewer},
+                    {"id": reviewer}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_guid_lookup_rejects_mismatched_identity() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "12345678-1234-1234-1234-1234567890ab";
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("identityIds", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1,
+                "value": [{
+                    "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_guid_lookup_rejects_http_errors_and_invalid_json() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let reviewer = "12345678-1234-1234-1234-1234567890ab";
+        let http_error_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("identityIds", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&http_error_server)
+            .await;
+
+        let http_error = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &http_error_server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert!(http_error.is_none());
+
+        let invalid_json_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("identityIds", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("{", "application/json"))
+            .expect(1)
+            .mount(&invalid_json_server)
+            .await;
+
+        let invalid_json = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &invalid_json_server.uri(),
+            reviewer,
+            "token",
+            None,
+        )
+        .await;
+        assert!(invalid_json.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewer_guid_lookup_preserves_bearer_auth_routing() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let reviewer = "12345678-1234-1234-1234-1234567890ab";
+        Mock::given(method("GET"))
+            .and(path("/_apis/identities"))
+            .and(query_param("identityIds", reviewer))
+            .and(query_param("api-version", "7.1"))
+            .and(header("authorization", "Bearer entra-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1,
+                "value": [{"id": reviewer}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let id = lookup_reviewer_id(
+            &reqwest::Client::new(),
+            &server.uri(),
+            reviewer,
+            "entra-token",
+            Some(crate::compile::types::WriteConnectionType::AzureDevOps),
+        )
+        .await;
+        assert_eq!(id.as_deref(), Some(reviewer));
     }
 
     #[tokio::test]

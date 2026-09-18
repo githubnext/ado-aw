@@ -128,11 +128,24 @@ The checked-in pipeline resolves `E2E_WORK_ITEM_ASSIGNEE` from a same-named
 definition/queue-time variable first, then falls back to
 `Build.RequestedForEmail`.
 
-The live create-PR → add-reviewers scenario resolves
+The two live create-PR → add-reviewers scenarios resolve
 `EXECUTOR_E2E_REVIEWER` the same way: a definition/queue-time override takes
 precedence, then `Build.RequestedForEmail` is used. The reviewer must resolve
-to exactly one Azure DevOps identity; otherwise the scenario skips before
-creating remote state.
+to exactly one Azure DevOps identity during setup; otherwise each scenario
+skips before creating remote state.
+
+- `create-pull-request-add-reviewers` submits the resolved identity GUID through
+  both the allowlist and safe-output payload, exercising production
+  `identityIds` verification.
+- `create-pull-request-add-reviewers-general` submits the configured email/name
+  unchanged through both surfaces, exercising production
+  `searchFilter=General` exact matching. It skips when the configured value is
+  itself a GUID.
+
+Each scenario uses its own temporary ID, source branch, patch, and PR; each
+request contains exactly one reviewer. Both verify the structured executor
+result and live PR membership against the setup-resolved identity GUID, and
+retain failure-safe PR/branch/checkout cleanup.
 
 > **Coverage note.** The signal scenarios (`noop`, `missing-tool`,
 > `missing-data`, `report-incomplete`) were previously exercised only by

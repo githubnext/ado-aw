@@ -1744,6 +1744,111 @@ Create and update pull requests.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Compiler entry-point coverage for the effective staged compatibility rule
+/// shared by every temporary-ID producer/consumer family.
+#[test]
+fn test_temporary_id_tools_require_matching_staged_settings() {
+    let families = [
+        (
+            "github-issue",
+            "create-github-issue",
+            "    target-repo: githubnext/ado-aw\n",
+            "set-github-issue-type",
+            "    target-repo: githubnext/ado-aw\n",
+            "temporary issue IDs",
+        ),
+        (
+            "work-item",
+            "create-work-item",
+            "",
+            "assign-work-item",
+            "    target: \"*\"\n",
+            "temporary work-item IDs",
+        ),
+        (
+            "pull-request",
+            "create-pull-request",
+            "",
+            "update-pr",
+            "    allowed-operations:\n      - update-description\n",
+            "temporary pull-request IDs",
+        ),
+    ];
+
+    let render_tool = |tool: &str, extra: &str, staged: Option<bool>| {
+        let staged = staged
+            .map(|value| format!("    staged: {value}\n"))
+            .unwrap_or_default();
+        if staged.is_empty() && extra.is_empty() {
+            format!("  {tool}: {{}}\n")
+        } else {
+            format!("  {tool}:\n{staged}{extra}")
+        }
+    };
+
+    for (family, producer, producer_extra, consumer, consumer_extra, diagnostic) in families {
+        let cases = [
+            ("section-default", Some(true), None, None, true),
+            (
+                "matching-overrides",
+                Some(true),
+                Some(false),
+                Some(false),
+                true,
+            ),
+            (
+                "producer-staged-consumer-live",
+                None,
+                Some(true),
+                Some(false),
+                false,
+            ),
+            (
+                "producer-live-consumer-staged",
+                None,
+                Some(false),
+                Some(true),
+                false,
+            ),
+        ];
+
+        for (case_name, section_default, producer_staged, consumer_staged, should_succeed) in cases
+        {
+            let staged_default = section_default
+                .map(|value| format!("  staged: {value}\n"))
+                .unwrap_or_default();
+            let test_content = format!(
+                r#"---
+name: "Temporary ID Staging Agent"
+description: "Agent that creates and then updates an entity"
+safe-outputs:
+{staged_default}{producer_block}{consumer_block}---
+
+## Temporary ID Staging Agent
+
+Create and update an entity.
+"#,
+                producer_block = render_tool(producer, producer_extra, producer_staged),
+                consumer_block = render_tool(consumer, consumer_extra, consumer_staged),
+            );
+            let (ok, _, stderr) =
+                compile_inline_source(&format!("{family}-staging-{case_name}"), &test_content);
+
+            if should_succeed {
+                assert!(ok, "Compiler should accept {family} {case_name}: {stderr}");
+            } else {
+                assert!(!ok, "Compiler should reject {family} {case_name}");
+                assert!(
+                    stderr.contains("same effective staged")
+                        && stderr.contains(diagnostic)
+                        && stderr.contains("preview"),
+                    "Unexpected compiler error for {family} {case_name}: {stderr}"
+                );
+            }
+        }
+    }
+}
+
 /// Test that update-pr compiles successfully whether the vote operation is made
 /// unreachable via `allowed-operations` (excluding "vote") or is reachable but
 /// backed by a non-empty `allowed-votes` list. Both configurations satisfy
@@ -6427,12 +6532,11 @@ safe-outputs:
 Replace the managed issue comment.
 "#,
     );
+    assert!(compiled.contains("--actor-output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN'"));
     assert!(
-        compiled.contains("--actor-output-var 'ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN'")
+        compiled
+            .contains("ADO_AW_GITHUB_ACTOR_LOGIN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN)")
     );
-    assert!(compiled.contains(
-        "ADO_AW_GITHUB_ACTOR_LOGIN: $(ADO_AW_SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN)"
-    ));
 }
 
 /// The example file in `examples/dogfood-failure-reporter.md` must compile
