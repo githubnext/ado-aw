@@ -43,3 +43,12 @@ When `tools.cache-memory` is configured, the compiler automatically injects a `c
 - Creates an empty memory directory so the agent starts fresh
 
 If you define your own `clearMemory` parameter in the front matter, the auto-injected one is suppressed — your definition takes precedence.
+
+### Reserved names on `target: job` / `target: stage`
+
+On these two targets the compiler auto-injects its own `dependsOn` and
+`condition` template parameters (see [`docs/targets.md`](targets.md)) so
+callers can wire in external ordering at the `template:` invocation site.
+Declaring a front-matter `parameters:` entry named `dependsOn` or `condition`
+on `target: job` or `target: stage` is therefore a **compile-time error** —
+rename the parameter or switch targets.
