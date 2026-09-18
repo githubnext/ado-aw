@@ -133,9 +133,10 @@ impl AgentStats {
     /// `github.copilot.cost` omit consumption from the footer.
     pub fn to_markdown(&self) -> String {
         let duration = format_duration(self.duration_seconds);
+        let model = sanitize_for_markdown(self.model.as_deref().unwrap_or("unknown"));
         let name = sanitize_for_markdown(&self.agent_name);
 
-        let mut segments = vec![format!("\u{1F916} {name}")];
+        let mut segments = vec![format!("\u{1F916} {name}"), model];
         if let Some(credits) = self.ai_credits {
             segments.push(format!("{credits} AI credits"));
         }
@@ -292,7 +293,7 @@ mod tests {
         };
         let md = stats.to_markdown();
         assert!(md.contains("Daily Code Review"));
-        assert!(!md.contains("claude-opus-4.5"));
+        assert!(md.contains("claude-opus-4.5"));
         assert!(md.contains("5 AI credits"));
         assert!(!md.contains("45,230 in"), "tokens should not appear when credits are present");
         assert!(!md.contains("12,450 out"), "tokens should not appear when credits are present");

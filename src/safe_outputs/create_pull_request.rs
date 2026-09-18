@@ -1166,8 +1166,6 @@ impl Executor for CreatePrResult {
         };
         debug!("Changes pushed successfully");
 
-        // Append agent stats and compiler provenance as one footer.
-        // Provenance goes last as the final unambiguous marker.
         // If any symlinks were skipped during file collection, surface that in the
         // PR description so the agent/PR author can see that some intended file
         // content was dropped for safety (otherwise the warning only appears in
@@ -1176,11 +1174,7 @@ impl Executor for CreatePrResult {
             crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
         let description_with_symlink_notice =
             append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
-        let description_final = format!(
-            "{}{}",
-            description_with_symlink_notice,
-            generate_provenance_suffix(config.include_stats && ctx.agent_stats.is_some())
-        );
+        let description_final = description_with_symlink_notice;
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -2441,22 +2435,6 @@ fn find_protected_files(paths: &[String]) -> Vec<String> {
     protected
 }
 
-/// Generate a provenance suffix for the PR body.
-///
-/// When agent statistics are present, append this to their footer rather than
-/// rendering a second metadata section.
-fn generate_provenance_suffix(append_to_stats_footer: bool) -> String {
-    format!(
-        "{}> Compiler: ado-aw v{}",
-        if append_to_stats_footer {
-            ""
-        } else {
-            "\n\n---\n"
-        },
-        env!("CARGO_PKG_VERSION")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2471,37 +2449,6 @@ mod tests {
             labels: vec![],
         };
         assert!(params.validate().is_ok());
-    }
-
-    #[test]
-    fn test_pr_footer_extends_agent_stats_without_second_section() {
-        let footer = generate_provenance_suffix(true);
-        assert!(footer.starts_with("> Compiler: ado-aw v"));
-        assert!(!footer.contains("---"));
-        assert!(!footer.contains("Generated at:"));
-        assert!(!footer.contains("created by an automated agent"));
-
-        let stats = crate::agent_stats::AgentStats {
-            agent_name: "Dependency Updater".to_string(),
-            model: Some("claude-opus-4.7".to_string()),
-            input_tokens: 4_736_548,
-            output_tokens: 28_863,
-            ai_credits: Some(42),
-            duration_seconds: 603.0,
-            tool_calls: 85,
-            turns: 1,
-        };
-        let combined = format!("{}{}", stats.to_markdown(), footer);
-        assert_eq!(combined.matches("---").count(), 1);
-        assert!(!combined.contains("claude-opus-4.7"));
-        assert!(combined.contains("10m 3s\n> Compiler:"));
-    }
-
-    #[test]
-    fn test_pr_footer_stands_alone_without_agent_stats() {
-        let footer = generate_provenance_suffix(false);
-        assert!(footer.starts_with("\n\n---\n> Compiler: ado-aw v"));
-        assert!(!footer.contains("Generated at:"));
     }
 
     #[test]
