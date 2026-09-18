@@ -97,6 +97,9 @@ stages:
 - The `condition` parameter is ANDed into the agent job's existing internal
   condition (PR gate, pipeline gate, etc.). Empty default preserves ADO's
   native `succeeded()` behaviour.
+- `dependsOn` and `condition` are reserved parameter names on `target: job`.
+  Declaring a front-matter `parameters:` entry with either name is a
+  **compile-time error** — rename the parameter or drop `target: job`.
 - Triggers (`on:`) are ignored with a warning (the parent pipeline controls triggers).
 - If the agent declares additional repositories via `repos:`, add them to the
   parent pipeline's `resources:` block (documented in the generated file header).
@@ -136,6 +139,9 @@ stages:
   behaviour.
 - The `dependsOn` parameter is typed `object`, matching ADO's native
   `dependsOn:` semantics (accepts a single string or a list).
+- `dependsOn` and `condition` are reserved parameter names on `target: stage`,
+  same as `target: job` — a front-matter `parameters:` entry with either name
+  is a **compile-time error**.
 - Same 3-job chain, job-name prefixing, and pool handling as `target: job`.
 - Triggers (`on:`) are ignored with a warning.
 - If the agent declares additional repositories via `repos:`, add them to the
