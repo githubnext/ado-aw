@@ -1166,8 +1166,6 @@ impl Executor for CreatePrResult {
         };
         debug!("Changes pushed successfully");
 
-        // Append agent stats then provenance footer to description.
-        // Footer goes last as the final unambiguous provenance marker.
         // If any symlinks were skipped during file collection, surface that in the
         // PR description so the agent/PR author can see that some intended file
         // content was dropped for safety (otherwise the warning only appears in
@@ -1176,11 +1174,7 @@ impl Executor for CreatePrResult {
             crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
         let description_with_symlink_notice =
             append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
-        let description_final = format!(
-            "{}{}",
-            description_with_symlink_notice,
-            generate_pr_footer()
-        );
+        let description_final = description_with_symlink_notice;
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -2439,19 +2433,6 @@ fn find_protected_files(paths: &[String]) -> Vec<String> {
         }
     }
     protected
-}
-
-/// Generate a provenance footer for the PR body
-fn generate_pr_footer() -> String {
-    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-    format!(
-        "\n\n---\n\
-        > 🤖 *This pull request was created by an automated agent.*\n\
-        > Generated at: {}\n\
-        > Compiler: ado-aw v{}",
-        timestamp,
-        env!("CARGO_PKG_VERSION")
-    )
 }
 
 #[cfg(test)]
