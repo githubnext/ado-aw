@@ -1151,7 +1151,7 @@ Note: The source branch name is auto-generated from a sanitized version of the P
 - `work-items` - List of work item IDs to link
 - `fallback-record-branch` - When PR creation fails, record the pushed branch name and target branch in the failure response so operators can manually create the PR (default: true)
 - `max` - Maximum number of create-pull-request outputs allowed per run (default: 1)
-- `include-stats` - Whether to append agent execution stats (token usage, duration, model) to the PR description (default: true)
+- `include-stats` - Whether to append agent execution stats (AI credits when available, duration, model, tool calls) to the PR description (default: true)
 
 **Multi-repository support:**
 When `workspace: root` and multiple repositories are checked out, agents can create PRs for any allowed repository:
