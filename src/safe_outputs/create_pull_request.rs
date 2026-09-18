@@ -2493,6 +2493,7 @@ mod tests {
         };
         let combined = format!("{}{}", stats.to_markdown(), footer);
         assert_eq!(combined.matches("---").count(), 1);
+        assert!(!combined.contains("claude-opus-4.7"));
         assert!(combined.contains("10m 3s\n> Compiler:"));
     }
 
