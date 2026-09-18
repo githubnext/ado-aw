@@ -1179,7 +1179,7 @@ impl Executor for CreatePrResult {
         let description_final = format!(
             "{}{}",
             description_with_symlink_notice,
-            generate_pr_footer(config.include_stats && ctx.agent_stats.is_some())
+            generate_provenance_suffix(config.include_stats && ctx.agent_stats.is_some())
         );
 
         // Create the pull request via REST API
@@ -2445,12 +2445,16 @@ fn find_protected_files(paths: &[String]) -> Vec<String> {
 ///
 /// When agent statistics are present, append this to their footer rather than
 /// rendering a second metadata section.
-fn generate_pr_footer(has_agent_stats: bool) -> String {
+fn generate_provenance_suffix(append_to_stats_footer: bool) -> String {
     let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
     format!(
         "{}> Generated at: {}\n\
         > Compiler: ado-aw v{}",
-        if has_agent_stats { "" } else { "\n\n---\n" },
+        if append_to_stats_footer {
+            ""
+        } else {
+            "\n\n---\n"
+        },
         timestamp,
         env!("CARGO_PKG_VERSION")
     )
@@ -2474,7 +2478,7 @@ mod tests {
 
     #[test]
     fn test_pr_footer_extends_agent_stats_without_second_section() {
-        let footer = generate_pr_footer(true);
+        let footer = generate_provenance_suffix(true);
         assert!(footer.starts_with("> Generated at: "));
         assert!(!footer.contains("---"));
         assert!(!footer.contains("created by an automated agent"));
@@ -2496,7 +2500,7 @@ mod tests {
 
     #[test]
     fn test_pr_footer_stands_alone_without_agent_stats() {
-        let footer = generate_pr_footer(false);
+        let footer = generate_provenance_suffix(false);
         assert!(footer.starts_with("\n\n---\n> Generated at: "));
         assert!(!footer.contains("created by an automated agent"));
     }
