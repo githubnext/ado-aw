@@ -71,7 +71,7 @@ interface CreatePrScenarioOptions {
 const CREATE_PR_TEMPORARY_ID = "#aw_prcreate";
 const HANDOFF_TEMPORARY_ID = "#aw_prhandoff";
 const REVIEWERS_TEMPORARY_ID = "#aw_prreviewers";
-const REVIEWERS_GENERAL_TEMPORARY_ID = "#aw_prreviewersgeneral";
+const REVIEWERS_GENERAL_TEMPORARY_ID = "#aw_prreviewgen";
 
 interface AddReviewersState extends CreatePrState {
   reviewer: string;

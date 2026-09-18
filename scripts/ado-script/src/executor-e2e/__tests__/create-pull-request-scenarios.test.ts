@@ -55,7 +55,7 @@ const reviewerVariants = [
     name: "raw configured email/name",
     scenario: createPullRequestAddReviewersGeneral,
     id: "create-pull-request-add-reviewers-general",
-    temporaryId: "#aw_prreviewersgeneral",
+    temporaryId: "#aw_prreviewgen",
     submittedReviewer: "requester@example.com",
   },
 ] as const;
@@ -104,7 +104,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       patch_file: "create-pr-add-reviewers.patch",
     });
     expect(generalPrior[0]?.entry).toMatchObject({
-      temporary_id: "#aw_prreviewersgeneral",
+      temporary_id: "#aw_prreviewgen",
       source_branch: "source-general",
       patch_file: "create-pr-add-reviewers-general.patch",
     });
