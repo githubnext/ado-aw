@@ -1166,8 +1166,8 @@ impl Executor for CreatePrResult {
         };
         debug!("Changes pushed successfully");
 
-        // Append agent stats then provenance footer to description.
-        // Footer goes last as the final unambiguous provenance marker.
+        // Append agent stats and provenance as one footer.
+        // Provenance goes last as the final unambiguous marker.
         // If any symlinks were skipped during file collection, surface that in the
         // PR description so the agent/PR author can see that some intended file
         // content was dropped for safety (otherwise the warning only appears in
@@ -1179,7 +1179,7 @@ impl Executor for CreatePrResult {
         let description_final = format!(
             "{}{}",
             description_with_symlink_notice,
-            generate_pr_footer()
+            generate_pr_footer(config.include_stats && ctx.agent_stats.is_some())
         );
 
         // Create the pull request via REST API
@@ -2441,14 +2441,16 @@ fn find_protected_files(paths: &[String]) -> Vec<String> {
     protected
 }
 
-/// Generate a provenance footer for the PR body
-fn generate_pr_footer() -> String {
+/// Generate a provenance suffix for the PR body.
+///
+/// When agent statistics are present, append this to their footer rather than
+/// rendering a second metadata section.
+fn generate_pr_footer(has_agent_stats: bool) -> String {
     let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
     format!(
-        "\n\n---\n\
-        > 🤖 *This pull request was created by an automated agent.*\n\
-        > Generated at: {}\n\
+        "{}> Generated at: {}\n\
         > Compiler: ado-aw v{}",
+        if has_agent_stats { "" } else { "\n\n---\n" },
         timestamp,
         env!("CARGO_PKG_VERSION")
     )
@@ -2468,6 +2470,35 @@ mod tests {
             labels: vec![],
         };
         assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn test_pr_footer_extends_agent_stats_without_second_section() {
+        let footer = generate_pr_footer(true);
+        assert!(footer.starts_with("> Generated at: "));
+        assert!(!footer.contains("---"));
+        assert!(!footer.contains("created by an automated agent"));
+
+        let stats = crate::agent_stats::AgentStats {
+            agent_name: "Dependency Updater".to_string(),
+            model: Some("claude-opus-4.7".to_string()),
+            input_tokens: 4_736_548,
+            output_tokens: 28_863,
+            ai_credits: None,
+            duration_seconds: 603.0,
+            tool_calls: 85,
+            turns: 1,
+        };
+        let combined = format!("{}{}", stats.to_markdown(), footer);
+        assert_eq!(combined.matches("---").count(), 1);
+        assert!(combined.contains("10m 3s\n> Generated at:"));
+    }
+
+    #[test]
+    fn test_pr_footer_stands_alone_without_agent_stats() {
+        let footer = generate_pr_footer(false);
+        assert!(footer.starts_with("\n\n---\n> Generated at: "));
+        assert!(!footer.contains("created by an automated agent"));
     }
 
     #[test]
