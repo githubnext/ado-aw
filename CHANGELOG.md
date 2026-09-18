@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.52.1](https://github.com/githubnext/ado-aw/compare/v0.52.0...v0.52.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **safe-outputs:** simplify PR metadata footer ([#2195](https://github.com/githubnext/ado-aw/issues/2195)) ([abed846](https://github.com/githubnext/ado-aw/commit/abed8467abb7d04a2193310b06e25aa91fc69268))
+
 ## [0.52.0](https://github.com/githubnext/ado-aw/compare/v0.51.0...v0.52.0) (2026-09-14)
 
 
