@@ -4,6 +4,7 @@
  */
 import type { Scenario } from "../scenario.js";
 import { buildScenarios } from "./build.js";
+import { conclusionScenarios } from "./conclusion.js";
 import { createPullRequestScenarios } from "./create-pull-request.js";
 import { crossOrgScenarios } from "./cross-org.js";
 import { gitScenarios } from "./git.js";
@@ -16,6 +17,7 @@ import { workItemScenarios } from "./work-item.js";
 /** Every scenario, in a deterministic run order. */
 export const allScenarios: Scenario<unknown>[] = [
   ...signalScenarios,
+  ...conclusionScenarios,
   ...workItemScenarios,
   ...wikiScenarios,
   ...prScenarios,

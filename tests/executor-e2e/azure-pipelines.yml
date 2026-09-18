@@ -24,6 +24,7 @@ pr:
       - src/sanitize.rs
       - src/sanitize/**
       - src/safe_outputs/**
+      - scripts/ado-script/src/conclusion/**
       - scripts/ado-script/src/executor-e2e/**
       - tests/executor-e2e/**
 
@@ -119,8 +120,12 @@ steps:
       set -euo pipefail
       npm ci
       npm run build:executor-e2e
+      # The conclusion scenarios run the real Conclusion reporter over the
+      # manifest the executor writes, so the bundle must be built too.
+      npm run build:conclusion
+      echo "##vso[task.setvariable variable=CONCLUSION_BUNDLE]$(Build.SourcesDirectory)/scripts/ado-script/conclusion.js"
     workingDirectory: scripts/ado-script
-    displayName: Build executor-e2e harness (not shipped in ado-script.zip)
+    displayName: Build executor-e2e harness + conclusion bundle (not shipped in ado-script.zip)
 
   - task: AzureCLI@2
     displayName: Acquire ADO token (SC_WRITE_TOKEN)
@@ -145,6 +150,9 @@ steps:
       # explicitly so the harness (and the ado-aw binary it spawns) can write.
       SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
       EXECUTOR_E2E_ADO_AW_BIN: $(ADO_AW_BIN)
+      # Compiled conclusion.js driven by the conclusion work-item scenarios.
+      # When unset those scenarios skip rather than fail.
+      EXECUTOR_E2E_CONCLUSION_BUNDLE: $(CONCLUSION_BUNDLE)
       EXECUTOR_E2E_ADO_REPO: $(EFFECTIVE_EXECUTOR_E2E_ADO_REPO)
       EXECUTOR_E2E_ISSUE_REPO: $(EXECUTOR_E2E_ISSUE_REPO)
       # Secret PAT for filing failure issues on the configured repository.

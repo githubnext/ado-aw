@@ -281,7 +281,7 @@ function extractNamedValue(
   fieldName: "tool_name" | "data_type",
   pattern: RegExp,
 ): string | undefined {
-  const direct = entry[fieldName];
+  const direct = entry[fieldName] ?? entry.result?.[fieldName];
   if (typeof direct === "string" && direct.trim().length > 0) {
     return direct.trim();
   }
@@ -319,7 +319,9 @@ function buildPipelineFailureReport(config: RuntimeConfig): SignalReport | null 
 function buildNoopReport(config: RuntimeConfig, entries: readonly ManifestEntry[]): SignalReport | null {
   if (entries.length === 0) return null;
 
-  const contexts = unique(entries.map((entry) => entry.context ?? undefined));
+  const contexts = unique(
+    entries.map((entry) => entry.context ?? toOptionalString(entry.result?.context)),
+  );
   const lines = [
     "The conclusion job detected one or more `noop` diagnostic signals.",
     "",
@@ -347,7 +349,9 @@ function buildMissingToolReport(
       extractNamedValue(entry, "tool_name", /tool[_ -]?name\s*:\s*([^\r\n,;]+)/i)
     ),
   );
-  const contexts = unique(entries.map((entry) => entry.context ?? undefined));
+  const contexts = unique(
+    entries.map((entry) => entry.context ?? toOptionalString(entry.result?.context)),
+  );
   const lines = [
     "The conclusion job detected one or more `missing_tool` diagnostic signals.",
     "",
@@ -378,8 +382,12 @@ function buildMissingDataReport(
       extractNamedValue(entry, "data_type", /data[_ -]?type\s*:\s*([^\r\n,;]+)/i)
     ),
   );
-  const contexts = unique(entries.map((entry) => entry.context ?? undefined));
-  const reasons = unique(entries.map((entry) => entry.reason ?? undefined));
+  const contexts = unique(
+    entries.map((entry) => entry.context ?? toOptionalString(entry.result?.context)),
+  );
+  const reasons = unique(
+    entries.map((entry) => entry.reason ?? toOptionalString(entry.result?.reason)),
+  );
   const lines = [
     "The conclusion job detected one or more `missing_data` diagnostic signals.",
     "",

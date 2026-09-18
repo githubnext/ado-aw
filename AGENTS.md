@@ -96,6 +96,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   │   └── integration_tests.rs # Import resolution + merge integration tests
 │   │   ├── extensions/   # CompilerExtension trait and infrastructure extensions
 │   │   │   ├── mod.rs    # Trait, Extension enum, collect_extensions(), re-exports
+│   │   │   ├── container_runtime.rs # Typed Docker runtime config shared by MCPG stdio servers (Mount/Network/Tmpfs/AddHost/ContainerUser, ContainerRuntimeConfig)
 │   │   │   ├── ado_aw_marker.rs # Always-on metadata marker extension (emits # ado-aw-metadata JSON)
 │   │   │   ├── github.rs # Always-on GitHub MCP extension
 │   │   │   ├── safe_outputs.rs # Always-on SafeOutputs MCP extension
@@ -623,7 +624,7 @@ the directive and it's inert at runtime.
 To review the generated shell as ordinary files:
 
 ```bash
-cargo run -- export-bash-scripts --out /tmp/ado-aw-shell
+cargo run -- export-bash-scripts --output /tmp/ado-aw-shell
 ```
 
 ### Markdown-only smoke suite
