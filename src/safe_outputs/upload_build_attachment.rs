@@ -951,6 +951,7 @@ attachment-type: "agent-artifact"
             triggered_by_build_number: None,
             triggered_by_project_id: None,
             pull_request_id: None,
+            pull_request_number: None,
             pull_request_source_branch: None,
             pull_request_target_branch: None,
             build_container_id: None,

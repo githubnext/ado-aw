@@ -19,22 +19,21 @@ use crate::safe_outputs::{
     CommentOnGithubIssueResult, CommentOnWorkItemParams, CommentOnWorkItemResult,
     CreateBranchParams, CreateBranchResult, CreateGitTagParams, CreateGitTagResult,
     CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams, CreatePrResult,
-    CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
-    CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, HideGithubIssueCommentParams,
-    HideGithubIssueCommentResult, LinkGithubSubIssueParams, LinkGithubSubIssueResult,
-    LinkWorkItemsParams, LinkWorkItemsResult, MissingDataParams, MissingDataResult,
-    MissingToolParams, MissingToolResult, NoopParams, NoopResult,
-    PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
+    CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams, CreateWorkItemResult,
+    DEFAULT_MAX_FILE_SIZE, HideGithubIssueCommentParams, HideGithubIssueCommentResult,
+    LinkGithubSubIssueParams, LinkGithubSubIssueResult, LinkWorkItemsParams, LinkWorkItemsResult,
+    MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
+    NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
     RemoveGithubIssueLabelsParams, RemoveGithubIssueLabelsResult, ReplyToPrCommentParams,
-    ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult,
-    ResolvePrThreadParams, ResolvePrThreadResult, SetGithubIssueFieldParams,
-    SetGithubIssueFieldResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
-    SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UnassignGithubIssueFromUserParams,
-    UnassignGithubIssueFromUserResult, UpdateGithubIssueParams, UpdateGithubIssueResult,
-    UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
-    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
-    UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
-    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
+    ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult, ResolvePrThreadParams,
+    ResolvePrThreadResult, SetGithubIssueFieldParams, SetGithubIssueFieldResult,
+    SetGithubIssueTypeParams, SetGithubIssueTypeResult, SubmitPrReviewParams, SubmitPrReviewResult,
+    ToolResult, UnassignGithubIssueFromUserParams, UnassignGithubIssueFromUserResult,
+    UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePrParams, UpdatePrResult,
+    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
+    UploadBuildAttachmentParams, UploadBuildAttachmentResult, UploadPipelineArtifactParams,
+    UploadPipelineArtifactResult, UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
+    Validate, anyhow_to_mcp_error,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::WorkItemTemporaryId;
@@ -538,8 +537,7 @@ impl SafeOutputs {
                     WorkItemTemporaryId::parse(format!("#aw_{}", generate_short_id())).ok()?;
                 let canonical = candidate.canonical();
                 let collision = existing.iter().any(|proposal| {
-                    proposal.get("name").and_then(Value::as_str)
-                        == Some(CreateWorkItemResult::NAME)
+                    proposal.get("name").and_then(Value::as_str) == Some(CreateWorkItemResult::NAME)
                         && proposal.get("temporary_id").and_then(Value::as_str)
                             == Some(canonical.as_str())
                 });

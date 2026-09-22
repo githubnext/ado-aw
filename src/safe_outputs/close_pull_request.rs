@@ -200,7 +200,8 @@ pub(crate) fn validate_close_pull_request_config(
 }
 
 fn parse_positive(value: Option<&str>) -> Option<u64> {
-    value.and_then(|value| value.parse::<u64>().ok())
+    value
+        .and_then(|value| value.parse::<u64>().ok())
         .filter(|number| *number > 0)
 }
 
@@ -334,12 +335,13 @@ impl Executor for ClosePullRequestResult {
             Ok(metadata) => metadata,
             Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
         };
-        if let Err(result) =
-            validate_github_target_capability(&metadata, GithubTargetCapabilities {
+        if let Err(result) = validate_github_target_capability(
+            &metadata,
+            GithubTargetCapabilities {
                 issues: false,
                 pull_requests: true,
-            })
-        {
+            },
+        ) {
             return Ok(result);
         }
         if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
@@ -347,10 +349,11 @@ impl Executor for ClosePullRequestResult {
         }
 
         let already_closed = metadata.state.eq_ignore_ascii_case("closed");
-        let comment_posted = match post_comment(&client, &repository, target_number, self.body.as_deref()).await? {
-            Ok(posted) => posted,
-            Err(result) => return Ok(result),
-        };
+        let comment_posted =
+            match post_comment(&client, &repository, target_number, self.body.as_deref()).await? {
+                Ok(posted) => posted,
+                Err(result) => return Ok(result),
+            };
         if let Err(result) =
             close_pull_request(&client, &repository, target_number, already_closed).await?
         {
@@ -363,9 +366,15 @@ impl Executor for ClosePullRequestResult {
             "Closed GitHub pull request"
         };
         if already_closed {
-            warn!("GitHub pull request {}#{} was already closed", repository, target_number);
+            warn!(
+                "GitHub pull request {}#{} was already closed",
+                repository, target_number
+            );
         } else {
-            info!("Closed GitHub pull request {}#{}", repository, target_number);
+            info!(
+                "Closed GitHub pull request {}#{}",
+                repository, target_number
+            );
         }
         Ok(ExecutionResult::success_with_data(
             format!("{action} {repository}#{target_number}"),
@@ -429,9 +438,12 @@ mod tests {
         let number: ClosePullRequestConfig =
             serde_json::from_value(serde_json::json!({"target": 42})).unwrap();
         assert_eq!(number.target, ClosePullRequestTarget::Number(42));
-        assert!(serde_json::from_value::<ClosePullRequestConfig>(serde_json::json!({
-            "target": 0
-        })).is_err());
+        assert!(
+            serde_json::from_value::<ClosePullRequestConfig>(serde_json::json!({
+                "target": 0
+            }))
+            .is_err()
+        );
     }
 
     #[test]

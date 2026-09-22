@@ -444,12 +444,14 @@ pub(crate) fn resolve_repository_write_target(
             "Repository '{selector}' is not in the allowed repository list"
         )));
     };
-    let current_org_url = ctx.ado_org_url.as_deref().ok_or_else(|| {
-        ExecutionResult::failure("Azure DevOps organization URL not configured")
-    })?;
-    let current_organization = ctx.ado_organization.as_deref().ok_or_else(|| {
-        ExecutionResult::failure("Azure DevOps organization name not configured")
-    })?;
+    let current_org_url = ctx
+        .ado_org_url
+        .as_deref()
+        .ok_or_else(|| ExecutionResult::failure("Azure DevOps organization URL not configured"))?;
+    let current_organization = ctx
+        .ado_organization
+        .as_deref()
+        .ok_or_else(|| ExecutionResult::failure("Azure DevOps organization name not configured"))?;
     let current_project = ctx
         .ado_project
         .as_deref()
@@ -509,8 +511,7 @@ pub(crate) fn resolve_repository_write_target(
         )));
     }
 
-    let (project, repository_name) =
-        split_repository_target_name(&config.name, current_project)?;
+    let (project, repository_name) = split_repository_target_name(&config.name, current_project)?;
     let organization = config
         .organization
         .as_deref()
@@ -767,9 +768,9 @@ macro_rules! impl_temporary_reference_deserialize {
 mod add_build_tag;
 mod add_github_issue_labels;
 mod add_pr_comment;
-mod assign_work_item;
 mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
+mod assign_work_item;
 mod close_github_issue;
 mod close_pull_request;
 mod comment_on_github_issue;
@@ -809,9 +810,9 @@ mod upload_workitem_attachment;
 pub use add_build_tag::*;
 pub use add_github_issue_labels::*;
 pub use add_pr_comment::*;
-pub use assign_work_item::*;
 pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;
+pub use assign_work_item::*;
 pub use close_github_issue::*;
 pub use close_pull_request::*;
 pub use comment_on_github_issue::*;
@@ -1507,7 +1508,11 @@ mod tests {
 
         let error = resolve_repository_write_target(Some("target"), &ctx).unwrap_err();
 
-        assert!(error.message.contains("declares the pipeline's current organization"));
+        assert!(
+            error
+                .message
+                .contains("declares the pipeline's current organization")
+        );
     }
 
     #[test]

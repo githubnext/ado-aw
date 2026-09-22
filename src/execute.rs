@@ -22,11 +22,11 @@ use crate::safe_outputs::{
     CommentOnWorkItemResult, CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult,
     CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
     Executor, HideGithubIssueCommentResult, LinkGithubSubIssueResult, LinkWorkItemsResult,
-    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
-    ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
-    SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
-    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
-    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult,
+    RemoveGithubIssueLabelsResult, ReplyToPrCommentResult, ReportIncompleteResult,
+    ResolvePrThreadResult, SetGithubIssueFieldResult, SetGithubIssueTypeResult,
+    SubmitPrReviewResult, ToolResult, UnassignGithubIssueFromUserResult, UpdateGithubIssueResult,
+    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::sanitize::neutralize_pipeline_commands;
