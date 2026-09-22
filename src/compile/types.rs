@@ -715,6 +715,7 @@ pub const GITHUB_ISSUE_SAFE_OUTPUT_TOOLS: &[&str] = &[
     "add-github-issue-labels",
     "remove-github-issue-labels",
     "close-github-issue",
+    "close-pull-request",
     "update-github-issue",
     "set-github-issue-field",
     "assign-github-issue-milestone",
@@ -2291,6 +2292,12 @@ impl FrontMatter {
         self.typed_safe_output_config("close-github-issue")
     }
 
+    pub fn close_pull_request_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::ClosePullRequestConfig>> {
+        self.typed_safe_output_config("close-pull-request")
+    }
+
     pub fn update_github_issue_config(
         &self,
     ) -> anyhow::Result<Option<crate::safe_outputs::UpdateGithubIssueConfig>> {
@@ -2415,6 +2422,19 @@ impl FrontMatter {
                         ..Default::default()
                     }))
             }
+            "close-pull-request" => {
+                Ok(self
+                    .close_pull_request_config()?
+                    .map(|config| GithubIssueCompilerConfig {
+                        target_repo: config.target_repo,
+                        allowed_repos: config.allowed_repos,
+                        required_labels: config.required_labels,
+                        required_title_prefix: config.required_title_prefix,
+                        pull_requests: Some(true),
+                        issues: Some(false),
+                        ..Default::default()
+                    }))
+            }
             "update-github-issue" => {
                 Ok(self
                     .update_github_issue_config()?
@@ -2510,6 +2530,9 @@ impl FrontMatter {
                     issues = true;
                     pull_requests = true;
                     discussions |= config.discussions.unwrap_or(false);
+                }
+                "close-pull-request" => {
+                    pull_requests = true;
                 }
                 "remove-github-issue-labels" => {
                     issues = true;

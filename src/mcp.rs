@@ -15,10 +15,11 @@ use crate::safe_outputs::{
     AddPrCommentParams, AddPrCommentResult, AssignGithubIssueMilestoneParams,
     AssignGithubIssueMilestoneResult, AssignGithubIssueToUserParams, AssignGithubIssueToUserResult,
     AssignWorkItemParams, AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
-    CommentOnGithubIssueParams, CommentOnGithubIssueResult, CommentOnWorkItemParams,
-    CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult, CreateGitTagParams,
-    CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
-    CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
+    ClosePullRequestParams, ClosePullRequestResult, CommentOnGithubIssueParams,
+    CommentOnGithubIssueResult, CommentOnWorkItemParams, CommentOnWorkItemResult,
+    CreateBranchParams, CreateBranchResult, CreateGitTagParams, CreateGitTagResult,
+    CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams, CreatePrResult,
+    CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
     CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, HideGithubIssueCommentParams,
     HideGithubIssueCommentResult, LinkGithubSubIssueParams, LinkGithubSubIssueResult,
     LinkWorkItemsParams, LinkWorkItemsResult, MissingDataParams, MissingDataResult,
@@ -942,6 +943,18 @@ issue_number may be a positive number or a temporary_id from create-github-issue
         params: Parameters<CloseGithubIssueParams>,
     ) -> Result<CallToolResult, McpError> {
         let result: CloseGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "close-pull-request",
+        description = "Close a configured GitHub pull request without merging, optionally with a comment."
+    )]
+    async fn close_pull_request(
+        &self,
+        params: Parameters<ClosePullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: ClosePullRequestResult = params.0.try_into()?;
         self.queue_sanitized_output(result).await
     }
 

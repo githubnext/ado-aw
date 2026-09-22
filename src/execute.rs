@@ -18,11 +18,11 @@ use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
     AddBuildTagResult, AddGithubIssueLabelsResult, AddPrCommentResult,
     AssignGithubIssueMilestoneResult, AssignGithubIssueToUserResult, AssignWorkItemResult,
-    CloseGithubIssueResult, CommentOnGithubIssueResult, CommentOnWorkItemResult,
-    CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult, CreatePrResult,
-    CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor,
-    HideGithubIssueCommentResult, LinkGithubSubIssueResult, LinkWorkItemsResult, MissingDataResult,
-    MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
+    CloseGithubIssueResult, ClosePullRequestResult, CommentOnGithubIssueResult,
+    CommentOnWorkItemResult, CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult,
+    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
+    Executor, HideGithubIssueCommentResult, LinkGithubSubIssueResult, LinkWorkItemsResult,
+    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
     ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
     SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
     UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
@@ -777,6 +777,7 @@ async fn dispatch_github_tools(
         "add-github-issue-labels" => AddGithubIssueLabelsResult,
         "remove-github-issue-labels" => RemoveGithubIssueLabelsResult,
         "close-github-issue" => CloseGithubIssueResult,
+        "close-pull-request" => ClosePullRequestResult,
         "update-github-issue" => UpdateGithubIssueResult,
         "set-github-issue-field" => SetGithubIssueFieldResult,
         "assign-github-issue-milestone" => AssignGithubIssueMilestoneResult,
@@ -803,6 +804,9 @@ fn resolve_max(ctx: &ExecutionContext, tool_name: &str, default_max: u32) -> usi
 fn extract_entry_context(entry: &Value) -> String {
     if let Some(issue) = entry.get("issue_number") {
         return format!(" (GitHub issue {})", safe_json_identifier(issue));
+    }
+    if let Some(pr) = entry.get("pull_request_number") {
+        return format!(" (GitHub pull request {})", safe_json_identifier(pr));
     }
     if let (Some(parent), Some(sub_issue)) = (
         entry.get("parent_issue_number"),

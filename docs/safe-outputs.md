@@ -740,6 +740,7 @@ JSON uses the snake_case parameter names below.
 | `add-github-issue-labels` | `issue_number`, `labels`, optional `repository` | `allowed`, `blocked`, `issues`, `pull-requests` | 5 |
 | `remove-github-issue-labels` | `issue_number`, `labels`, optional `repository` | `allowed`, `blocked` | 5 |
 | `close-github-issue` | `issue_number`, optional `body`, `state_reason`, `duplicate_of`, `repository` | `state-reason`, `allowed-state-reason`, `allow-body` | 1 |
+| `close-pull-request` | optional `pull_request_number`, optional `body`, optional `repository` | `target` (`"triggering"`, `"*"`, or number) | 1 |
 | `update-github-issue` | `issue_number`, one or more of `status`/`title`/`body`/`labels`/`assignees`/`milestone`, optional body `operation`, optional `repository` | `status`, `title`, `body`, `labels`, `assignees`, `milestone`, `allowed-labels`, `footer`, `issues`, `pull-requests` | 1 |
 | `set-github-issue-field` | `issue_number`, `value`, exactly one of `field_name`/`field_node_id`, optional `repository` | `allowed-fields` | 5 |
 | `assign-github-issue-milestone` | `issue_number`, exactly one of `milestone_number`/`milestone_title`, optional `repository` | `allowed`, `auto-create` | 1 |
@@ -785,6 +786,25 @@ is already absent as success.
 `duplicate_of` is validated against repository policy before any comment or
 close, then creates the native duplicate relationship. Already-closed targets
 are idempotent success.
+
+`close-pull-request` matches gh-aw's front matter interface for closing GitHub
+PRs without merging:
+
+```yaml
+safe-outputs:
+  close-pull-request:
+    target: "triggering"              # "triggering" (default), "*", or number
+    required-labels: [automated, stale]
+    required-title-prefix: "[bot]"
+    max: 10
+    target-repo: octo-org/octo-repo
+```
+
+When `target` is `"*"`, the agent must pass `pull_request_number`; when it is a
+number, that configured PR is used. The default `"triggering"` target uses the
+GitHub PR number exposed by Azure Pipelines PR context. `body` posts an optional
+closing comment before the PR is closed. `target-repo` and `allowed-repos`
+follow the same repository policy as the GitHub issue tools.
 
 `update-github-issue` requires at least one of `status`, `title`, `body`,
 `labels`, `assignees`, or `milestone`. Every mutable field is independently

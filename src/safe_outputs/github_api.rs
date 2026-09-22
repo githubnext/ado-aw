@@ -185,6 +185,11 @@ impl GithubClient {
         self.repository_route(repository, &["issues", &number.to_string(), "comments"])
     }
 
+    pub fn pull_request_url(&self, repository: &str, number: u64) -> anyhow::Result<Url> {
+        ensure!(number > 0, "GitHub pull request number must be positive");
+        self.repository_route(repository, &["pulls", &number.to_string()])
+    }
+
     pub fn issue_comment_url(&self, repository: &str, comment_id: u64) -> anyhow::Result<Url> {
         ensure!(comment_id > 0, "GitHub comment ID must be positive");
         self.repository_route(repository, &["issues", "comments", &comment_id.to_string()])

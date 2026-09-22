@@ -54,6 +54,7 @@ pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
     AddGithubIssueLabelsResult,
     RemoveGithubIssueLabelsResult,
     CloseGithubIssueResult,
+    ClosePullRequestResult,
     UpdateGithubIssueResult,
     SetGithubIssueFieldResult,
     AssignGithubIssueMilestoneResult,
@@ -98,6 +99,7 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     AddGithubIssueLabelsResult,
     RemoveGithubIssueLabelsResult,
     CloseGithubIssueResult,
+    ClosePullRequestResult,
     UpdateGithubIssueResult,
     SetGithubIssueFieldResult,
     AssignGithubIssueMilestoneResult,
@@ -769,6 +771,7 @@ mod assign_work_item;
 mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
 mod close_github_issue;
+mod close_pull_request;
 mod comment_on_github_issue;
 mod comment_on_work_item;
 mod create_branch;
@@ -810,6 +813,7 @@ pub use assign_work_item::*;
 pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;
 pub use close_github_issue::*;
+pub use close_pull_request::*;
 pub use comment_on_github_issue::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
