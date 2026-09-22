@@ -20,8 +20,8 @@ use crate::safe_outputs::{
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
 
-const MAX_TITLE_LEN: usize = 256;
-const MAX_BODY_LEN: usize = 65_536;
+const MAX_TITLE_CHARS: usize = 256;
+const MAX_BODY_CHARS: usize = 65_536;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -99,21 +99,17 @@ impl UpdatePullRequestParams {
 
 impl Validate for UpdatePullRequestParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(
-            self.title.is_some() || self.body.is_some() || self.update_branch == Some(true),
-            "at least one of title, body, or update_branch: true is required"
-        );
         if let Some(title) = self.title.as_deref() {
             ensure!(!title.trim().is_empty(), "title must not be empty");
             ensure!(
-                title.len() <= MAX_TITLE_LEN,
-                "title must be {MAX_TITLE_LEN} characters or fewer"
+                title.chars().count() <= MAX_TITLE_CHARS,
+                "title must be {MAX_TITLE_CHARS} characters or fewer"
             );
         }
         if let Some(body) = self.body.as_deref() {
             ensure!(
-                body.len() <= MAX_BODY_LEN,
-                "body must be {MAX_BODY_LEN} characters or fewer"
+                body.chars().count() <= MAX_BODY_CHARS,
+                "body must be {MAX_BODY_CHARS} characters or fewer"
             );
         } else {
             ensure!(
@@ -405,9 +401,9 @@ fn build_updated_body(
         GithubBodyOperation::Replace => section,
         GithubBodyOperation::ReplaceIsland => replace_island(current, &section, ctx)?,
     };
-    if updated.len() > MAX_BODY_LEN {
+    if updated.chars().count() > MAX_BODY_CHARS {
         return Err(ExecutionResult::failure(format!(
-            "updated body exceeds GitHub's {MAX_BODY_LEN}-character limit"
+            "updated body exceeds GitHub's {MAX_BODY_CHARS}-character limit"
         )));
     }
     Ok(updated)
@@ -604,6 +600,12 @@ impl Executor for UpdatePullRequestResult {
                 "update-pull-request field 'body' is not enabled by configuration",
             ));
         }
+        let update_branch = self.update_branch.unwrap_or(config.update_branch);
+        if self.title.is_none() && self.body.is_none() && !update_branch {
+            return Ok(ExecutionResult::failure(
+                "at least one of title, body, or effective update_branch: true is required",
+            ));
+        }
         let number = match self.resolve_number(&config, ctx) {
             Ok(number) => number,
             Err(result) => return Ok(result),
@@ -638,7 +640,6 @@ impl Executor for UpdatePullRequestResult {
         if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
             return Ok(result);
         }
-        let update_branch = self.update_branch.unwrap_or(config.update_branch);
         if update_branch
             && let Err(result) = self.update_branch(&client, &repository, number).await?
         {
@@ -767,15 +768,70 @@ mod tests {
     }
 
     #[test]
-    fn validates_meaningful_update_and_number_aliases() {
+    fn validates_number_aliases() {
         let mut empty = params();
         empty.title = None;
-        assert!(empty.validate().is_err());
+        assert!(empty.validate().is_ok());
 
         let mut aliases = params();
         aliases.pull_request_number = Some(GithubPullRequestNumber::Number(1));
         aliases.pr_number = Some(GithubPullRequestNumber::String("#2".to_string()));
         assert!(aliases.validate().is_err());
+    }
+
+    #[test]
+    fn replace_island_appends_then_replaces_pipeline_scoped_section() {
+        let ctx = ExecutionContext {
+            definition_id: Some(123),
+            ..Default::default()
+        };
+        let first = build_updated_body(
+            "before",
+            "new",
+            GithubBodyOperation::ReplaceIsland,
+            false,
+            &ctx,
+        )
+        .unwrap();
+        assert!(first.contains("before\n\n---\n\n"));
+        assert!(first.contains("<!-- ado-aw-pr-island-start:pipeline-definition-id=123 -->"));
+        assert!(first.contains("\nnew\n"));
+
+        let second = build_updated_body(
+            &first,
+            "next",
+            GithubBodyOperation::ReplaceIsland,
+            false,
+            &ctx,
+        )
+        .unwrap();
+        assert!(second.contains("\nnext\n"));
+        assert!(!second.contains("\nnew\n"));
+    }
+
+    #[test]
+    fn replace_island_requires_definition_id_and_ordered_markers() {
+        let missing_id = ExecutionContext::default();
+        assert!(
+            build_updated_body(
+                "",
+                "new",
+                GithubBodyOperation::ReplaceIsland,
+                false,
+                &missing_id
+            )
+            .is_err()
+        );
+
+        let ctx = ExecutionContext {
+            definition_id: Some(123),
+            ..Default::default()
+        };
+        let bad = "<!-- ado-aw-pr-island-end:pipeline-definition-id=123 -->\nold\n<!-- ado-aw-pr-island-start:pipeline-definition-id=123 -->";
+        assert!(
+            build_updated_body(bad, "new", GithubBodyOperation::ReplaceIsland, false, &ctx)
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -872,7 +928,7 @@ mod tests {
             title: None,
             body: None,
             operation: None,
-            update_branch: Some(true),
+            update_branch: None,
             pull_request_number: None,
             pr_number: None,
             pr: None,
