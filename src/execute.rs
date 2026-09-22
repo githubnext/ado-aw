@@ -805,8 +805,8 @@ fn extract_entry_context(entry: &Value) -> String {
     if let Some(issue) = entry.get("issue_number") {
         return format!(" (GitHub issue {})", safe_json_identifier(issue));
     }
-    if let Some(pr) = entry.get("pull_request_number") {
-        return format!(" (GitHub pull request {})", safe_json_identifier(pr));
+    if let Some(pr) = entry.get("pull_request_id") {
+        return format!(" (pull request {})", safe_json_identifier(pr));
     }
     if let (Some(parent), Some(sub_issue)) = (
         entry.get("parent_issue_number"),
