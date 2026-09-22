@@ -828,6 +828,48 @@ their complete existing lists, and `milestone` selects an existing milestone
 by positive number. All requested changes are preflighted before the first
 write.
 
+#### Pull request updates (`update-pull-request`)
+
+`update-pull-request` matches gh-aw's front matter configuration for updating
+GitHub pull requests. It updates the PR title or body; both fields are enabled
+by default. The `operation` field controls body updates: `replace` (default),
+`append`, `prepend`, or `replace-island`.
+
+```yaml
+safe-outputs:
+  update-pull-request:
+    title: true               # enable title updates (default: true)
+    body: true                # enable body updates (default: true)
+    update-branch: false      # update the PR branch from its base first (default: false)
+    sync-stack: true          # accepted for gh-aw configuration parity
+    footer: false             # omit the ado-aw trace footer from body updates (default: true)
+    operation: replace        # replace, append, prepend, or replace-island
+    max: 1                    # maximum updates per run (default: 1)
+    target: "*"               # "triggering" (default), "*", or a PR number
+    target-repo: octo-org/octo-repo
+    allowed-repos: [octo-org/octo-repo]
+    required-labels: [automated]
+    required-title-prefix: "[bot] "
+```
+
+**Agent parameters:**
+
+- `title` *(optional)* - Replacement PR title.
+- `body` *(optional)* - PR body content in Markdown.
+- `operation` *(optional)* - Overrides the configured body operation for this
+  update.
+- `update_branch` *(optional)* - When `true`, update the PR branch with the
+  latest base branch changes before title/body updates.
+- `pull_request_number`, `pr_number`, or `pr` - Required when `target: "*"` is
+  configured. With `target: "triggering"`, any supplied number must match the
+  triggering PR.
+- `repository` *(optional)* - Target repository, constrained by `target-repo`
+  and `allowed-repos`.
+
+`update-branch` calls GitHub's pull request branch update API. GitHub's benign
+"already up to date", merge-conflict, and missing-head responses are treated as
+non-fatal, matching gh-aw's best-effort behavior.
+
 #### Fields, milestones, and assignees
 
 `set-github-issue-field` rejects built-in fields and limits repository-defined

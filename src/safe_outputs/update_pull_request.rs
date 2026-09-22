@@ -445,6 +445,7 @@ impl UpdatePullRequestResult {
     fn resolve_number(
         &self,
         config: &UpdatePullRequestConfig,
+        ctx: &ExecutionContext,
     ) -> Result<u64, ExecutionResult> {
         let requested = self
             .requested_number()
@@ -468,11 +469,15 @@ impl UpdatePullRequestResult {
                 })
             }
             UpdatePullRequestTarget::Named(target) if target == "triggering" => {
-                requested.ok_or_else(|| {
-                    ExecutionResult::failure(
-                        "SYSTEM_PULLREQUEST_PULLREQUESTID is required for target \"triggering\"",
-                    )
-                })
+                let triggering = ctx_pull_request_id_from(ctx)?;
+                if let Some(requested) = requested
+                    && requested != triggering
+                {
+                    return Err(ExecutionResult::failure(format!(
+                        "requested pull_request_number #{requested} does not match triggering pull request #{triggering}"
+                    )));
+                }
+                Ok(triggering)
             }
             UpdatePullRequestTarget::Named(target) => Err(ExecutionResult::failure(format!(
                 "unsupported update-pull-request target '{}'",
@@ -541,7 +546,9 @@ impl UpdatePullRequestResult {
 
 fn ctx_pull_request_id_from(ctx: &ExecutionContext) -> Result<u64, ExecutionResult> {
     let raw = ctx.pull_request_id.as_deref().ok_or_else(|| {
-        ExecutionResult::failure("SYSTEM_PULLREQUEST_PULLREQUESTID is required for target \"triggering\"")
+        ExecutionResult::failure(
+            "SYSTEM_PULLREQUEST_PULLREQUESTID is required for target \"triggering\"",
+        )
     })?;
     raw.parse::<u64>()
         .ok()
@@ -561,6 +568,19 @@ impl Executor for UpdatePullRequestResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        let params = UpdatePullRequestParams {
+            title: self.title.clone(),
+            body: self.body.clone(),
+            operation: self.operation,
+            update_branch: self.update_branch,
+            pull_request_number: self.pull_request_number.clone(),
+            pr_number: self.pr_number.clone(),
+            pr: self.pr.clone(),
+            repository: self.repository.clone(),
+        };
+        if let Err(error) = params.validate() {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         if !ctx.tool_configs.contains_key("update-pull-request") {
             return Ok(ExecutionResult::failure(
                 "update-pull-request is not configured for this workflow",
@@ -584,20 +604,9 @@ impl Executor for UpdatePullRequestResult {
                 "update-pull-request field 'body' is not enabled by configuration",
             ));
         }
-        let number = match &config.target {
-            UpdatePullRequestTarget::Named(target) if target == "triggering" => {
-                match self.requested_number()? {
-                    Some(number) => number,
-                    None => match ctx_pull_request_id_from(ctx) {
-                        Ok(number) => number,
-                        Err(result) => return Ok(result),
-                    },
-                }
-            }
-            _ => match self.resolve_number(&config) {
-                Ok(number) => number,
-                Err(result) => return Ok(result),
-            },
+        let number = match self.resolve_number(&config, ctx) {
+            Ok(number) => number,
+            Err(result) => return Ok(result),
         };
         let repository = match resolve_github_repository(
             self.repository.as_deref(),
@@ -683,5 +692,195 @@ impl Executor for UpdatePullRequestResult {
                 "fields": self.requested_fields(&config),
             }),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::safe_outputs::ToolResult;
+    use std::collections::HashMap;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn context(server: &MockServer, config: serde_json::Value) -> ExecutionContext {
+        let mut tool_configs = HashMap::new();
+        tool_configs.insert("update-pull-request".to_string(), config);
+        ExecutionContext {
+            github_token: Some("token".to_string()),
+            github_api_url: server.uri(),
+            repository_provider: Some("GitHub".to_string()),
+            repository_name: Some("octo/repo".to_string()),
+            pull_request_id: Some("7".to_string()),
+            tool_configs,
+            definition_id: Some(123),
+            ..Default::default()
+        }
+    }
+
+    fn pull_request(number: u64) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "title": "[bot] Existing",
+            "body": "Existing body",
+            "state": "open",
+            "labels": [{"name": "automated"}],
+            "html_url": format!("https://github.example/octo/repo/pull/{number}")
+        })
+    }
+
+    fn params() -> UpdatePullRequestParams {
+        UpdatePullRequestParams {
+            title: Some("Updated title".to_string()),
+            body: None,
+            operation: None,
+            update_branch: None,
+            pull_request_number: None,
+            pr_number: None,
+            pr: None,
+            repository: None,
+        }
+    }
+
+    #[test]
+    fn contract_name_and_budget() {
+        assert_eq!(UpdatePullRequestResult::NAME, "update-pull-request");
+        assert_eq!(UpdatePullRequestResult::DEFAULT_MAX, 1);
+    }
+
+    #[test]
+    fn config_matches_gh_aw_defaults_and_rejects_unknown_fields() {
+        let config: UpdatePullRequestConfig =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(config.title);
+        assert!(config.body);
+        assert!(!config.update_branch);
+        assert!(config.sync_stack);
+        assert!(config.footer);
+        assert_eq!(config.operation, GithubBodyOperation::Replace);
+        assert!(
+            serde_json::from_value::<UpdatePullRequestConfig>(serde_json::json!({
+                "allow-title": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_meaningful_update_and_number_aliases() {
+        let mut empty = params();
+        empty.title = None;
+        assert!(empty.validate().is_err());
+
+        let mut aliases = params();
+        aliases.pull_request_number = Some(GithubPullRequestNumber::Number(1));
+        aliases.pr_number = Some(GithubPullRequestNumber::String("#2".to_string()));
+        assert!(aliases.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn updates_triggering_pull_request_title_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/octo/repo/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pull_request(7)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/octo/repo/pulls/7"))
+            .and(body_json(serde_json::json!({
+                "title": "Updated title",
+                "body": "Existing body\n\n---\n\nNew body"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pull_request(7)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = context(
+            &server,
+            serde_json::json!({
+                "target-repo": "octo/repo",
+                "title": true,
+                "body": true,
+                "footer": false,
+                "operation": "append",
+                "required-labels": ["automated"],
+                "required-title-prefix": "[bot]"
+            }),
+        );
+        let mut result: UpdatePullRequestResult = UpdatePullRequestParams {
+            title: Some("Updated title".to_string()),
+            body: Some("New body".to_string()),
+            operation: None,
+            update_branch: None,
+            pull_request_number: None,
+            pr_number: None,
+            pr: None,
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "{}", execution.message);
+    }
+
+    #[tokio::test]
+    async fn target_star_requires_agent_pull_request_number() {
+        let server = MockServer::start().await;
+        let ctx = context(
+            &server,
+            serde_json::json!({
+                "target-repo": "octo/repo",
+                "target": "*"
+            }),
+        );
+        let mut result: UpdatePullRequestResult = params().try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(
+            execution
+                .message
+                .contains("pull_request_number is required")
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_branch_only_calls_update_branch_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/octo/repo/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pull_request(7)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/repos/octo/repo/pulls/7/update-branch"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = context(
+            &server,
+            serde_json::json!({
+                "target-repo": "octo/repo",
+                "update-branch": true
+            }),
+        );
+        let mut result: UpdatePullRequestResult = UpdatePullRequestParams {
+            title: None,
+            body: None,
+            operation: None,
+            update_branch: Some(true),
+            pull_request_number: None,
+            pr_number: None,
+            pr: None,
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "{}", execution.message);
     }
 }
