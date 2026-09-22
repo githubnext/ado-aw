@@ -1302,7 +1302,7 @@ Abandons an Azure DevOps pull request without merging it.
 
 **Agent parameters:**
 - `pull_request_id` - The PR ID to abandon (required when `target: "*"`)
-- `body` *(optional)* - Comment posted before abandoning the PR
+- `body` *(optional)* - Comment posted after abandoning the PR
 - `repository` - Repository alias (default: configured `target-repo`, then `"self"`)
 
 **Configuration options (front matter):**
@@ -1320,8 +1320,8 @@ safe-outputs:
 When `target` is `"triggering"`, Stage 3 uses
 `SYSTEM_PULLREQUEST_PULLREQUESTID`. When `target` is a number, that configured
 ADO PR ID is used. The tool fetches the PR first, applies the optional
-title/label filters, optionally posts `body` as a PR thread comment, then
-patches the PR status to `abandoned`.
+title/label filters, patches the PR status to `abandoned`, then optionally
+posts `body` as a PR thread comment.
 
 ### link-work-items
 Links two Azure DevOps work items together.

@@ -483,10 +483,12 @@ impl Executor for AbandonPullRequestResult {
             return Ok(result);
         }
 
-        let status = pr
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
+        let Some(status) = pr.get("status").and_then(|v| v.as_str()) else {
+            return Ok(ExecutionResult::failure(format!(
+                "Cannot abandon PR #{} because the Azure DevOps response did not include a status",
+                pull_request_id
+            )));
+        };
         if status.eq_ignore_ascii_case("abandoned") {
             warn!("Azure DevOps PR #{} was already abandoned", pull_request_id);
             return Ok(ExecutionResult::success_with_data(
@@ -499,11 +501,15 @@ impl Executor for AbandonPullRequestResult {
                 }),
             ));
         }
-        if !status.is_empty() && !status.eq_ignore_ascii_case("active") {
+        if !status.eq_ignore_ascii_case("active") {
             return Ok(ExecutionResult::failure(format!(
                 "Cannot abandon PR #{} because its status is '{}' (expected active)",
                 pull_request_id, status
             )));
+        }
+
+        if let Err(result) = abandon_pr(&client, &pr_url, pull_request_id, token, ctx).await? {
+            return Ok(result);
         }
 
         let comment_posted = match post_comment(
@@ -518,11 +524,13 @@ impl Executor for AbandonPullRequestResult {
         .await?
         {
             Ok(posted) => posted,
-            Err(result) => return Ok(result),
+            Err(result) => {
+                return Ok(ExecutionResult::warning(format!(
+                    "Abandoned Azure DevOps PR #{} but failed to add comment: {}",
+                    pull_request_id, result.message
+                )));
+            }
         };
-        if let Err(result) = abandon_pr(&client, &pr_url, pull_request_id, token, ctx).await? {
-            return Ok(result);
-        }
 
         info!("Abandoned Azure DevOps PR #{}", pull_request_id);
         Ok(ExecutionResult::success_with_data(
