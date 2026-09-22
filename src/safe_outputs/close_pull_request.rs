@@ -218,13 +218,13 @@ impl ClosePullRequestResult {
                     "pull_request_number is required when safe-outputs.close-pull-request.target is '*'",
                 )
             }),
-            ClosePullRequestTarget::Triggering => parse_positive(ctx.pull_request_number.as_deref())
-                .or_else(|| parse_positive(ctx.pull_request_id.as_deref()))
-                .ok_or_else(|| {
+            ClosePullRequestTarget::Triggering => {
+                parse_positive(ctx.pull_request_number.as_deref()).ok_or_else(|| {
                     ExecutionResult::failure(
                         "safe-outputs.close-pull-request.target is 'triggering' but no GitHub pull request context is available; use target: '*' and pass pull_request_number, or configure a numeric target",
                     )
-                }),
+                })
+            }
         }
     }
 
@@ -297,7 +297,7 @@ impl Executor for ClosePullRequestResult {
         let target = self
             .pull_request_number
             .map(|number| format!("#{number}"))
-            .unwrap_or_else(|| "configured target".to_string());
+            .unwrap_or_else(|| "the configured or triggering target".to_string());
         format!("close GitHub pull request {target}")
     }
 
@@ -314,7 +314,6 @@ impl Executor for ClosePullRequestResult {
             ));
         };
         let config: ClosePullRequestConfig = ctx.get_tool_config("close-pull-request")?;
-        validate_close_pull_request_config(&config)?;
         let filters = GithubMutationFilters {
             required_labels: &config.required_labels,
             required_title_prefix: config.required_title_prefix.as_deref(),
