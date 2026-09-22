@@ -48,6 +48,7 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
     AssignWorkItemResult,
     CreateGithubIssueResult,
+    UpdatePullRequestResult,
     SetGithubIssueTypeResult,
     CommentOnGithubIssueResult,
     HideGithubIssueCommentResult,
@@ -92,6 +93,7 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     ReplyToPrCommentResult,
     ResolvePrThreadResult,
     CreateGithubIssueResult,
+    UpdatePullRequestResult,
     SetGithubIssueTypeResult,
     CommentOnGithubIssueResult,
     HideGithubIssueCommentResult,
@@ -796,6 +798,7 @@ mod set_github_issue_type;
 mod submit_pr_review;
 mod unassign_github_issue_from_user;
 mod update_github_issue;
+mod update_pull_request;
 mod update_pr;
 mod update_wiki_page;
 mod update_work_item;
@@ -840,6 +843,7 @@ pub use set_github_issue_type::*;
 pub use submit_pr_review::*;
 pub use unassign_github_issue_from_user::*;
 pub use update_github_issue::*;
+pub use update_pull_request::*;
 pub use update_pr::*;
 pub use update_wiki_page::*;
 pub use update_work_item::*;

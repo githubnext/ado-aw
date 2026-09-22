@@ -30,10 +30,11 @@ use crate::safe_outputs::{
     SetGithubIssueFieldResult, SetGithubIssueTypeParams, SetGithubIssueTypeResult,
     SubmitPrReviewParams, SubmitPrReviewResult, ToolResult, UnassignGithubIssueFromUserParams,
     UnassignGithubIssueFromUserResult, UpdateGithubIssueParams, UpdateGithubIssueResult,
-    UpdatePrParams, UpdatePrResult, UpdateWikiPageParams, UpdateWikiPageResult,
-    UpdateWorkItemParams, UpdateWorkItemResult, UploadBuildAttachmentParams,
-    UploadBuildAttachmentResult, UploadPipelineArtifactParams, UploadPipelineArtifactResult,
-    UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
+    UpdatePrParams, UpdatePrResult, UpdatePullRequestParams, UpdatePullRequestResult,
+    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
+    UploadBuildAttachmentParams, UploadBuildAttachmentResult, UploadPipelineArtifactParams,
+    UploadPipelineArtifactResult, UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
+    Validate, anyhow_to_mcp_error,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::WorkItemTemporaryId;
@@ -954,6 +955,18 @@ issue_number may be a positive number or a temporary_id from create-github-issue
         params: Parameters<UpdateGithubIssueParams>,
     ) -> Result<CallToolResult, McpError> {
         let result: UpdateGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "update-pull-request",
+        description = "Update a configured GitHub pull request title or body, or update its branch from the base branch."
+    )]
+    async fn update_pull_request(
+        &self,
+        params: Parameters<UpdatePullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: UpdatePullRequestResult = params.0.try_into()?;
         self.queue_sanitized_output(result).await
     }
 

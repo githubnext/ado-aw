@@ -26,8 +26,8 @@ use crate::safe_outputs::{
     ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
     SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
     UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
-    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
-    UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
+    UpdatePullRequestResult, UpdateWikiPageResult, UpdateWorkItemResult,
+    UploadBuildAttachmentResult, UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::sanitize::neutralize_pipeline_commands;
 
@@ -259,6 +259,7 @@ pub async fn execute_safe_outputs(
         AddGithubIssueLabelsResult,
         RemoveGithubIssueLabelsResult,
         CloseGithubIssueResult,
+        UpdatePullRequestResult,
         UpdateGithubIssueResult,
         SetGithubIssueFieldResult,
         AssignGithubIssueMilestoneResult,
@@ -777,6 +778,7 @@ async fn dispatch_github_tools(
         "add-github-issue-labels" => AddGithubIssueLabelsResult,
         "remove-github-issue-labels" => RemoveGithubIssueLabelsResult,
         "close-github-issue" => CloseGithubIssueResult,
+        "update-pull-request" => UpdatePullRequestResult,
         "update-github-issue" => UpdateGithubIssueResult,
         "set-github-issue-field" => SetGithubIssueFieldResult,
         "assign-github-issue-milestone" => AssignGithubIssueMilestoneResult,
