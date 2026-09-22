@@ -960,7 +960,7 @@ issue_number may be a positive number or a temporary_id from create-github-issue
 
     #[tool(
         name = "update-pull-request",
-        description = "Update a configured GitHub pull request title or body, or update its branch from the base branch."
+        description = "Update an Azure DevOps pull request title or description. Uses gh-aw-style title/body/operation inputs."
     )]
     async fn update_pull_request(
         &self,

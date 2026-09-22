@@ -48,7 +48,6 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
     AssignWorkItemResult,
     CreateGithubIssueResult,
-    UpdatePullRequestResult,
     SetGithubIssueTypeResult,
     CommentOnGithubIssueResult,
     HideGithubIssueCommentResult,

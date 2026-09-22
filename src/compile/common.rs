@@ -2427,11 +2427,6 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
                     crate::safe_outputs::validate_update_github_issue_config(&config)?;
                 }
             }
-            "update-pull-request" => {
-                if let Some(config) = front_matter.update_pull_request_config()? {
-                    crate::safe_outputs::validate_update_pull_request_config(&config)?;
-                }
-            }
             "set-github-issue-field" => {
                 if let Some(config) = front_matter.set_github_issue_field_config()? {
                     crate::safe_outputs::validate_set_github_issue_field_config(&config)?;
@@ -2459,6 +2454,9 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
             }
             _ => {}
         }
+    }
+    if let Some(config) = front_matter.update_pull_request_config()? {
+        crate::safe_outputs::validate_update_pull_request_config(&config)?;
     }
     if let Some(config) = front_matter.create_github_issue_config()? {
         if let Some(prefix) = config.title_prefix.as_deref() {

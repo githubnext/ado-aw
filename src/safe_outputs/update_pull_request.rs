@@ -1,96 +1,104 @@
-//! `update-pull-request` GitHub safe output.
+//! `update-pull-request` Azure DevOps safe output.
 
-use anyhow::ensure;
-use log::{debug, info, warn};
-use reqwest::Method;
+use anyhow::{Context, ensure};
+use log::{debug, info};
+use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use url::Url;
 
 use ado_aw_derive::SanitizeConfig;
 
-use crate::safe_outputs::{
-    ExecutionContext, ExecutionResult, Executor, GithubBodyOperation, GithubClient,
-    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities, GithubTargetKind,
-    GithubTargetMetadata, Validate, build_github_trace_footer, resolve_github_repository,
-    validate_github_mutation_filter_config, validate_github_mutation_filters,
-    validate_github_repository, validate_github_target_capability,
-};
+use super::{PATH_SEGMENT, resolve_repo_name};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
+use crate::validate::reject_pipeline_injection;
 
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_BODY_CHARS: usize = 65_536;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdoPullRequestBodyOperation {
+    Replace,
+    Append,
+    Prepend,
+    ReplaceIsland,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
-pub enum GithubPullRequestNumber {
-    Number(u64),
+pub enum AdoPullRequestId {
+    Number(i32),
     String(String),
 }
 
-impl GithubPullRequestNumber {
-    fn parse(&self, field: &str) -> anyhow::Result<u64> {
-        let number = match self {
-            Self::Number(number) => *number,
+impl AdoPullRequestId {
+    fn parse(&self, field: &str) -> anyhow::Result<i32> {
+        let id = match self {
+            Self::Number(id) => *id,
             Self::String(value) => value
                 .trim()
                 .strip_prefix('#')
                 .unwrap_or_else(|| value.trim())
-                .parse::<u64>()
-                .map_err(|_| anyhow::anyhow!("{field} must be a positive pull request number"))?,
+                .parse::<i32>()
+                .map_err(|_| anyhow::anyhow!("{field} must be a positive pull request ID"))?,
         };
-        ensure!(number > 0, "{field} must be positive");
-        Ok(number)
+        ensure!(id > 0, "{field} must be positive");
+        Ok(id)
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct UpdatePullRequestParams {
-    /// New pull request title.
+    /// Replacement Azure DevOps pull request title.
     #[serde(default)]
     pub title: Option<String>,
-    /// Pull request body content in Markdown.
+    /// Pull request description content in Markdown.
     #[serde(default)]
     pub body: Option<String>,
-    /// Body update operation. Defaults to the configured operation, then `replace`.
+    /// Description update operation. Defaults to the configured operation, then `replace`.
     #[serde(default)]
-    pub operation: Option<GithubBodyOperation>,
-    /// When true, update the PR branch from the base branch before other updates.
+    pub operation: Option<AdoPullRequestBodyOperation>,
+    /// Not supported for Azure DevOps PRs; accepted for gh-aw schema compatibility but must be false/omitted.
     #[serde(default, rename = "update_branch", alias = "updateBranch")]
     pub update_branch: Option<bool>,
-    /// Pull request number. Required when front matter uses `target: "*"`.
+    /// Azure DevOps pull request ID. Required when front matter uses `target: "*"`.
+    #[serde(default, rename = "pull_request_id", alias = "pullRequestId")]
+    pub pull_request_id: Option<AdoPullRequestId>,
+    /// gh-aw-compatible alias for pull_request_id.
     #[serde(default, rename = "pull_request_number", alias = "pullRequestNumber")]
-    pub pull_request_number: Option<GithubPullRequestNumber>,
-    /// Alias for pull_request_number.
+    pub pull_request_number: Option<AdoPullRequestId>,
+    /// Alias for pull_request_id.
     #[serde(default, rename = "pr_number", alias = "prNumber")]
-    pub pr_number: Option<GithubPullRequestNumber>,
-    /// Alias for pull_request_number.
+    pub pr_number: Option<AdoPullRequestId>,
+    /// Alias for pull_request_id.
     #[serde(default)]
-    pub pr: Option<GithubPullRequestNumber>,
-    /// Optional target repository.
+    pub pr: Option<AdoPullRequestId>,
+    /// Repository alias: "self" for the pipeline repo, or an alias from the checkout list.
     #[serde(default)]
     pub repository: Option<String>,
 }
 
 impl UpdatePullRequestParams {
-    fn requested_number(&self) -> anyhow::Result<Option<u64>> {
+    fn requested_id(&self) -> anyhow::Result<Option<i32>> {
         let mut found = None;
         for (field, value) in [
+            ("pull_request_id", self.pull_request_id.as_ref()),
             ("pull_request_number", self.pull_request_number.as_ref()),
             ("pr_number", self.pr_number.as_ref()),
             ("pr", self.pr.as_ref()),
         ] {
             if let Some(value) = value {
-                let number = value.parse(field)?;
+                let id = value.parse(field)?;
                 if let Some(existing) = found {
                     ensure!(
-                        existing == number,
-                        "pull request number aliases must all refer to the same PR"
+                        existing == id,
+                        "pull request ID aliases must all refer to the same PR"
                     );
                 }
-                found = Some(number);
+                found = Some(id);
             }
         }
         Ok(found)
@@ -118,9 +126,9 @@ impl Validate for UpdatePullRequestParams {
             );
         }
         if let Some(repository) = self.repository.as_deref() {
-            validate_github_repository(repository)?;
+            reject_pipeline_injection(repository, "repository")?;
         }
-        let _ = self.requested_number()?;
+        let _ = self.requested_id()?;
         Ok(())
     }
 }
@@ -130,22 +138,24 @@ tool_result! {
     write = true,
     params = UpdatePullRequestParams,
     default_max = 1,
-    /// Result of updating a GitHub pull request.
+    /// Result of updating an Azure DevOps pull request.
     pub struct UpdatePullRequestResult {
         #[serde(default)]
         title: Option<String>,
         #[serde(default)]
         body: Option<String>,
         #[serde(default)]
-        operation: Option<GithubBodyOperation>,
+        operation: Option<AdoPullRequestBodyOperation>,
         #[serde(default, rename = "update_branch")]
         update_branch: Option<bool>,
+        #[serde(default, rename = "pull_request_id")]
+        pull_request_id: Option<AdoPullRequestId>,
         #[serde(default, rename = "pull_request_number")]
-        pull_request_number: Option<GithubPullRequestNumber>,
+        pull_request_number: Option<AdoPullRequestId>,
         #[serde(default, rename = "pr_number")]
-        pr_number: Option<GithubPullRequestNumber>,
+        pr_number: Option<AdoPullRequestId>,
         #[serde(default)]
-        pr: Option<GithubPullRequestNumber>,
+        pr: Option<AdoPullRequestId>,
         #[serde(default)]
         repository: Option<String>,
     }
@@ -163,14 +173,14 @@ fn default_true() -> bool {
     true
 }
 
-fn default_operation() -> GithubBodyOperation {
-    GithubBodyOperation::Replace
+fn default_operation() -> AdoPullRequestBodyOperation {
+    AdoPullRequestBodyOperation::Replace
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UpdatePullRequestTarget {
-    Number(u64),
+    Id(i32),
     Named(String),
 }
 
@@ -183,37 +193,36 @@ impl Default for UpdatePullRequestTarget {
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdatePullRequestConfig {
-    /// Whether title updates are enabled. Defaults to true.
+    /// Whether title updates are enabled. Defaults to true to match gh-aw.
     #[serde(default = "default_true")]
     #[sanitize_config(skip)]
     pub title: bool,
-    /// Whether body updates are enabled. Defaults to true.
+    /// Whether description updates are enabled. Defaults to true to match gh-aw.
     #[serde(default = "default_true")]
     #[sanitize_config(skip)]
     pub body: bool,
-    /// Default branch update policy. Defaults to false.
+    /// Not supported for Azure DevOps PRs; must remain false.
     #[serde(default, rename = "update-branch")]
     #[sanitize_config(skip)]
     pub update_branch: bool,
-    /// gh-aw-compatible stacked-PR fallback knob. Parsed for config parity.
+    /// Accepted for gh-aw front matter parity; unused for Azure DevOps.
     #[serde(default = "default_true", rename = "sync-stack")]
     #[sanitize_config(skip)]
     pub sync_stack: bool,
-    /// Include the standard ado-aw trace footer in body updates.
+    /// Include agent stats in body updates.
     #[serde(default = "default_true")]
     #[sanitize_config(skip)]
     pub footer: bool,
     /// Body update operation. Defaults to replace.
     #[serde(default = "default_operation")]
     #[sanitize_config(skip)]
-    pub operation: GithubBodyOperation,
-    /// `"triggering"` (default), `"*"`, or a fixed PR number.
+    pub operation: AdoPullRequestBodyOperation,
+    /// `"triggering"` (default), `"*"`, or a fixed PR ID.
     #[serde(default)]
     pub target: UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
-    pub target_repo: Option<String>,
-    #[serde(default, rename = "allowed-repos")]
-    pub allowed_repos: Vec<String>,
+    /// Repository aliases the agent may target. Empty means any checkout alias accepted by the compiler.
+    #[serde(default, rename = "allowed-repositories")]
+    pub allowed_repositories: Vec<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
@@ -231,10 +240,9 @@ impl Default for UpdatePullRequestConfig {
             update_branch: false,
             sync_stack: true,
             footer: true,
-            operation: GithubBodyOperation::Replace,
+            operation: AdoPullRequestBodyOperation::Replace,
             target: UpdatePullRequestTarget::default(),
-            target_repo: None,
-            allowed_repos: Vec::new(),
+            allowed_repositories: Vec::new(),
             required_labels: Vec::new(),
             required_title_prefix: None,
             max: None,
@@ -245,82 +253,63 @@ impl Default for UpdatePullRequestConfig {
 pub(crate) fn validate_update_pull_request_config(
     config: &UpdatePullRequestConfig,
 ) -> anyhow::Result<()> {
+    ensure!(
+        !config.update_branch,
+        "safe-outputs.update-pull-request.update-branch is not supported for Azure DevOps PRs"
+    );
     match &config.target {
-        UpdatePullRequestTarget::Number(number) => {
-            ensure!(*number > 0, "target PR number must be positive");
-        }
-        UpdatePullRequestTarget::Named(target) => {
-            ensure!(
-                matches!(target.as_str(), "triggering" | "*"),
-                "target must be \"triggering\", \"*\", or a positive pull request number"
-            );
-        }
+        UpdatePullRequestTarget::Id(id) => ensure!(*id > 0, "target PR ID must be positive"),
+        UpdatePullRequestTarget::Named(target) => ensure!(
+            matches!(target.as_str(), "triggering" | "*"),
+            "target must be \"triggering\", \"*\", or a positive pull request ID"
+        ),
     }
-    validate_github_mutation_filter_config(GithubMutationFilters {
-        required_labels: &config.required_labels,
-        required_title_prefix: config.required_title_prefix.as_deref(),
-    })?;
+    for repository in &config.allowed_repositories {
+        ensure!(
+            !repository.trim().is_empty(),
+            "allowed-repositories entries must not be empty"
+        );
+        reject_pipeline_injection(
+            repository,
+            "safe-outputs.update-pull-request.allowed-repositories",
+        )?;
+    }
+    for label in &config.required_labels {
+        ensure!(
+            !label.is_empty(),
+            "required-labels entries must not be empty"
+        );
+        reject_pipeline_injection(label, "safe-outputs.update-pull-request.required-labels")?;
+    }
+    if let Some(prefix) = config.required_title_prefix.as_deref() {
+        ensure!(
+            !prefix.is_empty(),
+            "required-title-prefix must not be empty"
+        );
+        reject_pipeline_injection(
+            prefix,
+            "safe-outputs.update-pull-request.required-title-prefix",
+        )?;
+    }
     Ok(())
 }
 
 #[derive(Debug, Deserialize)]
-struct RawPullRequestTarget {
-    number: u64,
+struct RawPullRequest {
+    #[serde(rename = "pullRequestId")]
+    pull_request_id: i32,
     title: String,
     #[serde(default)]
-    body: Option<String>,
-    state: String,
+    description: Option<String>,
     #[serde(default)]
     labels: Vec<RawLabel>,
-    html_url: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawLabel {
     name: String,
-}
-
-impl RawPullRequestTarget {
-    fn metadata(&self) -> GithubTargetMetadata {
-        GithubTargetMetadata {
-            number: self.number,
-            node_id: None,
-            title: self.title.clone(),
-            state: self.state.clone(),
-            labels: self.labels.iter().map(|label| label.name.clone()).collect(),
-            kind: GithubTargetKind::PullRequest,
-            html_url: self.html_url.clone(),
-        }
-    }
-}
-
-fn repository_route(client: &GithubClient, repository: &str, tail: &[&str]) -> anyhow::Result<Url> {
-    validate_github_repository(repository)?;
-    let (owner, name) = repository
-        .split_once('/')
-        .expect("validated GitHub repository contains slash");
-    let mut url = client.rest_api_url().clone();
-    {
-        let mut path = url
-            .path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("GitHub API URL cannot be a base URL"))?;
-        path.pop_if_empty();
-        path.push("repos");
-        path.push(owner);
-        path.push(name);
-        for segment in tail {
-            path.push(segment);
-        }
-    }
-    Ok(url)
-}
-
-fn body_with_footer(body: &str, include_footer: bool, ctx: &ExecutionContext) -> String {
-    if include_footer {
-        format!("{body}\n\n{}", build_github_trace_footer(ctx))
-    } else {
-        body.to_string()
-    }
 }
 
 fn island_markers(ctx: &ExecutionContext) -> Result<(String, String), ExecutionResult> {
@@ -375,102 +364,109 @@ fn replace_island(
     ))
 }
 
+fn body_with_footer(body: &str, include_footer: bool, ctx: &ExecutionContext) -> String {
+    if include_footer {
+        crate::agent_stats::append_stats_to_body(body, ctx, true)
+    } else {
+        body.to_string()
+    }
+}
+
 fn build_updated_body(
     current: &str,
     new_content: &str,
-    operation: GithubBodyOperation,
+    operation: AdoPullRequestBodyOperation,
     include_footer: bool,
     ctx: &ExecutionContext,
 ) -> Result<String, ExecutionResult> {
     let section = body_with_footer(new_content, include_footer, ctx);
     let updated = match operation {
-        GithubBodyOperation::Append => {
+        AdoPullRequestBodyOperation::Append => {
             if current.is_empty() {
                 section
             } else {
                 format!("{current}\n\n---\n\n{section}")
             }
         }
-        GithubBodyOperation::Prepend => {
+        AdoPullRequestBodyOperation::Prepend => {
             if current.is_empty() {
                 section
             } else {
                 format!("{section}\n\n---\n\n{current}")
             }
         }
-        GithubBodyOperation::Replace => section,
-        GithubBodyOperation::ReplaceIsland => replace_island(current, &section, ctx)?,
+        AdoPullRequestBodyOperation::Replace => section,
+        AdoPullRequestBodyOperation::ReplaceIsland => replace_island(current, &section, ctx)?,
     };
     if updated.chars().count() > MAX_BODY_CHARS {
         return Err(ExecutionResult::failure(format!(
-            "updated body exceeds GitHub's {MAX_BODY_CHARS}-character limit"
+            "updated body exceeds Azure DevOps' {MAX_BODY_CHARS}-character limit"
         )));
     }
     Ok(updated)
 }
 
+fn ctx_pull_request_id(ctx: &ExecutionContext) -> Result<i32, ExecutionResult> {
+    let raw = ctx.pull_request_id.as_deref().ok_or_else(|| {
+        ExecutionResult::failure(
+            "SYSTEM_PULLREQUEST_PULLREQUESTID is required for target \"triggering\"",
+        )
+    })?;
+    raw.parse::<i32>().ok().filter(|id| *id > 0).ok_or_else(|| {
+        ExecutionResult::failure(format!(
+            "SYSTEM_PULLREQUEST_PULLREQUESTID '{}' is not a positive pull request ID",
+            crate::sanitize::neutralize_pipeline_commands(raw)
+        ))
+    })
+}
+
 impl UpdatePullRequestResult {
-    fn requested_number(&self) -> anyhow::Result<Option<u64>> {
-        let params = UpdatePullRequestParams {
+    fn requested_id(&self) -> anyhow::Result<Option<i32>> {
+        UpdatePullRequestParams {
             title: self.title.clone(),
             body: self.body.clone(),
             operation: self.operation,
             update_branch: self.update_branch,
+            pull_request_id: self.pull_request_id.clone(),
             pull_request_number: self.pull_request_number.clone(),
             pr_number: self.pr_number.clone(),
             pr: self.pr.clone(),
             repository: self.repository.clone(),
-        };
-        params.requested_number()
+        }
+        .requested_id()
     }
 
-    fn requested_fields(&self, config: &UpdatePullRequestConfig) -> Vec<&'static str> {
-        let mut fields = Vec::new();
-        if self.title.is_some() {
-            fields.push("title");
-        }
-        if self.body.is_some() {
-            fields.push("body");
-        }
-        if self.update_branch.unwrap_or(config.update_branch) {
-            fields.push("update_branch");
-        }
-        fields
-    }
-
-    fn resolve_number(
+    fn resolve_id(
         &self,
         config: &UpdatePullRequestConfig,
         ctx: &ExecutionContext,
-    ) -> Result<u64, ExecutionResult> {
+    ) -> Result<i32, ExecutionResult> {
         let requested = self
-            .requested_number()
+            .requested_id()
             .map_err(|error| ExecutionResult::failure(error.to_string()))?;
         match &config.target {
-            UpdatePullRequestTarget::Number(number) => {
+            UpdatePullRequestTarget::Id(id) => {
                 if let Some(requested) = requested
-                    && requested != *number
+                    && requested != *id
                 {
                     return Err(ExecutionResult::failure(format!(
-                        "requested pull_request_number #{requested} does not match configured target #{number}"
+                        "requested pull_request_id #{requested} does not match configured target #{id}"
                     )));
                 }
-                Ok(*number)
+                Ok(*id)
             }
-            UpdatePullRequestTarget::Named(target) if target == "*" => {
-                requested.ok_or_else(|| {
-                    ExecutionResult::failure(
-                        "pull_request_number is required when safe-outputs.update-pull-request.target is \"*\"",
-                    )
-                })
-            }
+            UpdatePullRequestTarget::Named(target) if target == "*" => requested.ok_or_else(|| {
+                ExecutionResult::failure(
+                    "pull_request_id is required when safe-outputs.update-pull-request.target is \"*\"",
+                )
+            }),
             UpdatePullRequestTarget::Named(target) if target == "triggering" => {
-                let triggering = ctx_pull_request_id_from(ctx)?;
+                let triggering = ctx_pull_request_id(ctx)?;
                 if let Some(requested) = requested
                     && requested != triggering
                 {
                     return Err(ExecutionResult::failure(format!(
-                        "requested pull_request_number #{requested} does not match triggering pull request #{triggering}"
+                        "requested pull_request_id #{requested} does not match triggering pull request #{triggering}"
                     )));
                 }
                 Ok(triggering)
@@ -482,85 +478,90 @@ impl UpdatePullRequestResult {
         }
     }
 
-    async fn fetch_target(
+    fn requested_fields(&self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.title.is_some() {
+            fields.push("title");
+        }
+        if self.body.is_some() {
+            fields.push("body");
+        }
+        fields
+    }
+
+    async fn fetch_pr(
         &self,
-        client: &GithubClient,
-        repository: &str,
-        number: u64,
-    ) -> anyhow::Result<Result<RawPullRequestTarget, ExecutionResult>> {
+        client: &reqwest::Client,
+        base_url: &str,
+        repo_name: &str,
+        token: &str,
+        pr_id: i32,
+    ) -> anyhow::Result<Result<RawPullRequest, ExecutionResult>> {
+        let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
+        let url = format!("{base_url}/{encoded_repo}/pullRequests/{pr_id}?api-version=7.1");
         let response = client
-            .send(
-                Method::GET,
-                repository_route(client, repository, &["pulls", &number.to_string()])?,
-                None,
-            )
-            .await?;
-        let response = match response.require_success("Failed to fetch GitHub pull request") {
-            Ok(response) => response,
-            Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
-        };
-        match response.json("Failed to parse GitHub pull request") {
-            Ok(target) => Ok(Ok(target)),
-            Err(error) => Ok(Err(ExecutionResult::failure(error.to_string()))),
+            .get(&url)
+            .basic_auth("", Some(token))
+            .send()
+            .await
+            .context("Failed to fetch Azure DevOps pull request")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Failed to fetch PR #{pr_id} (HTTP {status}): {body}"
+            ))));
+        }
+        match response.json::<RawPullRequest>().await {
+            Ok(pr) => Ok(Ok(pr)),
+            Err(error) => Ok(Err(ExecutionResult::failure(format!(
+                "Failed to parse PR #{pr_id}: {error}"
+            )))),
         }
     }
 
-    async fn update_branch(
+    fn validate_filters(
         &self,
-        client: &GithubClient,
-        repository: &str,
-        number: u64,
-    ) -> anyhow::Result<Result<(), ExecutionResult>> {
-        let response = client
-            .send(
-                Method::PUT,
-                repository_route(
-                    client,
-                    repository,
-                    &["pulls", &number.to_string(), "update-branch"],
-                )?,
-                None,
-            )
-            .await?;
-        if response.is_success() {
-            return Ok(Ok(()));
+        pr: &RawPullRequest,
+        config: &UpdatePullRequestConfig,
+    ) -> Result<(), ExecutionResult> {
+        let missing: Vec<&str> = config
+            .required_labels
+            .iter()
+            .map(String::as_str)
+            .filter(|required| {
+                !pr.labels
+                    .iter()
+                    .any(|label| label.name.eq_ignore_ascii_case(required))
+            })
+            .collect();
+        if !missing.is_empty() {
+            return Err(ExecutionResult::failure(format!(
+                "PR #{} is missing required labels: {}",
+                pr.pull_request_id,
+                missing.join(", ")
+            )));
         }
-        let error = response
-            .require_success("Failed to update GitHub pull request branch")
-            .expect_err("non-success response must produce an API error");
-        let message = error.message.to_ascii_lowercase();
-        if message.contains("there are no new commits on the base branch")
-            || message.contains("merge conflict between base and head")
-            || message.contains("head ref does not exist")
+        if let Some(prefix) = config.required_title_prefix.as_deref()
+            && !pr.title.starts_with(prefix)
         {
-            warn!("Non-fatal update-pull-request branch update failure: {error}");
-            return Ok(Ok(()));
+            return Err(ExecutionResult::failure(format!(
+                "PR #{} title does not start with required-title-prefix '{}'",
+                pr.pull_request_id,
+                crate::sanitize::neutralize_pipeline_commands(prefix)
+            )));
         }
-        Ok(Err(ExecutionResult::failure(error.to_string())))
+        Ok(())
     }
-}
-
-fn ctx_pull_request_id_from(ctx: &ExecutionContext) -> Result<u64, ExecutionResult> {
-    let raw = ctx.pull_request_id.as_deref().ok_or_else(|| {
-        ExecutionResult::failure(
-            "SYSTEM_PULLREQUEST_PULLREQUESTID is required for target \"triggering\"",
-        )
-    })?;
-    raw.parse::<u64>()
-        .ok()
-        .filter(|number| *number > 0)
-        .ok_or_else(|| {
-            ExecutionResult::failure(format!(
-                "SYSTEM_PULLREQUEST_PULLREQUESTID '{}' is not a positive pull request number",
-                crate::sanitize::neutralize_pipeline_commands(raw)
-            ))
-        })
 }
 
 #[async_trait::async_trait]
 impl Executor for UpdatePullRequestResult {
     fn dry_run_summary(&self) -> String {
-        "update GitHub pull request".to_string()
+        "update Azure DevOps pull request".to_string()
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -569,6 +570,7 @@ impl Executor for UpdatePullRequestResult {
             body: self.body.clone(),
             operation: self.operation,
             update_branch: self.update_branch,
+            pull_request_id: self.pull_request_id.clone(),
             pull_request_number: self.pull_request_number.clone(),
             pr_number: self.pr_number.clone(),
             pr: self.pr.clone(),
@@ -582,12 +584,18 @@ impl Executor for UpdatePullRequestResult {
                 "update-pull-request is not configured for this workflow",
             ));
         }
-        let Some(token) = ctx.github_token.as_ref() else {
-            return Ok(ExecutionResult::failure(
-                "ADO_AW_GITHUB_TOKEN is not set; configure safe-outputs.github-token \
-                 or safe-outputs.github-app",
-            ));
-        };
+        let org_url = ctx
+            .ado_org_url
+            .as_ref()
+            .context("AZURE_DEVOPS_ORG_URL not set")?;
+        let project = ctx
+            .ado_project
+            .as_ref()
+            .context("SYSTEM_TEAMPROJECT not set")?;
+        let token = ctx
+            .access_token
+            .as_ref()
+            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         let config: UpdatePullRequestConfig = ctx.get_tool_config("update-pull-request")?;
         validate_update_pull_request_config(&config)?;
         if self.title.is_some() && !config.title {
@@ -600,97 +608,106 @@ impl Executor for UpdatePullRequestResult {
                 "update-pull-request field 'body' is not enabled by configuration",
             ));
         }
-        let update_branch = self.update_branch.unwrap_or(config.update_branch);
-        if self.title.is_none() && self.body.is_none() && !update_branch {
+        if self.update_branch == Some(true) {
             return Ok(ExecutionResult::failure(
-                "at least one of title, body, or effective update_branch: true is required",
+                "update_branch is not supported for Azure DevOps PRs",
             ));
         }
-        let number = match self.resolve_number(&config, ctx) {
-            Ok(number) => number,
-            Err(result) => return Ok(result),
-        };
-        let repository = match resolve_github_repository(
-            self.repository.as_deref(),
-            GithubRepositoryPolicy::new(config.target_repo.as_deref(), &config.allowed_repos),
-            ctx,
-        ) {
-            Ok(repository) => repository,
-            Err(result) => return Ok(result),
-        };
-        let client = GithubClient::new(&ctx.github_api_url, token)?;
-        let current = match self.fetch_target(&client, &repository, number).await? {
-            Ok(target) => target,
-            Err(result) => return Ok(result),
-        };
-        let metadata = current.metadata();
-        if let Err(result) = validate_github_target_capability(
-            &metadata,
-            GithubTargetCapabilities {
-                issues: false,
-                pull_requests: true,
-            },
-        ) {
-            return Ok(result);
+        if self.title.is_none() && self.body.is_none() {
+            return Ok(ExecutionResult::failure(
+                "at least one of title or body is required",
+            ));
         }
-        let filters = GithubMutationFilters {
-            required_labels: &config.required_labels,
-            required_title_prefix: config.required_title_prefix.as_deref(),
+        let pr_id = match self.resolve_id(&config, ctx) {
+            Ok(pr_id) => pr_id,
+            Err(result) => return Ok(result),
         };
-        if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
-            return Ok(result);
-        }
-        if update_branch
-            && let Err(result) = self.update_branch(&client, &repository, number).await?
+        let repo_alias = self.repository.as_deref().unwrap_or("self");
+        if !config.allowed_repositories.is_empty()
+            && !config
+                .allowed_repositories
+                .iter()
+                .any(|allowed| allowed == repo_alias)
         {
+            return Ok(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list: [{}]",
+                crate::sanitize::neutralize_pipeline_commands(repo_alias),
+                config.allowed_repositories.join(", ")
+            )));
+        }
+        let repo_name = match resolve_repo_name(self.repository.as_deref(), ctx) {
+            Ok(name) => name,
+            Err(failure) => return Ok(failure),
+        };
+        let client = reqwest::Client::new();
+        let encoded_project = utf8_percent_encode(project, PATH_SEGMENT).to_string();
+        let base_url = format!(
+            "{}/{}/_apis/git/repositories",
+            org_url.trim_end_matches('/'),
+            encoded_project,
+        );
+        let current = match self
+            .fetch_pr(&client, &base_url, &repo_name, token, pr_id)
+            .await?
+        {
+            Ok(pr) => pr,
+            Err(result) => return Ok(result),
+        };
+        if let Err(result) = self.validate_filters(&current, &config) {
             return Ok(result);
         }
-
-        let mut payload = Map::new();
+        let mut patch = Map::new();
         if let Some(title) = self.title.as_ref() {
-            payload.insert("title".to_string(), Value::String(title.clone()));
+            patch.insert("title".to_string(), Value::String(title.clone()));
         }
         if let Some(body) = self.body.as_deref() {
-            let updated = match build_updated_body(
-                current.body.as_deref().unwrap_or_default(),
+            let description = match build_updated_body(
+                current.description.as_deref().unwrap_or_default(),
                 body,
                 self.operation.unwrap_or(config.operation),
                 config.footer,
                 ctx,
             ) {
-                Ok(body) => body,
+                Ok(description) => description,
                 Err(result) => return Ok(result),
             };
-            payload.insert("body".to_string(), Value::String(updated));
+            patch.insert("description".to_string(), Value::String(description));
         }
-        if !payload.is_empty() {
-            debug!("Updating GitHub pull request {repository}#{number}");
-            let response = client
-                .send(
-                    Method::PATCH,
-                    repository_route(&client, &repository, &["pulls", &number.to_string()])?,
-                    Some(&Value::Object(payload)),
-                )
-                .await?;
-            if !response.is_success() {
-                let error = response
-                    .require_success("Failed to update GitHub pull request")
-                    .expect_err("non-success response must produce an API error");
-                return Ok(ExecutionResult::failure(error.to_string()));
-            }
+        let encoded_repo = utf8_percent_encode(&repo_name, PATH_SEGMENT).to_string();
+        let patch_url = format!("{base_url}/{encoded_repo}/pullRequests/{pr_id}?api-version=7.1");
+        debug!(
+            "Updating Azure DevOps PR #{pr_id}: {}",
+            self.requested_fields().join(", ")
+        );
+        let response = client
+            .patch(&patch_url)
+            .header("Content-Type", "application/json")
+            .basic_auth("", Some(token))
+            .json(&Value::Object(patch))
+            .send()
+            .await
+            .context("Failed to update Azure DevOps pull request")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Ok(ExecutionResult::failure(format!(
+                "Failed to update PR #{pr_id} (HTTP {status}): {body}"
+            )));
         }
-
-        info!("Updated GitHub pull request {repository}#{number}");
+        info!("Updated Azure DevOps PR #{pr_id}");
         Ok(ExecutionResult::success_with_data(
             format!(
-                "Updated GitHub pull request {repository}#{number}: {}",
-                self.requested_fields(&config).join(", ")
+                "Updated Azure DevOps PR #{pr_id}: {}",
+                self.requested_fields().join(", ")
             ),
             serde_json::json!({
-                "number": number,
-                "target_repo": repository,
-                "pull_request_url": metadata.html_url,
-                "fields": self.requested_fields(&config),
+                "pull_request_id": pr_id,
+                "operation": "update-pull-request",
+                "fields": self.requested_fields(),
+                "url": current.url,
             }),
         ))
     }
@@ -708,10 +725,10 @@ mod tests {
         let mut tool_configs = HashMap::new();
         tool_configs.insert("update-pull-request".to_string(), config);
         ExecutionContext {
-            github_token: Some("token".to_string()),
-            github_api_url: server.uri(),
-            repository_provider: Some("GitHub".to_string()),
-            repository_name: Some("octo/repo".to_string()),
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("project".to_string()),
+            access_token: Some("token".to_string()),
+            repository_name: Some("repo".to_string()),
             pull_request_id: Some("7".to_string()),
             tool_configs,
             definition_id: Some(123),
@@ -719,14 +736,13 @@ mod tests {
         }
     }
 
-    fn pull_request(number: u64) -> serde_json::Value {
+    fn pr(id: i32) -> serde_json::Value {
         serde_json::json!({
-            "number": number,
+            "pullRequestId": id,
             "title": "[bot] Existing",
-            "body": "Existing body",
-            "state": "open",
+            "description": "Existing body",
             "labels": [{"name": "automated"}],
-            "html_url": format!("https://github.example/octo/repo/pull/{number}")
+            "url": format!("https://dev.azure.example/pr/{id}")
         })
     }
 
@@ -736,6 +752,7 @@ mod tests {
             body: None,
             operation: None,
             update_branch: None,
+            pull_request_id: None,
             pull_request_number: None,
             pr_number: None,
             pr: None,
@@ -750,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn config_matches_gh_aw_defaults_and_rejects_unknown_fields() {
+    fn config_matches_gh_aw_shape_but_rejects_update_branch_true() {
         let config: UpdatePullRequestConfig =
             serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(config.title);
@@ -758,24 +775,26 @@ mod tests {
         assert!(!config.update_branch);
         assert!(config.sync_stack);
         assert!(config.footer);
-        assert_eq!(config.operation, GithubBodyOperation::Replace);
-        assert!(
-            serde_json::from_value::<UpdatePullRequestConfig>(serde_json::json!({
-                "allow-title": true
-            }))
-            .is_err()
-        );
+        assert_eq!(config.operation, AdoPullRequestBodyOperation::Replace);
+
+        let unsupported: UpdatePullRequestConfig = serde_json::from_value(serde_json::json!({
+            "update-branch": true
+        }))
+        .unwrap();
+        assert!(validate_update_pull_request_config(&unsupported).is_err());
     }
 
     #[test]
-    fn validates_number_aliases() {
-        let mut empty = params();
-        empty.title = None;
+    fn validates_id_aliases() {
+        let empty = UpdatePullRequestParams {
+            title: None,
+            ..params()
+        };
         assert!(empty.validate().is_ok());
 
         let mut aliases = params();
-        aliases.pull_request_number = Some(GithubPullRequestNumber::Number(1));
-        aliases.pr_number = Some(GithubPullRequestNumber::String("#2".to_string()));
+        aliases.pull_request_id = Some(AdoPullRequestId::Number(1));
+        aliases.pull_request_number = Some(AdoPullRequestId::String("#2".to_string()));
         assert!(aliases.validate().is_err());
     }
 
@@ -788,19 +807,17 @@ mod tests {
         let first = build_updated_body(
             "before",
             "new",
-            GithubBodyOperation::ReplaceIsland,
+            AdoPullRequestBodyOperation::ReplaceIsland,
             false,
             &ctx,
         )
         .unwrap();
         assert!(first.contains("before\n\n---\n\n"));
         assert!(first.contains("<!-- ado-aw-pr-island-start:pipeline-definition-id=123 -->"));
-        assert!(first.contains("\nnew\n"));
-
         let second = build_updated_body(
             &first,
             "next",
-            GithubBodyOperation::ReplaceIsland,
+            AdoPullRequestBodyOperation::ReplaceIsland,
             false,
             &ctx,
         )
@@ -809,54 +826,28 @@ mod tests {
         assert!(!second.contains("\nnew\n"));
     }
 
-    #[test]
-    fn replace_island_requires_definition_id_and_ordered_markers() {
-        let missing_id = ExecutionContext::default();
-        assert!(
-            build_updated_body(
-                "",
-                "new",
-                GithubBodyOperation::ReplaceIsland,
-                false,
-                &missing_id
-            )
-            .is_err()
-        );
-
-        let ctx = ExecutionContext {
-            definition_id: Some(123),
-            ..Default::default()
-        };
-        let bad = "<!-- ado-aw-pr-island-end:pipeline-definition-id=123 -->\nold\n<!-- ado-aw-pr-island-start:pipeline-definition-id=123 -->";
-        assert!(
-            build_updated_body(bad, "new", GithubBodyOperation::ReplaceIsland, false, &ctx)
-                .is_err()
-        );
-    }
-
     #[tokio::test]
-    async fn updates_triggering_pull_request_title_and_body() {
+    async fn updates_triggering_pr_title_and_body() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/repos/octo/repo/pulls/7"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pull_request(7)))
+            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
-            .and(path("/repos/octo/repo/pulls/7"))
+            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
             .and(body_json(serde_json::json!({
                 "title": "Updated title",
-                "body": "Existing body\n\n---\n\nNew body"
+                "description": "Existing body\n\n---\n\nNew body"
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pull_request(7)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
             .expect(1)
             .mount(&server)
             .await;
         let ctx = context(
             &server,
             serde_json::json!({
-                "target-repo": "octo/repo",
                 "title": true,
                 "body": true,
                 "footer": false,
@@ -870,6 +861,7 @@ mod tests {
             body: Some("New body".to_string()),
             operation: None,
             update_branch: None,
+            pull_request_id: None,
             pull_request_number: None,
             pr_number: None,
             pr: None,
@@ -882,61 +874,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn target_star_requires_agent_pull_request_number() {
+    async fn target_star_requires_agent_pr_id() {
         let server = MockServer::start().await;
         let ctx = context(
             &server,
             serde_json::json!({
-                "target-repo": "octo/repo",
                 "target": "*"
             }),
         );
         let mut result: UpdatePullRequestResult = params().try_into().unwrap();
         let execution = result.execute_sanitized(&ctx).await.unwrap();
         assert!(!execution.success);
-        assert!(
-            execution
-                .message
-                .contains("pull_request_number is required")
-        );
+        assert!(execution.message.contains("pull_request_id is required"));
         assert!(server.received_requests().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn update_branch_only_calls_update_branch_endpoint() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/octo/repo/pulls/7"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pull_request(7)))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("PUT"))
-            .and(path("/repos/octo/repo/pulls/7/update-branch"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({})))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let ctx = context(
-            &server,
-            serde_json::json!({
-                "target-repo": "octo/repo",
-                "update-branch": true
-            }),
-        );
-        let mut result: UpdatePullRequestResult = UpdatePullRequestParams {
-            title: None,
-            body: None,
-            operation: None,
-            update_branch: None,
-            pull_request_number: None,
-            pr_number: None,
-            pr: None,
-            repository: None,
-        }
-        .try_into()
-        .unwrap();
-        let execution = result.execute_sanitized(&ctx).await.unwrap();
-        assert!(execution.success, "{}", execution.message);
     }
 }

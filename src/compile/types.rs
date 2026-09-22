@@ -709,7 +709,6 @@ pub const SAFE_OUTPUTS_GITHUB_ACTOR_LOGIN_ENV: &str = "ADO_AW_GITHUB_ACTOR_LOGIN
 /// intentionally does not depend on the safe-output module registry.
 pub const GITHUB_ISSUE_SAFE_OUTPUT_TOOLS: &[&str] = &[
     "create-github-issue",
-    "update-pull-request",
     "set-github-issue-type",
     "comment-on-github-issue",
     "hide-github-issue-comment",
@@ -2351,18 +2350,6 @@ impl FrontMatter {
                         ..Default::default()
                     }))
             }
-            "update-pull-request" => {
-                Ok(self
-                    .update_pull_request_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        pull_requests: Some(true),
-                        ..Default::default()
-                    }))
-            }
             "set-github-issue-type" => {
                 Ok(self
                     .set_github_issue_type_config()?
@@ -2513,9 +2500,6 @@ impl FrontMatter {
                 continue;
             };
             match tool.as_str() {
-                "update-pull-request" => {
-                    pull_requests = true;
-                }
                 "comment-on-github-issue" | "add-github-issue-labels" | "update-github-issue" => {
                     let tool_issues = config.issues.unwrap_or(true);
                     let tool_pull_requests = config.pull_requests.unwrap_or(false);
