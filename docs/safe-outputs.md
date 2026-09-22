@@ -1297,22 +1297,22 @@ safe-outputs:
     max: 1                          # Maximum per run (default: 1)
 ```
 
-### close-pull-request
+### abandon-pull-request
 Abandons an Azure DevOps pull request without merging it.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID to close (required when `target: "*"`)
-- `body` *(optional)* - Closing comment posted before abandoning the PR
+- `pull_request_id` - The PR ID to abandon (required when `target: "*"`)
+- `body` *(optional)* - Comment posted before abandoning the PR
 - `repository` - Repository alias (default: configured `target-repo`, then `"self"`)
 
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  close-pull-request:
+  abandon-pull-request:
     target: "triggering"              # "triggering" (default), "*", or PR ID
     required-labels: [automated, stale]
     required-title-prefix: "[bot]"
-    allowed-repositories: []          # Optional — restrict which repos can be closed
+    allowed-repositories: []          # Optional — restrict which repos can be abandoned
     target-repo: self                 # Optional default repository alias/name
     max: 1                            # Maximum per run (default: 1)
 ```

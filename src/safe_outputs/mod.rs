@@ -85,7 +85,7 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     AddBuildTagResult,
     CreateBranchResult,
     UpdatePrResult,
-    ClosePullRequestResult,
+    AbandonPullRequestResult,
     UploadBuildAttachmentResult,
     UploadPipelineArtifactResult,
     UploadWorkitemAttachmentResult,
@@ -771,7 +771,7 @@ mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
 mod assign_work_item;
 mod close_github_issue;
-mod close_pull_request;
+mod abandon_pull_request;
 mod comment_on_github_issue;
 mod comment_on_work_item;
 mod create_branch;
@@ -813,7 +813,7 @@ pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;
 pub use assign_work_item::*;
 pub use close_github_issue::*;
-pub use close_pull_request::*;
+pub use abandon_pull_request::*;
 pub use comment_on_github_issue::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;

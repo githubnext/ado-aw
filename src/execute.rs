@@ -16,17 +16,17 @@ use tokio::io::AsyncWriteExt;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagResult, AddGithubIssueLabelsResult, AddPrCommentResult,
+    AbandonPullRequestResult, AddBuildTagResult, AddGithubIssueLabelsResult, AddPrCommentResult,
     AssignGithubIssueMilestoneResult, AssignGithubIssueToUserResult, AssignWorkItemResult,
-    CloseGithubIssueResult, ClosePullRequestResult, CommentOnGithubIssueResult,
-    CommentOnWorkItemResult, CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult,
-    CreatePrResult, CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult,
-    Executor, HideGithubIssueCommentResult, LinkGithubSubIssueResult, LinkWorkItemsResult,
-    MissingDataResult, MissingToolResult, NoopResult, QueueBuildResult,
-    RemoveGithubIssueLabelsResult, ReplyToPrCommentResult, ReportIncompleteResult,
-    ResolvePrThreadResult, SetGithubIssueFieldResult, SetGithubIssueTypeResult,
-    SubmitPrReviewResult, ToolResult, UnassignGithubIssueFromUserResult, UpdateGithubIssueResult,
-    UpdatePrResult, UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    CloseGithubIssueResult, CommentOnGithubIssueResult, CommentOnWorkItemResult,
+    CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult, CreatePrResult,
+    CreateWikiPageResult, CreateWorkItemResult, ExecutionContext, ExecutionResult, Executor,
+    HideGithubIssueCommentResult, LinkGithubSubIssueResult, LinkWorkItemsResult, MissingDataResult,
+    MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
+    ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
+    SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
+    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
+    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::sanitize::neutralize_pipeline_commands;
@@ -739,6 +739,7 @@ async fn dispatch_pr_tools(
         "create-pull-request" => CreatePrResult,
         "add-pr-comment" => AddPrCommentResult,
         "update-pr" => UpdatePrResult,
+        "abandon-pull-request" => AbandonPullRequestResult,
         "submit-pr-review" => SubmitPrReviewResult,
         "reply-to-pr-comment" => ReplyToPrCommentResult,
         "resolve-pr-thread" => ResolvePrThreadResult,
@@ -777,7 +778,6 @@ async fn dispatch_github_tools(
         "add-github-issue-labels" => AddGithubIssueLabelsResult,
         "remove-github-issue-labels" => RemoveGithubIssueLabelsResult,
         "close-github-issue" => CloseGithubIssueResult,
-        "close-pull-request" => ClosePullRequestResult,
         "update-github-issue" => UpdateGithubIssueResult,
         "set-github-issue-field" => SetGithubIssueFieldResult,
         "assign-github-issue-milestone" => AssignGithubIssueMilestoneResult,

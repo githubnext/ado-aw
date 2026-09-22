@@ -2291,10 +2291,10 @@ impl FrontMatter {
         self.typed_safe_output_config("close-github-issue")
     }
 
-    pub fn close_pull_request_config(
+    pub fn abandon_pull_request_config(
         &self,
-    ) -> anyhow::Result<Option<crate::safe_outputs::ClosePullRequestConfig>> {
-        self.typed_safe_output_config("close-pull-request")
+    ) -> anyhow::Result<Option<crate::safe_outputs::AbandonPullRequestConfig>> {
+        self.typed_safe_output_config("abandon-pull-request")
     }
 
     pub fn update_github_issue_config(

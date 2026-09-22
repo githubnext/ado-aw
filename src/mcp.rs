@@ -11,19 +11,20 @@ use std::sync::Arc;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagParams, AddBuildTagResult, AddGithubIssueLabelsParams, AddGithubIssueLabelsResult,
-    AddPrCommentParams, AddPrCommentResult, AssignGithubIssueMilestoneParams,
-    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserParams, AssignGithubIssueToUserResult,
-    AssignWorkItemParams, AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
-    ClosePullRequestParams, ClosePullRequestResult, CommentOnGithubIssueParams,
-    CommentOnGithubIssueResult, CommentOnWorkItemParams, CommentOnWorkItemResult,
-    CreateBranchParams, CreateBranchResult, CreateGitTagParams, CreateGitTagResult,
-    CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams, CreatePrResult,
-    CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams, CreateWorkItemResult,
-    DEFAULT_MAX_FILE_SIZE, HideGithubIssueCommentParams, HideGithubIssueCommentResult,
-    LinkGithubSubIssueParams, LinkGithubSubIssueResult, LinkWorkItemsParams, LinkWorkItemsResult,
-    MissingDataParams, MissingDataResult, MissingToolParams, MissingToolResult, NoopParams,
-    NoopResult, PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
+    AbandonPullRequestParams, AbandonPullRequestResult, AddBuildTagParams, AddBuildTagResult,
+    AddGithubIssueLabelsParams, AddGithubIssueLabelsResult, AddPrCommentParams, AddPrCommentResult,
+    AssignGithubIssueMilestoneParams, AssignGithubIssueMilestoneResult,
+    AssignGithubIssueToUserParams, AssignGithubIssueToUserResult, AssignWorkItemParams,
+    AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
+    CommentOnGithubIssueParams, CommentOnGithubIssueResult, CommentOnWorkItemParams,
+    CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult, CreateGitTagParams,
+    CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
+    CreatePrResult, CreateWikiPageParams, CreateWikiPageResult, CreateWorkItemParams,
+    CreateWorkItemResult, DEFAULT_MAX_FILE_SIZE, HideGithubIssueCommentParams,
+    HideGithubIssueCommentResult, LinkGithubSubIssueParams, LinkGithubSubIssueResult,
+    LinkWorkItemsParams, LinkWorkItemsResult, MissingDataParams, MissingDataResult,
+    MissingToolParams, MissingToolResult, NoopParams, NoopResult,
+    PIPELINE_ARTIFACT_DEFAULT_MAX_FILE_SIZE, QueueBuildParams, QueueBuildResult,
     RemoveGithubIssueLabelsParams, RemoveGithubIssueLabelsResult, ReplyToPrCommentParams,
     ReplyToPrCommentResult, ReportIncompleteParams, ReportIncompleteResult, ResolvePrThreadParams,
     ResolvePrThreadResult, SetGithubIssueFieldParams, SetGithubIssueFieldResult,
@@ -945,14 +946,14 @@ issue_number may be a positive number or a temporary_id from create-github-issue
     }
 
     #[tool(
-        name = "close-pull-request",
+        name = "abandon-pull-request",
         description = "Abandon a configured Azure DevOps pull request without merging, optionally with a comment."
     )]
-    async fn close_pull_request(
+    async fn abandon_pull_request(
         &self,
-        params: Parameters<ClosePullRequestParams>,
+        params: Parameters<AbandonPullRequestParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result: ClosePullRequestResult = params.0.try_into()?;
+        let result: AbandonPullRequestResult = params.0.try_into()?;
         self.queue_sanitized_output(result).await
     }
 

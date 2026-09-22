@@ -2422,9 +2422,9 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
                     crate::safe_outputs::validate_close_github_issue_config(&config)?;
                 }
             }
-            "close-pull-request" => {
-                if let Some(config) = front_matter.close_pull_request_config()? {
-                    crate::safe_outputs::validate_close_pull_request_config(&config)?;
+            "abandon-pull-request" => {
+                if let Some(config) = front_matter.abandon_pull_request_config()? {
+                    crate::safe_outputs::validate_abandon_pull_request_config(&config)?;
                 }
             }
             "update-github-issue" => {
