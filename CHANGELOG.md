@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.52.1](https://github.com/githubnext/ado-aw/compare/v0.52.0...v0.52.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* **engine:** pass Copilot prompt using attached --prompt= form ([#2187](https://github.com/githubnext/ado-aw/issues/2187)) ([ee4a242](https://github.com/githubnext/ado-aw/commit/ee4a242eadc18c678c6b079a04de19dc87c49a13))
+* **safe-outputs:** simplify PR metadata footer ([#2195](https://github.com/githubnext/ado-aw/issues/2195)) ([abed846](https://github.com/githubnext/ado-aw/commit/abed8467abb7d04a2193310b06e25aa91fc69268))
+
 ## [0.52.0](https://github.com/githubnext/ado-aw/compare/v0.51.0...v0.52.0) (2026-09-14)
 
 
