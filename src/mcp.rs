@@ -946,7 +946,7 @@ issue_number may be a positive number or a temporary_id from create-github-issue
 
     #[tool(
         name = "close-pull-request",
-        description = "Close a configured GitHub pull request without merging, optionally with a comment."
+        description = "Abandon a configured Azure DevOps pull request without merging, optionally with a comment."
     )]
     async fn close_pull_request(
         &self,

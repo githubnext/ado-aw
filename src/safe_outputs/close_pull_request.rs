@@ -272,7 +272,7 @@ impl ClosePullRequestResult {
                 config.allowed_repositories.join(", ")
             )));
         }
-        resolve_repo_name(Some(selector), ctx).map_err(ExecutionResult::failure)
+        resolve_repo_name(Some(selector), ctx)
     }
 
     fn validate_filters(
