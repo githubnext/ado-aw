@@ -253,7 +253,7 @@ fn resolve_provider_base_url_host(engine_config: &EngineConfig) -> ProviderBaseU
 
 /// Default pinned version of the Copilot CLI.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
-pub const COPILOT_CLI_VERSION: &str = "1.0.87";
+pub const COPILOT_CLI_VERSION: &str = "1.0.88";
 const COPILOT_CLI_RELEASES_BASE: &str = "https://github.com/github/copilot-cli/releases";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
