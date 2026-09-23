@@ -161,10 +161,10 @@ subcommands. When configured, use `tools.azure-devops` for authenticated ADO
 reads. Do not run `az login` or inject Azure credentials into the Agent
 sandbox; use SafeOutputs or request a supported tool instead.
 
-A daily smoke pipeline at
-[`tests/safe-outputs/azure-cli.md`](../tests/safe-outputs/azure-cli.md)
-exercises binary/subcommand availability without claiming authenticated direct
-ADO access.
+A smoke pipeline at
+[`tests/smoke/ado-proxy.md`](../tests/smoke/ado-proxy.md)
+exercises the wrapped `az` path (`az devops`, `az rest`) against the
+credential-isolated proxy without claiming unauthenticated direct ADO access.
 
 ### GitHub CLI (`gh`)
 
