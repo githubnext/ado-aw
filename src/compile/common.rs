@@ -2359,137 +2359,175 @@ fn require_same_approval_lane(
     }
 }
 
-pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
-    let github_tools = front_matter.github_issue_tool_names();
-    if front_matter
+/// If `create-github-issue` is configured, every temporary-ID consumer tool
+/// (see `GITHUB_TEMPORARY_ID_CONSUMERS`) that is also configured must use the
+/// same effective `require-approval` lane, so temporary issue IDs stay
+/// resolvable within a single SafeOutputs job.
+fn validate_temporary_id_consumers_approval_lane(front_matter: &FrontMatter) -> Result<()> {
+    if !front_matter
         .safe_outputs
         .contains_key("create-github-issue")
     {
-        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
-            if front_matter.safe_outputs.contains_key(*consumer) {
-                require_same_approval_lane(front_matter, "create-github-issue", consumer)?;
-            }
+        return Ok(());
+    }
+    for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+        if front_matter.safe_outputs.contains_key(*consumer) {
+            require_same_approval_lane(front_matter, "create-github-issue", consumer)?;
         }
     }
+    Ok(())
+}
 
-    for tool in &github_tools {
-        let Some(config) = front_matter.github_issue_compiler_config(tool)? else {
-            continue;
-        };
-        crate::safe_outputs::configured_github_repositories(
-            crate::safe_outputs::GithubRepositoryPolicy::new(
-                config.target_repo.as_deref(),
-                &config.allowed_repos,
-            ),
+/// Validate the repository policy and mutation filters shared by every
+/// GitHub issue tool, then dispatch to the tool-specific config validator.
+fn validate_github_issue_tool_config(front_matter: &FrontMatter, tool: &str) -> Result<()> {
+    let Some(config) = front_matter.github_issue_compiler_config(tool)? else {
+        return Ok(());
+    };
+    crate::safe_outputs::configured_github_repositories(
+        crate::safe_outputs::GithubRepositoryPolicy::new(
+            config.target_repo.as_deref(),
+            &config.allowed_repos,
+        ),
+    )
+    .map_err(|error| anyhow::anyhow!("safe-outputs.{tool} has invalid repository policy: {error}"))?;
+    if tool != "create-github-issue" {
+        crate::safe_outputs::validate_github_mutation_filter_config(
+            crate::safe_outputs::GithubMutationFilters {
+                required_labels: &config.required_labels,
+                required_title_prefix: config.required_title_prefix.as_deref(),
+            },
         )
         .map_err(|error| {
-            anyhow::anyhow!("safe-outputs.{tool} has invalid repository policy: {error}")
+            anyhow::anyhow!("safe-outputs.{tool} has invalid mutation filters: {error}")
         })?;
-        if tool != "create-github-issue" {
-            crate::safe_outputs::validate_github_mutation_filter_config(
-                crate::safe_outputs::GithubMutationFilters {
-                    required_labels: &config.required_labels,
-                    required_title_prefix: config.required_title_prefix.as_deref(),
-                },
-            )
-            .map_err(|error| {
-                anyhow::anyhow!("safe-outputs.{tool} has invalid mutation filters: {error}")
-            })?;
-        }
-        match tool.as_str() {
-            "comment-on-github-issue" => {
-                if let Some(config) = front_matter.comment_on_github_issue_config()? {
-                    crate::safe_outputs::validate_comment_on_github_issue_config(&config)?;
-                }
-            }
-            "hide-github-issue-comment" => {
-                if let Some(config) = front_matter.hide_github_issue_comment_config()? {
-                    crate::safe_outputs::validate_hide_github_issue_comment_config(&config)?;
-                }
-            }
-            "add-github-issue-labels" => {
-                if let Some(config) = front_matter.add_github_issue_labels_config()? {
-                    crate::safe_outputs::validate_add_github_issue_labels_config(&config)?;
-                }
-            }
-            "remove-github-issue-labels" => {
-                if let Some(config) = front_matter.remove_github_issue_labels_config()? {
-                    crate::safe_outputs::validate_remove_github_issue_labels_config(&config)?;
-                }
-            }
-            "close-github-issue" => {
-                if let Some(config) = front_matter.close_github_issue_config()? {
-                    crate::safe_outputs::validate_close_github_issue_config(&config)?;
-                }
-            }
-            "update-github-issue" => {
-                if let Some(config) = front_matter.update_github_issue_config()? {
-                    crate::safe_outputs::validate_update_github_issue_config(&config)?;
-                }
-            }
-            "set-github-issue-field" => {
-                if let Some(config) = front_matter.set_github_issue_field_config()? {
-                    crate::safe_outputs::validate_set_github_issue_field_config(&config)?;
-                }
-            }
-            "assign-github-issue-milestone" => {
-                if let Some(config) = front_matter.assign_github_issue_milestone_config()? {
-                    crate::safe_outputs::validate_assign_github_issue_milestone_config(&config)?;
-                }
-            }
-            "assign-github-issue-to-user" => {
-                if let Some(config) = front_matter.assign_github_issue_to_user_config()? {
-                    crate::safe_outputs::validate_assign_github_issue_to_user_config(&config)?;
-                }
-            }
-            "unassign-github-issue-from-user" => {
-                if let Some(config) = front_matter.unassign_github_issue_from_user_config()? {
-                    crate::safe_outputs::validate_unassign_github_issue_from_user_config(&config)?;
-                }
-            }
-            "link-github-sub-issue" => {
-                if let Some(config) = front_matter.link_github_sub_issue_config()? {
-                    crate::safe_outputs::validate_link_github_sub_issue_config(&config)?;
-                }
-            }
-            _ => {}
-        }
     }
-    if let Some(config) = front_matter.create_github_issue_config()? {
-        if let Some(prefix) = config.title_prefix.as_deref() {
-            crate::validate::reject_pipeline_injection(
-                prefix,
-                "safe-outputs.create-github-issue.title-prefix",
-            )?;
+    dispatch_github_issue_tool_config_validation(front_matter, tool)
+}
+
+/// Dispatch to the per-tool config validator for a single GitHub issue tool.
+/// Each arm loads that tool's own config (if configured) and validates it;
+/// tools with no dedicated validator fall through to the no-op arm.
+fn dispatch_github_issue_tool_config_validation(
+    front_matter: &FrontMatter,
+    tool: &str,
+) -> Result<()> {
+    match tool {
+        "comment-on-github-issue" => {
+            if let Some(config) = front_matter.comment_on_github_issue_config()? {
+                crate::safe_outputs::validate_comment_on_github_issue_config(&config)?;
+            }
         }
-        for label in &config.labels {
-            crate::validate::reject_pipeline_injection(
-                label,
-                "safe-outputs.create-github-issue.labels",
-            )?;
+        "hide-github-issue-comment" => {
+            if let Some(config) = front_matter.hide_github_issue_comment_config()? {
+                crate::safe_outputs::validate_hide_github_issue_comment_config(&config)?;
+            }
         }
-        for label in &config.allowed_labels {
-            crate::validate::reject_pipeline_injection(
-                label,
-                "safe-outputs.create-github-issue.allowed-labels",
-            )?;
+        "add-github-issue-labels" => {
+            if let Some(config) = front_matter.add_github_issue_labels_config()? {
+                crate::safe_outputs::validate_add_github_issue_labels_config(&config)?;
+            }
         }
-        for assignee in &config.assignees {
-            crate::validate::reject_pipeline_injection(
-                assignee,
-                "safe-outputs.create-github-issue.assignees",
-            )?;
+        "remove-github-issue-labels" => {
+            if let Some(config) = front_matter.remove_github_issue_labels_config()? {
+                crate::safe_outputs::validate_remove_github_issue_labels_config(&config)?;
+            }
         }
+        "close-github-issue" => {
+            if let Some(config) = front_matter.close_github_issue_config()? {
+                crate::safe_outputs::validate_close_github_issue_config(&config)?;
+            }
+        }
+        "update-github-issue" => {
+            if let Some(config) = front_matter.update_github_issue_config()? {
+                crate::safe_outputs::validate_update_github_issue_config(&config)?;
+            }
+        }
+        "set-github-issue-field" => {
+            if let Some(config) = front_matter.set_github_issue_field_config()? {
+                crate::safe_outputs::validate_set_github_issue_field_config(&config)?;
+            }
+        }
+        "assign-github-issue-milestone" => {
+            if let Some(config) = front_matter.assign_github_issue_milestone_config()? {
+                crate::safe_outputs::validate_assign_github_issue_milestone_config(&config)?;
+            }
+        }
+        "assign-github-issue-to-user" => {
+            if let Some(config) = front_matter.assign_github_issue_to_user_config()? {
+                crate::safe_outputs::validate_assign_github_issue_to_user_config(&config)?;
+            }
+        }
+        "unassign-github-issue-from-user" => {
+            if let Some(config) = front_matter.unassign_github_issue_from_user_config()? {
+                crate::safe_outputs::validate_unassign_github_issue_from_user_config(&config)?;
+            }
+        }
+        "link-github-sub-issue" => {
+            if let Some(config) = front_matter.link_github_sub_issue_config()? {
+                crate::safe_outputs::validate_link_github_sub_issue_config(&config)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Reject pipeline-injection attempts in every free-text field of
+/// `create-github-issue` (title prefix, labels, allowed labels, assignees).
+fn validate_create_github_issue_injection(front_matter: &FrontMatter) -> Result<()> {
+    let Some(config) = front_matter.create_github_issue_config()? else {
+        return Ok(());
+    };
+    if let Some(prefix) = config.title_prefix.as_deref() {
+        crate::validate::reject_pipeline_injection(
+            prefix,
+            "safe-outputs.create-github-issue.title-prefix",
+        )?;
+    }
+    for label in &config.labels {
+        crate::validate::reject_pipeline_injection(label, "safe-outputs.create-github-issue.labels")?;
+    }
+    for label in &config.allowed_labels {
+        crate::validate::reject_pipeline_injection(
+            label,
+            "safe-outputs.create-github-issue.allowed-labels",
+        )?;
+    }
+    for assignee in &config.assignees {
+        crate::validate::reject_pipeline_injection(
+            assignee,
+            "safe-outputs.create-github-issue.assignees",
+        )?;
+    }
+    Ok(())
+}
+
+/// Reject pipeline-injection attempts in the `set-github-issue-type.allowed` list.
+fn validate_set_github_issue_type_injection(front_matter: &FrontMatter) -> Result<()> {
+    let Some(config) = front_matter.set_github_issue_type_config()? else {
+        return Ok(());
+    };
+    for issue_type in &config.allowed {
+        crate::validate::reject_pipeline_injection(
+            issue_type,
+            "safe-outputs.set-github-issue-type.allowed",
+        )?;
+    }
+    Ok(())
+}
+
+pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    let github_tools = front_matter.github_issue_tool_names();
+
+    validate_temporary_id_consumers_approval_lane(front_matter)?;
+
+    for tool in &github_tools {
+        validate_github_issue_tool_config(front_matter, tool)?;
     }
 
-    if let Some(config) = front_matter.set_github_issue_type_config()? {
-        for issue_type in &config.allowed {
-            crate::validate::reject_pipeline_injection(
-                issue_type,
-                "safe-outputs.set-github-issue-type.allowed",
-            )?;
-        }
-    }
+    validate_create_github_issue_injection(front_matter)?;
+    validate_set_github_issue_type_injection(front_matter)?;
 
     let _ = front_matter.github_app_permissions_for_tools(&github_tools)?;
     let _ = front_matter.github_safe_outputs_auth()?;
