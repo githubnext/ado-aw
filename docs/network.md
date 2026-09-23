@@ -131,7 +131,7 @@ not found" failure mode.
   agent on that runner needs `az`) or to install `azure-cli` on the
   runner image.
 
-See [`docs/tools.md`](tools.md#built-in-clis) for the agent-facing
+See [`docs/tools.md`](tools.md#host-provided-clis) for the agent-facing
 contract (auth scope, available subcommands).
 
 ## Renewable Azure authentication for MCP servers
