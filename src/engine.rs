@@ -253,7 +253,7 @@ fn resolve_provider_base_url_host(engine_config: &EngineConfig) -> ProviderBaseU
 
 /// Default pinned version of the Copilot CLI.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
-pub const COPILOT_CLI_VERSION: &str = "1.0.70";
+pub const COPILOT_CLI_VERSION: &str = "1.0.87";
 const COPILOT_CLI_RELEASES_BASE: &str = "https://github.com/github/copilot-cli/releases";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
@@ -412,7 +412,7 @@ impl Engine {
     ///
     /// Returns the content for the AWF `-- '<command>'` argument, including the
     /// binary path, prompt delivery flag, MCP config flag, and all CLI arguments.
-    /// The engine controls how the prompt is provided (e.g., `--prompt "$(cat ...)"`
+    /// The engine controls how the prompt is provided (e.g., `--prompt="$(cat ...)"`
     /// for Copilot) and how MCP config is referenced.
     ///
     /// `prompt_path` is the path to the prompt file inside the AWF container.
@@ -1355,7 +1355,7 @@ fn copilot_invocation(
 ) -> String {
     let mut parts = vec![
         command_path.to_string(),
-        format!("--prompt \"$(cat {prompt_path})\""),
+        format!("--prompt=\"$(cat {prompt_path})\""),
     ];
 
     if let Some(mcp_path) = mcp_config_path {
