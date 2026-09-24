@@ -85,6 +85,35 @@ async fn run_audit(
     command.output().await.expect("run ado-aw audit")
 }
 
+/// Like [`run_audit`], but does not force `--org`/`--project`, letting the
+/// caller control (or omit) them entirely. Used to exercise
+/// `validate_audit_url_host` — the guard in `resolve_audit_context` that
+/// stops a full build URL from redirecting the caller's ADO PAT to an
+/// untrusted host — through the real CLI argument-parsing path rather than
+/// calling the internal function directly.
+async fn run_audit_with_org(
+    workspace: &Path,
+    output_dir: &Path,
+    build_id_or_url: &str,
+    org: Option<&str>,
+) -> std::process::Output {
+    let mut command = Command::new(binary());
+    command.current_dir(workspace).env("CI", "1").args([
+        "audit",
+        build_id_or_url,
+        "--output",
+        output_dir
+            .to_str()
+            .expect("output path should be valid UTF-8"),
+        "--pat",
+        "test-pat",
+    ]);
+    if let Some(org) = org {
+        command.args(["--org", org]);
+    }
+    command.output().await.expect("run ado-aw audit")
+}
+
 fn artifact_zip(name: &str, repeated_root: bool, files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (path, contents) in files {
@@ -429,6 +458,82 @@ async fn audit_permission_denied_returns_structured_error() {
     assert!(
         !summary_path.exists(),
         "run summary should not be created on build metadata failure"
+    );
+}
+
+/// End-to-end (subprocess) coverage of the PAT-exfiltration guard in
+/// `resolve_audit_context` / `validate_audit_url_host`. Every other audit
+/// test in this file passes a bare numeric build ID, so this is the only
+/// place that drives a full build URL through the real CLI argument-parsing
+/// path (`ado-aw audit <url> ...`) rather than calling the internal
+/// validation function directly (as the unit tests in `src/audit/cli.rs`
+/// do). Without this, a regression that skipped the host check entirely
+/// (e.g. a refactor that stopped wiring `parsed.host` into
+/// `resolve_audit_context`) would not be caught by any test that actually
+/// invokes the binary.
+#[tokio::test]
+async fn audit_rejects_untrusted_host_in_build_url_without_org_override() {
+    let workspace = TempDir::new().expect("create workspace temp dir");
+    let output_dir = TempDir::new().expect("create output temp dir");
+
+    let output = run_audit_with_org(
+        workspace.path(),
+        output_dir.path(),
+        "https://attacker.example.com/Collection/Project/_build/results?buildId=42",
+        None,
+    )
+    .await;
+
+    assert!(
+        !output.status.success(),
+        "audit should refuse an untrusted host: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Refusing to send ADO credentials")
+            && stderr.contains("attacker.example.com"),
+        "expected PAT-exfiltration guard message, got:\n{stderr}"
+    );
+
+    let summary_path = run_summary_path(output_dir.path(), 42);
+    assert!(
+        !summary_path.exists(),
+        "no artifacts should be fetched when the host is untrusted"
+    );
+}
+
+/// Same guard, but exercising the "on-prem host present yet mismatched"
+/// branch: `--org` establishes a trusted host that differs from the one
+/// embedded in the build URL, which must still be refused (an attacker
+/// substituting the build URL host should not be able to piggyback on an
+/// unrelated trusted `--org`).
+#[tokio::test]
+async fn audit_rejects_build_url_host_mismatched_with_trusted_org() {
+    let workspace = TempDir::new().expect("create workspace temp dir");
+    let output_dir = TempDir::new().expect("create output temp dir");
+
+    let output = run_audit_with_org(
+        workspace.path(),
+        output_dir.path(),
+        "https://onprem.example.com/DefaultCollection/MyProj/_build/results?buildId=99",
+        Some("https://otherhost.example.com/Coll"),
+    )
+    .await;
+
+    assert!(
+        !output.status.success(),
+        "audit should refuse a mismatched on-prem host: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not match")
+            && stderr.contains("onprem.example.com")
+            && stderr.contains("otherhost.example.com"),
+        "expected host-mismatch guard message, got:\n{stderr}"
     );
 }
 
