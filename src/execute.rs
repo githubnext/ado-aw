@@ -26,8 +26,8 @@ use crate::safe_outputs::{
     ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
     SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
     UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
-    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
-    UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
+    UpdatePullRequestResult, UpdateWikiPageResult, UpdateWorkItemResult,
+    UploadBuildAttachmentResult, UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::sanitize::neutralize_pipeline_commands;
 
@@ -259,6 +259,7 @@ pub async fn execute_safe_outputs(
         AddGithubIssueLabelsResult,
         RemoveGithubIssueLabelsResult,
         CloseGithubIssueResult,
+        UpdatePullRequestResult,
         UpdateGithubIssueResult,
         SetGithubIssueFieldResult,
         AssignGithubIssueMilestoneResult,
@@ -740,6 +741,7 @@ async fn dispatch_pr_tools(
         "add-pr-comment" => AddPrCommentResult,
         "update-pr" => UpdatePrResult,
         "abandon-pull-request" => AbandonPullRequestResult,
+        "update-pull-request" => UpdatePullRequestResult,
         "submit-pr-review" => SubmitPrReviewResult,
         "reply-to-pr-comment" => ReplyToPrCommentResult,
         "resolve-pr-thread" => ResolvePrThreadResult,

@@ -2303,6 +2303,12 @@ impl FrontMatter {
         self.typed_safe_output_config("update-github-issue")
     }
 
+    pub fn update_pull_request_config(
+        &self,
+    ) -> anyhow::Result<Option<crate::safe_outputs::UpdatePullRequestConfig>> {
+        self.typed_safe_output_config("update-pull-request")
+    }
+
     pub fn set_github_issue_field_config(
         &self,
     ) -> anyhow::Result<Option<crate::safe_outputs::SetGithubIssueFieldConfig>> {

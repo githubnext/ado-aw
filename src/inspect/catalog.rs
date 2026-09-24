@@ -310,6 +310,7 @@ fn safe_output_description(name: &str) -> &'static str {
         "set-github-issue-field" => "Sets a repository-defined field on a GitHub issue",
         "submit-pr-review" => "Parameters for submitting a pull request review",
         "update-pr" => "Parameters for updating a pull request",
+        "update-pull-request" => "Updates an Azure DevOps pull request title or description",
         "unassign-github-issue-from-user" => {
             "Removes operator-permitted GitHub users from an issue"
         }

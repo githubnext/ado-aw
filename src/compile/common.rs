@@ -2460,6 +2460,9 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
             _ => {}
         }
     }
+    if let Some(config) = front_matter.update_pull_request_config()? {
+        crate::safe_outputs::validate_update_pull_request_config(&config)?;
+    }
     if let Some(config) = front_matter.create_github_issue_config()? {
         if let Some(prefix) = config.title_prefix.as_deref() {
             crate::validate::reject_pipeline_injection(

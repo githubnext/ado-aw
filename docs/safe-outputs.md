@@ -828,6 +828,43 @@ their complete existing lists, and `milestone` selects an existing milestone
 by positive number. All requested changes are preflighted before the first
 write.
 
+#### Pull request updates (`update-pull-request`)
+
+`update-pull-request` matches gh-aw's front matter configuration for updating
+Azure DevOps pull requests. It updates the PR title or description (`body`);
+both fields are enabled by default. The `operation` field controls description
+updates: `replace` (default), `append`, `prepend`, or `replace-island`.
+
+```yaml
+safe-outputs:
+  update-pull-request:
+    title: true               # enable title updates (default: true)
+    body: true                # enable description updates (default: true)
+    update-branch: false      # must be false; ADO has no equivalent branch-update API
+    sync-stack: true          # accepted for gh-aw front matter parity
+    footer: false             # omit agent stats from body updates (default: true)
+    operation: replace        # replace, append, prepend, or replace-island
+    max: 1                    # maximum updates per run (default: 1)
+    target: "*"               # "triggering" (default), "*", or an ADO PR ID
+    allowed-repositories: [self]
+    required-labels: [automated]
+    required-title-prefix: "[bot] "
+```
+
+**Agent parameters:**
+
+- `title` *(optional)* - Replacement PR title.
+- `body` *(optional)* - PR description content in Markdown.
+- `operation` *(optional)* - Overrides the configured body operation for this
+  update.
+- `update_branch` *(optional)* - Must be omitted or `false`; Azure DevOps does
+  not expose the gh-aw branch-update behavior.
+- `pull_request_id`, `pull_request_number`, `pr_number`, or `pr` - Required
+  when `target: "*"` is configured. With `target: "triggering"`, any supplied ID
+  must match the triggering PR.
+- `repository` *(optional)* - Target repository alias, constrained by
+  `allowed-repositories`.
+
 #### Fields, milestones, and assignees
 
 `set-github-issue-field` rejects built-in fields and limits repository-defined

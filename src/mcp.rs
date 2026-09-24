@@ -31,6 +31,7 @@ use crate::safe_outputs::{
     SetGithubIssueTypeParams, SetGithubIssueTypeResult, SubmitPrReviewParams, SubmitPrReviewResult,
     ToolResult, UnassignGithubIssueFromUserParams, UnassignGithubIssueFromUserResult,
     UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePrParams, UpdatePrResult,
+    UpdatePrParams, UpdatePrResult, UpdatePullRequestParams, UpdatePullRequestResult,
     UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
     UploadBuildAttachmentParams, UploadBuildAttachmentResult, UploadPipelineArtifactParams,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
@@ -966,6 +967,18 @@ issue_number may be a positive number or a temporary_id from create-github-issue
         params: Parameters<UpdateGithubIssueParams>,
     ) -> Result<CallToolResult, McpError> {
         let result: UpdateGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "update-pull-request",
+        description = "Update an Azure DevOps pull request title or description. Uses gh-aw-style title/body/operation inputs."
+    )]
+    async fn update_pull_request(
+        &self,
+        params: Parameters<UpdatePullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: UpdatePullRequestResult = params.0.try_into()?;
         self.queue_sanitized_output(result).await
     }
 
