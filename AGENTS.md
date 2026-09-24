@@ -239,7 +239,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── missing_tool.rs
 │   │   ├── noop.rs
 │   │   ├── pr_common.rs # Shared PR references and target/policy resolution
-│   │   ├── pr_mutations.rs # Shared PR mutations and historical update-pr executor
+│   │   ├── pr_mutations.rs # Shared PR mutations and legacy configuration validation
 │   │   ├── queue_build.rs
 │   │   ├── remove_github_issue_labels.rs
 │   │   ├── reply_to_pr_comment.rs
@@ -252,7 +252,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── submit_pr_review.rs
 │   │   ├── unassign_github_issue_from_user.rs
 │   │   ├── update_github_issue.rs
-│   │   ├── update_pr.rs # Historical Stage 3 compatibility exports (not an MCP tool)
+│   │   ├── update_pr.rs # Legacy configuration types used by migration (not a tool)
 │   │   ├── update_pull_request.rs
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs

@@ -29,7 +29,7 @@ impl Validate for SetPrAutoCompleteParams {
     }
 }
 tool_result! {
-    name = "set-pr-auto-complete",
+    name = "set-pull-request-auto-complete",
     write = true,
     params = SetPrAutoCompleteParams,
     pub struct SetPrAutoCompleteResult {
@@ -107,10 +107,12 @@ impl Executor for SetPrAutoCompleteResult {
             return Ok(ExecutionResult::failure(error.to_string()));
         }
         ensure!(
-            ctx.tool_configs.contains_key("set-pr-auto-complete"),
-            "set-pr-auto-complete is not configured"
+            ctx.tool_configs
+                .contains_key("set-pull-request-auto-complete"),
+            "set-pull-request-auto-complete is not configured"
         );
-        let config: SetPrAutoCompleteConfig = ctx.get_tool_config("set-pr-auto-complete")?;
+        let config: SetPrAutoCompleteConfig =
+            ctx.get_tool_config("set-pull-request-auto-complete")?;
         validate_set_pr_auto_complete_config(&config)?;
         let policy = UpdatePrConfig {
             allowed_repositories: config.allowed_repositories,
@@ -127,7 +129,7 @@ impl Executor for SetPrAutoCompleteResult {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
-        let legacy = legacy_policy(ctx, "set-pr-auto-complete", "set-auto-complete")?;
+        let legacy = legacy_policy(ctx, "set-pull-request-auto-complete", "set-auto-complete")?;
         if let Some(legacy) = &legacy
             && let Err(failure) = resolve_pr_target(
                 &self.pull_request_id,
@@ -232,7 +234,7 @@ mod tests {
             .await;
         let mut ctx = super::super::pr_common::tests::registered_context(
             &server.uri(),
-            "set-pr-auto-complete",
+            "set-pull-request-auto-complete",
             serde_json::json!({
                 "delete-source-branch": false, "merge-strategy": "rebase",
                 "legacy-update-pr": {"delete-source-branch": false, "merge-strategy": "rebase"}
@@ -240,7 +242,7 @@ mod tests {
         );
         ctx.write_connection_type = Some(crate::compile::types::WriteConnectionType::AzureDevOps);
         let mut result: SetPrAutoCompleteResult = serde_json::from_value(serde_json::json!({
-            "name": "set-pr-auto-complete", "pull_request_id": "#aw_pr123"
+            "name": "set-pull-request-auto-complete", "pull_request_id": "#aw_pr123"
         }))
         .unwrap();
         assert!(result.execute_sanitized(&ctx).await.unwrap().success);

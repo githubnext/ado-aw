@@ -25,9 +25,9 @@ use crate::safe_outputs::{
     MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
     ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
     SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
-    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
-    UpdatePullRequestResult, UpdateWikiPageResult, UpdateWorkItemResult,
-    UploadBuildAttachmentResult, UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
+    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePullRequestResult,
+    UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
+    UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::safe_outputs::{AddPrLabelsResult, AddPrReviewersResult, SetPrAutoCompleteResult};
 use crate::sanitize::neutralize_pipeline_commands;
@@ -205,9 +205,7 @@ pub async fn execute_safe_outputs(
     ctx: &ExecutionContext,
     filter: &ToolFilter,
 ) -> Result<Vec<ExecutionResult>> {
-    let mut effective_ctx = ctx.clone();
-    crate::compile::pr_migration::normalize_execution_context(&mut effective_ctx)?;
-    let ctx = &effective_ctx;
+    crate::compile::pr_migration::validate_execution_budget_groups(ctx)?;
     let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
 
     log_execution_context(safe_output_dir, ctx);
@@ -249,7 +247,6 @@ pub async fn execute_safe_outputs(
         CreateGitTagResult,
         AddBuildTagResult,
         CreateBranchResult,
-        UpdatePrResult,
         AddPrReviewersResult,
         AddPrLabelsResult,
         SetPrAutoCompleteResult,
@@ -356,34 +353,7 @@ async fn process_one_entry(
 
     // Skip entries the active filter excludes (manual-review split: the
     // auto job excludes reviewed tools; the reviewed job runs only them).
-    let canonical = if proposal_tool_name == "update-pr" {
-        entry
-            .get("operation")
-            .and_then(Value::as_str)
-            .and_then(crate::compile::pr_migration::focused_pr_tool)
-            .unwrap_or(proposal_tool_name)
-    } else {
-        proposal_tool_name
-    };
-    let matches_filter = |names: &[String]| {
-        names.iter().any(|name| {
-            name == canonical
-                || name == proposal_tool_name
-                || (name == "update-pr"
-                    && ctx.tool_configs.get(canonical).is_some_and(|config| {
-                        config
-                            .get(crate::compile::pr_migration::LEGACY_PR_CONFIG)
-                            .is_some()
-                    }))
-        })
-    };
-    let allowed = if canonical == proposal_tool_name && !matches_filter(&["update-pr".to_string()])
-    {
-        filter.allows(canonical)
-    } else {
-        (filter.only.is_empty() || matches_filter(&filter.only)) && !matches_filter(&filter.exclude)
-    };
-    if !allowed {
+    if !filter.allows(proposal_tool_name) {
         debug!(
             "[{}/{}] Skipping entry for tool '{}' (filtered out)",
             i + 1,
@@ -400,8 +370,7 @@ async fn process_one_entry(
     // Budget is consumed before execution so that failed attempts (target policy rejection,
     // network errors) still count — this prevents unbounded retries against a failing endpoint.
     let group_failure = ctx.budget_groups.iter().find_map(|(name, group)| {
-        if (group.tools.iter().any(|tool| tool == canonical)
-            || (proposal_tool_name == "update-pr" && name == "update-pr"))
+        if group.tools.iter().any(|tool| tool == proposal_tool_name)
             && group_counts.get(name).copied().unwrap_or(0) >= group.max
         {
             Some(ExecutionResult::budget_exhausted(format!(
@@ -423,9 +392,7 @@ async fn process_one_entry(
         return Some(result);
     }
     for (name, group) in &ctx.budget_groups {
-        if group.tools.iter().any(|tool| tool == canonical)
-            || (proposal_tool_name == "update-pr" && name == "update-pr")
-        {
+        if group.tools.iter().any(|tool| tool == proposal_tool_name) {
             *group_counts.entry(name.clone()).or_default() += 1;
         }
     }
@@ -710,10 +677,6 @@ pub async fn execute_safe_output(
         .get("name")
         .and_then(|n| n.as_str())
         .ok_or_else(|| anyhow::anyhow!("Safe output missing 'name' field"))?;
-    anyhow::ensure!(
-        tool_name != "update-pr" || ctx.tool_configs.contains_key("update-pr"),
-        "historical update-pr proposal has no trusted legacy configuration"
-    );
 
     debug!("Dispatching tool: {}", tool_name);
 
@@ -800,16 +763,15 @@ async fn dispatch_pr_tools(
 ) -> Result<Option<ExecutionResult>> {
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-pull-request" => CreatePrResult,
-        "add-pr-comment" => AddPrCommentResult,
-        "update-pr" => UpdatePrResult,
-        "add-pr-reviewers" => AddPrReviewersResult,
-        "add-pr-labels" => AddPrLabelsResult,
-        "set-pr-auto-complete" => SetPrAutoCompleteResult,
+        "add-pull-request-comment" => AddPrCommentResult,
+        "add-pull-request-reviewers" => AddPrReviewersResult,
+        "add-pull-request-labels" => AddPrLabelsResult,
+        "set-pull-request-auto-complete" => SetPrAutoCompleteResult,
         "abandon-pull-request" => AbandonPullRequestResult,
         "update-pull-request" => UpdatePullRequestResult,
-        "submit-pr-review" => SubmitPrReviewResult,
-        "reply-to-pr-comment" => ReplyToPrCommentResult,
-        "resolve-pr-thread" => ResolvePrThreadResult,
+        "submit-pull-request-review" => SubmitPrReviewResult,
+        "reply-to-pull-request-comment" => ReplyToPrCommentResult,
+        "resolve-pull-request-thread" => ResolvePrThreadResult,
     })
 }
 
@@ -976,12 +938,30 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
-    async fn migrated_pr_tools_share_original_budget_with_historical_records() {
+    async fn old_pull_request_names_have_no_stage_three_aliases() {
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
+        for name in crate::compile::pr_migration::PR_TOOL_RENAMES
+            .iter()
+            .map(|(old, _)| *old)
+            .chain(["update-pr"])
+        {
+            let error = execute_safe_output(&serde_json::json!({"name": name}), &ctx)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Unknown tool type"), "{name}: {error}");
+        }
+    }
+    #[tokio::test]
+    async fn migrated_pr_tools_share_original_budget() {
         for max in [0, 1, 2] {
             let dir = tempfile::tempdir().unwrap();
             let entries = [
-                serde_json::json!({"name":"add-pr-labels","pull_request_id":7,"labels":["first"]}),
-                serde_json::json!({"name":"update-pr","pull_request_id":7,"operation":"update-description","description":"legacy description"}),
+                serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":["first"]}),
+                serde_json::json!({"name":"update-pull-request","pull_request_id":7,"body":"migrated description"}),
                 serde_json::json!({"name":"update-pull-request","pull_request_id":7,"body":"canonical description"}),
             ];
             let text = entries
@@ -992,14 +972,16 @@ mod tests {
             tokio::fs::write(dir.path().join(SAFE_OUTPUT_FILENAME), text)
                 .await
                 .unwrap();
+            let source = format!(
+                "---\nname: migrated\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-operations: [add-labels, update-description]\n    max: {max}\n---\nbody\n"
+            );
+            let fm = crate::compile::parse_markdown_detailed(&source)
+                .unwrap()
+                .front_matter;
             let ctx = ExecutionContext {
                 dry_run: true,
-                tool_configs: HashMap::from([(
-                    "update-pr".to_string(),
-                    serde_json::json!({
-                        "allowed-operations":["add-labels","update-description"],"max":max
-                    }),
-                )]),
+                budget_groups: crate::compile::pr_migration::budget_groups(&fm).unwrap(),
+                tool_configs: fm.safe_outputs,
                 ..ExecutionContext::default()
             };
             let results = execute_safe_outputs(dir.path(), &ctx, &ToolFilter::default())
@@ -1017,19 +999,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn historical_pr_filters_use_canonical_review_lane() {
+    async fn migrated_pr_filters_use_canonical_review_lane() {
         let dir = tempfile::tempdir().unwrap();
         tokio::fs::write(dir.path().join(SAFE_OUTPUT_FILENAME),
-            "{\"name\":\"update-pr\",\"pull_request_id\":7,\"operation\":\"update-description\",\"description\":\"legacy description\"}\n"
+            "{\"name\":\"update-pull-request\",\"pull_request_id\":7,\"body\":\"migrated description\"}\n"
         ).await.unwrap();
+        let fm = crate::compile::parse_markdown_detailed(
+            "---\nname: migrated\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-operations: [update-description]\n    require-approval: true\n---\nbody\n"
+        ).unwrap().front_matter;
         let ctx = ExecutionContext {
             dry_run: true,
-            tool_configs: HashMap::from([(
-                "update-pr".to_string(),
-                serde_json::json!({
-                    "allowed-operations":["update-description"],"require-approval":true
-                }),
-            )]),
+            budget_groups: crate::compile::pr_migration::budget_groups(&fm).unwrap(),
+            tool_configs: fm.safe_outputs,
             ..ExecutionContext::default()
         };
         let automatic = ToolFilter {
@@ -1151,7 +1132,7 @@ mod tests {
         // Empty filter allows everything.
         let f = ToolFilter::default();
         assert!(f.allows("create-pull-request"));
-        assert!(f.allows("add-pr-comment"));
+        assert!(f.allows("add-pull-request-comment"));
 
         // `only` restricts to the listed tools.
         let f = ToolFilter {
@@ -1159,7 +1140,7 @@ mod tests {
             exclude: vec![],
         };
         assert!(f.allows("create-pull-request"));
-        assert!(!f.allows("add-pr-comment"));
+        assert!(!f.allows("add-pull-request-comment"));
 
         // `exclude` removes the listed tools.
         let f = ToolFilter {
@@ -1167,7 +1148,7 @@ mod tests {
             exclude: vec!["create-pull-request".into()],
         };
         assert!(!f.allows("create-pull-request"));
-        assert!(f.allows("add-pr-comment"));
+        assert!(f.allows("add-pull-request-comment"));
     }
 
     async fn write_custom_tool_test_config(dir: &Path) -> PathBuf {
@@ -1648,10 +1629,9 @@ mod tests {
             "patch_sha256": patch_sha256
         });
         let update = serde_json::json!({
-            "name": "update-pr",
+            "name": "update-pull-request",
             "pull_request_id": "#aw_pr123",
-            "operation": "update-description",
-            "description": "Updated through the temporary reference."
+            "body": "Updated through the temporary reference."
         });
         let ndjson = format!(
             "{}\n{}\n",
@@ -1667,7 +1647,13 @@ mod tests {
             "create-pull-request".to_string(),
             serde_json::json!({"max": 1, "include-stats": false}),
         );
-        tool_configs.insert("update-pr".to_string(), serde_json::json!({"max": 1}));
+        tool_configs.insert(
+            "update-pull-request".to_string(),
+            serde_json::json!({
+                "max": 1, "target": "*", "title": false, "body": true, "include-stats": false,
+                "legacy-update-pr": {"allowed-operations": ["update-description"], "max": 1}
+            }),
+        );
         let ctx = ExecutionContext {
             ado_org_url: Some(server.uri()),
             ado_organization: Some("target-org".to_string()),

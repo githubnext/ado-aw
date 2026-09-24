@@ -32,7 +32,7 @@ impl Validate for AddPrLabelsParams {
 }
 
 tool_result! {
-    name = "add-pr-labels",
+    name = "add-pull-request-labels",
     write = true,
     params = AddPrLabelsParams,
     pub struct AddPrLabelsResult {
@@ -91,10 +91,10 @@ impl Executor for AddPrLabelsResult {
             return Ok(ExecutionResult::failure(error.to_string()));
         }
         ensure!(
-            ctx.tool_configs.contains_key("add-pr-labels"),
-            "add-pr-labels is not configured"
+            ctx.tool_configs.contains_key("add-pull-request-labels"),
+            "add-pull-request-labels is not configured"
         );
-        let config: AddPrLabelsConfig = ctx.get_tool_config("add-pr-labels")?;
+        let config: AddPrLabelsConfig = ctx.get_tool_config("add-pull-request-labels")?;
         validate_add_pr_labels_config(&config)?;
         let (pr_id, target) = match resolve_pr_target(
             &self.pull_request_id,
@@ -105,7 +105,7 @@ impl Executor for AddPrLabelsResult {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
-        if let Some(legacy) = legacy_policy(ctx, "add-pr-labels", "add-labels")?
+        if let Some(legacy) = legacy_policy(ctx, "add-pull-request-labels", "add-labels")?
             && let Err(failure) = resolve_pr_target(
                 &self.pull_request_id,
                 self.repository.as_deref(),
@@ -185,9 +185,9 @@ mod tests {
         ctx.allowed_repositories
             .insert("other".into(), "Other/repo".into());
         ctx.tool_configs
-            .insert("add-pr-labels".into(), serde_json::json!({}));
+            .insert("add-pull-request-labels".into(), serde_json::json!({}));
         let result: AddPrLabelsResult = serde_json::from_value(serde_json::json!({
-            "name": "add-pr-labels", "pull_request_id": "4294967296",
+            "name": "add-pull-request-labels", "pull_request_id": "4294967296",
             "repository": "other", "labels": ["ready"]
         }))
         .unwrap();
@@ -208,16 +208,16 @@ mod tests {
             .await;
         let mut ctx = super::super::pr_common::tests::registered_context(
             &server.uri(),
-            "add-pr-labels",
+            "add-pull-request-labels",
             serde_json::json!({"legacy-update-pr": {"allowed-repositories": ["other"]}}),
         );
         let mut result: AddPrLabelsResult = serde_json::from_value(serde_json::json!({
-            "name": "add-pr-labels", "pull_request_id": "#aw_pr123", "labels": ["ready"]
+            "name": "add-pull-request-labels", "pull_request_id": "#aw_pr123", "labels": ["ready"]
         }))
         .unwrap();
         assert!(result.execute_sanitized(&ctx).await.unwrap().success);
         ctx.tool_configs.insert(
-            "add-pr-labels".into(),
+            "add-pull-request-labels".into(),
             serde_json::json!({"legacy-update-pr": {"allowed-repositories": ["self"]}}),
         );
         assert!(!result.execute_sanitized(&ctx).await.unwrap().success);

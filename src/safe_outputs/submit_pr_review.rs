@@ -17,7 +17,7 @@ use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
-/// Valid event values for submit-pr-review
+/// Valid event values for submit-pull-request-review
 const VALID_EVENTS: &[&str] = &[
     "approve",
     "approve-with-suggestions",
@@ -86,7 +86,7 @@ impl Validate for SubmitPrReviewParams {
 }
 
 tool_result! {
-    name = "submit-pr-review",
+    name = "submit-pull-request-review",
     write = true,
     params = SubmitPrReviewParams,
     /// Result of submitting a pull request review
@@ -106,12 +106,12 @@ impl SanitizeContent for SubmitPrReviewResult {
     }
 }
 
-/// Configuration for the submit-pr-review tool (specified in front matter)
+/// Configuration for the submit-pull-request-review tool (specified in front matter)
 ///
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
-///   submit-pr-review:
+///   submit-pull-request-review:
 ///     allowed-events:
 ///       - approve
 ///       - comment
@@ -139,7 +139,7 @@ pub(crate) fn validate_submit_pr_review_config(
     for event in &config.allowed_events {
         ensure!(
             VALID_EVENTS.contains(&event.as_str()),
-            "unknown submit-pr-review event '{event}'"
+            "unknown submit-pull-request-review event '{event}'"
         );
     }
     for repository in &config.allowed_repositories {
@@ -351,7 +351,7 @@ async fn post_review_comment_thread(
     Ok(Ok(thread_id))
 }
 
-/// Sole vote mutation implementation, also used by historical `update-pr` records.
+/// Sole vote mutation implementation for pull-request reviews.
 pub(crate) async fn execute_review_vote(
     ctx: &UpdatePrContext<'_>,
     event: &str,
@@ -390,7 +390,7 @@ impl Executor for SubmitPrReviewResult {
             self.pull_request_id, self.event
         );
         debug!(
-            "submit-pr-review: pr_id={}, event='{}'",
+            "submit-pull-request-review: pr_id={}, event='{}'",
             self.pull_request_id, self.event
         );
 
@@ -408,16 +408,16 @@ impl Executor for SubmitPrReviewResult {
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        let config: SubmitPrReviewConfig = ctx.get_tool_config("submit-pr-review")?;
+        let config: SubmitPrReviewConfig = ctx.get_tool_config("submit-pull-request-review")?;
         validate_submit_pr_review_config(&config)?;
         if matches!(self.pull_request_id, PullRequestReference::Temporary(_))
             && !config.allow_temporary_ids
         {
             return Ok(ExecutionResult::failure(
-                "submit-pr-review temporary IDs require allow-temporary-ids: true",
+                "submit-pull-request-review temporary IDs require allow-temporary-ids: true",
             ));
         }
-        let legacy = legacy_policy(ctx, "submit-pr-review", "vote")?;
+        let legacy = legacy_policy(ctx, "submit-pull-request-review", "vote")?;
         if let Some(legacy) = &legacy {
             if self.body.is_some() {
                 return Ok(ExecutionResult::failure(
@@ -436,9 +436,9 @@ impl Executor for SubmitPrReviewResult {
         // An empty allowed-events list means the operator hasn't opted in, so reject.
         if config.allowed_events.is_empty() {
             return Ok(ExecutionResult::failure(
-                "submit-pr-review requires 'allowed-events' to be configured in \
-                 safe-outputs.submit-pr-review. This prevents agents from casting \
-                 unrestricted review votes. Example:\n  safe-outputs:\n    submit-pr-review:\n      \
+                "submit-pull-request-review requires 'allowed-events' to be configured in \
+                 safe-outputs.submit-pull-request-review. This prevents agents from casting \
+                 unrestricted review votes. Example:\n  safe-outputs:\n    submit-pull-request-review:\n      \
                  allowed-events:\n        - comment\n        - approve-with-suggestions"
                     .to_string(),
             ));
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_result_has_correct_name() {
-        assert_eq!(SubmitPrReviewResult::NAME, "submit-pr-review");
+        assert_eq!(SubmitPrReviewResult::NAME, "submit-pull-request-review");
     }
 
     #[test]
@@ -557,7 +557,7 @@ mod tests {
             repository: Some("self".to_string()),
         };
         let result: SubmitPrReviewResult = params.try_into().unwrap();
-        assert_eq!(result.name, "submit-pr-review");
+        assert_eq!(result.name, "submit-pull-request-review");
         assert_eq!(result.pull_request_id, PullRequestReference::Number(42));
         assert_eq!(result.event, "approve");
     }
@@ -635,7 +635,7 @@ mod tests {
         let result: SubmitPrReviewResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
 
-        assert!(json.contains(r#""name":"submit-pr-review""#));
+        assert!(json.contains(r#""name":"submit-pull-request-review""#));
         assert!(json.contains(r#""pull_request_id":99"#));
         assert!(json.contains(r#""event":"request-changes""#));
     }
@@ -675,11 +675,11 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         let ctx = super::super::pr_common::tests::registered_context(
             &server.uri(),
-            "submit-pr-review",
+            "submit-pull-request-review",
             serde_json::json!({"allowed-events": ["reset"]}),
         );
         let mut result: SubmitPrReviewResult = serde_json::from_value(serde_json::json!({
-            "name": "submit-pr-review", "pull_request_id": "#aw_pr123", "event": "reset"
+            "name": "submit-pull-request-review", "pull_request_id": "#aw_pr123", "event": "reset"
         }))
         .unwrap();
         let execution = result.execute_sanitized(&ctx).await.unwrap();
@@ -722,11 +722,11 @@ mod tests {
             .expect(1).mount(&server).await;
         let ctx = super::super::pr_common::tests::registered_context(
             &server.uri(),
-            "submit-pr-review",
+            "submit-pull-request-review",
             serde_json::json!({"allowed-events": ["comment"], "allow-temporary-ids": true}),
         );
         let mut result: SubmitPrReviewResult = serde_json::from_value(serde_json::json!({
-            "name": "submit-pr-review", "pull_request_id": "#aw_pr123", "event": "comment",
+            "name": "submit-pull-request-review", "pull_request_id": "#aw_pr123", "event": "comment",
             "body": "Reviewed without objection."
         }))
         .unwrap();
@@ -765,7 +765,7 @@ mod tests {
                 .await;
             let mut ctx = super::super::pr_common::tests::registered_context(
                 &server.uri(),
-                "submit-pr-review",
+                "submit-pull-request-review",
                 serde_json::json!({
                     "allowed-events": [event], "allow-temporary-ids": true,
                     "legacy-update-pr": {"allowed-votes": [event]}
@@ -774,7 +774,7 @@ mod tests {
             ctx.write_connection_type =
                 Some(crate::compile::types::WriteConnectionType::AzureDevOps);
             let mut result: SubmitPrReviewResult = serde_json::from_value(serde_json::json!({
-                "name": "submit-pr-review", "pull_request_id": "#aw_pr123", "event": event
+                "name": "submit-pull-request-review", "pull_request_id": "#aw_pr123", "event": event
             }))
             .unwrap();
             let execution = result.execute_sanitized(&ctx).await.unwrap();
@@ -793,14 +793,14 @@ mod tests {
         ] {
             let ctx = super::super::pr_common::tests::registered_context(
                 &server.uri(),
-                "submit-pr-review",
+                "submit-pull-request-review",
                 serde_json::json!({
                     "allowed-events": ["reset"], "allow-temporary-ids": true,
                     "legacy-update-pr": {"allowed-votes": allowed_votes}
                 }),
             );
             let mut result: SubmitPrReviewResult = serde_json::from_value(serde_json::json!({
-                "name": "submit-pr-review", "pull_request_id": "#aw_pr123", "event": "reset", "body": body
+                "name": "submit-pull-request-review", "pull_request_id": "#aw_pr123", "event": "reset", "body": body
             })).unwrap();
             assert!(!result.execute_sanitized(&ctx).await.unwrap().success);
         }
@@ -837,11 +837,11 @@ mod tests {
                 .await;
             let ctx = super::super::pr_common::tests::registered_context(
                 &server.uri(),
-                "submit-pr-review",
+                "submit-pull-request-review",
                 serde_json::json!({"allowed-events": ["approve"], "allow-temporary-ids": true}),
             );
             let mut result: SubmitPrReviewResult = serde_json::from_value(serde_json::json!({
-                "name": "submit-pr-review", "pull_request_id": "#aw_pr123", "event": "approve"
+                "name": "submit-pull-request-review", "pull_request_id": "#aw_pr123", "event": "approve"
             }))
             .unwrap();
             assert!(!result.execute_sanitized(&ctx).await.unwrap().success);

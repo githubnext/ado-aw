@@ -17,12 +17,12 @@ safe-outputs:
   abandon-pull-request:
     target: "*"
     include-stats: false
-  add-pr-labels: {}
-  add-pr-reviewers:
+  add-pull-request-labels: {}
+  add-pull-request-reviewers:
     allowed-reviewers: ["preview@example.test"]
     max-reviewers: 1
-  set-pr-auto-complete: {}
-  submit-pr-review:
+  set-pull-request-auto-complete: {}
+  submit-pull-request-review:
     allowed-events: [reset]
 ---
 
@@ -33,10 +33,10 @@ pull request. Emit exactly one proposal for each of the six tools below using
 the synthetic numeric pull_request_id `1` and repository `self`.
 
 1. `update-pull-request`: body "Preview-only content update.", operation "replace".
-2. `add-pr-labels`: labels ["preview"].
-3. `add-pr-reviewers`: reviewers ["preview@example.test"].
-4. `submit-pr-review`: event "reset".
-5. `set-pr-auto-complete`: no additional fields.
+2. `add-pull-request-labels`: labels ["preview"].
+3. `add-pull-request-reviewers`: reviewers ["preview@example.test"].
+4. `submit-pull-request-review`: event "reset".
+5. `set-pull-request-auto-complete`: no additional fields.
 6. `abandon-pull-request`: body "Preview-only abandonment."
 
 Stop after the six proposals. No catch-all PR update tool should be needed.

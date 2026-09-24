@@ -1,6 +1,6 @@
 /**
  * Pull-request safe-output scenarios against the ADO `agent-definitions` repo:
- * add-pr-comment, reply-to-pr-comment, resolve-pr-thread, submit-pr-review,
+ * add-pull-request-comment, reply-to-pull-request-comment, resolve-pull-request-thread, submit-pull-request-review,
  * focused PR content editing and abandonment.
  *
  * Each scenario deterministically creates a transient PR (with a real commit,
@@ -84,17 +84,17 @@ async function teardownPr(ctx: ScenarioContext, state: PrState): Promise<void> {
 }
 
 export const addPrComment: Scenario<PrState> = {
-  tool: "add-pr-comment",
+  tool: "add-pull-request-comment",
   targetsAdoRepo: true,
   config: (ctx) => ({
     "allowed-repositories": [ctx.adoRepo],
     max: 1,
     "include-stats": false,
   }),
-  setup: (ctx) => setupPr(ctx, "add-pr-comment", false),
+  setup: (ctx) => setupPr(ctx, "add-pull-request-comment", false),
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId,
-    content: detBody(ctx, "add-pr-comment"),
+    content: detBody(ctx, "add-pull-request-comment"),
     repository: ctx.adoRepo,
     status: "active",
   }),
@@ -109,21 +109,21 @@ export const addPrComment: Scenario<PrState> = {
 };
 
 export const replyToPrComment: Scenario<PrState> = {
-  tool: "reply-to-pr-comment",
+  tool: "reply-to-pull-request-comment",
   targetsAdoRepo: true,
   config: (ctx) => ({ "allowed-repositories": [ctx.adoRepo], max: 1 }),
-  setup: (ctx) => setupPr(ctx, "reply-to-pr-comment", true),
+  setup: (ctx) => setupPr(ctx, "reply-to-pull-request-comment", true),
   ndjson: async (ctx, state) => {
-    if (state.threadId === undefined) throw new Error(`[reply-to-pr-comment] threadId not set by setup`);
+    if (state.threadId === undefined) throw new Error(`[reply-to-pull-request-comment] threadId not set by setup`);
     return {
       pull_request_id: state.prId,
       thread_id: state.threadId,
-      content: detBody(ctx, "reply-to-pr-comment"),
+      content: detBody(ctx, "reply-to-pull-request-comment"),
       repository: ctx.adoRepo,
     };
   },
   assert: async (ctx, state) => {
-    if (state.threadId === undefined) throw new Error(`[reply-to-pr-comment] threadId not set by setup`);
+    if (state.threadId === undefined) throw new Error(`[reply-to-pull-request-comment] threadId not set by setup`);
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
     const replied = (thread.comments ?? []).some((c) => (c.content ?? "").includes(`build ${ctx.buildId}`));
     if (!replied) throw new Error(`reply not found on thread #${state.threadId}`);
@@ -132,16 +132,16 @@ export const replyToPrComment: Scenario<PrState> = {
 };
 
 export const resolvePrThread: Scenario<PrState> = {
-  tool: "resolve-pr-thread",
+  tool: "resolve-pull-request-thread",
   targetsAdoRepo: true,
   config: (ctx) => ({
     "allowed-repositories": [ctx.adoRepo],
     "allowed-statuses": ["fixed"],
     max: 1,
   }),
-  setup: (ctx) => setupPr(ctx, "resolve-pr-thread", true),
+  setup: (ctx) => setupPr(ctx, "resolve-pull-request-thread", true),
   ndjson: async (ctx, state) => {
-    if (state.threadId === undefined) throw new Error(`[resolve-pr-thread] threadId not set by setup`);
+    if (state.threadId === undefined) throw new Error(`[resolve-pull-request-thread] threadId not set by setup`);
     return {
       pull_request_id: state.prId,
       thread_id: state.threadId,
@@ -150,7 +150,7 @@ export const resolvePrThread: Scenario<PrState> = {
     };
   },
   assert: async (ctx, state) => {
-    if (state.threadId === undefined) throw new Error(`[resolve-pr-thread] threadId not set by setup`);
+    if (state.threadId === undefined) throw new Error(`[resolve-pull-request-thread] threadId not set by setup`);
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
     // ADO returns thread status as either a numeric enum (2=fixed) or its
     // string name. We requested "fixed", so accept ONLY the "fixed" states —
@@ -166,14 +166,14 @@ export const resolvePrThread: Scenario<PrState> = {
 };
 
 export const submitPrReview: Scenario<PrState> = {
-  tool: "submit-pr-review",
+  tool: "submit-pull-request-review",
   targetsAdoRepo: true,
   config: (ctx) => ({
     "allowed-events": ["request-changes"],
     "allowed-repositories": [ctx.adoRepo],
     max: 1,
   }),
-  setup: (ctx) => setupPr(ctx, "submit-pr-review", false),
+  setup: (ctx) => setupPr(ctx, "submit-pull-request-review", false),
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId,
     // Use "request-changes" (vote=-5), not a positive vote: the executor's
@@ -182,7 +182,7 @@ export const submitPrReview: Scenario<PrState> = {
     // creates and reviews the PR with the SAME identity. A negative vote
     // exercises the same submit path without tripping the guard.
     event: "request-changes",
-    body: detBody(ctx, "submit-pr-review"),
+    body: detBody(ctx, "submit-pull-request-review"),
     repository: ctx.adoRepo,
   }),
   assert: async (ctx, state) => {
@@ -191,30 +191,6 @@ export const submitPrReview: Scenario<PrState> = {
     // executor regression producing a different vote is caught.
     const voted = reviewers.some((r) => r.vote === -5);
     if (!voted) throw new Error(`PR #${state.prId} has no request-changes (vote=-5) reviewer`);
-  },
-  cleanup: teardownPr,
-};
-
-export const updatePr: Scenario<PrState> = {
-  tool: "update-pr",
-  targetsAdoRepo: true,
-  config: (ctx) => ({
-    "allowed-operations": ["update-description"],
-    "allowed-repositories": [ctx.adoRepo],
-    max: 1,
-  }),
-  setup: (ctx) => setupPr(ctx, "update-pr", false),
-  ndjson: async (ctx, state) => ({
-    pull_request_id: state.prId,
-    repository: ctx.adoRepo,
-    operation: "update-description",
-    description: `${detBody(ctx, "update-pr")} (updated)`,
-  }),
-  assert: async (ctx, state) => {
-    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
-    if (!(pr.description ?? "").includes("(updated)")) {
-      throw new Error(`PR #${state.prId} description was not updated`);
-    }
   },
   cleanup: teardownPr,
 };
@@ -327,11 +303,11 @@ export const updatePullRequestOversized: Scenario<PrState> = {
 };
 
 export const addPrLabels: Scenario<PrState> = {
-  tool: "add-pr-labels",
+  tool: "add-pull-request-labels",
   targetsAdoRepo: true,
   config: (ctx) => ({ "allowed-repositories": [ctx.adoRepo] }),
   setup: async (ctx) => {
-    const state = await setupPr(ctx, "add-pr-labels", false);
+    const state = await setupPr(ctx, "add-pull-request-labels", false);
     try {
       await ctx.rest.setPullRequestLabels(state.repo, state.prId, ["existing-label"]);
     } catch (error) {
@@ -356,7 +332,7 @@ export const addPrLabels: Scenario<PrState> = {
 interface AutoCompleteState extends PrState { targetBranch: string }
 
 export const setPrAutoComplete: Scenario<AutoCompleteState> = {
-  tool: "set-pr-auto-complete",
+  tool: "set-pull-request-auto-complete",
   targetsAdoRepo: true,
   config: (ctx) => ({
     "allowed-repositories": [ctx.adoRepo],
@@ -368,8 +344,8 @@ export const setPrAutoComplete: Scenario<AutoCompleteState> = {
     const base = await defaultBranchShortName(ctx, repo);
     const sha = await ctx.rest.getRefObjectId(repo, `heads/${base}`);
     if (!sha) throw new Error("Default branch has no tip");
-    const targetBranch = `${ctx.prefix("set-pr-auto-complete")}-target`;
-    const branch = `${ctx.prefix("set-pr-auto-complete")}-src`;
+    const targetBranch = `${ctx.prefix("set-pull-request-auto-complete")}-target`;
+    const branch = `${ctx.prefix("set-pull-request-auto-complete")}-src`;
     await ctx.rest.pushAddFileBranch(repo, targetBranch, sha,
       `/ado-aw-det/${ctx.buildId}/autocomplete-target.md`, "isolated target", "prepare isolated completion target");
     let sourceCreated = false;
@@ -380,7 +356,7 @@ export const setPrAutoComplete: Scenario<AutoCompleteState> = {
         `/ado-aw-det/${ctx.buildId}/autocomplete-source.md`, "isolated source", "prepare completion source");
       sourceCreated = true;
       const pr = await ctx.rest.createPullRequest(repo, branch, targetBranch,
-        ctx.prefix("set-pr-auto-complete"), "Completes only into a disposable test branch.");
+        ctx.prefix("set-pull-request-auto-complete"), "Completes only into a disposable test branch.");
       return { repo, prId: pr.pullRequestId, branch, targetBranch };
     } catch (error) {
       const cleanup = new Teardown();
@@ -413,7 +389,6 @@ export const prScenarios: Scenario<unknown>[] = [
   replyToPrComment,
   resolvePrThread,
   submitPrReview,
-  updatePr,
   updatePullRequest,
   abandonPullRequest,
   updatePullRequestIsland,

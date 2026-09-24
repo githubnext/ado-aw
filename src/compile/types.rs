@@ -7157,7 +7157,7 @@ description: "Test"
 safe-outputs:
   require-approval: true
   create-pull-request: {}
-  add-pr-comment: {}
+  add-pull-request-comment: {}
 ---
 
 Body
@@ -7169,10 +7169,16 @@ Body
         assert_eq!(tools.len(), 2);
         // Global default makes every tool require approval.
         assert!(fm.tool_requires_approval("create-pull-request").is_some());
-        assert!(fm.tool_requires_approval("add-pr-comment").is_some());
+        assert!(
+            fm.tool_requires_approval("add-pull-request-comment")
+                .is_some()
+        );
         let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
         assert!(auto.is_empty());
-        assert_eq!(reviewed, vec!["add-pr-comment", "create-pull-request"]);
+        assert_eq!(
+            reviewed,
+            vec!["add-pull-request-comment", "create-pull-request"]
+        );
     }
 
     #[test]
@@ -7184,7 +7190,7 @@ safe-outputs:
   require-approval: true
   create-pull-request:
     require-approval: false
-  add-pr-comment: {}
+  add-pull-request-comment: {}
 ---
 
 Body
@@ -7192,10 +7198,13 @@ Body
         let (fm, _) = super::super::common::parse_markdown(content).unwrap();
         // Per-tool false overrides the global true.
         assert!(fm.tool_requires_approval("create-pull-request").is_none());
-        assert!(fm.tool_requires_approval("add-pr-comment").is_some());
+        assert!(
+            fm.tool_requires_approval("add-pull-request-comment")
+                .is_some()
+        );
         let (auto, reviewed) = fm.partition_safe_outputs_by_approval();
         assert_eq!(auto, vec!["create-pull-request"]);
-        assert_eq!(reviewed, vec!["add-pr-comment"]);
+        assert_eq!(reviewed, vec!["add-pull-request-comment"]);
     }
 
     #[test]

@@ -76,7 +76,7 @@ impl Validate for ResolvePrThreadParams {
 }
 
 tool_result! {
-    name = "resolve-pr-thread",
+    name = "resolve-pull-request-thread",
     write = true,
     params = ResolvePrThreadParams,
     /// Result of resolving or reactivating a PR review thread
@@ -97,12 +97,12 @@ impl SanitizeContent for ResolvePrThreadResult {
     }
 }
 
-/// Configuration for the resolve-pr-thread tool (specified in front matter)
+/// Configuration for the resolve-pull-request-thread tool (specified in front matter)
 ///
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
-///   resolve-pr-thread:
+///   resolve-pull-request-thread:
 ///     allowed-repositories:
 ///       - self
 ///       - other-repo
@@ -138,7 +138,7 @@ impl Executor for ResolvePrThreadResult {
             self.thread_id, self.pull_request_id, self.status
         );
         debug!(
-            "resolve-pr-thread: pr_id={}, thread_id={}, status='{}'",
+            "resolve-pull-request-thread: pr_id={}, thread_id={}, status='{}'",
             self.pull_request_id, self.thread_id, self.status
         );
 
@@ -156,7 +156,7 @@ impl Executor for ResolvePrThreadResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: ResolvePrThreadConfig = ctx.get_tool_config("resolve-pr-thread")?;
+        let config: ResolvePrThreadConfig = ctx.get_tool_config("resolve-pull-request-thread")?;
         debug!("Config: {:?}", config);
 
         // Validate status against allowed-statuses — REQUIRED.
@@ -165,10 +165,10 @@ impl Executor for ResolvePrThreadResult {
         // concerns as "fixed") without explicit operator consent.
         if config.allowed_statuses.is_empty() {
             return Ok(ExecutionResult::failure(
-                "resolve-pr-thread requires 'allowed-statuses' to be configured in \
-                 safe-outputs.resolve-pr-thread. This prevents agents from \
+                "resolve-pull-request-thread requires 'allowed-statuses' to be configured in \
+                 safe-outputs.resolve-pull-request-thread. This prevents agents from \
                  manipulating thread statuses without explicit operator consent. Example:\n  \
-                 safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n        \
+                 safe-outputs:\n    resolve-pull-request-thread:\n      allowed-statuses:\n        \
                  - fixed\n\nValid statuses: active, fixed, wont-fix, closed, by-design"
                     .to_string(),
             ));
@@ -309,7 +309,7 @@ mod tests {
             repository: Some("self".to_string()),
         };
         let result: ResolvePrThreadResult = params.try_into().unwrap();
-        assert_eq!(result.name, "resolve-pr-thread");
+        assert_eq!(result.name, "resolve-pull-request-thread");
         assert_eq!(result.pull_request_id, 42);
         assert_eq!(result.thread_id, 7);
         assert_eq!(result.status, "fixed");
@@ -392,7 +392,7 @@ mod tests {
         let result: ResolvePrThreadResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
 
-        assert!(json.contains(r#""name":"resolve-pr-thread""#));
+        assert!(json.contains(r#""name":"resolve-pull-request-thread""#));
         assert!(json.contains(r#""pull_request_id":42"#));
         assert!(json.contains(r#""thread_id":7"#));
     }

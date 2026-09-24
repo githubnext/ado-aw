@@ -35,7 +35,7 @@ describe("focused PR tools", () => {
   it("links temporary targets only to earlier creates without inventing real IDs", () => {
     const summary = renderSummary(parseProposals(ndjson(
       { name: "create-pull-request", temporary_id: "#aw_created", repository: "tools" },
-      { name: "add-pr-reviewers", pull_request_id: "#aw_created", reviewers: ["person@example.test"] },
+      { name: "add-pull-request-reviewers", pull_request_id: "#aw_created", reviewers: ["person@example.test"] },
       { name: "abandon-pull-request", pull_request_id: "#aw_missing", body: "reason" },
     )), new Set());
     expect(summary).toContain("real ID assigned at execution");
@@ -90,12 +90,12 @@ describe("parseProposals", () => {
   it("parses one proposal per non-blank line with a string name", () => {
     const text = ndjson(
       { name: "create-pull-request", title: "T" },
-      { name: "add-pr-comment", content: "C" },
+      { name: "add-pull-request-comment", content: "C" },
     );
     const out = parseProposals(text);
     expect(out.map((p) => p.name)).toEqual([
       "create-pull-request",
-      "add-pr-comment",
+      "add-pull-request-comment",
     ]);
     expect(out.map((p) => p.index)).toEqual([0, 1]);
   });
@@ -176,7 +176,7 @@ describe("sanitizeBlock", () => {
 describe("renderSummary — grouping/ordering", () => {
   const proposals: Proposal[] = parseProposals(
     ndjson(
-      { name: "add-pr-comment", pull_request_id: 5, content: "auto comment" },
+      { name: "add-pull-request-comment", pull_request_id: 5, content: "auto comment" },
       { name: "create-pull-request", title: "Reviewed PR", source_branch: "feat/x" },
       { name: "create-work-item", title: "Reviewed WI" },
     ),
@@ -194,7 +194,7 @@ describe("renderSummary — grouping/ordering", () => {
     const pendingBlock = md.slice(pendingIdx, autoIdx);
     expect(pendingBlock).toContain("create-pull-request");
     expect(pendingBlock).toContain("create-work-item");
-    expect(pendingBlock).not.toContain("add-pr-comment");
+    expect(pendingBlock).not.toContain("add-pull-request-comment");
   });
 
   it("counts the pending and automatic groups", () => {

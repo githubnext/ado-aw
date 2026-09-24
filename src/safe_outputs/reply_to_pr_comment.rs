@@ -51,7 +51,7 @@ impl Validate for ReplyToPrCommentParams {
 }
 
 tool_result! {
-    name = "reply-to-pr-comment",
+    name = "reply-to-pull-request-comment",
     write = true,
     params = ReplyToPrCommentParams,
     /// Result of replying to a review comment thread on a pull request
@@ -70,12 +70,12 @@ impl SanitizeContent for ReplyToPrCommentResult {
     }
 }
 
-/// Configuration for the reply-to-pr-comment tool (specified in front matter)
+/// Configuration for the reply-to-pull-request-comment tool (specified in front matter)
 ///
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
-///   reply-to-pr-comment:
+///   reply-to-pull-request-comment:
 ///     comment-prefix: "[Agent] "
 ///     allowed-repositories:
 ///       - self
@@ -110,7 +110,7 @@ impl Executor for ReplyToPrCommentResult {
             self.content.len()
         );
         debug!(
-            "reply-to-pr-comment: pr_id={}, thread_id={}",
+            "reply-to-pull-request-comment: pr_id={}, thread_id={}",
             self.pull_request_id, self.thread_id
         );
 
@@ -128,7 +128,8 @@ impl Executor for ReplyToPrCommentResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: ReplyToPrCommentConfig = ctx.get_tool_config("reply-to-pr-comment")?;
+        let config: ReplyToPrCommentConfig =
+            ctx.get_tool_config("reply-to-pull-request-comment")?;
         debug!("Config: {:?}", config);
 
         let repository = self.repository.as_deref().unwrap_or("self");
@@ -270,7 +271,7 @@ mod tests {
             repository: Some("self".to_string()),
         };
         let result: ReplyToPrCommentResult = params.try_into().unwrap();
-        assert_eq!(result.name, "reply-to-pr-comment");
+        assert_eq!(result.name, "reply-to-pull-request-comment");
         assert_eq!(result.pull_request_id, 42);
         assert_eq!(result.thread_id, 7);
         assert_eq!(
@@ -359,7 +360,7 @@ mod tests {
         let result: ReplyToPrCommentResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
 
-        assert!(json.contains(r#""name":"reply-to-pr-comment""#));
+        assert!(json.contains(r#""name":"reply-to-pull-request-comment""#));
         assert!(json.contains(r#""pull_request_id":42"#));
         assert!(json.contains(r#""thread_id":7"#));
     }
@@ -387,7 +388,7 @@ allowed-repositories:
     #[test]
     fn test_sanitize_content_neutralizes_repository_pipeline_command() {
         let mut result = ReplyToPrCommentResult {
-            name: "reply-to-pr-comment".to_string(),
+            name: "reply-to-pull-request-comment".to_string(),
             pull_request_id: 42,
             thread_id: 7,
             content: "This is a valid reply body text.".to_string(),

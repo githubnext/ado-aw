@@ -46,8 +46,8 @@ gitignored, non-root path) and is **deliberately excluded** from the released
 The PR family includes focused content updates (including the exact
 4,000-character description boundary), abandonment with comment verification,
 and create-then-follow-up reviewer/content scenarios. Reviewer handoffs use
-`add-pr-reviewers`; content handoffs use `update-pull-request`. A legacy
-`update-pr` scenario remains for historical-record and config-migration coverage.
+`add-pull-request-reviewers`; content handoffs use `update-pull-request`. Old
+configuration names are covered by compiler migration tests, not runtime aliases.
 The compiled `pr-tools-preview` smoke exercises focused MCP discovery and
 staged proposal schemas without writing to an existing PR; live executor
 scenarios are responsible for checking actual service mutations.
@@ -90,8 +90,8 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
   two rendering-fidelity scenarios (see [Rendering
   fidelity](#rendering-fidelity) below)
 - **Wiki:** `create-wiki-page`, `update-wiki-page`
-- **PR:** `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`,
-  `submit-pr-review`, `update-pr`
+- **PR:** `add-pull-request-comment`, `reply-to-pull-request-comment`, `resolve-pull-request-thread`,
+  `submit-pull-request-review`, `update-pull-request`
 - **Git:** `create-branch`, `create-git-tag`
 - **Cross-org Git (optional infrastructure):** `create-branch-cross-org`,
   `create-git-tag-cross-org`, and `create-pull-request-cross-org`

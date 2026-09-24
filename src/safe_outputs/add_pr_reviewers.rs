@@ -39,7 +39,7 @@ impl Validate for AddPrReviewersParams {
 }
 
 tool_result! {
-    name = "add-pr-reviewers",
+    name = "add-pull-request-reviewers",
     write = true,
     params = AddPrReviewersParams,
     pub struct AddPrReviewersResult {
@@ -93,7 +93,7 @@ pub(crate) fn validate_add_pr_reviewers_config(
 ) -> anyhow::Result<()> {
     ensure!(
         config.max_reviewers > 0,
-        "add-pr-reviewers.max-reviewers must be greater than zero"
+        "add-pull-request-reviewers.max-reviewers must be greater than zero"
     );
     for reviewer in &config.allowed_reviewers {
         ensure!(
@@ -132,10 +132,10 @@ impl Executor for AddPrReviewersResult {
             return Ok(ExecutionResult::failure(error.to_string()));
         }
         ensure!(
-            ctx.tool_configs.contains_key("add-pr-reviewers"),
-            "add-pr-reviewers is not configured"
+            ctx.tool_configs.contains_key("add-pull-request-reviewers"),
+            "add-pull-request-reviewers is not configured"
         );
-        let config: AddPrReviewersConfig = ctx.get_tool_config("add-pr-reviewers")?;
+        let config: AddPrReviewersConfig = ctx.get_tool_config("add-pull-request-reviewers")?;
         validate_add_pr_reviewers_config(&config)?;
         let policy = UpdatePrConfig {
             allowed_repositories: config.allowed_repositories,
@@ -155,7 +155,7 @@ impl Executor for AddPrReviewersResult {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
-        let legacy = legacy_policy(ctx, "add-pr-reviewers", "add-reviewers")?;
+        let legacy = legacy_policy(ctx, "add-pull-request-reviewers", "add-reviewers")?;
         if let Some(legacy) = &legacy
             && let Err(failure) = resolve_pr_target(
                 &self.pull_request_id,
@@ -247,7 +247,7 @@ mod tests {
     async fn historical_metadata_cannot_widen_reviewer_allowlist() {
         let mut ctx = ExecutionContext::default();
         ctx.tool_configs.insert(
-            "add-pr-reviewers".into(),
+            "add-pull-request-reviewers".into(),
             serde_json::json!({
                 "allowed-reviewers": ["permitted"], "legacy-update-pr": {"allowed-reviewers": ["*"]}
             }),
@@ -271,11 +271,11 @@ mod tests {
         ] {
             let ctx = super::super::pr_common::tests::registered_context(
                 &server.uri(),
-                "add-pr-reviewers",
+                "add-pull-request-reviewers",
                 serde_json::json!({"allowed-reviewers": ["*"], "max-reviewers": 3, "legacy-update-pr": legacy}),
             );
             let mut result: AddPrReviewersResult = serde_json::from_value(serde_json::json!({
-                "name": "add-pr-reviewers", "pull_request_id": "#aw_pr123",
+                "name": "add-pull-request-reviewers", "pull_request_id": "#aw_pr123",
                 "reviewers": ["forbidden", "second"]
             }))
             .unwrap();

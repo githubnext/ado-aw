@@ -273,7 +273,7 @@ fn safe_output_classification(name: &str) -> &'static str {
 fn safe_output_description(name: &str) -> &'static str {
     match name {
         "add-build-tag" => "Parameters for adding a tag to an Azure DevOps build",
-        "add-pr-comment" => "Parameters for adding a comment thread on a pull request",
+        "add-pull-request-comment" => "Parameters for adding a comment thread on a pull request",
         "assign-work-item" => "Assigns an Azure DevOps work item to an allowed identity",
         "comment-on-work-item" => "Parameters for commenting on a work item",
         "create-branch" => "Parameters for creating a branch",
@@ -302,17 +302,21 @@ fn safe_output_description(name: &str) -> &'static str {
         "missing-tool" => "Parameters for reporting a missing tool",
         "noop" => "Parameters for describing a no operation. Use this if there is no work to do.",
         "queue-build" => "Parameters for queuing a build",
-        "reply-to-pr-comment" => {
+        "reply-to-pull-request-comment" => {
             "Parameters for replying to an existing review comment thread on a pull request"
         }
         "report-incomplete" => "Parameters for reporting that a task could not be completed",
-        "resolve-pr-thread" => "Parameters for resolving or reactivating a PR review thread",
+        "resolve-pull-request-thread" => {
+            "Parameters for resolving or reactivating a PR review thread"
+        }
         "set-github-issue-type" => "Sets or clears the native type on a GitHub issue",
         "set-github-issue-field" => "Sets a repository-defined field on a GitHub issue",
-        "submit-pr-review" => "Parameters for submitting a pull request review",
-        "add-pr-reviewers" => "Adds policy-permitted Azure DevOps PR reviewers",
-        "add-pr-labels" => "Adds labels without replacing existing Azure DevOps PR labels",
-        "set-pr-auto-complete" => {
+        "submit-pull-request-review" => "Parameters for submitting a pull request review",
+        "add-pull-request-reviewers" => "Adds policy-permitted Azure DevOps PR reviewers",
+        "add-pull-request-labels" => {
+            "Adds labels without replacing existing Azure DevOps PR labels"
+        }
+        "set-pull-request-auto-complete" => {
             "Enables Azure DevOps PR auto-complete without bypassing branch policies"
         }
         "update-pull-request" => "Updates an Azure DevOps pull request title or description",

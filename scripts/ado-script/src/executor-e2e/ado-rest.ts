@@ -129,7 +129,7 @@ export class AdoRest {
   }
 
   /**
-   * Resolve an identity using the same exact-match fields as update-pr's
+   * Resolve an identity using the same exact-match fields as add-pull-request-reviewers'
    * production add-reviewers implementation. Canonical GUIDs are verified
    * through the identityIds query; names and emails use exact field matching.
    */

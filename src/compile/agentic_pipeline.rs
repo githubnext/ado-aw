@@ -8341,7 +8341,7 @@ safe-outputs:
             "safe-outputs:\n",
             "  require-approval: true\n",
             "  create-pull-request: {}\n",
-            "  add-pr-comment:\n",
+            "  add-pull-request-comment:\n",
             "    require-approval: false\n",
         );
         let enabled = format!("---\n{common}  threat-detection: true\n---\nbody\n");

@@ -1,13 +1,19 @@
-//! Shared Azure DevOps PR mutations and historical `update-pr` execution.
+//! Shared Azure DevOps PR mutations and legacy configuration validation.
 
 pub use super::pr_common::PullRequestReference;
-use super::pr_common::{repository_api_base, resolve_pr_target};
+use super::pr_common::repository_api_base;
+#[cfg(test)]
+use super::pr_common::resolve_pr_target;
 use super::result::AdoRepositoryTarget;
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
+#[cfg(test)]
+use crate::safe_outputs::ExecutionContext;
+use crate::safe_outputs::{ExecutionResult, Validate};
+#[cfg(test)]
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::secure::Guid;
 #[cfg(test)]
 use crate::secure::PullRequestTemporaryId;
+#[cfg(test)]
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
@@ -38,18 +44,6 @@ const VALID_VOTES: &[&str] = &[
 const VALID_MERGE_STRATEGIES: &[&str] = &["squash", "noFastForward", "rebase", "rebaseMerge"];
 const DEFAULT_MAX_REVIEWERS: usize = 3;
 const MAX_REVIEWER_LEN: usize = 256;
-
-/// Map a vote string to its ADO numeric value
-fn vote_to_ado_value(vote: &str) -> Option<i32> {
-    match vote {
-        "approve" => Some(10),
-        "approve-with-suggestions" => Some(5),
-        "wait-for-author" => Some(-5),
-        "reject" => Some(-10),
-        "reset" => Some(0),
-        _ => None,
-    }
-}
 
 /// Parameters for updating a pull request
 #[derive(Deserialize, JsonSchema)]
@@ -152,6 +146,7 @@ impl Validate for UpdatePrParams {
     }
 }
 
+#[cfg(test)]
 tool_result! {
     name = "update-pr",
     write = true,
@@ -168,6 +163,7 @@ tool_result! {
     }
 }
 
+#[cfg(test)]
 impl SanitizeContent for UpdatePrResult {
     fn sanitize_content_fields(&mut self) {
         self.repository = self.repository.as_deref().map(sanitize_config);
@@ -279,6 +275,7 @@ impl UpdatePrContext<'_> {
     }
 }
 
+#[cfg(test)]
 fn resolve_update_pr_target(
     reference: &PullRequestReference,
     requested_repository: Option<&str>,
@@ -291,109 +288,6 @@ fn resolve_update_pr_target(
         &config.allowed_repositories,
         ctx,
     )
-}
-
-#[async_trait::async_trait]
-impl Executor for UpdatePrResult {
-    fn dry_run_summary(&self) -> String {
-        format!("{} on PR #{}", self.operation, self.pull_request_id)
-    }
-
-    async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        let params = UpdatePrParams {
-            pull_request_id: self.pull_request_id.clone(),
-            repository: self.repository.clone(),
-            operation: self.operation.clone(),
-            reviewers: self.reviewers.clone(),
-            labels: self.labels.clone(),
-            vote: self.vote.clone(),
-            description: self.description.clone(),
-        };
-        if let Err(error) = params.validate() {
-            return Ok(ExecutionResult::failure(error.to_string()));
-        }
-        info!(
-            "Updating PR #{} — operation: {}",
-            self.pull_request_id, self.operation
-        );
-        debug!(
-            "update-pr: pr_id={}, operation='{}'",
-            self.pull_request_id, self.operation
-        );
-
-        let token = ctx
-            .access_token
-            .as_ref()
-            .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        let config: UpdatePrConfig = ctx.get_tool_config("update-pr")?;
-        debug!("Config: {:?}", config);
-
-        // Validate operation against allowed-operations
-        if !config.allowed_operations.is_empty()
-            && !config.allowed_operations.contains(&self.operation)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Operation '{}' is not in the allowed-operations list: [{}]",
-                self.operation,
-                config.allowed_operations.join(", ")
-            )));
-        }
-
-        let (pr_id, target) = match resolve_update_pr_target(
-            &self.pull_request_id,
-            self.repository.as_deref(),
-            &config,
-            ctx,
-        )? {
-            Ok(target) => target,
-            Err(failure) => return Ok(failure),
-        };
-        debug!("Resolved PR target: {} #{}", target.display_name(), pr_id);
-
-        let client = reqwest::Client::new();
-        let operation_ctx = UpdatePrContext {
-            client: &client,
-            target,
-            pr_id,
-            token,
-            connection_type: ctx.write_connection_type,
-        };
-
-        match self.operation.as_str() {
-            "set-auto-complete" => execute_set_auto_complete(&operation_ctx, &config).await,
-            "vote" => self.execute_vote(&operation_ctx, &config).await,
-            "add-reviewers" => {
-                execute_add_reviewers(
-                    &operation_ctx,
-                    &config,
-                    self.reviewers
-                        .as_deref()
-                        .context("reviewers are required")?,
-                )
-                .await
-            }
-            "add-labels" => {
-                execute_add_labels(
-                    &operation_ctx,
-                    self.labels.as_deref().context("labels are required")?,
-                )
-                .await
-            }
-            "update-description" => {
-                execute_update_description(
-                    &operation_ctx,
-                    self.description
-                        .as_deref()
-                        .context("description is required")?,
-                )
-                .await
-            }
-            _ => Ok(ExecutionResult::failure(format!(
-                "Unknown operation: {}",
-                self.operation
-            ))),
-        }
-    }
 }
 
 /// Outcome of a single reviewer resolution + add attempt.
@@ -578,66 +472,6 @@ pub(crate) async fn execute_set_auto_complete(
             "Failed to set auto-complete on PR #{} (HTTP {}): {}",
             operation_ctx.pr_id, status, error_body
         )))
-    }
-}
-
-impl UpdatePrResult {
-    /// Submit a vote on a pull request.
-    ///
-    /// Resolves the current user identity via `_apis/connectiondata`, then
-    /// PUTs the vote to the reviewers endpoint.
-    async fn execute_vote(
-        &self,
-        operation_ctx: &UpdatePrContext<'_>,
-        config: &UpdatePrConfig,
-    ) -> anyhow::Result<ExecutionResult> {
-        let vote_str = self
-            .vote
-            .as_deref()
-            .context("vote value is required for vote operation")?;
-
-        // Validate against allowed-votes — REQUIRED for vote operation.
-        // An empty allowed-votes list means the operator hasn't opted in, so reject.
-        if config.allowed_votes.is_empty() {
-            return Ok(ExecutionResult::failure(
-                "vote operation requires 'allowed-votes' to be configured in safe-outputs.update-pr. \
-                 This prevents agents from casting unrestricted votes (including approve). \
-                 Example:\n  safe-outputs:\n    update-pr:\n      allowed-votes:\n        - approve-with-suggestions\n        - wait-for-author"
-                    .to_string(),
-            ));
-        }
-        if !config.allowed_votes.contains(&vote_str.to_string()) {
-            return Ok(ExecutionResult::failure(format!(
-                "Vote '{}' is not in the allowed-votes list: [{}]",
-                vote_str,
-                config.allowed_votes.join(", ")
-            )));
-        }
-
-        let vote_value = vote_to_ado_value(vote_str).context(format!(
-            "Invalid vote value: '{}'. Must be one of: {}",
-            vote_str,
-            VALID_VOTES.join(", ")
-        ))?;
-
-        if let Some(failure) =
-            super::submit_pr_review::execute_review_vote(operation_ctx, vote_str, vote_value)
-                .await?
-        {
-            return Ok(failure);
-        }
-        Ok(ExecutionResult::success_with_data(
-            format!(
-                "Vote '{}' submitted on PR #{}",
-                vote_str, operation_ctx.pr_id
-            ),
-            serde_json::json!({
-                "pull_request_id": operation_ctx.pr_id,
-                "operation": "vote",
-                "vote": vote_str,
-                "vote_value": vote_value,
-            }),
-        ))
     }
 }
 

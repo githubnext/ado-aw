@@ -568,7 +568,7 @@ pub(crate) fn resolve_repository_write_target(
 ///
 /// `repository` may be **either** a raw agent-supplied selector or an alias
 /// already canonicalized by [`canonical_repository_alias`]; both are supported
-/// because that helper is idempotent. `add-pr-comment` passes the raw value
+/// because that helper is idempotent. `add-pull-request-comment` passes the raw value
 /// straight from the agent, while `create-pull-request` canonicalizes first so
 /// it can reuse the alias for target-branch resolution. Callers must not build
 /// the path themselves — routing every selector through here is what keeps
@@ -862,6 +862,7 @@ pub use set_pr_auto_complete::*;
 pub use submit_pr_review::*;
 pub use unassign_github_issue_from_user::*;
 pub use update_github_issue::*;
+#[cfg(test)]
 pub use update_pr::*;
 pub use update_pull_request::*;
 pub use update_wiki_page::*;

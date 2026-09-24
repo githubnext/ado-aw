@@ -18,8 +18,8 @@ afterEach(() => {
 
 describe("parseReviewed", () => {
   it("splits a newline-delimited list, trims, and drops empties", () => {
-    const set = parseReviewed(" create-pull-request \n \n add-pr-comment ");
-    expect([...set].sort()).toEqual(["add-pr-comment", "create-pull-request"]);
+    const set = parseReviewed(" create-pull-request \n \n add-pull-request-comment ");
+    expect([...set].sort()).toEqual(["add-pull-request-comment", "create-pull-request"]);
   });
 
   describe("parseRepositoryPolicies", () => {

@@ -303,7 +303,7 @@ pub(crate) mod tests {
     fn temporary_reference_checks_exact_target_not_only_alias() {
         let mut ctx = registered_context(
             "https://dev.azure.com/other-org",
-            "add-pr-labels",
+            "add-pull-request-labels",
             serde_json::json!({}),
         );
         ctx.allowed_repositories
@@ -329,23 +329,23 @@ pub(crate) mod tests {
     fn legacy_metadata_is_trusted_config_only_and_fail_closed() {
         let mut ctx = ExecutionContext::default();
         ctx.tool_configs.insert(
-            "add-pr-labels".into(),
+            "add-pull-request-labels".into(),
             serde_json::json!({
                 "legacy-update-pr": {"allowed-operations": ["vote"]}
             }),
         );
-        assert!(legacy_policy(&ctx, "add-pr-labels", "add-labels").is_err());
+        assert!(legacy_policy(&ctx, "add-pull-request-labels", "add-labels").is_err());
         ctx.tool_configs.insert(
-            "add-pr-labels".into(),
+            "add-pull-request-labels".into(),
             serde_json::json!({
                 "legacy-update-pr": null
             }),
         );
-        assert!(legacy_policy(&ctx, "add-pr-labels", "add-labels").is_err());
+        assert!(legacy_policy(&ctx, "add-pull-request-labels", "add-labels").is_err());
         ctx.tool_configs
-            .insert("add-pr-labels".into(), serde_json::json!({}));
+            .insert("add-pull-request-labels".into(), serde_json::json!({}));
         assert!(
-            legacy_policy(&ctx, "add-pr-labels", "add-labels")
+            legacy_policy(&ctx, "add-pull-request-labels", "add-labels")
                 .unwrap()
                 .is_none()
         );

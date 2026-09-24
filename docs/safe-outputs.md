@@ -30,7 +30,7 @@ safe-outputs:
       - agent-created
     work-items:
       - 12345
-  add-pr-reviewers:
+  add-pull-request-reviewers:
     allowed-reviewers:
       - "user@example.com"
     max-reviewers: 3
@@ -127,7 +127,7 @@ safe-outputs:
   require-approval: true          # global default: every output below needs review
   create-pull-request:
     target-branch: main
-  add-pr-comment:
+  add-pull-request-comment:
     require-approval: false       # …except low-impact comments, which auto-apply
 ```
 
@@ -192,7 +192,7 @@ apply one note to every tool.
   diagnostic outputs (`noop`, `report-incomplete`, `missing-tool`,
   `missing-data`) until after approval, since they share that one job. If you
   want diagnostics to apply without waiting on a human, leave at least one
-  low-impact tool (e.g. `add-pr-comment`) non-gated so the automatic split job
+  low-impact tool (e.g. `add-pull-request-comment`) non-gated so the automatic split job
   is created.
 
 The Detection job always runs first. When AI threat analysis is enabled, a
@@ -292,7 +292,7 @@ that pins the representation returned by Azure DevOps.
 ### Executor authentication
 
 All write-bearing safe outputs (e.g. `create-pull-request`,
-`create-work-item`, `add-pr-comment`, `upload-build-attachment`) run in the
+`create-work-item`, `add-pull-request-comment`, `upload-build-attachment`) run in the
 Stage 3 `SafeOutputs` job and authenticate to Azure DevOps using
 `SYSTEM_ACCESSTOKEN`. By default this is `$(System.AccessToken)` — the
 pipeline's built-in OAuth token running as the *Project Collection Build
@@ -1267,7 +1267,7 @@ Reports that a task could not be completed.
 - `reason` - Why the task could not be completed (required, at least 10 characters)
 - `context` - Optional additional context about what was attempted
 
-### add-pr-comment
+### add-pull-request-comment
 Adds a new comment thread to a pull request.
 
 **Agent parameters:**
@@ -1282,7 +1282,7 @@ Adds a new comment thread to a pull request.
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  add-pr-comment:
+  add-pull-request-comment:
     comment-prefix: "[Agent Review] "  # Optional — prepended to all comments
     allowed-repositories: []           # Optional — restrict which repos can be commented on
     allowed-statuses: []               # Optional — restrict which thread statuses the agent can set (empty = any)
@@ -1290,7 +1290,7 @@ safe-outputs:
     include-stats: true                # Append agent stats to comment (default: true)
 ```
 
-### reply-to-pr-comment
+### reply-to-pull-request-comment
 Replies to an existing review comment thread on a pull request.
 
 **Agent parameters:**
@@ -1302,13 +1302,13 @@ Replies to an existing review comment thread on a pull request.
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  reply-to-pr-comment:
+  reply-to-pull-request-comment:
     comment-prefix: "[Agent] "     # Optional — prepended to all replies
     allowed-repositories: []       # Optional — restrict which repos can be replied on
     max: 1                         # Maximum per run (default: 1)
 ```
 
-### resolve-pr-thread
+### resolve-pull-request-thread
 Resolves or updates the status of a pull request review thread.
 
 **Agent parameters:**
@@ -1320,13 +1320,13 @@ Resolves or updates the status of a pull request review thread.
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  resolve-pr-thread:
+  resolve-pull-request-thread:
     allowed-repositories: []     # Optional — restrict which repos can be operated on
     allowed-statuses: []         # REQUIRED — empty list rejects all status transitions
     max: 1                       # Maximum per run (default: 1)
 ```
 
-### submit-pr-review
+### submit-pull-request-review
 Submits a review vote on a pull request.
 
 **Agent parameters:**
@@ -1338,7 +1338,7 @@ Submits a review vote on a pull request.
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  submit-pr-review:
+  submit-pull-request-review:
     allowed-events: []           # REQUIRED — empty list rejects all events
     allowed-repositories: []     # Optional — restrict which repos can be reviewed
     allow-temporary-ids: false   # Opt in to same-run create/follow-up references
@@ -1352,10 +1352,10 @@ Each PR intent has one agent-facing tool:
 | Intent | Tool |
 |---|---|
 | Title/description | `update-pull-request` |
-| Add reviewers | `add-pr-reviewers` |
-| Add labels | `add-pr-labels` |
-| Review/vote | `submit-pr-review` |
-| Enable auto-complete | `set-pr-auto-complete` |
+| Add reviewers | `add-pull-request-reviewers` |
+| Add labels | `add-pull-request-labels` |
+| Review/vote | `submit-pull-request-review` |
+| Enable auto-complete | `set-pull-request-auto-complete` |
 | Abandon | `abandon-pull-request` |
 
 Reviewer, label, auto-complete and review tools require `pull_request_id` and
@@ -1366,15 +1366,15 @@ or perform an immediate merge.
 
 ```yaml
 safe-outputs:
-  add-pr-reviewers:
+  add-pull-request-reviewers:
     allowed-repositories: [self]
     allowed-reviewers: ["owner@example.com"]
     max-reviewers: 3
     max: 1
-  add-pr-labels:
+  add-pull-request-labels:
     allowed-repositories: [self]
     max: 1
-  set-pr-auto-complete:
+  set-pull-request-auto-complete:
     allowed-repositories: [self]
     delete-source-branch: true
     merge-strategy: squash
@@ -1404,7 +1404,7 @@ after live creation. The compiler rejects both split-process configurations.
 Section-level `safe-outputs.staged` defaults and per-tool `staged` overrides are
 resolved before this comparison.
 Each follow-up counts against its tool budget and any shared budget group.
-Existing `submit-pr-review` configurations remain numeric-only unless
+Existing `submit-pull-request-review` configurations remain numeric-only unless
 `allow-temporary-ids: true` is configured. Automatic migration enables this for
 legacy votes that already supported temporary references.
 
@@ -1416,21 +1416,43 @@ Example agent call sequence:
 ```
 
 The first line represents the `create-pull-request` call; use the actual
-temporary ID returned by that call in the later `add-pr-reviewers` call.
+temporary ID returned by that call in the later `add-pull-request-reviewers` call.
 
-### Migrating update-pr
+### Migrating PR tool names
+
+All public Azure DevOps safe-output tool names use `pull-request`, not `pr`.
+Compilation migrates the following keys without changing their configuration:
+
+| Previous name | Canonical name |
+|---|---|
+| `add-pr-comment` | `add-pull-request-comment` |
+| `reply-to-pr-comment` | `reply-to-pull-request-comment` |
+| `resolve-pr-thread` | `resolve-pull-request-thread` |
+| `submit-pr-review` | `submit-pull-request-review` |
+| `add-pr-reviewers` | `add-pull-request-reviewers` |
+| `add-pr-labels` | `add-pull-request-labels` |
+| `set-pr-auto-complete` | `set-pull-request-auto-complete` |
+
+Shared-budget member names are migrated too. If both spellings are configured,
+compilation reports a conflict rather than merging policies. Prompt references
+to old tool names are highlighted for manual correction; prompt text is not
+rewritten. These are source migrations, not runtime aliases: MCP and Stage 3
+accept only canonical names. Existing compiled pipelines use their pinned
+compiler release.
+
+### Migrating the update-pr operation-based tool
 
 `compile` automatically migrates `safe-outputs.update-pr` to focused tools.
-The catch-all is no longer advertised over MCP. Historical Stage 3 proposals
-remain supported with trusted legacy configuration.
+The catch-all is no longer exposed by MCP or executable by the new Stage 3
+executor.
 
 | Old operation | Replacement |
 |---|---|
 | `update-description` | `update-pull-request` (`body`) |
-| `add-reviewers` | `add-pr-reviewers` |
-| `add-labels` | `add-pr-labels` |
-| `vote` | `submit-pr-review` (`event`) |
-| `set-auto-complete` | `set-pr-auto-complete` |
+| `add-reviewers` | `add-pull-request-reviewers` |
+| `add-labels` | `add-pull-request-labels` |
+| `vote` | `submit-pull-request-review` (`event`) |
+| `set-auto-complete` | `set-pull-request-auto-complete` |
 
 Migration preserves enabled operations, reviewer/vote/repository policy,
 temporary references, approval/staged settings and completion options.
@@ -1446,14 +1468,14 @@ Do not remove migration metadata without reviewing the authority change.
 
 Conflicting old/new tool declarations require manual migration; no config is
 silently merged or overwritten. Prompt bodies are preserved byte-for-byte.
-Explicit `update-pr`/`update_pr` references produce located warnings with
+Explicit references to `update-pr` or abbreviated PR tool names produce located warnings with
 replacement guidance, including on later compile/lint passes until corrected.
 Review these warnings: front-matter migration cannot rewrite agent intent.
 
 Review votes retain their exact ADO meanings: approve=10,
 approve-with-suggestions=5, wait-for-author/request-changes=-5, reject=-10,
 reset/comment=0. Existing request-changes requires a rationale; migrated
-wait-for-author does not. A discussion-only comment uses `add-pr-comment`.
+wait-for-author does not. A discussion-only comment uses `add-pull-request-comment`.
 
 ### abandon-pull-request
 Abandons an Azure DevOps pull request without merging it.

@@ -23,8 +23,8 @@ describe("renderSourceMarkdown", () => {
 
   it("emits a repos block when adoRepo is provided", () => {
     const md = renderSourceMarkdown({
-      tool: "add-pr-comment",
-      safeOutputs: { "add-pr-comment": { "allowed-repositories": ["agent-definitions"] } },
+      tool: "add-pull-request-comment",
+      safeOutputs: { "add-pull-request-comment": { "allowed-repositories": ["agent-definitions"] } },
       adoRepo: "agent-definitions",
     });
     expect(md).toContain("repos:");

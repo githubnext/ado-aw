@@ -511,7 +511,7 @@ function createPullRequestAddReviewersScenario(
 
   return {
     id: options.id,
-    tool: "add-pr-reviewers",
+    tool: "add-pull-request-reviewers",
     targetsAdoRepo: true,
     setup: async (ctx) => {
       const reviewer = resolveExecutorE2eReviewer();
@@ -595,7 +595,7 @@ function createPullRequestAddReviewersScenario(
         );
       }
       if (strResult(record, "operation") !== "add-reviewers") {
-        throw new Error("add-pr-reviewers reported an unexpected operation");
+        throw new Error("add-pull-request-reviewers reported an unexpected operation");
       }
       const failed = stringArrayResult(record, "failed");
       if (failed.length !== 0) {

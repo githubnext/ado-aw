@@ -100,7 +100,7 @@ fn compile_migrates_pr_tools_and_keeps_prompt_warning_until_fixed() {
     assert!(fm["safe-outputs"]["update-pr"].is_null());
     assert_eq!(fm["safe-outputs"]["budget-groups"]["update-pr"]["max"], 1);
     assert!(String::from_utf8_lossy(&first.stderr).contains("deprecated-tool-reference"));
-    assert!(String::from_utf8_lossy(&first.stderr).contains("add-pr-reviewers"));
+    assert!(String::from_utf8_lossy(&first.stderr).contains("add-pull-request-reviewers"));
     let second = run_compile(&source);
     assert!(second.status.success());
     assert_eq!(fs::read_to_string(&source).unwrap(), after);
@@ -125,6 +125,63 @@ fn conflicting_pr_migration_does_not_rewrite_source_or_lock() {
     let output = run_compile(&source);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("manual migration required"));
+    assert_eq!(fs::read_to_string(&source).unwrap(), original);
+    assert!(!source.with_extension("lock.yml").exists());
+}
+
+#[test]
+fn compile_expands_all_pr_tool_names_and_budget_members_without_body_edits() {
+    let dir = fresh_git_temp_dir();
+    let original = "---\nname: full-names\ndescription: d\nsafe-outputs:\n  require-approval: true\n  staged: true\n  add-pr-comment: {max: 2}\n  reply-to-pr-comment: {max: 2}\n  resolve-pr-thread: {allowed-statuses: [fixed], max: 2}\n  submit-pr-review: {allowed-events: [comment], max: 2}\n  add-pr-reviewers: {allowed-reviewers: [owner@example.test], max-reviewers: 1, max: 2}\n  add-pr-labels: {max: 2}\n  set-pr-auto-complete: {max: 2}\n  budget-groups:\n    shared: {max: 1, tools: [add-pr-reviewers, add-pr-labels]}\n---\nCall `add-pr-comment` and `submit-pr-review`.\n";
+    let source = write_source(dir.path(), original);
+    let output = run_compile(&source);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rewritten = fs::read_to_string(&source).unwrap();
+    assert!(rewritten.ends_with("\nCall `add-pr-comment` and `submit-pr-review`.\n"));
+    let fm: serde_yaml::Value =
+        serde_yaml::from_str(rewritten.split("---").nth(1).unwrap()).unwrap();
+    for (old, new) in [
+        ("add-pr-comment", "add-pull-request-comment"),
+        ("reply-to-pr-comment", "reply-to-pull-request-comment"),
+        ("resolve-pr-thread", "resolve-pull-request-thread"),
+        ("submit-pr-review", "submit-pull-request-review"),
+        ("add-pr-reviewers", "add-pull-request-reviewers"),
+        ("add-pr-labels", "add-pull-request-labels"),
+        ("set-pr-auto-complete", "set-pull-request-auto-complete"),
+    ] {
+        assert!(fm["safe-outputs"][old].is_null());
+        assert_eq!(fm["safe-outputs"][new]["max"], 2);
+    }
+    assert_eq!(fm["safe-outputs"]["budget-groups"]["shared"]["max"], 1);
+    assert_eq!(
+        fm["safe-outputs"]["budget-groups"]["shared"]["tools"][0],
+        "add-pull-request-reviewers"
+    );
+    assert_eq!(
+        fm["safe-outputs"]["budget-groups"]["shared"]["tools"][1],
+        "add-pull-request-labels"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pull_request_tool_names"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("deprecated-tool-reference"));
+    assert!(run_compile(&source).status.success());
+    assert_eq!(fs::read_to_string(&source).unwrap(), rewritten);
+}
+
+#[test]
+fn abbreviated_and_full_pr_keys_conflict_without_rewriting() {
+    let dir = fresh_git_temp_dir();
+    let original = "---\nname: conflict\ndescription: d\nsafe-outputs:\n  add-pr-comment: {max: 1}\n  add-pull-request-comment: {max: 3}\n---\nbody\n";
+    let source = write_source(dir.path(), original);
+    let output = run_compile(&source);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("manual migration required"));
+    assert!(error.contains("add-pr-comment"));
+    assert!(error.contains("add-pull-request-comment"));
     assert_eq!(fs::read_to_string(&source).unwrap(), original);
     assert!(!source.with_extension("lock.yml").exists());
 }

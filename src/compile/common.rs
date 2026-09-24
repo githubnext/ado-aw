@@ -3022,12 +3022,12 @@ pub fn validate_update_work_item_target(front_matter: &FrontMatter) -> Result<()
     Ok(())
 }
 
-/// Validate that submit-pr-review has a required `allowed-events` field when configured.
+/// Validate that submit-pull-request-review has a required `allowed-events` field when configured.
 ///
 /// An empty or missing `allowed-events` list would allow agents to cast any review vote,
 /// including auto-approvals. Operators must explicitly opt in to each allowed event.
 pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("submit-pr-review") {
+    if let Some(config_value) = front_matter.safe_outputs.get("submit-pull-request-review") {
         if let Some(obj) = config_value.as_object() {
             let allowed_events = obj.get("allowed-events");
             let is_empty = match allowed_events {
@@ -3041,18 +3041,18 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
                     );
                 }
                 anyhow::bail!(
-                    "safe-outputs.submit-pr-review requires a non-empty 'allowed-events' list \
+                    "safe-outputs.submit-pull-request-review requires a non-empty 'allowed-events' list \
                      to prevent agents from casting unrestricted review votes. Example:\n\n  \
-                     safe-outputs:\n    submit-pr-review:\n      allowed-events:\n        \
+                     safe-outputs:\n    submit-pull-request-review:\n      allowed-events:\n        \
                      - comment\n        - approve-with-suggestions\n\n\
                      Valid events: approve, approve-with-suggestions, request-changes, wait-for-author, reject, reset, comment\n"
                 );
             }
         } else {
             anyhow::bail!(
-                "safe-outputs.submit-pr-review must be a configuration object with an \
+                "safe-outputs.submit-pull-request-review must be a configuration object with an \
                  'allowed-events' list. Example:\n\n  \
-                 safe-outputs:\n    submit-pr-review:\n      allowed-events:\n        - comment\n"
+                 safe-outputs:\n    submit-pull-request-review:\n      allowed-events:\n        - comment\n"
             );
         }
     }
@@ -3063,19 +3063,23 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
 pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Result<()> {
     super::pr_migration::validate_budget_groups(front_matter)?;
     if let Some(config) = front_matter
-        .typed_safe_output_config::<crate::safe_outputs::AddPrLabelsConfig>("add-pr-labels")?
+        .typed_safe_output_config::<crate::safe_outputs::AddPrLabelsConfig>(
+            "add-pull-request-labels",
+        )?
     {
         crate::safe_outputs::validate_add_pr_labels_config(&config)?;
     }
     if let Some(config) = front_matter
         .typed_safe_output_config::<crate::safe_outputs::SetPrAutoCompleteConfig>(
-            "set-pr-auto-complete",
+            "set-pull-request-auto-complete",
         )?
     {
         crate::safe_outputs::validate_set_pr_auto_complete_config(&config)?;
     }
     if let Some(config) = front_matter
-        .typed_safe_output_config::<crate::safe_outputs::SubmitPrReviewConfig>("submit-pr-review")?
+        .typed_safe_output_config::<crate::safe_outputs::SubmitPrReviewConfig>(
+            "submit-pull-request-review",
+        )?
     {
         crate::safe_outputs::validate_submit_pr_review_config(&config)?;
     }
@@ -3086,17 +3090,17 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
         crate::safe_outputs::validate_abandon_pull_request_config(&config)?;
     }
     for tool in [
-        "add-pr-reviewers",
-        "add-pr-labels",
-        "set-pr-auto-complete",
+        "add-pull-request-reviewers",
+        "add-pull-request-labels",
+        "set-pull-request-auto-complete",
         "update-pull-request",
         "abandon-pull-request",
-        "submit-pr-review",
+        "submit-pull-request-review",
     ] {
         if !front_matter.safe_outputs.contains_key(tool) {
             continue;
         }
-        let temporary_capable = tool != "submit-pr-review"
+        let temporary_capable = tool != "submit-pull-request-review"
             || front_matter
                 .safe_outputs
                 .get(tool)
@@ -3123,23 +3127,25 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
 
     if let Some(max_reviewers) = front_matter
         .safe_outputs
-        .get("add-pr-reviewers")
+        .get("add-pull-request-reviewers")
         .and_then(serde_json::Value::as_object)
         .and_then(|object| object.get("max-reviewers"))
     {
         let max_reviewers =
             serde_json::from_value::<usize>(max_reviewers.clone()).map_err(|_| {
                 anyhow::anyhow!(
-                    "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                    "safe-outputs.add-pull-request-reviewers.max-reviewers must be a positive integer that fits in usize"
                 )
             })?;
         anyhow::ensure!(
             max_reviewers > 0,
-            "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+            "safe-outputs.add-pull-request-reviewers.max-reviewers must be a positive integer that fits in usize"
         );
     }
     if let Some(config) = front_matter
-        .typed_safe_output_config::<crate::safe_outputs::AddPrReviewersConfig>("add-pr-reviewers")?
+        .typed_safe_output_config::<crate::safe_outputs::AddPrReviewersConfig>(
+            "add-pull-request-reviewers",
+        )?
     {
         crate::safe_outputs::validate_add_pr_reviewers_config(&config)?;
     }
@@ -3158,7 +3164,7 @@ pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
     if let Some(config_value) = front_matter.safe_outputs.get("update-pr").or_else(|| {
         front_matter
             .safe_outputs
-            .get("submit-pr-review")
+            .get("submit-pull-request-review")
             .and_then(|config| config.get(super::pr_migration::LEGACY_PR_CONFIG))
     }) && let Some(obj) = config_value.as_object()
     {
@@ -3196,13 +3202,13 @@ pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
-/// Validate that resolve-pr-thread has a required `allowed-statuses` field when configured.
+/// Validate that resolve-pull-request-thread has a required `allowed-statuses` field when configured.
 ///
 /// An empty or missing `allowed-statuses` list would let agents set any thread status,
 /// including "fixed" or "wontFix" on security-critical review threads. Operators must
 /// explicitly opt in to each allowed status transition.
 pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("resolve-pr-thread") {
+    if let Some(config_value) = front_matter.safe_outputs.get("resolve-pull-request-thread") {
         if let Some(obj) = config_value.as_object() {
             let allowed_statuses = obj.get("allowed-statuses");
             let is_empty = match allowed_statuses {
@@ -3211,19 +3217,19 @@ pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result
             };
             if is_empty {
                 anyhow::bail!(
-                    "safe-outputs.resolve-pr-thread requires a non-empty \
+                    "safe-outputs.resolve-pull-request-thread requires a non-empty \
                      'allowed-statuses' list to prevent agents from manipulating thread \
                      statuses without explicit operator consent. Example:\n\n  \
-                     safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n\
+                     safe-outputs:\n    resolve-pull-request-thread:\n      allowed-statuses:\n\
                      \x20       - fixed\n\n\
                      Valid statuses: active, fixed, wont-fix, closed, by-design\n"
                 );
             }
         } else {
             anyhow::bail!(
-                "safe-outputs.resolve-pr-thread must be a configuration object \
+                "safe-outputs.resolve-pull-request-thread must be a configuration object \
                  with an 'allowed-statuses' list. Example:\n\n  \
-                 safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n\
+                 safe-outputs:\n    resolve-pull-request-thread:\n      allowed-statuses:\n\
                  \x20       - fixed\n"
             );
         }
@@ -5604,7 +5610,7 @@ mod tests {
     #[test]
     fn test_submit_pr_review_events_fails_when_allowed_events_missing() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-repositories:\n      - self\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pull-request-review:\n    allowed-repositories:\n      - self\n---\n"
         ).unwrap();
         let result = validate_submit_pr_review_events(&fm);
         assert!(result.is_err());
@@ -5615,7 +5621,7 @@ mod tests {
     #[test]
     fn test_submit_pr_review_events_fails_when_allowed_events_empty() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-events: []\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pull-request-review:\n    allowed-events: []\n---\n"
         ).unwrap();
         let result = validate_submit_pr_review_events(&fm);
         assert!(result.is_err());
@@ -5626,7 +5632,7 @@ mod tests {
     #[test]
     fn test_submit_pr_review_events_fails_when_value_is_scalar() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review: true\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pull-request-review: true\n---\n",
         )
         .unwrap();
         let result = validate_submit_pr_review_events(&fm);
@@ -5636,7 +5642,7 @@ mod tests {
     #[test]
     fn test_submit_pr_review_events_passes_when_events_provided() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-events:\n      - comment\n      - approve\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pull-request-review:\n    allowed-events:\n      - comment\n      - approve\n---\n"
         ).unwrap();
         assert!(validate_submit_pr_review_events(&fm).is_ok());
     }
@@ -5721,7 +5727,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_fails_when_allowed_statuses_missing() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-repositories:\n      - self\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pull-request-thread:\n    allowed-repositories:\n      - self\n---\n"
         ).unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
         assert!(result.is_err());
@@ -5732,7 +5738,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_fails_when_allowed_statuses_empty() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-statuses: []\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pull-request-thread:\n    allowed-statuses: []\n---\n"
         ).unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
         assert!(result.is_err());
@@ -5743,7 +5749,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_fails_when_value_is_scalar() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread: true\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pull-request-thread: true\n---\n",
         )
         .unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
@@ -5753,7 +5759,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_passes_when_statuses_provided() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pull-request-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
         ).unwrap();
         assert!(validate_resolve_pr_thread_statuses(&fm).is_ok());
     }
@@ -6615,7 +6621,7 @@ safe-outputs:
         ] {
             let (mut fm, _) = parse_markdown(yaml).unwrap();
             fm.safe_outputs
-                .get_mut("add-pr-reviewers")
+                .get_mut("add-pull-request-reviewers")
                 .unwrap()
                 .as_object_mut()
                 .unwrap()
@@ -6625,7 +6631,7 @@ safe-outputs:
                 .to_string();
             assert!(
                 error.contains(
-                    "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                    "safe-outputs.add-pull-request-reviewers.max-reviewers must be a positive integer that fits in usize"
                 ),
                 "value {value}: {error}"
             );

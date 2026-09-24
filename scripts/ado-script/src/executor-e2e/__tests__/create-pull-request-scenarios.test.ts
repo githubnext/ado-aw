@@ -161,7 +161,7 @@ describe("create-pull-request add-reviewers handoff", () => {
         },
       };
       const updated: ExecutedRecord = {
-        name: "add_pr_reviewers",
+        name: "add_pull_request_reviewers",
         status: "succeeded",
         result: {
           pull_request_id: 42,
@@ -264,7 +264,7 @@ describe("create-pull-request add-reviewers handoff", () => {
         result: created,
       },
       {
-        name: "add_pr_reviewers",
+        name: "add_pull_request_reviewers",
         status: "succeeded",
         result: updated,
       },
@@ -294,7 +294,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       },
     };
     const updated: ExecutedRecord = {
-      name: "add_pr_reviewers",
+      name: "add_pull_request_reviewers",
       status: "succeeded",
       result: {
         pull_request_id: 42,
@@ -406,7 +406,7 @@ describe("Rust executor payload contract", () => {
 
   it.each([
     { target: "producer", tool: "create-pull-request", index: 0 },
-    { target: "consumer", tool: "add-pr-reviewers", index: 1 },
+    { target: "consumer", tool: "add-pull-request-reviewers", index: 1 },
   ] as const)(
     "rejects an overlong $target temporary ID through Rust deserialization",
     async ({ target, tool, index }) => {
@@ -456,7 +456,7 @@ describe("Rust executor payload contract", () => {
     expect(result.records).toHaveLength(2);
     expect(result.records[0]?.status).toBe("succeeded");
     expect(result.records[1]?.status).toBe("failed");
-    expect(result.records[1]?.error).toContain("Failed to parse add-pr-reviewers:");
+    expect(result.records[1]?.error).toContain("Failed to parse add-pull-request-reviewers:");
     expect(result.records[1]?.error).toContain("expected a sequence");
   });
 });

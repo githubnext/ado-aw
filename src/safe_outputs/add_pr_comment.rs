@@ -102,7 +102,7 @@ impl Validate for AddPrCommentParams {
 }
 
 tool_result! {
-    name = "add-pr-comment",
+    name = "add-pull-request-comment",
     write = true,
     params = AddPrCommentParams,
     /// Result of adding a comment thread on a pull request
@@ -130,12 +130,12 @@ impl SanitizeContent for AddPrCommentResult {
     }
 }
 
-/// Configuration for the add-pr-comment tool (specified in front matter)
+/// Configuration for the add-pull-request-comment tool (specified in front matter)
 ///
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
-///   add-pr-comment:
+///   add-pull-request-comment:
 ///     comment-prefix: "[Agent Review] "
 ///     allowed-repositories:
 ///       - self
@@ -399,7 +399,7 @@ impl Executor for AddPrCommentResult {
             self.content.len()
         );
         debug!(
-            "add-pr-comment: pr_id={}, content length={}",
+            "add-pull-request-comment: pr_id={}, content length={}",
             self.pull_request_id,
             self.content.len()
         );
@@ -418,7 +418,7 @@ impl Executor for AddPrCommentResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: AddPrCommentConfig = ctx.get_tool_config("add-pr-comment")?;
+        let config: AddPrCommentConfig = ctx.get_tool_config("add-pull-request-comment")?;
         debug!("Config: {:?}", config);
 
         let status_int = match self.validate_against_config(&config) {
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_result_has_correct_name() {
-        assert_eq!(AddPrCommentResult::NAME, "add-pr-comment");
+        assert_eq!(AddPrCommentResult::NAME, "add-pull-request-comment");
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
             status: "active".to_string(),
         };
         let result: AddPrCommentResult = params.try_into().unwrap();
-        assert_eq!(result.name, "add-pr-comment");
+        assert_eq!(result.name, "add-pull-request-comment");
         assert_eq!(result.pull_request_id, 42);
         assert!(result.content.contains("test comment"));
     }
@@ -652,7 +652,7 @@ mod tests {
         let result: AddPrCommentResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
 
-        assert!(json.contains(r#""name":"add-pr-comment""#));
+        assert!(json.contains(r#""name":"add-pull-request-comment""#));
         assert!(json.contains(r#""pull_request_id":42"#));
     }
 
@@ -793,7 +793,7 @@ allowed-statuses:
             status: "active".to_string(),
         };
         let mut result = AddPrCommentResult {
-            name: "add-pr-comment".to_string(),
+            name: "add-pull-request-comment".to_string(),
             pull_request_id: params.pull_request_id,
             content: params.content,
             repository: params.repository,

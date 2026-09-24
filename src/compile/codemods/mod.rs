@@ -51,6 +51,8 @@ mod m0007_promote_debug_create_github_issue;
 mod m0008_explicit_mcp_pipeline_env;
 #[path = "0009_split_update_pr.rs"]
 mod m0009_split_update_pr;
+#[path = "0010_pull_request_tool_names.rs"]
+mod m0010_pull_request_tool_names;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
@@ -158,6 +160,7 @@ pub static CODEMODS: &[&Codemod] = &[
     &m0007_promote_debug_create_github_issue::CODEMOD,
     &m0008_explicit_mcp_pipeline_env::CODEMOD,
     &m0009_split_update_pr::CODEMOD,
+    &m0010_pull_request_tool_names::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter

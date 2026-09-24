@@ -113,6 +113,11 @@ continues.
 
 ### PR tool decomposition
 
+The subsequent `pull_request_tool_names` codemod expands abbreviated tool keys
+such as `add-pr-comment` to `add-pull-request-comment`, preserving configuration
+and updating shared-budget members. Old/new key collisions fail atomically.
+Only source configuration is migrated; old tool spellings are not runtime aliases.
+
 The `split_update_pr` codemod replaces the old operation-based `update-pr`
 declaration with focused PR tools. It preserves the original aggregate `max`
 in a persisted `budget-groups` declaration and retains operator-owned legacy

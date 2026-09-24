@@ -97,7 +97,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     ],
     body: "body",
   },
-  "add-pr-reviewers": {
+  "add-pull-request-reviewers": {
     title: "Add pull request reviewers",
     fields: [
       { label: "PR", key: "pull_request_id" },
@@ -105,7 +105,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "Repository selector", key: "repository" },
     ],
   },
-  "add-pr-labels": {
+  "add-pull-request-labels": {
     title: "Add pull request labels",
     fields: [
       { label: "PR", key: "pull_request_id" },
@@ -113,7 +113,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "Repository selector", key: "repository" },
     ],
   },
-  "set-pr-auto-complete": {
+  "set-pull-request-auto-complete": {
     title: "Enable pull request auto-complete",
     fields: [
       { label: "PR", key: "pull_request_id" },
@@ -129,17 +129,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     ],
     body: "description",
   },
-  "update-pr": {
-    title: "Update pull request",
-    fields: [
-      { label: "PR", key: "pull_request_id" },
-      { label: "Operation", key: "operation" },
-      { label: "Repository", key: "repository" },
-      { label: "Vote", key: "vote" },
-    ],
-    body: "description",
-  },
-  "add-pr-comment": {
+  "add-pull-request-comment": {
     title: "Comment on pull request",
     fields: [
       { label: "PR", key: "pull_request_id" },
@@ -148,7 +138,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     ],
     body: "content",
   },
-  "reply-to-pr-comment": {
+  "reply-to-pull-request-comment": {
     title: "Reply to PR comment",
     fields: [
       { label: "PR", key: "pull_request_id" },
@@ -156,7 +146,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     ],
     body: "content",
   },
-  "submit-pr-review": {
+  "submit-pull-request-review": {
     title: "Submit PR review",
     fields: [
       { label: "PR", key: "pull_request_id" },
@@ -164,7 +154,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     ],
     body: "body",
   },
-  "resolve-pr-thread": {
+  "resolve-pull-request-thread": {
     title: "Resolve PR thread",
     fields: [
       { label: "PR", key: "pull_request_id" },

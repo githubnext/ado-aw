@@ -7,11 +7,20 @@ use serde_json::{Map, Value, json};
 use super::types::FrontMatter;
 
 pub const LEGACY_PR_CONFIG: &str = "legacy-update-pr";
+pub const PR_TOOL_RENAMES: &[(&str, &str)] = &[
+    ("add-pr-comment", "add-pull-request-comment"),
+    ("reply-to-pr-comment", "reply-to-pull-request-comment"),
+    ("resolve-pr-thread", "resolve-pull-request-thread"),
+    ("submit-pr-review", "submit-pull-request-review"),
+    ("add-pr-reviewers", "add-pull-request-reviewers"),
+    ("add-pr-labels", "add-pull-request-labels"),
+    ("set-pr-auto-complete", "set-pull-request-auto-complete"),
+];
 pub const PR_OPERATIONS: &[(&str, &str)] = &[
-    ("add-reviewers", "add-pr-reviewers"),
-    ("add-labels", "add-pr-labels"),
-    ("set-auto-complete", "set-pr-auto-complete"),
-    ("vote", "submit-pr-review"),
+    ("add-reviewers", "add-pull-request-reviewers"),
+    ("add-labels", "add-pull-request-labels"),
+    ("set-auto-complete", "set-pull-request-auto-complete"),
+    ("vote", "submit-pull-request-review"),
     ("update-description", "update-pull-request"),
 ];
 
@@ -30,7 +39,7 @@ pub fn focused_pr_tool(operation: &str) -> Option<&'static str> {
         .find_map(|(old, new)| (*old == operation).then_some(*new))
 }
 
-/// Pure, atomic normalization shared by the codemod and historical execution.
+/// Split the legacy front-matter declaration without widening its policy.
 pub fn migrate_safe_outputs(outputs: &mut Map<String, Value>) -> Result<bool> {
     let Some(raw) = outputs.get("update-pr") else {
         return Ok(false);
@@ -201,21 +210,8 @@ pub fn validate_budget_groups(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
-/// Keep historical proposals executable without advertising the old MCP tool.
-pub fn normalize_execution_context(ctx: &mut crate::safe_outputs::ExecutionContext) -> Result<()> {
-    let mut outputs: Map<String, Value> = ctx.tool_configs.clone().into_iter().collect();
-    if !ctx.budget_groups.is_empty() {
-        outputs.insert(
-            "budget-groups".to_string(),
-            serde_json::to_value(&ctx.budget_groups)?,
-        );
-    }
-    migrate_safe_outputs(&mut outputs)?;
-    ctx.budget_groups = outputs
-        .remove("budget-groups")
-        .map(serde_json::from_value)
-        .transpose()?
-        .unwrap_or_default();
+pub fn validate_execution_budget_groups(ctx: &crate::safe_outputs::ExecutionContext) -> Result<()> {
+    let outputs = &ctx.tool_configs;
     let mut seen = HashSet::new();
     for (name, group) in &ctx.budget_groups {
         ensure!(
@@ -256,27 +252,51 @@ pub fn normalize_execution_context(ctx: &mut crate::safe_outputs::ExecutionConte
             );
         }
     }
-    let legacy = outputs
-        .values()
-        .filter_map(|config| {
-            config
-                .get(LEGACY_PR_CONFIG)
-                .map(|original| (original, config))
-        })
-        .collect::<Vec<_>>();
-    if let Some((original, effective)) = legacy.first() {
-        ensure!(
-            legacy.iter().all(|(config, _)| config == original),
-            "conflicting legacy update-pr execution policies"
-        );
-        let mut original = (*original).clone();
-        if let (Some(object), Some(staged)) = (original.as_object_mut(), effective.get("staged")) {
-            object.insert("staged".to_string(), staged.clone());
-        }
-        outputs.insert("update-pr".to_string(), original);
-    }
-    ctx.tool_configs = outputs.into_iter().collect();
     Ok(())
+}
+
+pub fn rename_pr_tools(outputs: &mut Map<String, Value>) -> Result<bool> {
+    let mut renamed = outputs.clone();
+    let mut changed = false;
+    for (old, new) in PR_TOOL_RENAMES {
+        if let Some(config) = renamed.get(*old).cloned() {
+            ensure!(
+                !renamed.contains_key(*new),
+                "manual migration required: both {old} and {new} are configured"
+            );
+            renamed.remove(*old);
+            renamed.insert((*new).to_string(), config);
+            changed = true;
+        }
+    }
+    if let Some(raw_groups) = renamed.get("budget-groups") {
+        let mut groups: BudgetGroups = serde_json::from_value(raw_groups.clone())
+            .context("safe-outputs.budget-groups has invalid configuration")?;
+        let mut groups_changed = false;
+        for group in groups.values_mut() {
+            for tool in &mut group.tools {
+                if let Some((_, new)) = PR_TOOL_RENAMES.iter().find(|(old, _)| *old == tool) {
+                    *tool = (*new).to_string();
+                    groups_changed = true;
+                }
+            }
+        }
+        if groups_changed {
+            renamed.insert("budget-groups".to_string(), serde_json::to_value(groups)?);
+            changed = true;
+        }
+    }
+    if changed {
+        *outputs = renamed;
+    }
+    Ok(changed)
+}
+
+pub fn is_deprecated_pr_tool(name: &str) -> bool {
+    matches!(name, "update-pr" | "update_pr")
+        || PR_TOOL_RENAMES
+            .iter()
+            .any(|(old, _)| name == *old || name == old.replace('-', "_"))
 }
 
 pub fn deprecated_pr_prompt_lines(body: &str) -> Vec<usize> {
@@ -286,15 +306,17 @@ pub fn deprecated_pr_prompt_lines(body: &str) -> Vec<usize> {
             text.split(|c: char| {
                 c.is_whitespace() || (!c.is_alphanumeric() && c != '-' && c != '_')
             })
-            .any(|word| matches!(word, "update-pr" | "update_pr"))
+            .any(is_deprecated_pr_tool)
             .then_some(line + 1)
         })
         .collect()
 }
 
-pub const PR_PROMPT_GUIDANCE: &str = "update-pr is no longer an agent tool: use update-pull-request for content, \
-     add-pr-reviewers for reviewers, add-pr-labels for labels, set-pr-auto-complete \
-     for auto-complete, and submit-pr-review for votes. Update the prompt manually; \
+pub const PR_PROMPT_GUIDANCE: &str = "PR tools now use pull-request, not pr. Use \
+     add-pull-request-comment, reply-to-pull-request-comment and resolve-pull-request-thread. \
+     For former update-pr operations use update-pull-request for content, \
+     add-pull-request-reviewers for reviewers, add-pull-request-labels for labels, set-pull-request-auto-complete \
+     for auto-complete, and submit-pull-request-review for votes. Update the prompt manually; \
      its text has not been rewritten.";
 
 pub fn warn_prompt_references(source: &std::path::Path, content: &str, body: &str) {
@@ -316,6 +338,84 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renamed_tools_preserve_configuration_and_are_idempotent() {
+        for (old, new) in PR_TOOL_RENAMES {
+            let config = json!({
+                "max": 2, "require-approval": {"approvers": ["reviewers"]},
+                "staged": false, "allowed-repositories": ["self"]
+            });
+            let mut outputs = Map::from_iter([((*old).to_string(), config.clone())]);
+            assert!(rename_pr_tools(&mut outputs).unwrap());
+            assert_eq!(outputs.get(*new), Some(&config));
+            assert!(!outputs.contains_key(*old));
+            let snapshot = outputs.clone();
+            assert!(!rename_pr_tools(&mut outputs).unwrap());
+            assert_eq!(outputs, snapshot);
+        }
+    }
+
+    #[test]
+    fn renamed_budget_members_keep_the_same_limit() {
+        let mut outputs = json!({
+            "add-pr-reviewers": {"max": 2, "legacy-update-pr": {"allowed-operations":["add-reviewers"]}},
+            "add-pr-labels": {"max": 2},
+            "budget-groups": {"update-pr": {"max": 2, "tools": ["add-pr-reviewers", "add-pr-labels"]}}
+        }).as_object().unwrap().clone();
+        assert!(rename_pr_tools(&mut outputs).unwrap());
+        assert_eq!(
+            outputs["budget-groups"]["update-pr"],
+            json!({
+                "max": 2, "tools": ["add-pull-request-reviewers", "add-pull-request-labels"]
+            })
+        );
+        assert_eq!(
+            outputs["add-pull-request-reviewers"]["legacy-update-pr"],
+            json!({
+                "allowed-operations": ["add-reviewers"]
+            })
+        );
+        assert!(!rename_pr_tools(&mut outputs).unwrap());
+    }
+
+    #[test]
+    fn name_conflicts_do_not_partially_rename_other_tools() {
+        let mut outputs = json!({
+            "add-pr-comment": {"max": 2},
+            "add-pr-labels": {"max": 1},
+            "add-pull-request-labels": {"max": 5}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let original = outputs.clone();
+        let error = rename_pr_tools(&mut outputs).unwrap_err().to_string();
+        assert!(error.contains("manual migration required"));
+        assert!(error.contains("add-pr-labels"));
+        assert!(error.contains("add-pull-request-labels"));
+        assert_eq!(outputs, original);
+    }
+
+    #[test]
+    fn every_abbreviated_prompt_name_is_detected_but_canonical_names_are_not() {
+        for (old, new) in PR_TOOL_RENAMES {
+            assert_eq!(
+                deprecated_pr_prompt_lines(&format!("Call `{old}`.")),
+                vec![1]
+            );
+            assert_eq!(
+                deprecated_pr_prompt_lines(&format!("Call `{}`.", old.replace('-', "_"))),
+                vec![1]
+            );
+            assert!(
+                deprecated_pr_prompt_lines(&format!(
+                    "Call `{new}`; not prefix_{old} or {old}-helper."
+                ))
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn migration_preserves_policy_and_shared_budget() {
         let mut outputs = json!({
             "update-pr": {
@@ -332,7 +432,7 @@ mod tests {
         .clone();
         assert!(migrate_safe_outputs(&mut outputs).unwrap());
         assert!(!outputs.contains_key("update-pr"));
-        assert_eq!(outputs["add-pr-reviewers"]["max-reviewers"], 2);
+        assert_eq!(outputs["add-pull-request-reviewers"]["max-reviewers"], 2);
         assert_eq!(outputs["update-pull-request"]["title"], false);
         assert_eq!(outputs["update-pull-request"]["include-stats"], false);
         assert_eq!(outputs["update-pull-request"]["target"], "*");
@@ -353,7 +453,7 @@ mod tests {
     fn migration_conflict_is_atomic() {
         let mut outputs = json!({
             "update-pr": {"allowed-operations": ["vote"], "allowed-votes": ["reset"]},
-            "submit-pr-review": {"allowed-events": ["approve"]}
+            "submit-pull-request-review": {"allowed-events": ["approve"]}
         })
         .as_object()
         .unwrap()
@@ -387,7 +487,7 @@ mod tests {
             parsed.body_raw,
             "\r\nCall `update-pr` with #aw_created.\r\n"
         );
-        let config = &parsed.front_matter.safe_outputs["submit-pr-review"];
+        let config = &parsed.front_matter.safe_outputs["submit-pull-request-review"];
         assert_eq!(
             config["allowed-events"],
             json!(["wait-for-author", "reject", "reset"])
@@ -405,7 +505,8 @@ mod tests {
         let raw = crate::compile::custom_tools::resolved_execution_config_json(&fm, &[]).unwrap();
         let config: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(config["budgetGroups"]["update-pr"]["max"], 0);
-        fm.safe_outputs.get_mut("add-pr-labels").unwrap()["require-approval"] = json!(true);
+        fm.safe_outputs.get_mut("add-pull-request-labels").unwrap()["require-approval"] =
+            json!(true);
         assert!(
             validate_budget_groups(&fm)
                 .unwrap_err()
@@ -418,22 +519,22 @@ mod tests {
     fn focused_config_validators_run_during_compilation() {
         for (tool, config, expected) in [
             (
-                "add-pr-reviewers",
+                "add-pull-request-reviewers",
                 json!({"allowed-reviewers":[""]}),
                 "allowed-reviewers",
             ),
             (
-                "add-pr-labels",
+                "add-pull-request-labels",
                 json!({"allowed-repositories":[""]}),
                 "allowed-repositories",
             ),
             (
-                "set-pr-auto-complete",
+                "set-pull-request-auto-complete",
                 json!({"merge-strategy":"invalid"}),
                 "merge-strategy",
             ),
             (
-                "submit-pr-review",
+                "submit-pull-request-review",
                 json!({"allowed-events":["invalid"]}),
                 "event",
             ),
