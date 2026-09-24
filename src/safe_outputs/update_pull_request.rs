@@ -2,23 +2,26 @@
 
 use anyhow::{Context, ensure};
 use log::{debug, info};
-use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use ado_aw_derive::SanitizeConfig;
 
-use super::{
-    PATH_SEGMENT, authenticate_ado_request, canonical_repository_alias, resolve_repo_name,
+use super::authenticate_ado_request;
+use super::pr_common::{
+    PullRequestReference, legacy_policy, repository_api_base, resolve_pr_target,
+    resolved_reference_id, validate_description, validate_reference,
 };
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::sanitize::{
+    SanitizeContent, sanitize as sanitize_text, sanitize_config, sanitize_markdown,
+};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 
 const MAX_TITLE_CHARS: usize = 256;
-const MAX_BODY_CHARS: usize = 65_536;
+const MAX_BODY_CHARS: usize = 4_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -29,28 +32,7 @@ pub enum AdoPullRequestBodyOperation {
     ReplaceIsland,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum AdoPullRequestId {
-    Number(i32),
-    String(String),
-}
-
-impl AdoPullRequestId {
-    fn parse(&self, field: &str) -> anyhow::Result<i32> {
-        let id = match self {
-            Self::Number(id) => *id,
-            Self::String(value) => value
-                .trim()
-                .strip_prefix('#')
-                .unwrap_or_else(|| value.trim())
-                .parse::<i32>()
-                .map_err(|_| anyhow::anyhow!("{field} must be a positive pull request ID"))?,
-        };
-        ensure!(id > 0, "{field} must be positive");
-        Ok(id)
-    }
-}
+pub type AdoPullRequestId = PullRequestReference;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct UpdatePullRequestParams {
@@ -66,8 +48,13 @@ pub struct UpdatePullRequestParams {
     /// Not supported for Azure DevOps PRs; accepted for gh-aw schema compatibility but must be false/omitted.
     #[serde(default, rename = "update_branch", alias = "updateBranch")]
     pub update_branch: Option<bool>,
-    /// Azure DevOps pull request ID. Required when front matter uses `target: "*"`.
-    #[serde(default, rename = "pull_request_id", alias = "pullRequestId")]
+    /// Positive Azure DevOps PR ID or same-run temporary ID. Required when target is "*".
+    #[serde(
+        default,
+        rename = "pull_request_id",
+        alias = "pullRequestId",
+        alias = "id"
+    )]
     pub pull_request_id: Option<AdoPullRequestId>,
     /// gh-aw-compatible alias for pull_request_id.
     #[serde(default, rename = "pull_request_number", alias = "pullRequestNumber")]
@@ -84,19 +71,20 @@ pub struct UpdatePullRequestParams {
 }
 
 impl UpdatePullRequestParams {
-    fn requested_id(&self) -> anyhow::Result<Option<i32>> {
+    fn requested_id(&self) -> anyhow::Result<Option<PullRequestReference>> {
         let mut found = None;
-        for (field, value) in [
+        for (_field, value) in [
             ("pull_request_id", self.pull_request_id.as_ref()),
             ("pull_request_number", self.pull_request_number.as_ref()),
             ("pr_number", self.pr_number.as_ref()),
             ("pr", self.pr.as_ref()),
         ] {
             if let Some(value) = value {
-                let id = value.parse(field)?;
-                if let Some(existing) = found {
+                validate_reference(value)?;
+                let id = value.clone();
+                if let Some(existing) = &found {
                     ensure!(
-                        existing == id,
+                        existing == &id,
                         "pull request ID aliases must all refer to the same PR"
                     );
                 }
@@ -118,8 +106,8 @@ impl Validate for UpdatePullRequestParams {
         }
         if let Some(body) = self.body.as_deref() {
             ensure!(
-                body.chars().count() <= MAX_BODY_CHARS,
-                "body must be {MAX_BODY_CHARS} characters or fewer"
+                body.encode_utf16().count() <= MAX_BODY_CHARS,
+                "body must be {MAX_BODY_CHARS} UTF-16 units or fewer"
             );
         } else {
             ensure!(
@@ -150,7 +138,7 @@ tool_result! {
         operation: Option<AdoPullRequestBodyOperation>,
         #[serde(default, rename = "update_branch")]
         update_branch: Option<bool>,
-        #[serde(default, rename = "pull_request_id")]
+        #[serde(default, rename = "pull_request_id", alias = "pullRequestId", alias = "id")]
         pull_request_id: Option<AdoPullRequestId>,
         #[serde(default, rename = "pull_request_number")]
         pull_request_number: Option<AdoPullRequestId>,
@@ -165,8 +153,15 @@ tool_result! {
 
 impl SanitizeContent for UpdatePullRequestResult {
     fn sanitize_content_fields(&mut self) {
-        self.title = self.title.as_deref().map(sanitize_text);
-        self.body = self.body.as_deref().map(sanitize_text);
+        // Rendering policy is selected in Stage 3; proposals still receive transport sanitization.
+        self.title = self
+            .title
+            .as_deref()
+            .map(crate::sanitize::sanitize_custom_payload);
+        self.body = self
+            .body
+            .as_deref()
+            .map(crate::sanitize::sanitize_custom_payload);
         self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
@@ -182,7 +177,7 @@ fn default_operation() -> AdoPullRequestBodyOperation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UpdatePullRequestTarget {
-    Id(i32),
+    Id(u64),
     Named(String),
 }
 
@@ -212,9 +207,9 @@ pub struct UpdatePullRequestConfig {
     #[sanitize_config(skip)]
     pub sync_stack: bool,
     /// Include agent stats in body updates.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", rename = "include-stats", alias = "footer")]
     #[sanitize_config(skip)]
-    pub footer: bool,
+    pub include_stats: bool,
     /// Body update operation. Defaults to replace.
     #[serde(default = "default_operation")]
     #[sanitize_config(skip)]
@@ -241,7 +236,7 @@ impl Default for UpdatePullRequestConfig {
             body: true,
             update_branch: false,
             sync_stack: true,
-            footer: true,
+            include_stats: true,
             operation: AdoPullRequestBodyOperation::Replace,
             target: UpdatePullRequestTarget::default(),
             allowed_repositories: Vec::new(),
@@ -262,7 +257,8 @@ pub(crate) fn validate_update_pull_request_config(
     match &config.target {
         UpdatePullRequestTarget::Id(id) => ensure!(*id > 0, "target PR ID must be positive"),
         UpdatePullRequestTarget::Named(target) => ensure!(
-            matches!(target.as_str(), "triggering" | "*"),
+            matches!(target.as_str(), "triggering" | "*")
+                || target.parse::<u64>().is_ok_and(|id| id > 0),
             "target must be \"triggering\", \"*\", or a positive pull request ID"
         ),
     }
@@ -299,7 +295,7 @@ pub(crate) fn validate_update_pull_request_config(
 #[derive(Debug, Deserialize)]
 struct RawPullRequest {
     #[serde(rename = "pullRequestId")]
-    pull_request_id: i32,
+    pull_request_id: u64,
     title: String,
     #[serde(default)]
     description: Option<String>,
@@ -340,13 +336,18 @@ fn replace_island(
         .match_indices(&end_marker)
         .map(|(index, _)| index)
         .collect();
-    if starts.len() != 1 || ends.len() != 1 {
+    if starts.is_empty() && ends.is_empty() {
         let island = format!("{start_marker}\n{replacement}\n{end_marker}");
         return Ok(if current.is_empty() {
             island
         } else {
             format!("{current}\n\n---\n\n{island}")
         });
+    }
+    if starts.len() != 1 || ends.len() != 1 {
+        return Err(ExecutionResult::failure(
+            "replace-island requires exactly one matching marker pair; duplicate or partial markers are not safe to replace",
+        ));
     }
     let start = starts[0];
     let end = ends[0];
@@ -400,21 +401,19 @@ fn build_updated_body(
         AdoPullRequestBodyOperation::Replace => section,
         AdoPullRequestBodyOperation::ReplaceIsland => replace_island(current, &section, ctx)?,
     };
-    if updated.chars().count() > MAX_BODY_CHARS {
-        return Err(ExecutionResult::failure(format!(
-            "updated body exceeds Azure DevOps' {MAX_BODY_CHARS}-character limit"
-        )));
+    if let Err(error) = validate_description(&updated) {
+        return Err(ExecutionResult::failure(error.to_string()));
     }
     Ok(updated)
 }
 
-fn ctx_pull_request_id(ctx: &ExecutionContext) -> Result<i32, ExecutionResult> {
+fn ctx_pull_request_id(ctx: &ExecutionContext) -> Result<u64, ExecutionResult> {
     let raw = ctx.pull_request_id.as_deref().ok_or_else(|| {
         ExecutionResult::failure(
             "SYSTEM_PULLREQUEST_PULLREQUESTID is required for target \"triggering\"",
         )
     })?;
-    raw.parse::<i32>().ok().filter(|id| *id > 0).ok_or_else(|| {
+    raw.parse::<u64>().ok().filter(|id| *id > 0).ok_or_else(|| {
         ExecutionResult::failure(format!(
             "SYSTEM_PULLREQUEST_PULLREQUESTID '{}' is not a positive pull request ID",
             crate::sanitize::neutralize_pipeline_commands(raw)
@@ -423,7 +422,7 @@ fn ctx_pull_request_id(ctx: &ExecutionContext) -> Result<i32, ExecutionResult> {
 }
 
 impl UpdatePullRequestResult {
-    fn requested_id(&self) -> anyhow::Result<Option<i32>> {
+    fn requested_id(&self) -> anyhow::Result<Option<PullRequestReference>> {
         UpdatePullRequestParams {
             title: self.title.clone(),
             body: self.body.clone(),
@@ -442,10 +441,13 @@ impl UpdatePullRequestResult {
         &self,
         config: &UpdatePullRequestConfig,
         ctx: &ExecutionContext,
-    ) -> Result<i32, ExecutionResult> {
+    ) -> Result<u64, ExecutionResult> {
         let requested = self
             .requested_id()
-            .map_err(|error| ExecutionResult::failure(error.to_string()))?;
+            .map_err(|error| ExecutionResult::failure(error.to_string()))?
+            .as_ref()
+            .map(|reference| resolved_reference_id(reference, ctx))
+            .transpose()?;
         match &config.target {
             UpdatePullRequestTarget::Id(id) => {
                 if let Some(requested) = requested
@@ -473,6 +475,13 @@ impl UpdatePullRequestResult {
                 }
                 Ok(triggering)
             }
+            UpdatePullRequestTarget::Named(target) if target.parse::<u64>().is_ok_and(|id| id > 0) => {
+                let id = target.parse::<u64>().map_err(|error| ExecutionResult::failure(error.to_string()))?;
+                if requested.is_some_and(|requested| requested != id) {
+                    return Err(ExecutionResult::failure(format!("requested pull_request_id does not match configured target #{id}")));
+                }
+                Ok(id)
+            }
             UpdatePullRequestTarget::Named(target) => Err(ExecutionResult::failure(format!(
                 "unsupported update-pull-request target '{}'",
                 crate::sanitize::neutralize_pipeline_commands(target)
@@ -495,13 +504,11 @@ impl UpdatePullRequestResult {
         &self,
         client: &reqwest::Client,
         base_url: &str,
-        repo_name: &str,
         token: &str,
-        pr_id: i32,
+        pr_id: u64,
         ctx: &ExecutionContext,
     ) -> anyhow::Result<Result<RawPullRequest, ExecutionResult>> {
-        let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
-        let url = format!("{base_url}/{encoded_repo}/pullRequests/{pr_id}?api-version=7.1");
+        let url = format!("{base_url}/pullRequests/{pr_id}?api-version=7.1");
         let response = authenticate_ado_request(client.get(&url), token, ctx.write_connection_type)
             .send()
             .await
@@ -585,20 +592,24 @@ impl Executor for UpdatePullRequestResult {
                 "update-pull-request is not configured for this workflow",
             ));
         }
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
         let token = ctx
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         let config: UpdatePullRequestConfig = ctx.get_tool_config("update-pull-request")?;
         validate_update_pull_request_config(&config)?;
+        let legacy = legacy_policy(ctx, "update-pull-request", "update-description")?;
+        if legacy.is_some()
+            && (self.title.is_some()
+                || self.body.as_deref().is_none_or(|body| body.len() < 10)
+                || self.operation.unwrap_or(config.operation)
+                    != AdoPullRequestBodyOperation::Replace
+                || config.include_stats)
+        {
+            return Ok(ExecutionResult::failure(
+                "legacy update-description requires replacement body of at least 10 characters, no title and include-stats: false",
+            ));
+        }
         if self.title.is_some() && !config.title {
             return Ok(ExecutionResult::failure(
                 "update-pull-request field 'title' is not enabled by configuration",
@@ -623,41 +634,60 @@ impl Executor for UpdatePullRequestResult {
             Ok(pr_id) => pr_id,
             Err(result) => return Ok(result),
         };
-        let repo_selector = self.repository.as_deref().unwrap_or("self");
-        let Some(repo_alias) = canonical_repository_alias(repo_selector, ctx) else {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the configured checkout list",
-                crate::sanitize::neutralize_pipeline_commands(repo_selector)
-            )));
-        };
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .iter()
-                .filter_map(|allowed| canonical_repository_alias(allowed, ctx))
-                .any(|allowed| allowed == repo_alias)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list: [{}]",
-                crate::sanitize::neutralize_pipeline_commands(repo_selector),
-                config.allowed_repositories.join(", ")
-            )));
-        }
-        let repo_name = match resolve_repo_name(Some(&repo_alias), ctx) {
-            Ok(name) => name,
+        let reference = self
+            .requested_id()?
+            .unwrap_or(PullRequestReference::Number(pr_id));
+        let (_, target) = match resolve_pr_target(
+            &reference,
+            self.repository.as_deref(),
+            &config.allowed_repositories,
+            ctx,
+        )? {
+            Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
-        let client = reqwest::Client::new();
-        let encoded_project = utf8_percent_encode(project, PATH_SEGMENT).to_string();
-        let base_url = format!(
-            "{}/{}/_apis/git/repositories",
-            org_url.trim_end_matches('/'),
-            encoded_project,
-        );
-        let current = match self
-            .fetch_pr(&client, &base_url, &repo_name, token, pr_id, ctx)
-            .await?
+        if let Some(legacy) = &legacy
+            && let Err(failure) = resolve_pr_target(
+                &reference,
+                self.repository.as_deref(),
+                &legacy.allowed_repositories,
+                ctx,
+            )?
         {
+            return Ok(failure);
+        }
+        let client = reqwest::Client::new();
+        let base_url = repository_api_base(&target);
+        let body = self.body.as_deref().map(|body| {
+            if legacy.is_some() {
+                sanitize_text(body)
+            } else {
+                sanitize_markdown(body)
+            }
+        });
+        if legacy.is_some()
+            && config.required_labels.is_empty()
+            && config.required_title_prefix.is_none()
+        {
+            let body = body.as_deref().context("legacy body must be provided")?;
+            if body.len() < 10 {
+                return Ok(ExecutionResult::failure(
+                    "description must be at least 10 characters after sanitization",
+                ));
+            }
+            return super::pr_mutations::execute_update_description(
+                &super::pr_mutations::UpdatePrContext {
+                    client: &client,
+                    target,
+                    pr_id,
+                    token,
+                    connection_type: ctx.write_connection_type,
+                },
+                body,
+            )
+            .await;
+        }
+        let current = match self.fetch_pr(&client, &base_url, token, pr_id, ctx).await? {
             Ok(pr) => pr,
             Err(result) => return Ok(result),
         };
@@ -666,14 +696,20 @@ impl Executor for UpdatePullRequestResult {
         }
         let mut patch = Map::new();
         if let Some(title) = self.title.as_ref() {
-            patch.insert("title".to_string(), Value::String(title.clone()));
+            let title = sanitize_text(title);
+            if title.trim().is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+                return Ok(ExecutionResult::failure(
+                    "sanitized title must be nonempty and 256 characters or fewer",
+                ));
+            }
+            patch.insert("title".to_string(), Value::String(title));
         }
-        if let Some(body) = self.body.as_deref() {
+        if let Some(body) = body.as_deref() {
             let description = match build_updated_body(
                 current.description.as_deref().unwrap_or_default(),
                 body,
                 self.operation.unwrap_or(config.operation),
-                config.footer,
+                config.include_stats,
                 ctx,
             ) {
                 Ok(description) => description,
@@ -681,8 +717,7 @@ impl Executor for UpdatePullRequestResult {
             };
             patch.insert("description".to_string(), Value::String(description));
         }
-        let encoded_repo = utf8_percent_encode(&repo_name, PATH_SEGMENT).to_string();
-        let patch_url = format!("{base_url}/{encoded_repo}/pullRequests/{pr_id}?api-version=7.1");
+        let patch_url = format!("{base_url}/pullRequests/{pr_id}?api-version=7.1");
         debug!(
             "Updating Azure DevOps PR #{pr_id}: {}",
             self.requested_fields().join(", ")
@@ -737,6 +772,7 @@ mod tests {
         tool_configs.insert("update-pull-request".to_string(), config);
         ExecutionContext {
             ado_org_url: Some(server.uri()),
+            ado_organization: Some("org".to_string()),
             ado_project: Some("project".to_string()),
             access_token: Some("token".to_string()),
             repository_name: Some("repo".to_string()),
@@ -785,7 +821,7 @@ mod tests {
         assert!(config.body);
         assert!(!config.update_branch);
         assert!(config.sync_stack);
-        assert!(config.footer);
+        assert!(config.include_stats);
         assert_eq!(config.operation, AdoPullRequestBodyOperation::Replace);
 
         let unsupported: UpdatePullRequestConfig = serde_json::from_value(serde_json::json!({
@@ -805,8 +841,232 @@ mod tests {
 
         let mut aliases = params();
         aliases.pull_request_id = Some(AdoPullRequestId::Number(1));
-        aliases.pull_request_number = Some(AdoPullRequestId::String("#2".to_string()));
+        aliases.pull_request_number = Some(serde_json::from_str("\"#2\"").unwrap());
         assert!(aliases.validate().is_err());
+    }
+
+    #[test]
+    fn include_stats_alias_rejects_duplicate_spellings() {
+        for config in [
+            serde_json::json!({"include-stats": false}),
+            serde_json::json!({"footer": false}),
+        ] {
+            assert!(
+                !serde_json::from_value::<UpdatePullRequestConfig>(config)
+                    .unwrap()
+                    .include_stats
+            );
+        }
+        for footer in [true, false] {
+            assert!(
+                serde_json::from_value::<UpdatePullRequestConfig>(
+                    serde_json::json!({"include-stats": false, "footer": footer})
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn island_rejects_partial_duplicate_and_reversed_markers() {
+        let ctx = ExecutionContext {
+            definition_id: Some(123),
+            ..Default::default()
+        };
+        let (start, end) = island_markers(&ctx).unwrap();
+        for existing in [
+            start.clone(),
+            end.clone(),
+            format!("{end}{start}"),
+            format!("{start}{end}{start}{end}"),
+            format!("{start}{start}{end}"),
+            format!("{start}{end}{end}"),
+        ] {
+            assert!(
+                replace_island(&existing, "replacement", &ctx).is_err(),
+                "{existing}"
+            );
+        }
+        let other = "<!-- ado-aw-pr-island-start:pipeline-definition-id=456 -->\nother\n<!-- ado-aw-pr-island-end:pipeline-definition-id=456 -->";
+        let current = format!("before\n{other}\n{start}\nold\n{end}\nafter");
+        assert_eq!(
+            replace_island(&current, "new", &ctx).unwrap(),
+            format!("before\n{other}\n{start}\nnew\n{end}\nafter")
+        );
+    }
+
+    #[test]
+    fn final_description_bound_includes_existing_content_markers_and_stats() {
+        let ctx = ExecutionContext {
+            definition_id: Some(1),
+            ..Default::default()
+        };
+        for operation in [
+            AdoPullRequestBodyOperation::Append,
+            AdoPullRequestBodyOperation::Prepend,
+        ] {
+            assert!(build_updated_body(&"a".repeat(3990), "bbbb", operation, false, &ctx).is_err());
+        }
+        assert!(
+            build_updated_body(
+                "",
+                &"a".repeat(3990),
+                AdoPullRequestBodyOperation::ReplaceIsland,
+                false,
+                &ctx
+            )
+            .is_err()
+        );
+        let mut with_stats = ctx;
+        with_stats.agent_stats = Some(crate::agent_stats::AgentStats {
+            agent_name: "agent".into(),
+            model: None,
+            input_tokens: 1,
+            output_tokens: 1,
+            ai_credits: None,
+            duration_seconds: 1.0,
+            tool_calls: 1,
+            turns: 1,
+        });
+        assert!(
+            build_updated_body(
+                "",
+                &"a".repeat(4000),
+                AdoPullRequestBodyOperation::Replace,
+                true,
+                &with_stats
+            )
+            .is_err()
+        );
+        assert!(
+            build_updated_body(
+                "",
+                &"a".repeat(4000),
+                AdoPullRequestBodyOperation::Replace,
+                false,
+                &with_stats
+            )
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn migrated_description_uses_registered_target_plain_text_and_no_get_or_footer() {
+        let server = MockServer::start().await;
+        let text = "Code: `<safe>` and <strong>title</strong>.";
+        Mock::given(method("PATCH"))
+            .and(path(
+                "/Other/_apis/git/repositories/repo-id/pullRequests/4294967296",
+            ))
+            .and(body_json(
+                serde_json::json!({"description": sanitize_text(text)}),
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = super::super::pr_common::tests::registered_context(
+            &server.uri(),
+            "update-pull-request",
+            serde_json::json!({
+                "title": false, "body": true, "target": "*", "include-stats": false,
+                "legacy-update-pr": {"allowed-operations": ["update-description"], "allowed-repositories": ["other"]}
+            }),
+        );
+        let mut result: UpdatePullRequestResult = serde_json::from_value(serde_json::json!({
+            "name": "update-pull-request", "pull_request_id": "#aw_pr123", "body": text
+        }))
+        .unwrap();
+        assert!(result.execute_sanitized(&ctx).await.unwrap().success);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_title_append_footer_and_short_body_before_network() {
+        let server = MockServer::start().await;
+        for (request, include_stats) in [
+            (
+                serde_json::json!({"body": "long enough body", "title": "new title"}),
+                false,
+            ),
+            (
+                serde_json::json!({"body": "long enough body", "operation": "append"}),
+                false,
+            ),
+            (serde_json::json!({"body": "short"}), false),
+            (serde_json::json!({"body": "long enough body"}), true),
+        ] {
+            let ctx = context(
+                &server,
+                serde_json::json!({
+                    "target": "*", "include-stats": include_stats,
+                    "legacy-update-pr": {"allowed-operations": ["update-description"]}
+                }),
+            );
+            let mut request = request;
+            request["name"] = serde_json::json!("update-pull-request");
+            request["pull_request_id"] = serde_json::json!(7);
+            let mut result: UpdatePullRequestResult = serde_json::from_value(request).unwrap();
+            assert!(!result.execute_sanitized(&ctx).await.unwrap().success);
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_body_uses_markdown_and_rejects_assembled_overflow_before_patch() {
+        for (body, expected_success) in [("`<safe>`".to_string(), true), ("a".repeat(4000), false)]
+        {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("PATCH"))
+                .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+                .and(body_json(
+                    serde_json::json!({"description": "Existing body\n\n---\n\n`<safe>`"}),
+                ))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(if expected_success { 1 } else { 0 })
+                .mount(&server)
+                .await;
+            let ctx = context(
+                &server,
+                serde_json::json!({"operation": "append", "include-stats": false}),
+            );
+            let mut result: UpdatePullRequestResult = UpdatePullRequestParams {
+                title: None,
+                body: Some(body),
+                ..params()
+            }
+            .try_into()
+            .unwrap();
+            assert_eq!(
+                result.execute_sanitized(&ctx).await.unwrap().success,
+                expected_success
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn temporary_reference_does_not_bypass_fixed_or_triggering_target() {
+        for target in [serde_json::json!(7), serde_json::json!("triggering")] {
+            let server = MockServer::start().await;
+            let mut ctx = super::super::pr_common::tests::registered_context(
+                &server.uri(),
+                "update-pull-request",
+                serde_json::json!({"target": target}),
+            );
+            ctx.pull_request_id = Some("7".into());
+            let mut result: UpdatePullRequestResult = serde_json::from_value(serde_json::json!({
+                "name": "update-pull-request", "pull_request_id": "#aw_pr123", "title": "new title"
+            }))
+            .unwrap();
+            assert!(!result.execute_sanitized(&ctx).await.unwrap().success);
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
     }
 
     #[test]

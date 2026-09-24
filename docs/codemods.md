@@ -111,6 +111,19 @@ continues.
 
 ## Adding a codemod
 
+### PR tool decomposition
+
+The `split_update_pr` codemod replaces the old operation-based `update-pr`
+declaration with focused PR tools. It preserves the original aggregate `max`
+in a persisted `budget-groups` declaration and retains operator-owned legacy
+policy metadata to avoid broadening title, body, vote, or reviewer capabilities.
+Existing conflicting focused declarations stop migration without rewriting.
+
+Prompt diagnostics run outside the mapping-only codemod. Explicit `update-pr`
+tool references are highlighted with source locations and replacement guidance;
+the markdown body is never automatically rewritten. The warning persists on
+subsequent compile/lint passes until the author updates the instructions.
+
 You need a codemod whenever you introduce a breaking change to the
 front-matter grammar:
 

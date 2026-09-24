@@ -310,7 +310,11 @@ fn safe_output_description(name: &str) -> &'static str {
         "set-github-issue-type" => "Sets or clears the native type on a GitHub issue",
         "set-github-issue-field" => "Sets a repository-defined field on a GitHub issue",
         "submit-pr-review" => "Parameters for submitting a pull request review",
-        "update-pr" => "Parameters for updating a pull request",
+        "add-pr-reviewers" => "Adds policy-permitted Azure DevOps PR reviewers",
+        "add-pr-labels" => "Adds labels without replacing existing Azure DevOps PR labels",
+        "set-pr-auto-complete" => {
+            "Enables Azure DevOps PR auto-complete without bypassing branch policies"
+        }
         "update-pull-request" => "Updates an Azure DevOps pull request title or description",
         "unassign-github-issue-from-user" => {
             "Removes operator-permitted GitHub users from an issue"

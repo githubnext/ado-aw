@@ -65,6 +65,7 @@ pub use common::{
     reconstruct_source,
 };
 pub use types::{CompileTarget, FrontMatter};
+pub(crate) mod pr_migration;
 
 /// Trait for pipeline compilers.
 ///
@@ -177,6 +178,7 @@ async fn compile_pipeline_inner(
         registry,
         existing_version.as_deref(),
     )?;
+    pr_migration::warn_prompt_references(input_path, &content, &parsed.body_raw);
     let mut front_matter = parsed.front_matter;
     let mut markdown_body = parsed.markdown_body;
     let codemod_report = parsed.codemods;
@@ -203,6 +205,15 @@ async fn compile_pipeline_inner(
         input_path,
     )
     .await?;
+    if !imported_prompt_body.is_empty() {
+        for line in pr_migration::deprecated_pr_prompt_lines(&imported_prompt_body) {
+            eprintln!(
+                "warning: imported prompt for {} (combined import body line {line}): {}",
+                crate::sanitize::neutralize_pipeline_commands(&input_path.display().to_string()),
+                pr_migration::PR_PROMPT_GUIDANCE
+            );
+        }
+    }
     markdown_body = merged_body;
 
     // Sanitize all front matter text fields before any further processing.
@@ -655,6 +666,7 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
         &content,
         Some(header_meta.version.as_str()).filter(|v| !v.is_empty()),
     )?;
+    pr_migration::warn_prompt_references(&source_path, &content, &parsed.body_raw);
 
     // Pending-migration enforcement: `check` MUST NOT silently let
     // a stale source pass. The runtime integrity check inside

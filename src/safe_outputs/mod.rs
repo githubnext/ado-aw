@@ -35,6 +35,7 @@ pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &[];
 /// deliberately absent from [`ALL_KNOWN_SAFE_OUTPUTS`] (they have no tool type)
 /// and must be explicitly allowed in `validate_safe_outputs_keys`.
 pub const SAFE_OUTPUT_CONFIG_KEYS: &[&str] = &[
+    "budget-groups",
     "report-failure-as-work-item",
     "github-token",
     "github-api-url",
@@ -46,6 +47,11 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 
 /// Public tools exposed only when explicitly configured in `safe-outputs:`.
 pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
+    AddPrReviewersResult,
+    AddPrLabelsResult,
+    SetPrAutoCompleteResult,
+    UpdatePullRequestResult,
+    AbandonPullRequestResult,
     AssignWorkItemResult,
     CreateGithubIssueResult,
     SetGithubIssueTypeResult,
@@ -84,7 +90,9 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     CreateGitTagResult,
     AddBuildTagResult,
     CreateBranchResult,
-    UpdatePrResult,
+    AddPrReviewersResult,
+    AddPrLabelsResult,
+    SetPrAutoCompleteResult,
     AbandonPullRequestResult,
     UpdatePullRequestResult,
     UploadBuildAttachmentResult,
@@ -769,6 +777,8 @@ mod abandon_pull_request;
 mod add_build_tag;
 mod add_github_issue_labels;
 mod add_pr_comment;
+mod add_pr_labels;
+mod add_pr_reviewers;
 mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
 mod assign_work_item;
@@ -789,6 +799,8 @@ mod link_work_items;
 mod missing_data;
 mod missing_tool;
 mod noop;
+pub(crate) mod pr_common;
+pub(crate) mod pr_mutations;
 mod queue_build;
 mod remove_github_issue_labels;
 mod reply_to_pr_comment;
@@ -797,6 +809,7 @@ mod resolve_pr_thread;
 mod result;
 mod set_github_issue_field;
 mod set_github_issue_type;
+mod set_pr_auto_complete;
 mod submit_pr_review;
 mod unassign_github_issue_from_user;
 mod update_github_issue;
@@ -812,6 +825,8 @@ pub use abandon_pull_request::*;
 pub use add_build_tag::*;
 pub use add_github_issue_labels::*;
 pub use add_pr_comment::*;
+pub use add_pr_labels::*;
+pub use add_pr_reviewers::*;
 pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;
 pub use assign_work_item::*;
@@ -843,6 +858,7 @@ pub use result::{
 };
 pub use set_github_issue_field::*;
 pub use set_github_issue_type::*;
+pub use set_pr_auto_complete::*;
 pub use submit_pr_review::*;
 pub use unassign_github_issue_from_user::*;
 pub use update_github_issue::*;

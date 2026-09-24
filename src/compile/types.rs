@@ -2000,6 +2000,7 @@ fn validate_import_literal(label: &str, value: &str) -> anyhow::Result<()> {
 /// validation).
 pub const THREAT_DETECTION_KEY: &str = "threat-detection";
 pub const SAFE_OUTPUT_RESERVED_KEYS: &[&str] = &[
+    "budget-groups",
     "require-approval",
     "staged",
     "scripts",
@@ -2214,7 +2215,7 @@ impl FrontMatter {
             .collect()
     }
 
-    fn typed_safe_output_config<T>(&self, key: &str) -> anyhow::Result<Option<T>>
+    pub(crate) fn typed_safe_output_config<T>(&self, key: &str) -> anyhow::Result<Option<T>>
     where
         T: serde::de::DeserializeOwned + Default + SanitizeConfigTrait,
     {
@@ -2230,6 +2231,7 @@ impl FrontMatter {
         if let Some(object) = raw.as_object_mut() {
             object.remove("require-approval");
             object.remove("staged");
+            object.remove(crate::compile::pr_migration::LEGACY_PR_CONFIG);
         }
         let mut config: T = serde_json::from_value(raw)
             .map_err(|e| anyhow::anyhow!("safe-outputs.{key} has invalid configuration: {e}"))?;

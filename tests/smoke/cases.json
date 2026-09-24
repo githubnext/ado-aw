@@ -74,6 +74,13 @@
       "source": "tests/smoke/multi-repo.md"
     },
     {
+      "id": "pr-tools-preview",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/safe-outputs/pr-tools-preview.md"
+    },
+    {
       "id": "janitor",
       "lane": "agentic",
       "kind": "compiled",

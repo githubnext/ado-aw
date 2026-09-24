@@ -126,7 +126,6 @@ describe("create-pull-request add-reviewers handoff", () => {
     "configures and submits one $name reviewer",
     async ({ scenario, temporaryId, submittedReviewer }) => {
       expect(scenario.config(ctx, state)).toEqual({
-        "allowed-operations": ["add-reviewers"],
         "allowed-repositories": ["agent-definitions"],
         "allowed-reviewers": [submittedReviewer],
         "max-reviewers": 1,
@@ -134,7 +133,6 @@ describe("create-pull-request add-reviewers handoff", () => {
       });
       await expect(scenario.ndjson(ctx, state)).resolves.toEqual({
         pull_request_id: temporaryId,
-        operation: "add-reviewers",
         reviewers: [submittedReviewer],
       });
     },
@@ -163,7 +161,7 @@ describe("create-pull-request add-reviewers handoff", () => {
         },
       };
       const updated: ExecutedRecord = {
-        name: "update_pr",
+        name: "add_pr_reviewers",
         status: "succeeded",
         result: {
           pull_request_id: 42,
@@ -266,7 +264,7 @@ describe("create-pull-request add-reviewers handoff", () => {
         result: created,
       },
       {
-        name: "update_pr",
+        name: "add_pr_reviewers",
         status: "succeeded",
         result: updated,
       },
@@ -296,7 +294,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       },
     };
     const updated: ExecutedRecord = {
-      name: "update_pr",
+      name: "add_pr_reviewers",
       status: "succeeded",
       result: {
         pull_request_id: 42,
@@ -408,7 +406,7 @@ describe("Rust executor payload contract", () => {
 
   it.each([
     { target: "producer", tool: "create-pull-request", index: 0 },
-    { target: "consumer", tool: "update-pr", index: 1 },
+    { target: "consumer", tool: "add-pr-reviewers", index: 1 },
   ] as const)(
     "rejects an overlong $target temporary ID through Rust deserialization",
     async ({ target, tool, index }) => {
@@ -458,7 +456,7 @@ describe("Rust executor payload contract", () => {
     expect(result.records).toHaveLength(2);
     expect(result.records[0]?.status).toBe("succeeded");
     expect(result.records[1]?.status).toBe("failed");
-    expect(result.records[1]?.error).toContain("Failed to parse update-pr:");
+    expect(result.records[1]?.error).toContain("Failed to parse add-pr-reviewers:");
     expect(result.records[1]?.error).toContain("expected a sequence");
   });
 });

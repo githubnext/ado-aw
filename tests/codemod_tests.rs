@@ -83,6 +83,52 @@ fn copy_fixture(dir: &Path, fixture_name: &str) -> PathBuf {
     dest
 }
 
+#[test]
+fn compile_migrates_pr_tools_and_keeps_prompt_warning_until_fixed() {
+    let dir = fresh_git_temp_dir();
+    let original = "---\r\nname: pr-migration\r\ndescription: d\r\nsafe-outputs:\r\n  update-pr:\r\n    allowed-operations: [add-reviewers, update-description]\r\n    allowed-reviewers: [owner@example.test]\r\n    max: 1\r\n---\r\nCall `update-pr` to add reviewers.\r\n";
+    let source = write_source(dir.path(), original);
+    let first = run_compile(&source);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let after = fs::read_to_string(&source).unwrap();
+    assert!(after.ends_with("\r\nCall `update-pr` to add reviewers.\r\n"));
+    let fm: serde_yaml::Value = serde_yaml::from_str(after.split("---").nth(1).unwrap()).unwrap();
+    assert!(fm["safe-outputs"]["update-pr"].is_null());
+    assert_eq!(fm["safe-outputs"]["budget-groups"]["update-pr"]["max"], 1);
+    assert!(String::from_utf8_lossy(&first.stderr).contains("deprecated-tool-reference"));
+    assert!(String::from_utf8_lossy(&first.stderr).contains("add-pr-reviewers"));
+    let second = run_compile(&source);
+    assert!(second.status.success());
+    assert_eq!(fs::read_to_string(&source).unwrap(), after);
+    assert!(String::from_utf8_lossy(&second.stderr).contains("deprecated-tool-reference"));
+    let lint = Command::new(ado_aw_binary())
+        .args(["lint", source.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        lint.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lint.stderr)
+    );
+    assert!(String::from_utf8_lossy(&lint.stdout).contains("deprecated-tool-reference"));
+}
+
+#[test]
+fn conflicting_pr_migration_does_not_rewrite_source_or_lock() {
+    let dir = fresh_git_temp_dir();
+    let original = "---\nname: conflict\ndescription: d\nsafe-outputs:\n  update-pr:\n    allowed-operations: [update-description]\n  update-pull-request: {}\n---\nBody\n";
+    let source = write_source(dir.path(), original);
+    let output = run_compile(&source);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("manual migration required"));
+    assert_eq!(fs::read_to_string(&source).unwrap(), original);
+    assert!(!source.with_extension("lock.yml").exists());
+}
+
 // ─── Legacy directory marker migration (codemod 0004) ──────────────────────
 
 #[test]

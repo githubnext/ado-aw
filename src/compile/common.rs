@@ -2520,12 +2520,6 @@ fn validate_github_issue_tools(front_matter: &FrontMatter, github_tools: &[Strin
         validate_github_issue_shared_policy(tool, &config)?;
         validate_github_issue_tool_specific_config(front_matter, tool)?;
     }
-    if let Some(config) = front_matter.update_pull_request_config()? {
-        crate::safe_outputs::validate_update_pull_request_config(&config)?;
-    }
-    if let Some(config) = front_matter.abandon_pull_request_config()? {
-        crate::safe_outputs::validate_abandon_pull_request_config(&config)?;
-    }
     Ok(())
 }
 
@@ -3041,12 +3035,17 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
                 Some(v) => v.as_array().is_none_or(|a| a.is_empty()),
             };
             if is_empty {
+                if obj.contains_key(super::pr_migration::LEGACY_PR_CONFIG) {
+                    anyhow::bail!(
+                        "safe-outputs.update-pr enables vote but has no allowed-votes; restrict allowed-operations or configure allowed-votes"
+                    );
+                }
                 anyhow::bail!(
                     "safe-outputs.submit-pr-review requires a non-empty 'allowed-events' list \
                      to prevent agents from casting unrestricted review votes. Example:\n\n  \
                      safe-outputs:\n    submit-pr-review:\n      allowed-events:\n        \
                      - comment\n        - approve-with-suggestions\n\n\
-                     Valid events: approve, approve-with-suggestions, request-changes, comment\n"
+                     Valid events: approve, approve-with-suggestions, request-changes, wait-for-author, reject, reset, comment\n"
                 );
             }
         } else {
@@ -3060,8 +3059,59 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
     Ok(())
 }
 
-/// Validate configuration shared by create-pull-request and update-pr.
+/// Validate the PR tool family, including temporary-reference lanes and shared budgets.
 pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    super::pr_migration::validate_budget_groups(front_matter)?;
+    if let Some(config) = front_matter
+        .typed_safe_output_config::<crate::safe_outputs::AddPrLabelsConfig>("add-pr-labels")?
+    {
+        crate::safe_outputs::validate_add_pr_labels_config(&config)?;
+    }
+    if let Some(config) = front_matter
+        .typed_safe_output_config::<crate::safe_outputs::SetPrAutoCompleteConfig>(
+            "set-pr-auto-complete",
+        )?
+    {
+        crate::safe_outputs::validate_set_pr_auto_complete_config(&config)?;
+    }
+    if let Some(config) = front_matter
+        .typed_safe_output_config::<crate::safe_outputs::SubmitPrReviewConfig>("submit-pr-review")?
+    {
+        crate::safe_outputs::validate_submit_pr_review_config(&config)?;
+    }
+    if let Some(config) = front_matter.update_pull_request_config()? {
+        crate::safe_outputs::validate_update_pull_request_config(&config)?;
+    }
+    if let Some(config) = front_matter.abandon_pull_request_config()? {
+        crate::safe_outputs::validate_abandon_pull_request_config(&config)?;
+    }
+    for tool in [
+        "add-pr-reviewers",
+        "add-pr-labels",
+        "set-pr-auto-complete",
+        "update-pull-request",
+        "abandon-pull-request",
+        "submit-pr-review",
+    ] {
+        if !front_matter.safe_outputs.contains_key(tool) {
+            continue;
+        }
+        let temporary_capable = tool != "submit-pr-review"
+            || front_matter
+                .safe_outputs
+                .get(tool)
+                .and_then(|config| config.get("allow-temporary-ids"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+        if temporary_capable
+            && front_matter
+                .safe_outputs
+                .contains_key("create-pull-request")
+        {
+            require_same_approval_lane(front_matter, "create-pull-request", tool)?;
+            require_same_staged_lane(front_matter, "create-pull-request", tool)?;
+        }
+    }
     if front_matter
         .safe_outputs
         .contains_key("create-pull-request")
@@ -3073,7 +3123,7 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
 
     if let Some(max_reviewers) = front_matter
         .safe_outputs
-        .get("update-pr")
+        .get("add-pr-reviewers")
         .and_then(serde_json::Value::as_object)
         .and_then(|object| object.get("max-reviewers"))
     {
@@ -3088,6 +3138,11 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
             "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
         );
     }
+    if let Some(config) = front_matter
+        .typed_safe_output_config::<crate::safe_outputs::AddPrReviewersConfig>("add-pr-reviewers")?
+    {
+        crate::safe_outputs::validate_add_pr_reviewers_config(&config)?;
+    }
 
     Ok(())
 }
@@ -3100,8 +3155,12 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
 /// runtime error. Catching this at compile time is consistent with how
 /// `validate_submit_pr_review_events` handles the analogous case.
 pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("update-pr")
-        && let Some(obj) = config_value.as_object()
+    if let Some(config_value) = front_matter.safe_outputs.get("update-pr").or_else(|| {
+        front_matter
+            .safe_outputs
+            .get("submit-pr-review")
+            .and_then(|config| config.get(super::pr_migration::LEGACY_PR_CONFIG))
+    }) && let Some(obj) = config_value.as_object()
     {
         // Determine whether the vote operation is reachable:
         // - allowed-operations absent or empty → all operations allowed (includes vote)
@@ -6063,10 +6122,13 @@ safe-outputs:
 ---
 "#;
         let (fm, _) = parse_markdown(yaml).unwrap();
-        let error = validate_github_issue_outputs_config(&fm)
+        let error = validate_pull_request_outputs_config(&fm)
             .expect_err("invalid abandon-pull-request config must fail compilation")
             .to_string();
-        assert!(error.contains("required-labels"), "unexpected error: {error}");
+        assert!(
+            error.contains("required-labels"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -6477,7 +6539,7 @@ safe-outputs:
                 error.contains("same effective staged setting")
                     && error.contains("temporary pull-request IDs")
                     && error.contains("staged create-pull-request")
-                    && error.contains("staged update-pr"),
+                    && error.contains("staged update-pull-request"),
                 "create staged={create_staged}, update staged={update_staged}: {error}"
             );
         }
@@ -6553,7 +6615,7 @@ safe-outputs:
         ] {
             let (mut fm, _) = parse_markdown(yaml).unwrap();
             fm.safe_outputs
-                .get_mut("update-pr")
+                .get_mut("add-pr-reviewers")
                 .unwrap()
                 .as_object_mut()
                 .unwrap()

@@ -69,6 +69,7 @@ export function parseRepositoryPolicies(
   } catch {
     return policies;
   }
+
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return policies;
   }
@@ -92,6 +93,30 @@ export function parseRepositoryPolicies(
         )
       : [];
     policies.set(tool, { targetRepo, allowedRepos });
+  }
+  return policies;
+}
+
+export function parsePrPolicies(value: string | undefined): Map<string, Readonly<Record<string, unknown>>> {
+  if (!value) return new Map();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    logWarning(`approval-summary: invalid trusted PR policies: ${String(error)}`);
+    return new Map();
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    logWarning("approval-summary: trusted PR policies must be an object");
+    return new Map();
+  }
+  const policies = new Map<string, Readonly<Record<string, unknown>>>();
+  for (const [tool, policy] of Object.entries(parsed)) {
+    if (policy !== null && typeof policy === "object" && !Array.isArray(policy)) {
+      policies.set(tool, policy);
+    } else {
+      logWarning(`approval-summary: invalid trusted policy for ${tool}`);
+    }
   }
   return policies;
 }
@@ -130,6 +155,8 @@ export function main(env: NodeJS.ProcessEnv = process.env): number {
     currentRepository: env.AW_CURRENT_REPOSITORY,
     currentProvider: env.AW_CURRENT_REPOSITORY_PROVIDER,
     githubApiUrl: env.AW_GITHUB_API_URL,
+    prPolicies: parsePrPolicies(env.AW_PR_POLICIES),
+    triggeringPr: env.SYSTEM_PULLREQUEST_PULLREQUESTID,
   };
   const markdown = renderSummary(proposals, reviewed, repositoryContext);
   if (markdown.length === 0) {

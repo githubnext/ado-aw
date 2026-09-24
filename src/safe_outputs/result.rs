@@ -284,6 +284,7 @@ pub struct ExecutionContext {
     pub resolved_work_items: Arc<Mutex<HashMap<String, ResolvedWorkItem>>>,
     /// Temporary pull-request IDs resolved by successful `create-pull-request` calls.
     pub resolved_pull_requests: Arc<Mutex<HashMap<String, ResolvedPullRequest>>>,
+    pub budget_groups: crate::compile::pr_migration::BudgetGroups,
 }
 
 impl ExecutionContext {
@@ -313,6 +314,7 @@ impl ExecutionContext {
                 if let Some(object) = value.as_object_mut() {
                     object.remove("require-approval");
                     object.remove("staged");
+                    object.remove(crate::compile::pr_migration::LEGACY_PR_CONFIG);
                 }
                 serde_json::from_value(value).map_err(|error| {
                     anyhow::anyhow!("failed to deserialize config for tool '{tool_name}': {error}")
@@ -542,6 +544,7 @@ impl ExecutionContext {
             resolved_github_issues: Arc::new(Mutex::new(HashMap::new())),
             resolved_work_items: Arc::new(Mutex::new(HashMap::new())),
             resolved_pull_requests: Arc::new(Mutex::new(HashMap::new())),
+            budget_groups: Default::default(),
         }
     }
 }

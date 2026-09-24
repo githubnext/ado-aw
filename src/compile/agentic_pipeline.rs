@@ -4836,6 +4836,27 @@ fn safe_outputs_summary_step(front_matter: &FrontMatter, reviewed: &[String]) ->
     use super::ir::env::EnvValue;
     let approval_summary_path = super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
     let repository_policies = approval_summary_repository_policies(front_matter)?;
+    let pr_policies: serde_json::Map<String, serde_json::Value> = front_matter
+        .safe_outputs
+        .iter()
+        .filter(|(tool, _)| {
+            super::pr_migration::PR_OPERATIONS
+                .iter()
+                .any(|(_, focused)| *focused == tool.as_str())
+                || tool.as_str() == "abandon-pull-request"
+        })
+        .map(|(tool, config)| {
+            let policy = ["target", "target-repo", "operation"]
+                .into_iter()
+                .filter_map(|key| {
+                    config
+                        .get(key)
+                        .map(|value| (key.to_string(), value.clone()))
+                })
+                .collect::<serde_json::Map<_, _>>();
+            (tool.clone(), serde_json::Value::Object(policy))
+        })
+        .collect();
     let github_api_url = front_matter
         .github_safe_outputs_auth()?
         .map(|auth| auth.api_url().to_string())
@@ -4852,6 +4873,10 @@ fn safe_outputs_summary_step(front_matter: &FrontMatter, reviewed: &[String]) ->
             EnvValue::literal("$(Agent.TempDirectory)/ado-aw-safe-outputs.md"),
         )
         .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join("\n")))
+        .with_env(
+            "AW_PR_POLICIES",
+            EnvValue::literal(serde_json::to_string(&pr_policies)?),
+        )
         .with_env(
             "AW_GITHUB_REPOSITORY_POLICIES",
             EnvValue::literal(repository_policies),

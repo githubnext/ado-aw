@@ -14,6 +14,36 @@ function ndjson(...records: Record<string, unknown>[]): string {
   return records.map((r) => JSON.stringify(r)).join("\n") + "\n";
 }
 
+describe("focused PR tools", () => {
+  it("shows long bodies as excerpts and uses trusted defaults for omitted targets", () => {
+    const body = "report ".repeat(100);
+    const summary = renderSummary(
+      parseProposals(ndjson({ name: "update-pull-request", body })),
+      new Set(["update-pull-request"]),
+      {
+        policies: new Map(),
+        prPolicies: new Map([["update-pull-request", { target: 42, operation: "append", "target-repo": "tools" }]]),
+      },
+    );
+    expect(summary).toContain("| PR | 42 |");
+    expect(summary).toContain("| Body operation | append |");
+    expect(summary).toContain("| Repository selector | tools |");
+    expect(summary).toContain("```text\n" + body);
+    expect(summary).not.toContain("…(truncated)");
+  });
+
+  it("links temporary targets only to earlier creates without inventing real IDs", () => {
+    const summary = renderSummary(parseProposals(ndjson(
+      { name: "create-pull-request", temporary_id: "#aw_created", repository: "tools" },
+      { name: "add-pr-reviewers", pull_request_id: "#aw_created", reviewers: ["person@example.test"] },
+      { name: "abandon-pull-request", pull_request_id: "#aw_missing", body: "reason" },
+    )), new Set());
+    expect(summary).toContain("real ID assigned at execution");
+    expect(summary).toContain("no earlier create proposal");
+    expect(summary).toContain("person@example.test");
+  });
+});
+
 function repositoryContext(
   tool: string,
   targetRepo = "octo-org/octo-repo",

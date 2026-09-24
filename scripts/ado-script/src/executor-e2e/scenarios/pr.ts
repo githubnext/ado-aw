@@ -1,7 +1,7 @@
 /**
  * Pull-request safe-output scenarios against the ADO `agent-definitions` repo:
  * add-pr-comment, reply-to-pr-comment, resolve-pr-thread, submit-pr-review,
- * update-pr.
+ * focused PR content editing and abandonment.
  *
  * Each scenario deterministically creates a transient PR (with a real commit,
  * so ADO accepts it) and, where needed, a comment thread; asserts the effect;
@@ -219,10 +219,205 @@ export const updatePr: Scenario<PrState> = {
   cleanup: teardownPr,
 };
 
+export const updatePullRequest: Scenario<PrState> = {
+  tool: "update-pull-request",
+  targetsAdoRepo: true,
+  config: (ctx) => ({
+    target: "*",
+    "allowed-repositories": [ctx.adoRepo],
+    "include-stats": false,
+  }),
+  setup: (ctx) => setupPr(ctx, "update-pull-request", false),
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId,
+    repository: ctx.adoRepo,
+    title: `${ctx.prefix("update-pull-request")} updated`,
+    body: "x".repeat(4000),
+  }),
+  assert: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    if (pr.description !== "x".repeat(4000) || !pr.title.endsWith(" updated")) {
+      throw new Error("PR title or exact 4000-character description was not persisted");
+    }
+  },
+  cleanup: teardownPr,
+};
+
+export const abandonPullRequest: Scenario<PrState> = {
+  tool: "abandon-pull-request",
+  targetsAdoRepo: true,
+  config: (ctx) => ({
+    target: "*",
+    "allowed-repositories": [ctx.adoRepo],
+    "include-stats": false,
+  }),
+  setup: (ctx) => setupPr(ctx, "abandon-pull-request", false),
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId,
+    repository: ctx.adoRepo,
+    body: detBody(ctx, "abandon-pull-request"),
+  }),
+  assert: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    if (pr.status !== "abandoned") throw new Error("PR was not abandoned");
+    const threads = await ctx.rest.listThreads(state.repo, state.prId);
+    if (!threads.some((thread) => thread.comments?.some(
+      (comment) => comment.content === detBody(ctx, "abandon-pull-request"),
+    ))) throw new Error("Abandonment comment was not posted");
+  },
+  cleanup: teardownPr,
+};
+
+export const updatePullRequestIsland: Scenario<PrState> = {
+  id: "update-pull-request-island",
+  tool: "update-pull-request",
+  targetsAdoRepo: true,
+  config: (ctx) => ({
+    target: "*",
+    "allowed-repositories": [ctx.adoRepo],
+    operation: "replace-island",
+    "include-stats": false,
+    max: 2,
+  }),
+  setup: (ctx) => setupPr(ctx, "update-pull-request-island", false),
+  priorEntries: async (ctx, state) => [{
+    tool: "update-pull-request",
+    config: {
+      target: "*", "allowed-repositories": [ctx.adoRepo],
+      operation: "replace-island", "include-stats": false, max: 2,
+    },
+    entry: { pull_request_id: state.prId, repository: ctx.adoRepo, body: "first island report" },
+  }],
+  env: async () => ({ SYSTEM_DEFINITIONID: "123" }),
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId, repository: ctx.adoRepo, body: "updated island report",
+  }),
+  assert: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    const body = pr.description ?? "";
+    if (!body.startsWith(detBody(ctx, "update-pull-request-island"))
+      || !body.includes("updated island report")
+      || body.includes("first island report")
+      || body.split("ado-aw-pr-island-start:").length !== 2) {
+      throw new Error("PR island rerun did not preserve surrounding text and replace the one section");
+    }
+  },
+  cleanup: teardownPr,
+};
+
+export const updatePullRequestOversized: Scenario<PrState> = {
+  id: "update-pull-request-oversized",
+  tool: "update-pull-request",
+  targetsAdoRepo: true,
+  config: (ctx) => ({
+    target: "*", "allowed-repositories": [ctx.adoRepo], "include-stats": false,
+  }),
+  setup: (ctx) => setupPr(ctx, "update-pull-request-oversized", false),
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId, repository: ctx.adoRepo, body: "x".repeat(4001),
+  }),
+  expectedFailure: { error: /4000|4,000/ },
+  assert: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    if (pr.description !== detBody(ctx, "update-pull-request-oversized")) {
+      throw new Error("Rejected oversized body changed the live description");
+    }
+  },
+  cleanup: teardownPr,
+};
+
+export const addPrLabels: Scenario<PrState> = {
+  tool: "add-pr-labels",
+  targetsAdoRepo: true,
+  config: (ctx) => ({ "allowed-repositories": [ctx.adoRepo] }),
+  setup: async (ctx) => {
+    const state = await setupPr(ctx, "add-pr-labels", false);
+    try {
+      await ctx.rest.setPullRequestLabels(state.repo, state.prId, ["existing-label"]);
+    } catch (error) {
+      await teardownPr(ctx, state);
+      throw error;
+    }
+    return state;
+  },
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId, repository: ctx.adoRepo, labels: ["new-label"],
+  }),
+  assert: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    const labels = pr.labels?.map((label) => label.name) ?? [];
+    if (!labels.includes("existing-label") || !labels.includes("new-label")) {
+      throw new Error("Label addition did not preserve the existing label");
+    }
+  },
+  cleanup: teardownPr,
+};
+
+interface AutoCompleteState extends PrState { targetBranch: string }
+
+export const setPrAutoComplete: Scenario<AutoCompleteState> = {
+  tool: "set-pr-auto-complete",
+  targetsAdoRepo: true,
+  config: (ctx) => ({
+    "allowed-repositories": [ctx.adoRepo],
+    "delete-source-branch": false,
+    "merge-strategy": "squash",
+  }),
+  setup: async (ctx) => {
+    const repo = ctx.adoRepo;
+    const base = await defaultBranchShortName(ctx, repo);
+    const sha = await ctx.rest.getRefObjectId(repo, `heads/${base}`);
+    if (!sha) throw new Error("Default branch has no tip");
+    const targetBranch = `${ctx.prefix("set-pr-auto-complete")}-target`;
+    const branch = `${ctx.prefix("set-pr-auto-complete")}-src`;
+    await ctx.rest.pushAddFileBranch(repo, targetBranch, sha,
+      `/ado-aw-det/${ctx.buildId}/autocomplete-target.md`, "isolated target", "prepare isolated completion target");
+    let sourceCreated = false;
+    try {
+      const tip = await ctx.rest.getRefObjectId(repo, `heads/${targetBranch}`);
+      if (!tip) throw new Error("Isolated target branch has no tip");
+      await ctx.rest.pushAddFileBranch(repo, branch, tip,
+        `/ado-aw-det/${ctx.buildId}/autocomplete-source.md`, "isolated source", "prepare completion source");
+      sourceCreated = true;
+      const pr = await ctx.rest.createPullRequest(repo, branch, targetBranch,
+        ctx.prefix("set-pr-auto-complete"), "Completes only into a disposable test branch.");
+      return { repo, prId: pr.pullRequestId, branch, targetBranch };
+    } catch (error) {
+      const cleanup = new Teardown();
+      if (sourceCreated) cleanup.add("delete source", () => ctx.rest.deleteRef(repo, `refs/heads/${branch}`));
+      await cleanup.add("delete target", () => ctx.rest.deleteRef(repo, `refs/heads/${targetBranch}`)).run();
+      throw error;
+    }
+  },
+  ndjson: async (ctx, state) => ({ pull_request_id: state.prId, repository: ctx.adoRepo }),
+  assert: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    if (!pr.autoCompleteSetBy?.id && pr.status !== "completed") {
+      throw new Error("Auto-complete was neither set nor completed into the disposable target");
+    }
+  },
+  cleanup: async (ctx, state) => {
+    await new Teardown()
+      .add("abandon active PR", async () => {
+        const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+        if (pr.status === "active") await ctx.rest.abandonPullRequest(state.repo, state.prId);
+      })
+      .add("delete source", () => ctx.rest.deleteRef(state.repo, `refs/heads/${state.branch}`))
+      .add("delete isolated target", () => ctx.rest.deleteRef(state.repo, `refs/heads/${state.targetBranch}`))
+      .run();
+  },
+};
+
 export const prScenarios: Scenario<unknown>[] = [
   addPrComment,
   replyToPrComment,
   resolvePrThread,
   submitPrReview,
   updatePr,
+  updatePullRequest,
+  abandonPullRequest,
+  updatePullRequestIsland,
+  updatePullRequestOversized,
+  addPrLabels,
+  setPrAutoComplete,
 ];

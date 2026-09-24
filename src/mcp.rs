@@ -30,12 +30,15 @@ use crate::safe_outputs::{
     ResolvePrThreadResult, SetGithubIssueFieldParams, SetGithubIssueFieldResult,
     SetGithubIssueTypeParams, SetGithubIssueTypeResult, SubmitPrReviewParams, SubmitPrReviewResult,
     ToolResult, UnassignGithubIssueFromUserParams, UnassignGithubIssueFromUserResult,
-    UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePrParams, UpdatePrResult,
-    UpdatePullRequestParams, UpdatePullRequestResult, UpdateWikiPageParams, UpdateWikiPageResult,
-    UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadBuildAttachmentParams, UploadBuildAttachmentResult, UploadPipelineArtifactParams,
-    UploadPipelineArtifactResult, UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
-    Validate, anyhow_to_mcp_error,
+    UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePullRequestParams,
+    UpdatePullRequestResult, UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams,
+    UpdateWorkItemResult, UploadBuildAttachmentParams, UploadBuildAttachmentResult,
+    UploadPipelineArtifactParams, UploadPipelineArtifactResult, UploadWorkitemAttachmentParams,
+    UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
+};
+use crate::safe_outputs::{
+    AddPrLabelsParams, AddPrLabelsResult, AddPrReviewersParams, AddPrReviewersResult,
+    SetPrAutoCompleteParams, SetPrAutoCompleteResult,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::{PullRequestTemporaryId, WorkItemTemporaryId};
@@ -433,6 +436,9 @@ fn apply_tool_filter(tool_router: &mut ToolRouter<SafeOutputs>, enabled_tools: O
     if let Some(enabled) = enabled_tools {
         for name in enabled {
             if !all_tools.iter().any(|t| t == name) {
+                if name == "update-pr" {
+                    warn!("{}", crate::compile::pr_migration::PR_PROMPT_GUIDANCE);
+                }
                 warn!(
                     "Enabled-tools entry '{}' has no matching route (ignored)",
                     name
@@ -1107,7 +1113,7 @@ and only the fields you want to update."
         description = "Create a new pull request to propose code changes. This tool captures all \
 changes in the repository (both committed and uncommitted) and creates a PR from them. \
 Use 'self' for the pipeline's own repository, or a repository alias from the checkout list. \
-Returns a generated temporary_id that can be passed as pull_request_id to later update-pr calls."
+Returns a generated temporary_id for configured PR content, reviewer, label, review or auto-complete follow-up tools."
     )]
     async fn create_pr(
         &self,
@@ -1205,7 +1211,7 @@ Returns a generated temporary_id that can be passed as pull_request_id to later 
 
         let canonical = temporary_id.canonical();
         let mut response = CallToolResult::success(vec![Content::text(format!(
-            "PR request saved for repository '{}'. Patch file: {}. Use temporary ID {} as pull_request_id in later update-pr calls.",
+            "PR request saved for repository '{}'. Patch file: {}. Use temporary ID {} as pull_request_id in configured focused PR follow-up tools.",
             repository, result.patch_file, canonical
         ))]);
         response.structured_content = Some(serde_json::json!({
@@ -1434,29 +1440,39 @@ pull request. The branch will be created during safe output processing."
     }
 
     #[tool(
-        name = "update-pr",
-        description = "Update pull request metadata in Azure DevOps. Supports operations: \
-add-reviewers, add-labels, set-auto-complete, vote, update-description. \
-Changes will be applied during safe output processing."
+        name = "add-pr-reviewers",
+        description = "Add policy-permitted reviewers to an Azure DevOps PR. Accepts a numeric or same-run temporary PR ID."
     )]
-    async fn update_pr(
+    async fn add_pr_reviewers(
         &self,
-        params: Parameters<UpdatePrParams>,
+        params: Parameters<AddPrReviewersParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!(
-            "Tool called: update-pr - PR #{} operation '{}'",
-            params.0.pull_request_id, params.0.operation
-        );
-        let mut sanitized = params.0;
-        sanitized.description = sanitized.description.map(|d| sanitize_text(&d));
-        let result: UpdatePrResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
-        })?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "PR #{} '{}' operation queued. Changes will be applied during safe output processing.",
-            result.pull_request_id, result.operation
-        ))]))
+        let result: AddPrReviewersResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "add-pr-labels",
+        description = "Add labels to an Azure DevOps PR without replacing existing labels. Accepts a numeric or same-run temporary PR ID."
+    )]
+    async fn add_pr_labels(
+        &self,
+        params: Parameters<AddPrLabelsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AddPrLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "set-pr-auto-complete",
+        description = "Enable Azure DevOps PR auto-complete using configured completion options. Does not merge immediately or bypass branch policies."
+    )]
+    async fn set_pr_auto_complete(
+        &self,
+        params: Parameters<SetPrAutoCompleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: SetPrAutoCompleteResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
@@ -2645,7 +2661,7 @@ safe-outputs:
 
     #[tokio::test]
     async fn test_all_configured_only_tools_are_routes() {
-        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 14);
+        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 19);
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled: Vec<String> = CONFIGURED_ONLY_TOOLS
             .iter()
@@ -2655,6 +2671,10 @@ safe-outputs:
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
+        assert!(
+            !tools.iter().any(|tool| tool.name.as_ref() == "update-pr"),
+            "historical update-pr must never be an advertised MCP route"
+        );
         for configured_tool in CONFIGURED_ONLY_TOOLS {
             let route = tools
                 .iter()

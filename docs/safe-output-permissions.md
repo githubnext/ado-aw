@@ -132,7 +132,7 @@ from group membership.
 
 | Safe-output tool | Permission required (bit) |
 |---|---|
-| `add-pr-comment`, `submit-pr-review`, `reply-to-pr-comment`, `resolve-pr-thread`, `update-pr` | `PullRequestContribute` (16384) |
+| `add-pr-comment`, `submit-pr-review`, `reply-to-pr-comment`, `resolve-pr-thread`, `update-pull-request`, `add-pr-reviewers`, `add-pr-labels`, `set-pr-auto-complete`, `abandon-pull-request` | `PullRequestContribute` (16384) |
 | `create-pull-request` | `PullRequestContribute` (16384) + `CreateBranch` (16) + `GenericContribute` (4) on the target repo |
 | `create-branch` | `CreateBranch` (16) + `GenericContribute` (4) |
 | `create-git-tag` | `CreateTag` (32) + `GenericContribute` (4) |

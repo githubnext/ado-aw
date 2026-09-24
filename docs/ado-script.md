@@ -383,6 +383,13 @@ GitHub-typed repos return before any SDK load.
 
 ## Bundle env contract
 
+The approval-summary bundle also receives `AW_PR_POLICIES`, a non-secret JSON
+map of configured PR target/default-operation selectors. It uses the existing
+`SYSTEM_PULLREQUEST_PULLREQUESTID` environment variable for triggering targets.
+Missing target context is displayed as unresolved; same-run references identify
+an earlier create proposal without inventing a real PR ID. This preview is not
+an authorization decision.
+
 Every compiler-emitted step that runs an ado-script bundle has an implicit
 environment contract — which `process.env` keys the bundle reads. That contract
 is modelled in [`src/compile/ado_bundle.rs`](../src/compile/ado_bundle.rs):

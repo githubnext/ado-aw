@@ -53,6 +53,8 @@ export interface TrustedRepositoryContext {
   currentRepository?: string;
   currentProvider?: string;
   githubApiUrl?: string;
+  prPolicies?: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
+  triggeringPr?: string;
 }
 
 interface RepositoryResolution {
@@ -77,6 +79,47 @@ const INLINE_MAX_CHARS = 300;
  * serialization (the `tool_result!` macro emits field names verbatim).
  */
 const TOOL_SPECS: Record<string, ToolSpec> = {
+  "update-pull-request": {
+    title: "Update pull request content",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Title", key: "title" },
+      { label: "Body operation", key: "operation" },
+      { label: "Repository selector", key: "repository" },
+    ],
+    body: "body",
+  },
+  "abandon-pull-request": {
+    title: "Abandon pull request",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Repository selector", key: "repository" },
+    ],
+    body: "body",
+  },
+  "add-pr-reviewers": {
+    title: "Add pull request reviewers",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Reviewers", key: "reviewers" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "add-pr-labels": {
+    title: "Add pull request labels",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Labels", key: "labels" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "set-pr-auto-complete": {
+    title: "Enable pull request auto-complete",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
   "create-pull-request": {
     title: "Create pull request",
     fields: [
@@ -934,6 +977,32 @@ export function renderSummary(
   repositoryContext?: TrustedRepositoryContext,
 ): string {
   if (proposals.length === 0) return "";
+  const producers = new Map<string, Proposal>();
+  proposals = proposals.map((proposal) => {
+    const record = { ...proposal.record };
+    if (proposal.name === "create-pull-request" && typeof record.temporary_id === "string") {
+      producers.set(record.temporary_id.replace(/^#/, ""), proposal);
+    }
+    const policy = repositoryContext?.prPolicies?.get(proposal.name);
+    if (policy) {
+      record.operation ??= policy.operation;
+      record.repository ??= policy["target-repo"] ?? "self";
+      record.pull_request_id ??= record.pull_request_number ?? record.pr_number ?? record.pr
+        ?? (policy.target === "*" ? "<unresolved: explicit PR ID required>"
+          : typeof policy.target === "number" ? policy.target
+          : repositoryContext?.triggeringPr || "<unresolved: triggering PR ID unavailable>");
+    }
+    if (typeof record.pull_request_id === "string" && /^#?aw_/.test(record.pull_request_id)) {
+      const producer = producers.get(record.pull_request_id.replace(/^#/, ""));
+      record.pull_request_id = producer
+        ? `${record.pull_request_id} (from earlier create proposal ${producer.index + 1}; real ID assigned at execution)`
+        : `${record.pull_request_id} (unresolved: no earlier create proposal)`;
+      if (producer && !proposal.record.repository) {
+        record.repository = `${String(producer.record.repository ?? "self")} (producer's proposed selector; validated at execution)`;
+      }
+    }
+    return { ...proposal, record };
+  });
 
   const lines: string[] = ["# Proposed safe outputs", ""];
   const repositoryResolutions = buildRepositoryResolutions(

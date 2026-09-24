@@ -604,7 +604,11 @@ actions, and the executor processes them after threat analysis.
 | `reply-to-pr-comment` | Replies to an existing PR review comment thread |
 | `resolve-pr-thread` | Resolves or updates the status of a PR review thread |
 | `submit-pr-review` | Submits a review vote on a pull request |
-| `update-pr` | Updates pull request metadata (reviewers, labels, auto-complete, vote, update-description) |
+| `update-pull-request` | Updates PR title or description, including managed sections |
+| `add-pr-reviewers` | Adds policy-permitted PR reviewers |
+| `add-pr-labels` | Adds PR labels without replacing existing labels |
+| `set-pr-auto-complete` | Enables PR auto-complete with configured completion options |
+| `abandon-pull-request` | Abandons a PR without merging, optionally with a comment |
 | `link-work-items` | Links two ADO work items together |
 | `queue-build` | Queues a pipeline build by definition ID |
 | `create-git-tag` | Creates a git tag on a repository ref |

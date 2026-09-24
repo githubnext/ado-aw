@@ -470,7 +470,10 @@ export class AdoRest {
   async getPullRequest(
     repo: string,
     prId: number,
-  ): Promise<{ pullRequestId: number; status: string; title: string; description?: string }> {
+  ): Promise<{
+    pullRequestId: number; status: string; title: string; description?: string;
+    labels?: { name: string }[]; autoCompleteSetBy?: { id?: string };
+  }> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}?api-version=7.1`,
     );
@@ -479,6 +482,8 @@ export class AdoRest {
       status: string;
       title: string;
       description?: string;
+      labels?: { name: string }[];
+      autoCompleteSetBy?: { id?: string };
     }>(path);
     if (!res) throw new Error(`getPullRequest(${prId}) returned no body`);
     return res;

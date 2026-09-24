@@ -1929,11 +1929,24 @@ Vote on pull requests.
 
         let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
 
-        // update-pr must be listed as an enabled tool for the agent
         assert!(
-            compiled_has_enabled_tool(&compiled, "update-pr"),
-            "Compiled output should contain --enabled-tools update-pr (case: {})",
-            case_desc
+            !compiled_has_enabled_tool(&compiled, "update-pr"),
+            "legacy catch-all must not be advertised"
+        );
+        for tool in ["add-pr-reviewers", "set-pr-auto-complete"] {
+            assert!(
+                compiled_has_enabled_tool(&compiled, tool),
+                "{case_desc}: missing {tool}"
+            );
+        }
+        if case_desc.contains("vote reachable") {
+            assert!(compiled_has_enabled_tool(&compiled, "submit-pr-review"));
+            assert!(compiled_has_enabled_tool(&compiled, "update-pull-request"));
+        }
+        let migrated_source = fs::read_to_string(&test_input).unwrap();
+        assert!(
+            migrated_source.contains("budget-groups:"),
+            "legacy aggregate budget must persist"
         );
         // Stage 3 must acquire a write token (permissions.write is set)
         assert!(

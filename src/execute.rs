@@ -29,6 +29,7 @@ use crate::safe_outputs::{
     UpdatePullRequestResult, UpdateWikiPageResult, UpdateWorkItemResult,
     UploadBuildAttachmentResult, UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
+use crate::safe_outputs::{AddPrLabelsResult, AddPrReviewersResult, SetPrAutoCompleteResult};
 use crate::sanitize::neutralize_pipeline_commands;
 
 // Re-export memory types for use by main.rs
@@ -204,6 +205,9 @@ pub async fn execute_safe_outputs(
     ctx: &ExecutionContext,
     filter: &ToolFilter,
 ) -> Result<Vec<ExecutionResult>> {
+    let mut effective_ctx = ctx.clone();
+    crate::compile::pr_migration::normalize_execution_context(&mut effective_ctx)?;
+    let ctx = &effective_ctx;
     let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
 
     log_execution_context(safe_output_dir, ctx);
@@ -246,6 +250,9 @@ pub async fn execute_safe_outputs(
         AddBuildTagResult,
         CreateBranchResult,
         UpdatePrResult,
+        AddPrReviewersResult,
+        AddPrLabelsResult,
+        SetPrAutoCompleteResult,
         AbandonPullRequestResult,
         UploadBuildAttachmentResult,
         UploadPipelineArtifactResult,
@@ -269,6 +276,7 @@ pub async fn execute_safe_outputs(
         LinkGithubSubIssueResult,
     );
 
+    let mut group_counts = HashMap::<String, usize>::new();
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(result) = process_one_entry(
@@ -276,6 +284,7 @@ pub async fn execute_safe_outputs(
             entries.len(),
             entry,
             &mut budgets,
+            &mut group_counts,
             filter,
             ctx,
             safe_output_dir,
@@ -334,6 +343,7 @@ async fn process_one_entry(
     total: usize,
     entry: &Value,
     budgets: &mut HashMap<&'static str, (usize, usize)>,
+    group_counts: &mut HashMap<String, usize>,
     filter: &ToolFilter,
     ctx: &ExecutionContext,
     safe_output_dir: &Path,
@@ -346,7 +356,34 @@ async fn process_one_entry(
 
     // Skip entries the active filter excludes (manual-review split: the
     // auto job excludes reviewed tools; the reviewed job runs only them).
-    if !filter.allows(proposal_tool_name) {
+    let canonical = if proposal_tool_name == "update-pr" {
+        entry
+            .get("operation")
+            .and_then(Value::as_str)
+            .and_then(crate::compile::pr_migration::focused_pr_tool)
+            .unwrap_or(proposal_tool_name)
+    } else {
+        proposal_tool_name
+    };
+    let matches_filter = |names: &[String]| {
+        names.iter().any(|name| {
+            name == canonical
+                || name == proposal_tool_name
+                || (name == "update-pr"
+                    && ctx.tool_configs.get(canonical).is_some_and(|config| {
+                        config
+                            .get(crate::compile::pr_migration::LEGACY_PR_CONFIG)
+                            .is_some()
+                    }))
+        })
+    };
+    let allowed = if canonical == proposal_tool_name && !matches_filter(&["update-pr".to_string()])
+    {
+        filter.allows(canonical)
+    } else {
+        (filter.only.is_empty() || matches_filter(&filter.only)) && !matches_filter(&filter.exclude)
+    };
+    if !allowed {
         debug!(
             "[{}/{}] Skipping entry for tool '{}' (filtered out)",
             i + 1,
@@ -362,7 +399,20 @@ async fn process_one_entry(
     // Generic budget enforcement: skip excess entries rather than aborting the whole batch.
     // Budget is consumed before execution so that failed attempts (target policy rejection,
     // network errors) still count — this prevents unbounded retries against a failing endpoint.
-    if let Some(result) = enforce_budget(entry, budgets, total, i) {
+    let group_failure = ctx.budget_groups.iter().find_map(|(name, group)| {
+        if (group.tools.iter().any(|tool| tool == canonical)
+            || (proposal_tool_name == "update-pr" && name == "update-pr"))
+            && group_counts.get(name).copied().unwrap_or(0) >= group.max
+        {
+            Some(ExecutionResult::budget_exhausted(format!(
+                "Skipped: shared budget group '{name}' limit ({}) already reached",
+                group.max
+            )))
+        } else {
+            None
+        }
+    });
+    if let Some(result) = group_failure.or_else(|| enforce_budget(entry, budgets, total, i)) {
         append_execution_record(
             safe_output_dir,
             proposal_tool_name,
@@ -371,6 +421,13 @@ async fn process_one_entry(
         )
         .await;
         return Some(result);
+    }
+    for (name, group) in &ctx.budget_groups {
+        if group.tools.iter().any(|tool| tool == canonical)
+            || (proposal_tool_name == "update-pr" && name == "update-pr")
+        {
+            *group_counts.entry(name.clone()).or_default() += 1;
+        }
     }
 
     let result = match execute_safe_output(entry, ctx).await {
@@ -653,6 +710,10 @@ pub async fn execute_safe_output(
         .get("name")
         .and_then(|n| n.as_str())
         .ok_or_else(|| anyhow::anyhow!("Safe output missing 'name' field"))?;
+    anyhow::ensure!(
+        tool_name != "update-pr" || ctx.tool_configs.contains_key("update-pr"),
+        "historical update-pr proposal has no trusted legacy configuration"
+    );
 
     debug!("Dispatching tool: {}", tool_name);
 
@@ -741,6 +802,9 @@ async fn dispatch_pr_tools(
         "create-pull-request" => CreatePrResult,
         "add-pr-comment" => AddPrCommentResult,
         "update-pr" => UpdatePrResult,
+        "add-pr-reviewers" => AddPrReviewersResult,
+        "add-pr-labels" => AddPrLabelsResult,
+        "set-pr-auto-complete" => SetPrAutoCompleteResult,
         "abandon-pull-request" => AbandonPullRequestResult,
         "update-pull-request" => UpdatePullRequestResult,
         "submit-pr-review" => SubmitPrReviewResult,
@@ -910,6 +974,84 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn migrated_pr_tools_share_original_budget_with_historical_records() {
+        for max in [0, 1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let entries = [
+                serde_json::json!({"name":"add-pr-labels","pull_request_id":7,"labels":["first"]}),
+                serde_json::json!({"name":"update-pr","pull_request_id":7,"operation":"update-description","description":"legacy description"}),
+                serde_json::json!({"name":"update-pull-request","pull_request_id":7,"body":"canonical description"}),
+            ];
+            let text = entries
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            tokio::fs::write(dir.path().join(SAFE_OUTPUT_FILENAME), text)
+                .await
+                .unwrap();
+            let ctx = ExecutionContext {
+                dry_run: true,
+                tool_configs: HashMap::from([(
+                    "update-pr".to_string(),
+                    serde_json::json!({
+                        "allowed-operations":["add-labels","update-description"],"max":max
+                    }),
+                )]),
+                ..ExecutionContext::default()
+            };
+            let results = execute_safe_outputs(dir.path(), &ctx, &ToolFilter::default())
+                .await
+                .unwrap();
+            assert_eq!(results.iter().filter(|result| result.success).count(), max);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|result| result.is_budget_exhausted())
+                    .count(),
+                3 - max
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_pr_filters_use_canonical_review_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join(SAFE_OUTPUT_FILENAME),
+            "{\"name\":\"update-pr\",\"pull_request_id\":7,\"operation\":\"update-description\",\"description\":\"legacy description\"}\n"
+        ).await.unwrap();
+        let ctx = ExecutionContext {
+            dry_run: true,
+            tool_configs: HashMap::from([(
+                "update-pr".to_string(),
+                serde_json::json!({
+                    "allowed-operations":["update-description"],"require-approval":true
+                }),
+            )]),
+            ..ExecutionContext::default()
+        };
+        let automatic = ToolFilter {
+            exclude: vec!["update-pull-request".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            execute_safe_outputs(dir.path(), &ctx, &automatic)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let reviewed = ToolFilter {
+            only: vec!["update-pull-request".to_string()],
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(dir.path(), &ctx, &reviewed)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
+    }
 
     async fn append_and_read_execution_record(result: ExecutionResult) -> Value {
         let dir = tempfile::tempdir().expect("create temp dir");
