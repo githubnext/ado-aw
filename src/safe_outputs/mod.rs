@@ -435,19 +435,21 @@ fn split_repository_target_name(
 pub(crate) fn resolve_repository_write_target(
     repository: Option<&str>,
     ctx: &ExecutionContext,
-) -> Result<crate::safe_outputs::result::AdoRepositoryTarget, ExecutionResult> {
+) -> Result<AdoRepositoryTarget, ExecutionResult> {
     let selector = repository.unwrap_or("self");
     let Some(alias) = canonical_repository_alias(selector, ctx) else {
         return Err(ExecutionResult::failure(format!(
             "Repository '{selector}' is not in the allowed repository list"
         )));
     };
-    let current_org_url = ctx.ado_org_url.as_deref().ok_or_else(|| {
-        ExecutionResult::failure("Azure DevOps organization URL not configured")
-    })?;
-    let current_organization = ctx.ado_organization.as_deref().ok_or_else(|| {
-        ExecutionResult::failure("Azure DevOps organization name not configured")
-    })?;
+    let current_org_url = ctx
+        .ado_org_url
+        .as_deref()
+        .ok_or_else(|| ExecutionResult::failure("Azure DevOps organization URL not configured"))?;
+    let current_organization = ctx
+        .ado_organization
+        .as_deref()
+        .ok_or_else(|| ExecutionResult::failure("Azure DevOps organization name not configured"))?;
     let current_project = ctx
         .ado_project
         .as_deref()
@@ -459,7 +461,7 @@ pub(crate) fn resolve_repository_write_target(
             .as_deref()
             .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"))?;
         let (_, repository) = split_repository_target_name(name, current_project)?;
-        return Ok(crate::safe_outputs::result::AdoRepositoryTarget {
+        return Ok(AdoRepositoryTarget {
             alias,
             organization: current_organization.to_string(),
             organization_url: current_org_url.trim_end_matches('/').to_string(),
@@ -507,8 +509,7 @@ pub(crate) fn resolve_repository_write_target(
         )));
     }
 
-    let (project, repository_name) =
-        split_repository_target_name(&config.name, current_project)?;
+    let (project, repository_name) = split_repository_target_name(&config.name, current_project)?;
     let organization = config
         .organization
         .as_deref()
@@ -534,7 +535,7 @@ pub(crate) fn resolve_repository_write_target(
         }
     }
 
-    Ok(crate::safe_outputs::result::AdoRepositoryTarget {
+    Ok(AdoRepositoryTarget {
         alias,
         organization: organization.to_string(),
         organization_url: if cross_organization {
@@ -765,9 +766,9 @@ macro_rules! impl_temporary_reference_deserialize {
 mod add_build_tag;
 mod add_github_issue_labels;
 mod add_pr_comment;
-mod assign_work_item;
 mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
+mod assign_work_item;
 mod close_github_issue;
 mod comment_on_github_issue;
 mod comment_on_work_item;
@@ -806,9 +807,9 @@ mod upload_workitem_attachment;
 pub use add_build_tag::*;
 pub use add_github_issue_labels::*;
 pub use add_pr_comment::*;
-pub use assign_work_item::*;
 pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;
+pub use assign_work_item::*;
 pub use close_github_issue::*;
 pub use comment_on_github_issue::*;
 pub use comment_on_work_item::*;
@@ -832,8 +833,8 @@ pub use reply_to_pr_comment::*;
 pub use report_incomplete::*;
 pub use resolve_pr_thread::*;
 pub use result::{
-    ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ResolvedWorkItem, ToolResult,
-    Validate, anyhow_to_mcp_error, org_from_url,
+    AdoRepositoryTarget, ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue,
+    ResolvedPullRequest, ResolvedWorkItem, ToolResult, Validate, anyhow_to_mcp_error, org_from_url,
 };
 pub use set_github_issue_field::*;
 pub use set_github_issue_type::*;
@@ -1503,7 +1504,11 @@ mod tests {
 
         let error = resolve_repository_write_target(Some("target"), &ctx).unwrap_err();
 
-        assert!(error.message.contains("declares the pipeline's current organization"));
+        assert!(
+            error
+                .message
+                .contains("declares the pipeline's current organization")
+        );
     }
 
     #[test]

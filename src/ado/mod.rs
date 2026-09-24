@@ -1484,21 +1484,7 @@ pub async fn resolve_service_connection_id(
 /// though `value` was a GUID) is harmless; the API returns the same
 /// id back.
 fn is_uuid_like(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, b) in bytes.iter().enumerate() {
-        let is_hyphen_position = matches!(i, 8 | 13 | 18 | 23);
-        if is_hyphen_position {
-            if *b != b'-' {
-                return false;
-            }
-        } else if !b.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-    true
+    crate::validate::is_valid_guid(value)
 }
 
 /// Pick the single service-endpoint `id` from the

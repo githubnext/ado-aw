@@ -1175,7 +1175,8 @@ mod tests {
                 "name": "noop",
                 "status": "warning",
                 "context": "noop-warn",
-                "result": {"status": "ok"}
+                "result": {"status": "ok"},
+                "error": "completed with limitations"
             })],
         );
 
@@ -1197,6 +1198,15 @@ mod tests {
         let execution = analysis.execution.expect("execution");
         assert_eq!(execution.items.len(), 1);
         assert_eq!(execution.items[0].status, SafeOutputStatus::Warning);
+        assert_eq!(
+            execution.items[0].result,
+            Some(json!({"status": "ok"})),
+            "warning result data should survive manifest correlation"
+        );
+        assert_eq!(
+            execution.items[0].error.as_deref(),
+            Some("completed with limitations")
+        );
         assert!(
             execution.items[0].rejection_reason.is_none(),
             "warning items should have no rejection_reason"
