@@ -894,6 +894,11 @@ For another PR, use an explicit fixed target or `target: "*"`, subject to the
 same repository permissions. Numeric and quoted numeric fixed targets have the
 same meaning, including in the human-review preview.
 
+`required-labels` reads the dedicated PR labels-list endpoint, not the optional
+labels in general PR metadata. Every configured label must match
+case-insensitively before writing; HTTP errors and malformed list responses
+fail closed.
+
 Numeric IDs, quoted numeric IDs and same-run temporary PR references are
 accepted. Repository destinations resolve their configured organization and
 project; cross-organization writes require the normal explicit write policy.
@@ -1528,7 +1533,9 @@ ADO PR ID is used. The tool fetches the PR first, applies the optional
 title/label filters, patches the PR status to `abandoned`, then optionally
 posts `body` as a PR thread comment.
 
-All required labels must match (case-insensitively). Completed PRs are rejected;
+All required labels must match (case-insensitively), using the dedicated PR
+labels-list endpoint. A missing label, failed lookup or malformed response
+prevents mutation. Completed PRs are rejected;
 already-abandoned PRs are no-ops and do not post another comment. If abandonment
 succeeds but comment posting fails, execution is a warning with structured
 mutation/comment data. A transport error can leave comment delivery uncertain;

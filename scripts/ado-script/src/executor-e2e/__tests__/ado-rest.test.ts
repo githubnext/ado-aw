@@ -28,6 +28,37 @@ describe("AdoRest.listPullRequestLabels", () => {
     );
   });
 
+  describe("AdoRest.abandonPullRequest cleanup", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it.each(["active", "abandoned", "missing"])("cleans up a %s PR without repeating abandonment", async (status) => {
+      const fetch = stubFetch(() => status === "missing"
+        ? new Response("", { status: 404 })
+        : Response.json({ status }));
+      await new AdoRest(options).abandonPullRequest("repo", 42);
+      expect(fetch).toHaveBeenCalledTimes(status === "active" ? 2 : 1);
+      if (status === "active") {
+        expect(fetch.mock.calls[1]?.[1]).toMatchObject({
+          method: "PATCH", body: JSON.stringify({ status: "abandoned" }),
+        });
+      }
+    });
+
+    it.each([{}, { status: "completed" }, { status: "unknown" }])(
+      "does not silently accept an unexpected PR state %j", async (state) => {
+        const fetch = stubFetch(() => Response.json(state));
+        await expect(new AdoRest(options).abandonPullRequest("repo", 42)).rejects.toThrow("unexpected status");
+        expect(fetch).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("retains cleanup read errors without attempting another mutation", async () => {
+      const fetch = stubFetch(() => new Response("forbidden", { status: 403 }));
+      await expect(new AdoRest(options).abandonPullRequest("repo", 42)).rejects.toThrow("403");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it.each([{}, { value: null }, { value: [null] }, { value: [{name: 1}] }])(
     "does not report malformed %j as no labels", async (response) => {
       stubFetch(() => Response.json(response));

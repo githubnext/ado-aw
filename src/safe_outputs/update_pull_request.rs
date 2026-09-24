@@ -10,7 +10,7 @@ use ado_aw_derive::SanitizeConfig;
 
 use super::authenticate_ado_request;
 use super::pr_common::{
-    PrTargetPolicy, PullRequestReference, legacy_policy, repository_api_base,
+    PrTargetPolicy, PullRequestReference, fetch_pr_labels, legacy_policy, repository_api_base,
     resolve_pr_policy_target, resolve_pr_target, validate_description, validate_reference,
 };
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -309,14 +309,7 @@ struct RawPullRequest {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
-    labels: Vec<RawLabel>,
-    #[serde(default)]
     url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawLabel {
-    name: String,
 }
 
 fn island_markers(ctx: &ExecutionContext) -> Result<(String, String), ExecutionResult> {
@@ -477,6 +470,7 @@ impl UpdatePullRequestResult {
     fn validate_filters(
         &self,
         pr: &RawPullRequest,
+        labels: &[String],
         config: &UpdatePullRequestConfig,
     ) -> Result<(), ExecutionResult> {
         let missing: Vec<&str> = config
@@ -484,9 +478,9 @@ impl UpdatePullRequestResult {
             .iter()
             .map(String::as_str)
             .filter(|required| {
-                !pr.labels
+                !labels
                     .iter()
-                    .any(|label| label.name.eq_ignore_ascii_case(required))
+                    .any(|label| label.eq_ignore_ascii_case(required))
             })
             .collect();
         if !missing.is_empty() {
@@ -630,7 +624,15 @@ impl Executor for UpdatePullRequestResult {
             Ok(pr) => pr,
             Err(result) => return Ok(result),
         };
-        if let Err(result) = self.validate_filters(&current, &config) {
+        let labels = if config.required_labels.is_empty() {
+            Vec::new()
+        } else {
+            match fetch_pr_labels(&client, &base_url, pr_id, token, ctx).await? {
+                Ok(labels) => labels,
+                Err(result) => return Ok(result),
+            }
+        };
+        if let Err(result) = self.validate_filters(&current, &labels, &config) {
             return Ok(result);
         }
         let mut patch = Map::new();
@@ -734,7 +736,6 @@ mod tests {
             "pullRequestId": id,
             "title": "[bot] Existing",
             "description": "Existing body",
-            "labels": [{"name": "automated"}],
             "url": format!("https://dev.azure.example/pr/{id}")
         })
     }
@@ -1047,6 +1048,14 @@ mod tests {
     async fn updates_triggering_pr_title_and_body() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
+            .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1, "value": [{"name": "automated"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
             .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
             .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
             .expect(1)
@@ -1150,6 +1159,14 @@ mod tests {
     #[tokio::test]
     async fn rejects_filters_before_patch() {
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 0, "value": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
             .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))

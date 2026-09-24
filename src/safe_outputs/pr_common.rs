@@ -16,6 +16,46 @@ use crate::secure::PullRequestTemporaryId;
 
 pub(crate) const MAX_DESCRIPTION_UTF16: usize = 4_000;
 
+pub(crate) async fn fetch_pr_labels(
+    client: &reqwest::Client,
+    base_url: &str,
+    pr_id: u64,
+    token: &str,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<Result<Vec<String>, ExecutionResult>> {
+    #[derive(Deserialize)]
+    struct Label {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Labels {
+        value: Vec<Label>,
+    }
+
+    // The general PR endpoint can omit labels even when the PR has them.
+    let url = format!("{base_url}/pullRequests/{pr_id}/labels?api-version=7.1");
+    let response = super::authenticate_ado_request(
+        client.get(url),
+        token,
+        ctx.write_connection_type,
+    )
+    .send()
+    .await
+    .context("Failed to fetch pull request labels")?;
+    if !response.status().is_success() {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Failed to fetch PR #{pr_id} labels (HTTP {})",
+            response.status()
+        ))));
+    }
+    match response.json::<Labels>().await {
+        Ok(labels) => Ok(Ok(labels.value.into_iter().map(|label| label.name).collect())),
+        Err(error) => Ok(Err(ExecutionResult::failure(format!(
+            "Failed to parse PR #{pr_id} labels: {error}"
+        )))),
+    }
+}
+
 /// Normalized executor/preview target contract. Decimal strings avoid JS precision loss.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]

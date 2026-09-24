@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::pr_common::{
-    PrTargetPolicy, PullRequestReference, repository_api_base, resolve_pr_policy_target,
+    PrTargetPolicy, PullRequestReference, fetch_pr_labels, repository_api_base, resolve_pr_policy_target,
     validate_reference,
 };
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -237,16 +237,6 @@ impl AbandonPullRequestConfig {
     }
 }
 
-fn pr_labels(pr: &serde_json::Value) -> Vec<String> {
-    pr.get("labels")
-        .and_then(|labels| labels.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|label| label.get("name").and_then(|name| name.as_str()))
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
 impl AbandonPullRequestResult {
     fn repository_selector<'a>(&'a self, config: &'a AbandonPullRequestConfig) -> Option<&'a str> {
         self.repository.as_deref().or(config.target_repo.as_deref())
@@ -255,6 +245,7 @@ impl AbandonPullRequestResult {
     fn validate_filters(
         &self,
         pr: &serde_json::Value,
+        labels: &[String],
         config: &AbandonPullRequestConfig,
     ) -> Result<(), ExecutionResult> {
         if let Some(prefix) = config.required_title_prefix.as_deref() {
@@ -268,7 +259,6 @@ impl AbandonPullRequestResult {
         }
 
         if !config.required_labels.is_empty() {
-            let labels = pr_labels(pr);
             let missing: Vec<&str> = config
                 .required_labels
                 .iter()
@@ -455,7 +445,15 @@ impl Executor for AbandonPullRequestResult {
             Ok(pr) => pr,
             Err(result) => return Ok(result),
         };
-        if let Err(result) = self.validate_filters(&pr, &config) {
+        let labels = if config.required_labels.is_empty() {
+            Vec::new()
+        } else {
+            match fetch_pr_labels(&client, &base_url, pull_request_id, token, ctx).await? {
+                Ok(labels) => labels,
+                Err(result) => return Ok(result),
+            }
+        };
+        if let Err(result) = self.validate_filters(&pr, &labels, &config) {
             return Ok(result);
         }
 
@@ -603,8 +601,7 @@ mod tests {
         serde_json::json!({
             "pullRequestId": 7,
             "title": "[bot] stale PR",
-            "status": status,
-            "labels": [{"name": "automated"}, {"name": "stale"}]
+            "status": status
         })
     }
 
@@ -837,12 +834,18 @@ mod tests {
             "abandon-pull-request",
             serde_json::json!({"target": "*", "required-labels": ["missing"]}),
         );
+        Mock::given(method("GET"))
+            .and(path("/Other/_apis/git/repositories/repo-id/pullRequests/4294967296/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
         let mut result: AbandonPullRequestResult = serde_json::from_value(serde_json::json!({
             "name": "abandon-pull-request", "pull_request_id": "#aw_pr123"
         }))
         .unwrap();
         assert!(!result.execute_sanitized(&ctx).await.unwrap().success);
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 
     #[test]
@@ -963,6 +966,14 @@ mod tests {
                 "required-title-prefix": "[bot]"
             }),
         );
+        Mock::given(method("GET"))
+            .and(path("/proj/_apis/git/repositories/repo/pullRequests/7/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 2, "value": [{"name": "automated"}, {"name": "stale"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
         let mut result: AbandonPullRequestResult = AbandonPullRequestParams {
             pull_request_id: Some(PullRequestReference::Number(7)),
             body: Some("Closing as stale.".to_string()),
@@ -1023,6 +1034,12 @@ mod tests {
     #[tokio::test]
     async fn missing_label_rejects_before_patch() {
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/proj/_apis/git/repositories/repo/pullRequests/7/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"value": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/proj/_apis/git/repositories/repo/pullRequests/7"))
             .and(query_param("api-version", "7.1"))

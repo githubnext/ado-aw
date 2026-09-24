@@ -127,6 +127,25 @@ fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), ${JSON.stringif
     return bin;
   }
 
+  it.each([false, true])("fails on cleanup errors without losing an earlier assertion failure (%s)", async (assertionFails) => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-cleanup-outcome-"));
+    try {
+      const bin = await outcomeBinary(dir, "succeeded", "");
+      const scenario: Scenario<unknown> = {
+        tool: "update-pull-request", config: () => ({}),
+        setup: async () => ({}), ndjson: async () => ({}),
+        assert: async () => { if (assertionFails) throw new Error("wrong PR state"); },
+        cleanup: async () => { throw new Error("owned ref remains"); },
+      };
+      const result = await runScenario({ ...fakeCtx(), adoAwBin: bin, workDir: dir }, scenario);
+      expect(result).toMatchObject({
+        ok: false, skipped: false, cleanupError: "owned ref remains",
+        phase: assertionFails ? "assert" : "cleanup",
+        message: `${assertionFails ? "wrong PR state; " : ""}cleanup failed: owned ref remains`,
+      });
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
   it.each([false, true])("checks postconditions after expected failure (mutated=%s)", async (mutated) => {
     const dir = await mkdtemp(join(tmpdir(), "ado-aw-negative-assert-"));
     try {

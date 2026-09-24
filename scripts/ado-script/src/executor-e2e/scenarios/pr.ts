@@ -84,6 +84,21 @@ async function teardownPr(ctx: ScenarioContext, state: PrState): Promise<void> {
     .run();
 }
 
+async function setupLabeledPr(ctx: ScenarioContext, id: string): Promise<PrState> {
+  const state = await setupPr(ctx, id, false);
+  try {
+    await ctx.rest.setPullRequestLabels(state.repo, state.prId, ["existing-label"]);
+    const seeded = await ctx.rest.listPullRequestLabels(state.repo, state.prId);
+    if (!seeded.some((label) => label.name === "existing-label")) {
+      throw new Error(`Label setup did not persist existing-label: ${JSON.stringify(seeded)}`);
+    }
+  } catch (error) {
+    await teardownPr(ctx, state);
+    throw error;
+  }
+  return state;
+}
+
 export const addPrComment: Scenario<PrState> = {
   tool: "add-pull-request-comment",
   targetsAdoRepo: true,
@@ -383,20 +398,7 @@ export const addPrLabels: Scenario<PrState> = {
   tool: "add-pull-request-labels",
   targetsAdoRepo: true,
   config: (ctx) => ({ "allowed-repositories": [ctx.adoRepo] }),
-  setup: async (ctx) => {
-    const state = await setupPr(ctx, "add-pull-request-labels", false);
-    try {
-      await ctx.rest.setPullRequestLabels(state.repo, state.prId, ["existing-label"]);
-      const seeded = await ctx.rest.listPullRequestLabels(state.repo, state.prId);
-      if (!seeded.some((label) => label.name === "existing-label")) {
-        throw new Error(`Label setup did not persist existing-label: ${JSON.stringify(seeded)}`);
-      }
-    } catch (error) {
-      await teardownPr(ctx, state);
-      throw error;
-    }
-    return state;
-  },
+  setup: (ctx) => setupLabeledPr(ctx, "add-pull-request-labels"),
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId, repository: ctx.adoRepo, labels: ["new-label"],
   }),
@@ -465,6 +467,32 @@ export const setPrAutoComplete: Scenario<AutoCompleteState> = {
   },
 };
 
+const requiredLabelScenarios: Scenario<PrState>[] = [updatePullRequest, abandonPullRequest]
+  .map((scenario) => ({
+    ...scenario,
+    id: `${scenario.tool}-required-labels`,
+    config: (ctx, state) => ({
+      ...scenario.config(ctx, state),
+      "required-labels": ["existing-label"],
+    }),
+    setup: (ctx) => setupLabeledPr(ctx, `${scenario.tool}-required-labels`),
+  }));
+
+const updatePullRequestDeniedRepository: Scenario<PrState> = {
+  ...updatePullRequest,
+  id: "update-pull-request-denied-repository",
+  config: () => ({ target: "*", "allowed-repositories": ["not-selected"] }),
+  setup: (ctx) => setupPr(ctx, "update-pull-request-denied-repository", false),
+  expectedFailure: { error: /allowed-repositories/ },
+  assertFailure: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    const id = "update-pull-request-denied-repository";
+    if (pr.description !== detBody(ctx, id) || pr.title !== `${ctx.prefix(id)} (do not merge)`) {
+      throw new Error("Denied repository request changed the disposable PR");
+    }
+  },
+};
+
 export const prScenarios: Scenario<unknown>[] = [
   addPrComment,
   replyToPrComment,
@@ -472,6 +500,8 @@ export const prScenarios: Scenario<unknown>[] = [
   submitPrReview,
   updatePullRequest,
   abandonPullRequest,
+  ...requiredLabelScenarios,
+  updatePullRequestDeniedRepository,
   updatePullRequestIsland,
   updatePullRequestOversized,
   updatePullRequestUnicode,

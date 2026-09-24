@@ -20,8 +20,9 @@ This suite removes the LLM from the loop. For every ADO-write safe output it:
 4. asserts the effect via the ADO REST API,
 5. cleans up every object it created,
 
-and, on any failure, files a GitHub issue on the configured issue repository
-and fails the build. AgentPlayground currently uses
+and fails the build on any failure. When issue filing is enabled (the scheduled
+run default), it also files a GitHub issue on the configured repository.
+AgentPlayground currently uses
 `jamesadevine/ado-aw-issues` because a canonical-repository credential is not
 available.
 
@@ -108,6 +109,9 @@ Auto-complete scenarios use only disposable target branches.
 
 Label preservation is read through the dedicated PR labels-list API. General
 PR metadata responses can omit labels and are not used as an empty-set oracle.
+`update-pull-request-required-labels` and `abandon-pull-request-required-labels`
+seed and independently verify a required label before exercising the production
+policy check and the final mutation. They do not depend on embedded PR labels.
 
 All deterministically-assertable ADO-write safe outputs plus the flagship
 `create-pull-request`, and the four signal-only tools:

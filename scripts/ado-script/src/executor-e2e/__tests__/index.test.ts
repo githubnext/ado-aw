@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { booleanOption, main, selectScenarios, summarise } from "../index.js";
 import { fileFailureIssue } from "../github-issue.js";
 import { allScenarios } from "../scenarios/index.js";
+import { SkipError } from "../scenario.js";
 import type { ScenarioResult } from "../scenario.js";
 
 vi.mock("../github-issue.js", () => ({
@@ -14,7 +15,7 @@ vi.mock("../github-issue.js", () => ({
 }));
 
 describe("diagnostic selection", () => {
-  afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.clearAllMocks(); });
   it("only selects requested existing scenarios and rejects ambiguous input", () => {
     expect(selectScenarios(allScenarios, "noop,add-pull-request-labels")
       .map((scenario) => scenario.id ?? scenario.tool)).toEqual(["noop", "add-pull-request-labels"]);
@@ -54,6 +55,56 @@ name:"noop",status:"failed",error:"synthetic diagnostic failure"})+"\\n");
       expect(JSON.stringify(report)).not.toContain("not-a-real-token");
     } finally { await rm(dir, {recursive: true, force: true}); }
   });
+
+  it.each([
+    ["add-pull-request-reviewers", " ", "EXECUTOR_E2E_REVIEWER is unavailable"],
+    ["update-pull-request-cross-org", "", "EXECUTOR_E2E_CROSS_ORG_ORGANIZATION"],
+    ["create-pull-request-add-reviewers-general", "11111111-1111-1111-1111-111111111111", "not a GUID"],
+  ])("fails required %s preflight before creating scenario resources", async (id, reviewer, error) => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-required-preflight-"));
+    try {
+      for (const [key, value] of Object.entries({
+        SYSTEM_COLLECTIONURI: "https://example.test/", SYSTEM_TEAMPROJECT: "test",
+        SYSTEM_ACCESSTOKEN: "not-a-real-token", EXECUTOR_E2E_ADO_AW_BIN: "must-not-run",
+        EXECUTOR_E2E_SCENARIOS: id, EXECUTOR_E2E_REQUIRE_SELECTED: "true",
+        EXECUTOR_E2E_REVIEWER: reviewer, EXECUTOR_E2E_CROSS_ORG_ORGANIZATION: "",
+        EXECUTOR_E2E_FILE_FAILURE_ISSUE: "false",
+        EXECUTOR_E2E_RESULTS_PATH: join(dir, "results.json"),
+      })) vi.stubEnv(key, value);
+      const scenario = selectScenarios(allScenarios, id)[0]!;
+      const setup = vi.spyOn(scenario, "setup");
+      expect(await main()).toBe(1);
+      expect(setup).not.toHaveBeenCalled();
+      expect(fileFailureIssue).not.toHaveBeenCalled();
+      const report = JSON.parse(await readFile(join(dir, "results.json"), "utf8"));
+      expect(report.results).toEqual([expect.objectContaining({
+        tool: "required-preflight", ok: false, phase: "preflight",
+        message: expect.stringContaining(error),
+      })]);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("reports a required runtime skip as failed coverage", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-required-skip-"));
+    try {
+      for (const [key, value] of Object.entries({
+        SYSTEM_COLLECTIONURI: "https://example.test/", SYSTEM_TEAMPROJECT: "test",
+        SYSTEM_ACCESSTOKEN: "not-a-real-token", EXECUTOR_E2E_ADO_AW_BIN: "must-not-run",
+        EXECUTOR_E2E_SCENARIOS: "noop", EXECUTOR_E2E_REQUIRE_SELECTED: "true",
+        EXECUTOR_E2E_FILE_FAILURE_ISSUE: "false",
+        EXECUTOR_E2E_RESULTS_PATH: join(dir, "results.json"),
+      })) vi.stubEnv(key, value);
+      const scenario = selectScenarios(allScenarios, "noop")[0]!;
+      vi.spyOn(scenario, "setup").mockRejectedValue(new SkipError("prerequisite disappeared"));
+      expect(await main()).toBe(1);
+      const report = JSON.parse(await readFile(join(dir, "results.json"), "utf8"));
+      expect(report.results).toEqual([expect.objectContaining({
+        tool: "noop", ok: false, skipped: false, phase: "required-coverage",
+        message: "Required scenario skipped: prerequisite disappeared",
+      })]);
+      expect(fileFailureIssue).not.toHaveBeenCalled();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
 });
 
 describe("summarise", () => {
@@ -82,6 +133,10 @@ describe("scenario registry", () => {
     expect(ids).toContain("create-pull-request-add-reviewers");
     expect(ids).toContain("create-branch-cross-org");
     expect(ids).toContain("create-git-tag-cross-org");
+    for (const tool of [
+      "update-pull-request", "add-pull-request-labels", "add-pull-request-reviewers",
+      "submit-pull-request-review", "set-pull-request-auto-complete", "abandon-pull-request",
+    ]) expect(ids).toContain(`${tool}-cross-org`);
   });
 
   it("registers the GitHub issue scenarios with unique ids", () => {

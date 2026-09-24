@@ -1297,6 +1297,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn required_pr_labels_use_the_authoritative_list_and_fail_closed() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for tool in ["update-pull-request", "abandon-pull-request"] {
+            for (status, response, allowed) in [
+                (200, r#"{"value":[{"name":"REQUIRED"}]}"#, true),
+                (200, r#"{"value":[]}"#, false),
+                (200, r#"{"count":0}"#, false),
+                (200, r#"{"value":[{}]}"#, false),
+                (200, "{", false),
+                (401, "denied", false),
+                (403, "denied", false),
+                (500, "unavailable", false),
+            ] {
+                let server = MockServer::start().await;
+                let pr_path = "/P/_apis/git/repositories/repo/pullRequests/7";
+                Mock::given(method("GET"))
+                    .and(path(pr_path))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "pullRequestId":7, "status":"active", "title":"Example", "description":"Original",
+                        "labels":[{"name":"required"}]
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path(format!("{pr_path}/labels")))
+                    .respond_with(ResponseTemplate::new(status).set_body_string(response))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("PATCH"))
+                    .and(path(pr_path))
+                    .respond_with(ResponseTemplate::new(200))
+                    .expect(u64::from(allowed))
+                    .mount(&server)
+                    .await;
+                let ctx = ExecutionContext {
+                    ado_org_url: Some(server.uri()),
+                    ado_organization: Some("org".into()),
+                    ado_project: Some("P".into()),
+                    repository_name: Some("repo".into()),
+                    access_token: Some("token".into()),
+                    tool_configs: HashMap::from([(
+                        tool.into(),
+                        serde_json::json!({
+                            "target":"*","required-labels":["required"],"include-stats":false
+                        }),
+                    )]),
+                    ..Default::default()
+                };
+                let mut entry = serde_json::json!({"name":tool,"pull_request_id":7});
+                if tool == "update-pull-request" {
+                    entry["body"] = "Updated".into();
+                }
+                let (_, result) = execute_safe_output(&entry, &ctx).await.unwrap();
+                assert_eq!(result.success, allowed, "{tool}: {}", result.message);
+                if !allowed {
+                    assert!(result.message.contains("label"), "{}", result.message);
+                }
+                assert_eq!(
+                    server.received_requests().await.unwrap().len(),
+                    if allowed { 3 } else { 2 }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn review_write_failure_does_not_post_a_rationale_or_report_success() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        for (vote_status, comment_status) in [(403, 200), (500, 200), (200, 500)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/_apis/connectiondata"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "authenticatedUser":{"id":"actor"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/7/reviewers/actor"))
+                .and(body_json(serde_json::json!({"vote": 0})))
+                .respond_with(ResponseTemplate::new(vote_status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/7/threads"))
+                .respond_with(ResponseTemplate::new(comment_status))
+                .expect(u64::from(vote_status == 200))
+                .mount(&server)
+                .await;
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "submit-pull-request-review".into(),
+                    serde_json::json!({"allowed-events":["comment"]}),
+                )]),
+                ..Default::default()
+            };
+            let (_, result) = execute_safe_output(
+                &serde_json::json!({
+                    "name":"submit-pull-request-review","pull_request_id":7,"event":"comment",
+                    "body":"A review rationale."
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert!(!result.success);
+            assert!(result.message.contains(if vote_status == 200 {
+                "comment"
+            } else {
+                "vote"
+            }));
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), if vote_status == 200 { 3 } else { 2 });
+            assert_eq!(requests[0].method.as_str(), "GET");
+            assert_eq!(requests[1].method.as_str(), "PUT");
+            if vote_status == 200 {
+                assert_eq!(requests[2].method.as_str(), "POST");
+                assert!(result.message.starts_with("Vote submitted but failed"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn label_batch_connection_loss_retains_the_successful_first_write() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 8192];
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("POST "));
+                if index == 0 {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let ctx = ExecutionContext {
+            ado_org_url: Some(uri),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("token".into()),
+            tool_configs: HashMap::from([(
+                "add-pull-request-labels".into(),
+                serde_json::json!({}),
+            )]),
+            ..Default::default()
+        };
+        let (_, result) = execute_safe_output(
+            &serde_json::json!({
+                "name":"add-pull-request-labels","pull_request_id":7,"labels":["first","second"]
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(result.success);
+        assert!(result.message.contains("1 failed"));
+        let data = result.data.unwrap();
+        assert_eq!(data["added"], serde_json::json!(["first"]));
+        assert!(
+            data["failed"][0]
+                .as_str()
+                .unwrap()
+                .contains("second (request error)")
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn invalid_legacy_review_metadata_cannot_reset_a_vote() {
         let server = wiremock::MockServer::start().await;
         let ctx = ExecutionContext {

@@ -570,6 +570,11 @@ export class AdoRest {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}?api-version=7.1`,
     );
+    const pr = await this.request<{ status: string }>(path, { allow404: true });
+    if (!pr || pr.status === "abandoned") return;
+    if (pr.status !== "active") {
+      throw new Error(`Cannot clean up PR ${prId}: unexpected status '${pr.status}'`);
+    }
     await this.request(path, { method: "PATCH", body: { status: "abandoned" }, allow404: true });
   }
 
