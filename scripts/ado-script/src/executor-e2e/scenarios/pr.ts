@@ -11,6 +11,7 @@
  */
 import type { Scenario, ScenarioContext } from "../scenario.js";
 import { defaultBranchShortName, detBody, Teardown } from "./common.js";
+import { resolveExecutorE2eReviewer } from "./create-pull-request.js";
 
 interface PrState {
   repo: string;
@@ -305,6 +306,79 @@ export const updatePullRequestOversized: Scenario<PrState> = {
   cleanup: teardownPr,
 };
 
+export const updatePullRequestUnicode: Scenario<PrState> = {
+  ...updatePullRequest,
+  id: "update-pull-request-unicode",
+  setup: (ctx) => setupPr(ctx, "update-pull-request-unicode", false),
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId, repository: ctx.adoRepo,
+    body: "\u{1f600}".repeat(2000),
+  }),
+  assert: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    if (pr.description !== "\u{1f600}".repeat(2000)) {
+      throw new Error("ADO did not preserve the exact 4000-UTF16-unit non-BMP description");
+    }
+  },
+};
+
+export const updatePullRequestUnicodeOversized: Scenario<PrState> = {
+  ...updatePullRequestOversized,
+  id: "update-pull-request-unicode-oversized",
+  setup: (ctx) => setupPr(ctx, "update-pull-request-unicode-oversized", false),
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId, repository: ctx.adoRepo,
+    body: "\u{1f600}".repeat(2000) + "x",
+  }),
+  assertFailure: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    if (pr.description !== detBody(ctx, "update-pull-request-unicode-oversized")) {
+      throw new Error("Rejected Unicode description changed the live PR");
+    }
+  },
+};
+
+export const updatePullRequestComposedOversized: Scenario<PrState> = {
+  ...updatePullRequestOversized,
+  id: "update-pull-request-composed-oversized",
+  setup: (ctx) => setupPr(ctx, "update-pull-request-composed-oversized", false),
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId, repository: ctx.adoRepo,
+    body: "x".repeat(4000), operation: "append",
+  }),
+  assertFailure: async (ctx, state) => {
+    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+    if (pr.description !== detBody(ctx, "update-pull-request-composed-oversized")) {
+      throw new Error("Rejected assembled description changed the live PR");
+    }
+  },
+};
+
+interface ReviewerState extends PrState { reviewer: string }
+export const addPrReviewers: Scenario<ReviewerState> = {
+  tool: "add-pull-request-reviewers",
+  targetsAdoRepo: true,
+  config: (ctx, state) => ({
+    "allowed-repositories": [ctx.adoRepo], "allowed-reviewers": [state.reviewer], "max-reviewers": 1,
+  }),
+  setup: async (ctx) => {
+    const name = resolveExecutorE2eReviewer();
+    const reviewer = await ctx.rest.resolveIdentityId(name);
+    if (!reviewer) throw new Error("Configured reviewer does not resolve exactly");
+    return { ...await setupPr(ctx, "add-pull-request-reviewers", false), reviewer };
+  },
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId, repository: ctx.adoRepo, reviewers: [state.reviewer],
+  }),
+  assert: async (ctx, state) => {
+    const reviewers = await ctx.rest.listReviewers(state.repo, state.prId);
+    if (!reviewers.some((reviewer) => reviewer.id.toLowerCase() === state.reviewer.toLowerCase())) {
+      throw new Error("Requested reviewer is missing from the target PR");
+    }
+  },
+  cleanup: teardownPr,
+};
+
 export const addPrLabels: Scenario<PrState> = {
   tool: "add-pull-request-labels",
   targetsAdoRepo: true,
@@ -400,6 +474,10 @@ export const prScenarios: Scenario<unknown>[] = [
   abandonPullRequest,
   updatePullRequestIsland,
   updatePullRequestOversized,
+  updatePullRequestUnicode,
+  updatePullRequestUnicodeOversized,
+  updatePullRequestComposedOversized,
+  addPrReviewers,
   addPrLabels,
   setPrAutoComplete,
 ];

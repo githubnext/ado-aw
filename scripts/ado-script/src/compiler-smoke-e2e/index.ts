@@ -30,6 +30,7 @@ import { dirname, join } from "node:path";
 import { mkdir } from "node:fs/promises";
 
 import { AdoRest } from "./ado-rest.js";
+import { verifyPrBoundary } from "./pr-boundary.js";
 import {
   assertAgentCommandPolicy,
   assertPipelineTextPolicy,
@@ -133,7 +134,7 @@ async function stageCase(
           artifact: config.artifactName,
         }
       : undefined;
-  await writeFile(join(worktreeDir, relMd), prepareCaseSource(original, artifact), "utf8");
+  await writeFile(join(worktreeDir, relMd), prepareCaseSource(original, artifact, entry.prBoundary), "utf8");
 
   const result = await compileAndCheck({
     adoAwBin: config.adoAwBin,
@@ -179,7 +180,7 @@ async function stageCase(
   // `on:` is what makes the compiler emit `trigger: none` / `pr: none`;
   // assert it on the staged bytes rather than trusting it.
   await writeFile(target, yamlText, "utf8");
-  assertNoTriggers(yamlText, entry.id);
+  assertNoTriggers(yamlText, entry.id, entry.prBoundary !== undefined);
 }
 
 /** Stage, commit and push every case, returning the per-case ref and commit SHA. */
@@ -313,6 +314,8 @@ export async function main(): Promise<number> {
 
   // Refs actually pushed, so cleanup never touches a ref we failed to create.
   const pushedRefs = new Map<string, string>();
+  const boundaryResources = new Map<string, { id: number; targetRef: string; description: string }>();
+  const boundaryTargetRefs = new Map<string, string>();
   let overallOk = true;
   // Whether we reached the point where builds may have been queued. Only
   // trustworthy because it is set immediately before `runFixtures`; see there.
@@ -362,6 +365,18 @@ export async function main(): Promise<number> {
       pushedRefs.set(caseId, ref);
     });
 
+    for (const entry of resolved.cases) {
+      if (!entry.prBoundary) continue;
+      const source = staged.get(entry.id)!;
+      const targetRef = `${source.ref}-target`;
+      await rest.createBoundaryTarget(config.mirrorRepo, targetRef, config.sourceVersion);
+      boundaryTargetRefs.set(entry.id, targetRef);
+      const description = `ado-aw-boundary-original-${config.buildId}-${entry.id}`;
+      const pr = await rest.createBoundaryPr(config.mirrorRepo, source.ref, targetRef, description);
+      boundaryResources.set(entry.id, { id: pr.pullRequestId, targetRef, description });
+      log(`[${entry.id}] disposable PR #${pr.pullRequestId} ready`);
+    }
+
     const requests: FixtureBuildRequest[] = resolved.cases.map((entry) => ({
       caseId: entry.id,
       lane: entry.lane,
@@ -369,6 +384,7 @@ export async function main(): Promise<number> {
       sourceBranch: staged.get(entry.id)!.ref,
       sourceVersion: staged.get(entry.id)!.sha,
       tags: [`smoke-case:${entry.id}`, `smoke-candidate:${config.buildId}`],
+      expectedResult: entry.prBoundary === "rejected" ? "failed" : "succeeded",
     }));
 
     // Fail-closed: set immediately before the call that might queue builds, so
@@ -398,6 +414,27 @@ export async function main(): Promise<number> {
     results = auditOutcome.results;
     overallOk = outcome.ok && signalOutcome.ok && auditOutcome.ok;
     allTerminal = outcome.allTerminal;
+    for (const entry of resolved.cases) {
+      if (!entry.prBoundary) continue;
+      const resource = boundaryResources.get(entry.id);
+      const result = results.find((result) => result.caseId === entry.id);
+      if (!resource || !result?.buildId || result.status !== "succeeded") continue;
+      try {
+        const [pr, records, artifacts] = await Promise.all([
+          rest.boundaryPr(config.mirrorRepo, resource.id),
+          rest.boundaryTimeline(result.buildId),
+          rest.boundaryArtifacts(result.buildId),
+        ]);
+        for (const name of [`agent_outputs_${result.buildId}`, `analyzed_outputs_${result.buildId}`, "safe_outputs"]) {
+          if (!artifacts.includes(name)) throw new Error(`Boundary build did not publish ${name}`);
+        }
+        verifyPrBoundary(entry.prBoundary, result.buildId, resource.description, pr.description, records);
+      } catch (error) {
+        result.status = "failed";
+        result.message = errMessage(error);
+        overallOk = false;
+      }
+    }
     if (!overallOk) failureMessage = "one or more smoke cases did not succeed";
     if (!allTerminal) {
       overallOk = false;
@@ -426,6 +463,22 @@ export async function main(): Promise<number> {
       // let the stale-ref scanner reclaim it once ADO can prove it stopped.
       const proven = provenById.get(caseId) ?? !queueAttempted;
       (proven ? deletable : retained).push(ref);
+    }
+    for (const [caseId, targetRef] of boundaryTargetRefs) {
+      const proven = provenById.get(caseId) ?? !queueAttempted;
+      if (!proven) {
+        retained.push(targetRef);
+        continue;
+      }
+      const resource = boundaryResources.get(caseId);
+      try {
+        if (resource) await rest.abandonBoundaryPr(config.mirrorRepo, resource.id);
+        deletable.push(targetRef);
+      } catch (error) {
+        overallOk = false;
+        failureMessage ??= `failed to clean boundary PR for ${caseId}: ${errMessage(error)}`;
+        retained.push(targetRef);
+      }
     }
     if (deletable.length > 0) {
       try {

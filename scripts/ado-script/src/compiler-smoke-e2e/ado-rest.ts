@@ -39,6 +39,19 @@ export interface ArtifactInfo {
   resource?: { downloadUrl?: string; type?: string };
 }
 
+export interface BoundaryPr {
+  pullRequestId: number;
+  status: string;
+  description?: string;
+}
+
+export interface BoundaryTimelineRecord {
+  type?: string;
+  name?: string;
+  identifier?: string;
+  result?: string;
+}
+
 const DEFAULT_ARTIFACT_RETRIES = 5;
 const DEFAULT_ARTIFACT_RETRY_DELAY_MS = 5_000;
 const DEFAULT_TAG_RETRIES = 5;
@@ -153,6 +166,62 @@ export class AdoRest {
     const res = await this.request<BuildSummary>(path);
     if (!res) throw new Error(`getBuild(${buildId}) returned no body`);
     return res;
+  }
+
+  async createBoundaryTarget(repo: string, ref: string, sha: string): Promise<void> {
+    if (!ref.startsWith("refs/heads/ado-aw-smoke-candidate/") || !ref.endsWith("-target")) {
+      throw new Error("Boundary target must be a disposable candidate ref");
+    }
+    const response = await this.request<{value?: {success?: boolean}[]}>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/refs?api-version=7.1`),
+      { method: "POST", body: [{ name: ref, oldObjectId: "0".repeat(40), newObjectId: sha }] },
+    );
+    if (response?.value?.length !== 1 || response.value[0]?.success !== true) {
+      throw new Error("Failed to create disposable PR boundary target");
+    }
+  }
+
+  async createBoundaryPr(repo: string, source: string, target: string, marker: string): Promise<BoundaryPr> {
+    const response = await this.request<BoundaryPr>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullrequests?api-version=7.1`),
+      { method: "POST", body: {
+        sourceRefName: source, targetRefName: target, title: marker, description: marker,
+      } },
+    );
+    if (!response?.pullRequestId) throw new Error("PR boundary setup returned no PR ID");
+    return response;
+  }
+
+  async boundaryPr(repo: string, id: number): Promise<BoundaryPr> {
+    const response = await this.request<BoundaryPr>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${id}?api-version=7.1`),
+    );
+    if (!response) throw new Error("Boundary PR readback returned no object");
+    return response;
+  }
+
+  async abandonBoundaryPr(repo: string, id: number): Promise<void> {
+    const pr = await this.boundaryPr(repo, id);
+    if (pr.status === "active") {
+      await this.request(this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${id}?api-version=7.1`),
+        {method: "PATCH", body: {status: "abandoned"}});
+    }
+  }
+
+  async boundaryTimeline(buildId: number): Promise<BoundaryTimelineRecord[]> {
+    const response = await this.request<{records?: BoundaryTimelineRecord[]}>(
+      this.projPath(`_apis/build/builds/${buildId}/timeline?api-version=7.1`),
+    );
+    if (!Array.isArray(response?.records)) throw new Error("Build timeline response is missing records");
+    return response.records;
+  }
+
+  async boundaryArtifacts(buildId: number): Promise<string[]> {
+    const response = await this.request<{value?: ArtifactInfo[]}>(
+      this.projPath(`_apis/build/builds/${buildId}/artifacts?api-version=7.1`),
+    );
+    if (!Array.isArray(response?.value)) throw new Error("Build artifacts response is missing value");
+    return response.value.map((artifact) => artifact.name);
   }
 
   /** Read the observable tags on a completed child build. */

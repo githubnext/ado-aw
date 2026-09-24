@@ -58,9 +58,15 @@ export function booleanOption(value: string | undefined, fallback: boolean): boo
 async function requiredPreflight(ctx: ScenarioContext, scenarios: Scenario<unknown>[]): Promise<void> {
   const names = scenarios.map((scenario) => scenario.id ?? scenario.tool);
   if (names.some((name) => name.includes("cross-org"))) resolveCrossOrgEnv(ctx);
-  if (names.some((name) => name.includes("add-reviewers"))) {
+  if (names.some((name) => name.includes("reviewers"))) {
     const reviewer = resolveExecutorE2eReviewer();
-    if (!await ctx.rest.resolveIdentityId(reviewer)) {
+    if (names.some((name) => name.endsWith("-general")) &&
+      /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(reviewer)) {
+      throw new Error("Required General reviewer case needs an existing email or exact name, not a GUID");
+    }
+    const cross = names.some((name) => name.includes("reviewers") && name.includes("cross-org"));
+    const rest = cross ? resolveCrossOrgEnv(ctx).rest : ctx.rest;
+    if (!await rest.resolveIdentityId(reviewer)) {
       throw new Error("Required reviewer does not resolve to exactly one existing identity");
     }
   }

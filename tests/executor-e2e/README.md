@@ -99,6 +99,16 @@ scenario code or the relevant Rust schemas, validators, or executor change.
 
 ### Live coverage
 
+The PR matrix also registers Unicode boundary/composed-body rejection cases
+and optional cross-organization variants of content editing, reviewers, labels,
+review submission, auto-complete and abandonment. These require the existing
+cross-org variables below; selecting them with `requireSelected: true` fails
+preflight rather than counting missing infrastructure as a pass.
+Auto-complete scenarios use only disposable target branches.
+
+Label preservation is read through the dedicated PR labels-list API. General
+PR metadata responses can omit labels and are not used as an empty-set oracle.
+
 All deterministically-assertable ADO-write safe outputs plus the flagship
 `create-pull-request`, and the four signal-only tools:
 

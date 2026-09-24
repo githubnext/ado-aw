@@ -72,6 +72,7 @@ export interface FixtureBuildRequest {
   sourceVersion: string;
   /** Tags applied to the queued run so it is identifiable in a shared lane's history. */
   tags?: readonly string[];
+  expectedResult?: "succeeded" | "failed";
 }
 
 export type FixtureBuildStatus =
@@ -187,7 +188,7 @@ interface PollOneResult {
 async function pollOne(
   client: FixtureBuildClient,
   buildId: number,
-  expected: { definitionId: number; sourceBranch: string; sourceVersion: string },
+  expected: { definitionId: number; sourceBranch: string; sourceVersion: string; expectedResult?: "succeeded" | "failed" },
   opts: {
     deadlineAt: number;
     cancelGraceMs: number;
@@ -249,7 +250,7 @@ async function pollOne(
       if (cancelRequestedAt !== undefined) {
         return { status: "canceled", result: build.result, terminalProven: true };
       }
-      if (build.result === "succeeded") {
+      if (build.result === (expected.expectedResult ?? "succeeded")) {
         return { status: "succeeded", result: build.result, terminalProven: true };
       }
       opts.abort.signal();
@@ -364,7 +365,8 @@ export async function runFixtures(
         const outcome = await pollOne(
           client,
           q.buildId,
-          { definitionId: req.definitionId, sourceBranch: req.sourceBranch, sourceVersion: req.sourceVersion },
+          { definitionId: req.definitionId, sourceBranch: req.sourceBranch, sourceVersion: req.sourceVersion,
+            expectedResult: req.expectedResult },
           {
             deadlineAt,
             cancelGraceMs,

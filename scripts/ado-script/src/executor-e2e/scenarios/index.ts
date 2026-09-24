@@ -7,6 +7,7 @@ import { buildScenarios } from "./build.js";
 import { conclusionScenarios } from "./conclusion.js";
 import { createPullRequestScenarios } from "./create-pull-request.js";
 import { crossOrgScenarios } from "./cross-org.js";
+import { crossOrgPrScenarios } from "./pr-cross-org.js";
 import { gitScenarios } from "./git.js";
 import { githubIssueScenarios } from "./github-issue.js";
 import { prScenarios } from "./pr.js";
@@ -23,6 +24,7 @@ export const allScenarios: Scenario<unknown>[] = [
   ...prScenarios,
   ...gitScenarios,
   ...crossOrgScenarios,
+  ...crossOrgPrScenarios,
   ...buildScenarios,
   ...createPullRequestScenarios,
   ...githubIssueScenarios,

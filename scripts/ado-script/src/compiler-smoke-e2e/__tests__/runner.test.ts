@@ -77,6 +77,19 @@ function req(caseId: string, definitionId: number): FixtureBuildRequest {
 const noopSleep = async (): Promise<void> => {};
 
 describe("runFixtures", () => {
+  it("allows only explicitly expected failed builds through to boundary verification", async () => {
+    for (const result of ["failed", "succeeded"]) {
+      const { client } = makeFakeClient({
+        queueResults: { 1: { ok: true, id: 101 } },
+        timelines: { 101: [{ status: "completed", result }] },
+      });
+      const outcome = await runFixtures(client, [{...req("review-rejected", 1), expectedResult:"failed"}], {
+        concurrency:1, timeoutMs:1000, pollMs:1, log:()=>{}, sleepImpl:noopSleep,
+      });
+      expect(outcome.ok).toBe(result === "failed");
+      expect(outcome.allTerminal).toBe(true);
+    }
+  });
   it("succeeds when every fixture queues and completes successfully", async () => {
     const { client } = makeFakeClient({
       queueResults: {

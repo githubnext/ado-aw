@@ -938,6 +938,365 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
+    async fn abandonment_failures_never_post_a_comment() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for (get_status, patch_status, body) in [
+            (401, 200, "{}"),
+            (403, 200, "{}"),
+            (404, 200, "{}"),
+            (500, 200, "{}"),
+            (200, 200, "not json"),
+            (200, 200, "{}"),
+            (200, 200, "{\"status\":\"unexpected\"}"),
+            (200, 403, "{\"status\":\"active\"}"),
+            (200, 500, "{\"status\":\"active\"}"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/7"))
+                .respond_with(ResponseTemplate::new(get_status).set_body_string(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let patch_count = usize::from(body == "{\"status\":\"active\"}");
+            Mock::given(method("PATCH"))
+                .respond_with(ResponseTemplate::new(patch_status))
+                .expect(patch_count as u64)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "abandon-pull-request".into(),
+                    serde_json::json!({"target":"*"}),
+                )]),
+                ..Default::default()
+            };
+            let result = execute_safe_output(
+                &serde_json::json!({
+                    "name":"abandon-pull-request","pull_request_id":7,"body":"A closing comment."
+                }),
+                &ctx,
+            )
+            .await;
+            assert!(
+                result.is_err() || !result.as_ref().unwrap().1.success,
+                "{get_status}/{patch_status}/{body}"
+            );
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                1 + patch_count
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn autocomplete_failures_do_not_report_success_or_write_without_identity() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        for (lookup_status, patch_status, body) in [
+            (401, 200, "{}"),
+            (403, 200, "{}"),
+            (500, 200, "{}"),
+            (200, 200, "invalid"),
+            (200, 200, "{}"),
+            (200, 403, "{\"authenticatedUser\":{\"id\":\"actor\"}}"),
+            (200, 500, "{\"authenticatedUser\":{\"id\":\"actor\"}}"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(lookup_status).set_body_string(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let writes = u64::from(body.contains("actor"));
+            Mock::given(method("PATCH"))
+                .respond_with(ResponseTemplate::new(patch_status))
+                .expect(writes)
+                .mount(&server)
+                .await;
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "set-pull-request-auto-complete".into(),
+                    serde_json::json!({}),
+                )]),
+                ..Default::default()
+            };
+            let result = execute_safe_output(
+                &serde_json::json!({
+                    "name":"set-pull-request-auto-complete","pull_request_id":7
+                }),
+                &ctx,
+            )
+            .await;
+            assert!(
+                result.is_err() || !result.as_ref().unwrap().1.success,
+                "{lookup_status}/{patch_status}/{body}"
+            );
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                1 + writes as usize
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn label_batches_report_mixed_and_total_write_failures() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method},
+        };
+        for first_status in [200, 403] {
+            let server = MockServer::start().await;
+            for (label, status) in [("one", first_status), ("two", 500)] {
+                Mock::given(method("POST"))
+                    .and(body_json(serde_json::json!({"name":label})))
+                    .respond_with(ResponseTemplate::new(status))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "add-pull-request-labels".into(),
+                    serde_json::json!({}),
+                )]),
+                ..Default::default()
+            };
+            let (_, result) = execute_safe_output(
+                &serde_json::json!({
+                    "name":"add-pull-request-labels","pull_request_id":7,"labels":["one","two"]
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.success, first_status == 200);
+            if first_status == 200 {
+                let data = result.data.unwrap();
+                assert_eq!(data["added"], serde_json::json!(["one"]));
+                assert!(data["failed"][0].as_str().unwrap().contains("two"));
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_budget_counts_failed_attempts_and_respects_different_tool_caps() {
+        use crate::compile::pr_migration::BudgetGroup;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        for failure in ["parse", "policy", "http", "transport"] {
+            let server = MockServer::start().await;
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let unavailable = format!("http://{}", closed.local_addr().unwrap());
+            drop(closed);
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(if failure == "http" { 1 } else { 0 })
+                .mount(&server)
+                .await;
+            let first = match failure {
+                "parse" => {
+                    serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":"invalid"})
+                }
+                "policy" => {
+                    serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":["one"],"repository":"unlisted"})
+                }
+                _ => {
+                    serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":["one"]})
+                }
+            };
+            let dir = tempfile::tempdir().unwrap();
+            tokio::fs::write(dir.path().join(SAFE_OUTPUT_FILENAME), format!("{first}\n{}\n",
+                serde_json::json!({"name":"update-pull-request","pull_request_id":7,"title":"Must not write"}))).await.unwrap();
+            let ctx = ExecutionContext {
+                ado_org_url: Some(if failure == "transport" {
+                    unavailable
+                } else {
+                    server.uri()
+                }),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([
+                    (
+                        "add-pull-request-labels".into(),
+                        serde_json::json!({"max":3}),
+                    ),
+                    (
+                        "update-pull-request".into(),
+                        serde_json::json!({"max":3,"target":"*"}),
+                    ),
+                ]),
+                budget_groups: std::collections::BTreeMap::from([(
+                    "shared".into(),
+                    BudgetGroup {
+                        max: 1,
+                        tools: vec![
+                            "add-pull-request-labels".into(),
+                            "update-pull-request".into(),
+                        ],
+                    },
+                )]),
+                ..Default::default()
+            };
+            let results = execute_safe_outputs(dir.path(), &ctx, &ToolFilter::default())
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 2);
+            assert!(
+                !results[0].success && !results[0].is_budget_exhausted(),
+                "{failure}"
+            );
+            assert!(results[1].is_budget_exhausted(), "{failure}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                usize::from(failure == "http")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn per_tool_exhaustion_does_not_consume_another_shared_attempt() {
+        use crate::compile::pr_migration::BudgetGroup;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let label = serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":["label"]});
+        let update =
+            serde_json::json!({"name":"update-pull-request","pull_request_id":7,"title":"attempt"});
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!("{label}\n{label}\n{update}\n{update}\n"),
+        )
+        .await
+        .unwrap();
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("token".into()),
+            tool_configs: HashMap::from([
+                (
+                    "add-pull-request-labels".into(),
+                    serde_json::json!({"max":1}),
+                ),
+                (
+                    "update-pull-request".into(),
+                    serde_json::json!({"max":3,"target":"*"}),
+                ),
+            ]),
+            budget_groups: std::collections::BTreeMap::from([(
+                "shared".into(),
+                BudgetGroup {
+                    max: 2,
+                    tools: vec![
+                        "add-pull-request-labels".into(),
+                        "update-pull-request".into(),
+                    ],
+                },
+            )]),
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.is_budget_exhausted())
+                .collect::<Vec<_>>(),
+            vec![false, true, false, true]
+        );
+        assert!(results.iter().all(|result| !result.success));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        let records = read_executed_manifest(&dir).await;
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record["status"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["failed", "budget_exhausted", "failed", "budget_exhausted"]
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_loss_on_autocomplete_write_is_not_reported_successfully() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut lookup, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let read = lookup.read(&mut buffer).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&buffer[..read]).starts_with("GET /_apis/connectiondata")
+            );
+            let body = r#"{"authenticatedUser":{"id":"actor"}}"#;
+            lookup.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            drop(lookup);
+            let (mut write, _) = listener.accept().await.unwrap();
+            let read = write.read(&mut buffer).await.unwrap();
+            assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("PATCH "));
+        });
+        let ctx = ExecutionContext {
+            ado_org_url: Some(url),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("token".into()),
+            tool_configs: HashMap::from([(
+                "set-pull-request-auto-complete".into(),
+                serde_json::json!({}),
+            )]),
+            ..Default::default()
+        };
+        let result = execute_safe_output(
+            &serde_json::json!({"name":"set-pull-request-auto-complete","pull_request_id":7}),
+            &ctx,
+        )
+        .await;
+        assert!(result.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn invalid_legacy_review_metadata_cannot_reset_a_vote() {
         let server = wiremock::MockServer::start().await;
         let ctx = ExecutionContext {
