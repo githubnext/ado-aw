@@ -94,6 +94,14 @@ export interface ScenarioSource {
   readonly prefix: (tool: string) => string;
 }
 
+/** Files and records produced by one `ado-aw execute` run, handed to `postExecute`. */
+export interface PostExecuteRun {
+  /** Directory holding `safe_outputs.ndjson` + `safe-outputs-executed.ndjson`. */
+  readonly safeOutputDir: string;
+  /** Every parsed record from the executed manifest. */
+  readonly records: ExecutedRecord[];
+}
+
 /**
  * A single deterministic executor scenario.
  *
@@ -162,6 +170,20 @@ export interface Scenario<State = unknown> {
    */
   env?(ctx: ScenarioContext, state: State): Promise<Record<string, string>>;
   /**
+   * Optional phase that runs **after** a successful `ado-aw execute` and
+   * before `assert`.
+   *
+   * This exists for post-Stage-3 consumers of the executor's output — the
+   * Conclusion job reads `safe-outputs-executed.ndjson` from the same
+   * safe-output directory and files diagnostic work items from it. Running it
+   * here reproduces the production ordering (SafeOutputs → Conclusion) against
+   * a real manifest instead of a fixture.
+   *
+   * A throw records the scenario as failed in the `post-execute` phase;
+   * `cleanup()` still runs.
+   */
+  postExecute?(ctx: ScenarioContext, state: State, run: PostExecuteRun): Promise<void>;
+  /**
    * Some scenarios intentionally submit invalid staged output and should pass
    * only when the executor rejects it with the expected failure.
    */
@@ -186,15 +208,24 @@ export interface Scenario<State = unknown> {
     record: ExecutedRecord,
     records: ExecutedRecord[],
   ): Promise<void>;
-  /** Best-effort teardown of everything setup/execute created. */
-  cleanup(ctx: ScenarioContext, state: State): Promise<void>;
+  /**
+   * Best-effort teardown of everything setup/execute created.
+   *
+   * `records` is present whenever `runExecute()` returned, including when the
+   * primary tool reported failure before `assert()` could populate `state`.
+   */
+  cleanup(
+    ctx: ScenarioContext,
+    state: State,
+    records?: ExecutedRecord[],
+  ): Promise<void>;
 }
 
 /** Outcome of running one scenario. */
 export interface ScenarioResult {
   tool: string;
   ok: boolean;
-  /** "setup" | "execute" | "assert" | "cleanup" | "skipped". */
+  /** "setup" | "execute" | "post-execute" | "assert" | "cleanup" | "skipped". */
   phase?: string;
   message?: string;
   durationMs: number;

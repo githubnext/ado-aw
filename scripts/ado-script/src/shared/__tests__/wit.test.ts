@@ -154,7 +154,7 @@ describe("shared/wit", () => {
     await expect(findWorkItemByTitle("p", "title")).resolves.toBeNull();
   });
 
-  it("createWorkItem builds a JsonPatch document and prefixes the type with $", async () => {
+  it("createWorkItem builds a JsonPatch document with the SDK type name", async () => {
     mockWitApi.createWorkItem.mockResolvedValue({
       id: 99,
       _links: { html: { href: "https://example.test/wit/99" } },
@@ -179,7 +179,7 @@ describe("shared/wit", () => {
         },
       ],
       "MyProject",
-      "$Task",
+      "Task",
     );
     expect(result).toEqual({ id: 99, url: "https://example.test/wit/99" });
   });
@@ -291,7 +291,7 @@ describe("shared/wit", () => {
         },
       ],
       "MyProject",
-      "$Bug",
+      "Bug",
     );
     expect(result).toEqual({
       action: "created",

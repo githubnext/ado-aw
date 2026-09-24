@@ -329,38 +329,56 @@ describe("conclusion/main", () => {
   });
 
   it("files a missing-tool work item when the manifest contains missing_tool", async () => {
-    setManifestEntries([{ name: "missing_tool", tool_name: "gh", context: "tool_name: gh" }]);
-
-    await main();
-
-    expect(fileOrAppendWorkItem).toHaveBeenCalledTimes(1);
-    expect(fileOrAppendWorkItem).toHaveBeenCalledWith(
-      "MyProject",
-      expect.objectContaining({ enabled: true }),
-      "[ado-aw] Agent encountered missing tool: feature reporter",
-      expect.stringContaining("- gh"),
-    );
-  });
-
-  it("files a missing-data work item when the manifest contains missing_data", async () => {
     setManifestEntries([
       {
-        name: "missing_data",
-        data_type: "pull_request",
-        reason: "PR metadata not available",
-        context: "data_type: pull_request",
+        name: "missing_tool",
+        status: "succeeded",
+        result: { tool_name: "gh", context: "needed for repository inspection" },
       },
     ]);
 
     await main();
 
     expect(fileOrAppendWorkItem).toHaveBeenCalledTimes(1);
+    const body = (fileOrAppendWorkItem as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[3] as string;
+    expect(fileOrAppendWorkItem).toHaveBeenCalledWith(
+      "MyProject",
+      expect.objectContaining({ enabled: true }),
+      "[ado-aw] Agent encountered missing tool: feature reporter",
+      body,
+    );
+    expect(body).toContain("- gh");
+    expect(body).toContain("- needed for repository inspection");
+  });
+
+  it("files a missing-data work item when the manifest contains missing_data", async () => {
+    setManifestEntries([
+      {
+        name: "missing_data",
+        status: "succeeded",
+        result: {
+          data_type: "pull_request",
+          reason: "PR metadata not available",
+          context: "needed for review",
+        },
+      },
+    ]);
+
+    await main();
+
+    expect(fileOrAppendWorkItem).toHaveBeenCalledTimes(1);
+    const body = (fileOrAppendWorkItem as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[3] as string;
     expect(fileOrAppendWorkItem).toHaveBeenCalledWith(
       "MyProject",
       expect.objectContaining({ enabled: true }),
       "[ado-aw] Agent reported missing data: feature reporter",
-      expect.stringContaining("PR metadata not available"),
+      body,
     );
+    expect(body).toContain("- pull_request");
+    expect(body).toContain("- PR metadata not available");
+    expect(body).toContain("- needed for review");
   });
 
   it("appends a comment to an existing work item instead of creating a duplicate", async () => {

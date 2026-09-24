@@ -437,7 +437,7 @@ fn split_repository_target_name(
 pub(crate) fn resolve_repository_write_target(
     repository: Option<&str>,
     ctx: &ExecutionContext,
-) -> Result<crate::safe_outputs::result::AdoRepositoryTarget, ExecutionResult> {
+) -> Result<AdoRepositoryTarget, ExecutionResult> {
     let selector = repository.unwrap_or("self");
     let Some(alias) = canonical_repository_alias(selector, ctx) else {
         return Err(ExecutionResult::failure(format!(
@@ -463,7 +463,7 @@ pub(crate) fn resolve_repository_write_target(
             .as_deref()
             .ok_or_else(|| ExecutionResult::failure("BUILD_REPOSITORY_NAME not set"))?;
         let (_, repository) = split_repository_target_name(name, current_project)?;
-        return Ok(crate::safe_outputs::result::AdoRepositoryTarget {
+        return Ok(AdoRepositoryTarget {
             alias,
             organization: current_organization.to_string(),
             organization_url: current_org_url.trim_end_matches('/').to_string(),
@@ -537,7 +537,7 @@ pub(crate) fn resolve_repository_write_target(
         }
     }
 
-    Ok(crate::safe_outputs::result::AdoRepositoryTarget {
+    Ok(AdoRepositoryTarget {
         alias,
         organization: organization.to_string(),
         organization_url: if cross_organization {
@@ -838,8 +838,8 @@ pub use reply_to_pr_comment::*;
 pub use report_incomplete::*;
 pub use resolve_pr_thread::*;
 pub use result::{
-    ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue, ResolvedWorkItem, ToolResult,
-    Validate, anyhow_to_mcp_error, org_from_url,
+    AdoRepositoryTarget, ExecutionContext, ExecutionResult, Executor, ResolvedGithubIssue,
+    ResolvedPullRequest, ResolvedWorkItem, ToolResult, Validate, anyhow_to_mcp_error, org_from_url,
 };
 pub use set_github_issue_field::*;
 pub use set_github_issue_type::*;

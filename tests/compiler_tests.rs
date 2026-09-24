@@ -1689,6 +1689,166 @@ Vote on pull requests.
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Test that temporary PR producers and consumers cannot be split across the
+/// automatic and manually reviewed SafeOutputs jobs.
+#[test]
+fn test_pull_request_temporary_id_tools_require_matching_approval_lanes() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("agentic-pipeline-prlane-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let test_input = temp_dir.join("pr-lane-agent.md");
+    let test_content = r#"---
+name: "PR Lane Agent"
+description: "Agent that creates and then updates a pull request"
+permissions:
+  write: my-write-sc
+safe-outputs:
+  create-pull-request:
+    require-approval: true
+  update-pr:
+    require-approval: false
+    allowed-operations:
+      - update-description
+---
+
+## PR Lane Agent
+
+Create and update pull requests.
+"#;
+    fs::write(&test_input, test_content).expect("Failed to write test input");
+
+    let output_path = temp_dir.join("pr-lane-agent.yml");
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            test_input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "Compiler should reject temporary PR tools in different approval lanes"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("temporary pull-request IDs")
+            && stderr.contains("same effective require-approval"),
+        "Unexpected compiler error: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// Compiler entry-point coverage for the effective staged compatibility rule
+/// shared by every temporary-ID producer/consumer family.
+#[test]
+fn test_temporary_id_tools_require_matching_staged_settings() {
+    let families = [
+        (
+            "github-issue",
+            "create-github-issue",
+            "    target-repo: githubnext/ado-aw\n",
+            "set-github-issue-type",
+            "    target-repo: githubnext/ado-aw\n",
+            "temporary issue IDs",
+        ),
+        (
+            "work-item",
+            "create-work-item",
+            "",
+            "assign-work-item",
+            "    target: \"*\"\n",
+            "temporary work-item IDs",
+        ),
+        (
+            "pull-request",
+            "create-pull-request",
+            "",
+            "update-pr",
+            "    allowed-operations:\n      - update-description\n",
+            "temporary pull-request IDs",
+        ),
+    ];
+
+    let render_tool = |tool: &str, extra: &str, staged: Option<bool>| {
+        let staged = staged
+            .map(|value| format!("    staged: {value}\n"))
+            .unwrap_or_default();
+        if staged.is_empty() && extra.is_empty() {
+            format!("  {tool}: {{}}\n")
+        } else {
+            format!("  {tool}:\n{staged}{extra}")
+        }
+    };
+
+    for (family, producer, producer_extra, consumer, consumer_extra, diagnostic) in families {
+        let cases = [
+            ("section-default", Some(true), None, None, true),
+            (
+                "matching-overrides",
+                Some(true),
+                Some(false),
+                Some(false),
+                true,
+            ),
+            (
+                "producer-staged-consumer-live",
+                None,
+                Some(true),
+                Some(false),
+                false,
+            ),
+            (
+                "producer-live-consumer-staged",
+                None,
+                Some(false),
+                Some(true),
+                false,
+            ),
+        ];
+
+        for (case_name, section_default, producer_staged, consumer_staged, should_succeed) in cases
+        {
+            let staged_default = section_default
+                .map(|value| format!("  staged: {value}\n"))
+                .unwrap_or_default();
+            let test_content = format!(
+                r#"---
+name: "Temporary ID Staging Agent"
+description: "Agent that creates and then updates an entity"
+safe-outputs:
+{staged_default}{producer_block}{consumer_block}---
+
+## Temporary ID Staging Agent
+
+Create and update an entity.
+"#,
+                producer_block = render_tool(producer, producer_extra, producer_staged),
+                consumer_block = render_tool(consumer, consumer_extra, consumer_staged),
+            );
+            let (ok, _, stderr) =
+                compile_inline_source(&format!("{family}-staging-{case_name}"), &test_content);
+
+            if should_succeed {
+                assert!(ok, "Compiler should accept {family} {case_name}: {stderr}");
+            } else {
+                assert!(!ok, "Compiler should reject {family} {case_name}");
+                assert!(
+                    stderr.contains("same effective staged")
+                        && stderr.contains(diagnostic)
+                        && stderr.contains("preview"),
+                    "Unexpected compiler error for {family} {case_name}: {stderr}"
+                );
+            }
+        }
+    }
+}
+
 /// Test that update-pr compiles successfully whether the vote operation is made
 /// unreachable via `allowed-operations` (excluding "vote") or is reachable but
 /// backed by a non-empty `allowed-votes` list. Both configurations satisfy
@@ -2507,7 +2667,10 @@ fn test_mcpg_container_azure_auth_emits_refresher_and_rotating_token_mount() {
         .collect();
     assert_eq!(identity_keys.len(), 2);
     for name in ["Agent", "Detection"] {
-        let job = jobs.iter().find(|job| job["job"].as_str() == Some(name)).unwrap();
+        let job = jobs
+            .iter()
+            .find(|job| job["job"].as_str() == Some(name))
+            .unwrap();
         let run = job["steps"]
             .as_sequence()
             .unwrap()
@@ -7883,6 +8046,74 @@ fn compile_inline_source(name: &str, source: &str) -> (bool, String, String) {
     (output.status.success(), compiled, stderr)
 }
 
+#[test]
+fn update_pr_max_reviewers_requires_a_positive_usize() {
+    for (label, value) in [
+        ("negative", "-1"),
+        ("fractional", "1.5"),
+        ("string", "\"2\""),
+        ("zero", "0"),
+    ] {
+        let source = format!(
+            r#"---
+name: "Invalid max reviewers"
+description: "Exercises update-pr validation"
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: {value}
+---
+
+## Agent
+"#
+        );
+        let (ok, _, stderr) =
+            compile_inline_source(&format!("update-pr-max-reviewers-{label}"), &source);
+        assert!(!ok, "{label} max-reviewers should not compile");
+        assert!(
+            stderr.contains(
+                "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+            ),
+            "{label}: {stderr}"
+        );
+    }
+
+    let overflow = r#"---
+name: "Invalid max reviewers"
+description: "Exercises update-pr validation"
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: 18446744073709551616
+---
+
+## Agent
+"#;
+    let (ok, _, stderr) = compile_inline_source("update-pr-max-reviewers-overflow", overflow);
+    assert!(!ok, "overflow max-reviewers should not compile");
+    assert!(
+        stderr.contains("safe-outputs.update-pr.max-reviewers"),
+        "overflow: {stderr}"
+    );
+
+    let valid = r#"---
+name: "Valid max reviewers"
+description: "Exercises update-pr validation"
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: 3
+---
+
+## Agent
+"#;
+    let (ok, _, stderr) = compile_inline_source("update-pr-max-reviewers-valid", valid);
+    assert!(ok, "positive max-reviewers should compile: {stderr}");
+}
+
 /// Extract a single `- job: <name>` block from compiled YAML, from its header
 /// up to (but not including) the next top-level job header. Used to assert that
 /// a step lands in the expected job.
@@ -11194,4 +11425,149 @@ fn test_template_targets_emit_no_top_level_trigger() {
             "{fixture} (template target) must not emit a top-level `pr:`\n{compiled}"
         );
     }
+}
+
+/// A `mounts:` entry that maps the host Docker socket into a container MCP
+/// must surface `validate_mount_source`'s container-escape warning on
+/// stderr during `compile`. `validate_mount_source` itself is unit-tested in
+/// `src/compile/common.rs`, but nothing previously exercised the full
+/// front-matter → compile → stderr path, so a regression that dropped the
+/// `eprintln!` call in `validate_stdio_mcp` (or stopped iterating
+/// `opts.mounts`) would go unnoticed.
+#[test]
+fn test_compile_warns_on_docker_socket_mount() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcp-docker-sock-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Docker Socket Mount Test\"\ndescription: \"Tests docker.sock mount warning\"\nmcp-servers:\n  my-tool:\n    container: \"ghcr.io/example/my-tool:latest\"\n    mounts:\n      - \"/var/run/docker.sock:/var/run/docker.sock:rw\"\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("docker-sock-mcp.md");
+    let output_path = temp_dir.join("docker-sock-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed (mount warnings are non-fatal): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("exposes the Docker socket"),
+        "expected a Docker-socket container-escape warning on stderr, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// A Docker arg smuggling `--privileged` into a container MCP must surface
+/// `validate_docker_args`'s elevated-privileges warning on stderr during
+/// `compile`. This exercises the full front-matter → `validate_stdio_mcp` →
+/// stderr path for `args:` (as opposed to `mounts:`), guarding against a
+/// regression that stopped iterating `opts.args` or dropped the warning
+/// `eprintln!`.
+#[test]
+fn test_compile_warns_on_privileged_docker_arg() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcp-privileged-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Privileged Docker Arg Test\"\ndescription: \"Tests --privileged arg warning\"\nmcp-servers:\n  my-tool:\n    container: \"ghcr.io/example/my-tool:latest\"\n    args: [\"--privileged\"]\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("privileged-mcp.md");
+    let output_path = temp_dir.join("privileged-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed (docker-arg warnings are non-fatal): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("grants elevated privileges"),
+        "expected an elevated-privileges warning on stderr, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// A `-v`/`--volume` Docker arg smuggling a sensitive host mount (bypassing
+/// the dedicated `mounts:` field) must surface **both**
+/// `validate_docker_args`'s bypass warning and the delegated
+/// `validate_mount_source` sensitive-path warning on stderr during
+/// `compile`. This exercises the args→mounts delegation path in
+/// `validate_docker_args` (`src/validate.rs`), which is unit-tested with a
+/// safe `/data` mount in `src/compile/common.rs` but never against a
+/// genuinely sensitive source path end-to-end through the compiler.
+#[test]
+fn test_compile_warns_on_volume_arg_smuggling_sensitive_mount() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcp-volume-arg-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let input = "---\nname: \"Volume Arg Smuggling Test\"\ndescription: \"Tests -v arg bypassing mounts validation\"\nmcp-servers:\n  my-tool:\n    container: \"ghcr.io/example/my-tool:latest\"\n    args: [\"-v\", \"/etc:/host-etc:ro\"]\n---\n\n## Test\n";
+
+    let input_path = temp_dir.join("volume-arg-mcp.md");
+    let output_path = temp_dir.join("volume-arg-mcp.yml");
+    fs::write(&input_path, input).unwrap();
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "Compiler should succeed (docker-arg warnings are non-fatal): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bypasses mounts validation"),
+        "expected a mounts-bypass warning on stderr, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("sensitive host path"),
+        "expected the delegated sensitive-path warning on stderr, got:\n{stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }

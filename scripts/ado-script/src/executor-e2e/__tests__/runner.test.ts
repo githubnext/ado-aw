@@ -173,6 +173,7 @@ fs.writeFileSync(
 
   function handoffScenario(
     onAssert: (records: ExecutedRecord[]) => void,
+    onCleanup: (records: ExecutedRecord[] | undefined) => void = () => {},
   ): Scenario<unknown> {
     return {
       id: "prior-entry-handoff",
@@ -184,7 +185,7 @@ fs.writeFileSync(
       ],
       ndjson: async () => ({ issue_number: "#aw_x1" }),
       assert: async (_ctx, _state, _record, records) => onAssert(records),
-      cleanup: async () => {},
+      cleanup: async (_ctx, _state, records) => onCleanup(records),
     };
   }
 
@@ -235,6 +236,39 @@ fs.writeFileSync(
       expect(res.message).toContain("prior entry 'create-github-issue'");
       // The prerequisite failure must not be reported as an assertion failure.
       expect(asserted).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes prior records to cleanup when the primary entry fails", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-primary-fail-"));
+    try {
+      const bin = await writeEchoBin(dir, { "set-github-issue-type": "failed" });
+      let asserted = false;
+      let cleanedRecords: ExecutedRecord[] | undefined;
+      const res = await runScenario(
+        { ...fakeCtx(), adoAwBin: bin, workDir: dir },
+        handoffScenario(
+          () => {
+            asserted = true;
+          },
+          (records) => {
+            cleanedRecords = records;
+          },
+        ),
+      );
+
+      expect(res.ok).toBe(false);
+      expect(res.phase).toBe("execute");
+      expect(res.message).toContain("executor reported status='failed'");
+      expect(asserted).toBe(false);
+      expect(cleanedRecords?.map((record) => record.name)).toEqual([
+        "create_github_issue",
+        "set_github_issue_type",
+      ]);
+      expect(cleanedRecords?.[0]?.status).toBe("succeeded");
+      expect(cleanedRecords?.[1]?.status).toBe("failed");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -310,6 +344,119 @@ fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), [
       expect(res.ok).toBe(false);
       expect(res.phase).toBe("execute");
       expect(res.message).toContain("occurrence 2");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * `postExecute` runs a post-Stage-3 consumer (the Conclusion reporter) against
+ * the manifest the executor just wrote, before `assert`. These tests pin the
+ * ordering, the safe-output dir it is handed, and the failure/skip handling.
+ */
+describe("runScenario post-execute phase", () => {
+  /** Fake `ado-aw` that reports the primary tool as succeeded. */
+  async function writeOkBin(dir: string): Promise<string> {
+    const bin = join(dir, "ok-ado-aw.js");
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
+fs.writeFileSync(
+  path.join(out, "safe-outputs-executed.ndjson"),
+  JSON.stringify({ name: "noop", status: "succeeded", result: {} }) + "\\n",
+);
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    return bin;
+  }
+
+  function postExecuteScenario(
+    postExecute: Scenario<unknown>["postExecute"],
+    order: string[],
+  ): Scenario<unknown> {
+    return {
+      id: "post-execute",
+      tool: "noop",
+      config: () => ({}),
+      setup: async () => ({}),
+      ndjson: async () => ({}),
+      postExecute,
+      assert: async () => {
+        order.push("assert");
+      },
+      cleanup: async () => {
+        order.push("cleanup");
+      },
+    };
+  }
+
+  it("runs before assert and receives the executor's safe-output dir and records", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-post-"));
+    try {
+      const bin = await writeOkBin(dir);
+      const order: string[] = [];
+      let seenDir = "";
+      let seenRecords: ExecutedRecord[] = [];
+      const res = await runScenario(
+        { ...fakeCtx(), adoAwBin: bin, workDir: dir },
+        postExecuteScenario(async (_ctx, _state, run) => {
+          order.push("post-execute");
+          seenDir = run.safeOutputDir;
+          seenRecords = run.records;
+          // The executed manifest must be readable from the handed-over dir.
+          await readFile(join(run.safeOutputDir, "safe-outputs-executed.ndjson"), "utf8");
+        }, order),
+      );
+
+      expect(res.ok).toBe(true);
+      expect(order).toEqual(["post-execute", "assert", "cleanup"]);
+      expect(seenDir).toBe(join(dir, "post-execute", "out"));
+      expect(seenRecords.map((r) => r.name)).toEqual(["noop"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("records a post-execute failure without running assert, but still cleans up", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-post-"));
+    try {
+      const bin = await writeOkBin(dir);
+      const order: string[] = [];
+      const res = await runScenario(
+        { ...fakeCtx(), adoAwBin: bin, workDir: dir },
+        postExecuteScenario(async () => {
+          throw new Error("conclusion.js exited 3");
+        }, order),
+      );
+
+      expect(res.ok).toBe(false);
+      expect(res.phase).toBe("post-execute");
+      expect(res.message).toBe("conclusion.js exited 3");
+      expect(order).toEqual(["cleanup"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a SkipError from post-execute as a skip", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-post-"));
+    try {
+      const bin = await writeOkBin(dir);
+      const order: string[] = [];
+      const res = await runScenario(
+        { ...fakeCtx(), adoAwBin: bin, workDir: dir },
+        postExecuteScenario(async () => {
+          throw new SkipError("conclusion bundle not built");
+        }, order),
+      );
+
+      expect(res).toMatchObject({ ok: true, skipped: true, phase: "skipped" });
+      expect(order).toEqual(["cleanup"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

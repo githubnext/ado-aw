@@ -2352,6 +2352,11 @@ fn require_same_approval_lane(
              effective require-approval setting so temporary work-item IDs remain in one \
              SafeOutputs job"
         ),
+        "create-pull-request" => anyhow::bail!(
+            "safe-outputs.create-pull-request and safe-outputs.{consumer} must have the same \
+             effective require-approval setting so temporary pull-request IDs remain in one \
+             SafeOutputs job"
+        ),
         _ => anyhow::bail!(
             "safe-outputs.{producer} and safe-outputs.{consumer} must have the same effective \
              require-approval setting"
@@ -2359,101 +2364,161 @@ fn require_same_approval_lane(
     }
 }
 
-pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
-    let github_tools = front_matter.github_issue_tool_names();
-    if front_matter
+fn require_same_staged_lane(
+    front_matter: &FrontMatter,
+    producer: &str,
+    consumer: &str,
+) -> Result<()> {
+    if front_matter.tool_is_staged(producer) == front_matter.tool_is_staged(consumer) {
+        return Ok(());
+    }
+    match producer {
+        "create-github-issue" => anyhow::bail!(
+            "safe-outputs.create-github-issue and safe-outputs.{consumer} must use the same \
+             effective staged value when {consumer} accepts temporary issue IDs: a staged \
+             create only previews issue creation, while a live consumer needs a created issue; \
+             a live create followed by a staged consumer would split creation from its \
+             preview-only follow-up"
+        ),
+        "create-work-item" => anyhow::bail!(
+            "safe-outputs.create-work-item and safe-outputs.{consumer} must have the same \
+             effective staged setting when {consumer} accepts temporary work-item IDs: a \
+             staged create only previews work-item creation, while a live consumer needs a \
+             created work item; a live create followed by a staged consumer would split \
+             creation from its preview-only follow-up"
+        ),
+        "create-pull-request" => anyhow::bail!(
+            "safe-outputs.create-pull-request and safe-outputs.{consumer} must have the same \
+             effective staged setting so temporary pull-request IDs stay in one process: \
+             staged create-pull-request only previews PR creation, while live {consumer} needs \
+             a created PR; live create-pull-request followed by staged {consumer} would split \
+             creation from its preview-only updates"
+        ),
+        _ => anyhow::bail!(
+            "safe-outputs.{producer} and safe-outputs.{consumer} must have the same effective \
+             staged setting"
+        ),
+    }
+}
+
+/// Ensures every safe-output tool that accepts `create-github-issue`'s
+/// temporary issue IDs sits in the same approval and staged lanes as its producer.
+fn validate_create_github_issue_lanes(front_matter: &FrontMatter) -> Result<()> {
+    if !front_matter
         .safe_outputs
         .contains_key("create-github-issue")
     {
-        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
-            if front_matter.safe_outputs.contains_key(*consumer) {
-                require_same_approval_lane(front_matter, "create-github-issue", consumer)?;
-            }
+        return Ok(());
+    }
+    for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+        if front_matter.safe_outputs.contains_key(*consumer) {
+            require_same_approval_lane(front_matter, "create-github-issue", consumer)?;
+            require_same_staged_lane(front_matter, "create-github-issue", consumer)?;
         }
     }
+    Ok(())
+}
 
-    for tool in &github_tools {
+/// Validates the shared repository-policy and mutation-filter rules that
+/// apply to every configured GitHub-issue safe-output tool.
+fn validate_github_issue_shared_policy(
+    tool: &str,
+    config: &crate::compile::types::GithubIssueCompilerConfig,
+) -> Result<()> {
+    crate::safe_outputs::configured_github_repositories(
+        crate::safe_outputs::GithubRepositoryPolicy::new(
+            config.target_repo.as_deref(),
+            &config.allowed_repos,
+        ),
+    )
+    .map_err(|error| anyhow::anyhow!("safe-outputs.{tool} has invalid repository policy: {error}"))?;
+    if tool != "create-github-issue" {
+        crate::safe_outputs::validate_github_mutation_filter_config(
+            crate::safe_outputs::GithubMutationFilters {
+                required_labels: &config.required_labels,
+                required_title_prefix: config.required_title_prefix.as_deref(),
+            },
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("safe-outputs.{tool} has invalid mutation filters: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+/// Dispatches to the tool-specific validator for a single GitHub-issue
+/// safe-output tool, if one is configured.
+fn validate_github_issue_tool_specific_config(front_matter: &FrontMatter, tool: &str) -> Result<()> {
+    match tool {
+        "comment-on-github-issue" => {
+            if let Some(config) = front_matter.comment_on_github_issue_config()? {
+                crate::safe_outputs::validate_comment_on_github_issue_config(&config)?;
+            }
+        }
+        "hide-github-issue-comment" => {
+            if let Some(config) = front_matter.hide_github_issue_comment_config()? {
+                crate::safe_outputs::validate_hide_github_issue_comment_config(&config)?;
+            }
+        }
+        "add-github-issue-labels" => {
+            if let Some(config) = front_matter.add_github_issue_labels_config()? {
+                crate::safe_outputs::validate_add_github_issue_labels_config(&config)?;
+            }
+        }
+        "remove-github-issue-labels" => {
+            if let Some(config) = front_matter.remove_github_issue_labels_config()? {
+                crate::safe_outputs::validate_remove_github_issue_labels_config(&config)?;
+            }
+        }
+        "close-github-issue" => {
+            if let Some(config) = front_matter.close_github_issue_config()? {
+                crate::safe_outputs::validate_close_github_issue_config(&config)?;
+            }
+        }
+        "update-github-issue" => {
+            if let Some(config) = front_matter.update_github_issue_config()? {
+                crate::safe_outputs::validate_update_github_issue_config(&config)?;
+            }
+        }
+        "set-github-issue-field" => {
+            if let Some(config) = front_matter.set_github_issue_field_config()? {
+                crate::safe_outputs::validate_set_github_issue_field_config(&config)?;
+            }
+        }
+        "assign-github-issue-milestone" => {
+            if let Some(config) = front_matter.assign_github_issue_milestone_config()? {
+                crate::safe_outputs::validate_assign_github_issue_milestone_config(&config)?;
+            }
+        }
+        "assign-github-issue-to-user" => {
+            if let Some(config) = front_matter.assign_github_issue_to_user_config()? {
+                crate::safe_outputs::validate_assign_github_issue_to_user_config(&config)?;
+            }
+        }
+        "unassign-github-issue-from-user" => {
+            if let Some(config) = front_matter.unassign_github_issue_from_user_config()? {
+                crate::safe_outputs::validate_unassign_github_issue_from_user_config(&config)?;
+            }
+        }
+        "link-github-sub-issue" => {
+            if let Some(config) = front_matter.link_github_sub_issue_config()? {
+                crate::safe_outputs::validate_link_github_sub_issue_config(&config)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validates the shared policy plus tool-specific config for every
+/// configured GitHub-issue safe-output tool.
+fn validate_github_issue_tools(front_matter: &FrontMatter, github_tools: &[String]) -> Result<()> {
+    for tool in github_tools {
         let Some(config) = front_matter.github_issue_compiler_config(tool)? else {
             continue;
         };
-        crate::safe_outputs::configured_github_repositories(
-            crate::safe_outputs::GithubRepositoryPolicy::new(
-                config.target_repo.as_deref(),
-                &config.allowed_repos,
-            ),
-        )
-        .map_err(|error| {
-            anyhow::anyhow!("safe-outputs.{tool} has invalid repository policy: {error}")
-        })?;
-        if tool != "create-github-issue" {
-            crate::safe_outputs::validate_github_mutation_filter_config(
-                crate::safe_outputs::GithubMutationFilters {
-                    required_labels: &config.required_labels,
-                    required_title_prefix: config.required_title_prefix.as_deref(),
-                },
-            )
-            .map_err(|error| {
-                anyhow::anyhow!("safe-outputs.{tool} has invalid mutation filters: {error}")
-            })?;
-        }
-        match tool.as_str() {
-            "comment-on-github-issue" => {
-                if let Some(config) = front_matter.comment_on_github_issue_config()? {
-                    crate::safe_outputs::validate_comment_on_github_issue_config(&config)?;
-                }
-            }
-            "hide-github-issue-comment" => {
-                if let Some(config) = front_matter.hide_github_issue_comment_config()? {
-                    crate::safe_outputs::validate_hide_github_issue_comment_config(&config)?;
-                }
-            }
-            "add-github-issue-labels" => {
-                if let Some(config) = front_matter.add_github_issue_labels_config()? {
-                    crate::safe_outputs::validate_add_github_issue_labels_config(&config)?;
-                }
-            }
-            "remove-github-issue-labels" => {
-                if let Some(config) = front_matter.remove_github_issue_labels_config()? {
-                    crate::safe_outputs::validate_remove_github_issue_labels_config(&config)?;
-                }
-            }
-            "close-github-issue" => {
-                if let Some(config) = front_matter.close_github_issue_config()? {
-                    crate::safe_outputs::validate_close_github_issue_config(&config)?;
-                }
-            }
-            "update-github-issue" => {
-                if let Some(config) = front_matter.update_github_issue_config()? {
-                    crate::safe_outputs::validate_update_github_issue_config(&config)?;
-                }
-            }
-            "set-github-issue-field" => {
-                if let Some(config) = front_matter.set_github_issue_field_config()? {
-                    crate::safe_outputs::validate_set_github_issue_field_config(&config)?;
-                }
-            }
-            "assign-github-issue-milestone" => {
-                if let Some(config) = front_matter.assign_github_issue_milestone_config()? {
-                    crate::safe_outputs::validate_assign_github_issue_milestone_config(&config)?;
-                }
-            }
-            "assign-github-issue-to-user" => {
-                if let Some(config) = front_matter.assign_github_issue_to_user_config()? {
-                    crate::safe_outputs::validate_assign_github_issue_to_user_config(&config)?;
-                }
-            }
-            "unassign-github-issue-from-user" => {
-                if let Some(config) = front_matter.unassign_github_issue_from_user_config()? {
-                    crate::safe_outputs::validate_unassign_github_issue_from_user_config(&config)?;
-                }
-            }
-            "link-github-sub-issue" => {
-                if let Some(config) = front_matter.link_github_sub_issue_config()? {
-                    crate::safe_outputs::validate_link_github_sub_issue_config(&config)?;
-                }
-            }
-            _ => {}
-        }
+        validate_github_issue_shared_policy(tool, &config)?;
+        validate_github_issue_tool_specific_config(front_matter, tool)?;
     }
     if let Some(config) = front_matter.update_pull_request_config()? {
         crate::safe_outputs::validate_update_pull_request_config(&config)?;
@@ -2461,41 +2526,62 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
     if let Some(config) = front_matter.abandon_pull_request_config()? {
         crate::safe_outputs::validate_abandon_pull_request_config(&config)?;
     }
-    if let Some(config) = front_matter.create_github_issue_config()? {
-        if let Some(prefix) = config.title_prefix.as_deref() {
-            crate::validate::reject_pipeline_injection(
-                prefix,
-                "safe-outputs.create-github-issue.title-prefix",
-            )?;
-        }
-        for label in &config.labels {
-            crate::validate::reject_pipeline_injection(
-                label,
-                "safe-outputs.create-github-issue.labels",
-            )?;
-        }
-        for label in &config.allowed_labels {
-            crate::validate::reject_pipeline_injection(
-                label,
-                "safe-outputs.create-github-issue.allowed-labels",
-            )?;
-        }
-        for assignee in &config.assignees {
-            crate::validate::reject_pipeline_injection(
-                assignee,
-                "safe-outputs.create-github-issue.assignees",
-            )?;
-        }
-    }
+    Ok(())
+}
 
-    if let Some(config) = front_matter.set_github_issue_type_config()? {
-        for issue_type in &config.allowed {
-            crate::validate::reject_pipeline_injection(
-                issue_type,
-                "safe-outputs.set-github-issue-type.allowed",
-            )?;
-        }
+/// Rejects pipeline-injection attempts in every user-controlled string field
+/// of `safe-outputs.create-github-issue`.
+fn validate_create_github_issue_injection(front_matter: &FrontMatter) -> Result<()> {
+    let Some(config) = front_matter.create_github_issue_config()? else {
+        return Ok(());
+    };
+    if let Some(prefix) = config.title_prefix.as_deref() {
+        crate::validate::reject_pipeline_injection(
+            prefix,
+            "safe-outputs.create-github-issue.title-prefix",
+        )?;
     }
+    for label in &config.labels {
+        crate::validate::reject_pipeline_injection(
+            label,
+            "safe-outputs.create-github-issue.labels",
+        )?;
+    }
+    for label in &config.allowed_labels {
+        crate::validate::reject_pipeline_injection(
+            label,
+            "safe-outputs.create-github-issue.allowed-labels",
+        )?;
+    }
+    for assignee in &config.assignees {
+        crate::validate::reject_pipeline_injection(
+            assignee,
+            "safe-outputs.create-github-issue.assignees",
+        )?;
+    }
+    Ok(())
+}
+
+/// Rejects pipeline-injection attempts in `safe-outputs.set-github-issue-type.allowed`.
+fn validate_set_github_issue_type_injection(front_matter: &FrontMatter) -> Result<()> {
+    let Some(config) = front_matter.set_github_issue_type_config()? else {
+        return Ok(());
+    };
+    for issue_type in &config.allowed {
+        crate::validate::reject_pipeline_injection(
+            issue_type,
+            "safe-outputs.set-github-issue-type.allowed",
+        )?;
+    }
+    Ok(())
+}
+
+pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    let github_tools = front_matter.github_issue_tool_names();
+    validate_create_github_issue_lanes(front_matter)?;
+    validate_github_issue_tools(front_matter, &github_tools)?;
+    validate_create_github_issue_injection(front_matter)?;
+    validate_set_github_issue_type_injection(front_matter)?;
 
     let _ = front_matter.github_app_permissions_for_tools(&github_tools)?;
     let _ = front_matter.github_safe_outputs_auth()?;
@@ -2559,6 +2645,7 @@ pub fn validate_work_item_assignment_outputs_config(front_matter: &FrontMatter) 
         for consumer in crate::compile::types::WORK_ITEM_TEMPORARY_ID_CONSUMERS {
             if front_matter.safe_outputs.contains_key(*consumer) {
                 require_same_approval_lane(front_matter, "create-work-item", consumer)?;
+                require_same_staged_lane(front_matter, "create-work-item", consumer)?;
             }
         }
     }
@@ -2780,9 +2867,7 @@ pub fn generate_executor_ado_env(
             "ADO_AW_GITHUB_TOKEN: $({})",
             github_auth.executor_token_var()
         ));
-        if github_actor_required
-            && let Some(actor_var) = github_auth.executor_actor_var()
-        {
+        if github_actor_required && let Some(actor_var) = github_auth.executor_actor_var() {
             lines.push(format!(
                 "{}: $({})",
                 crate::compile::types::SAFE_OUTPUTS_GITHUB_ACTOR_LOGIN_ENV,
@@ -2972,6 +3057,38 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
             );
         }
     }
+    Ok(())
+}
+
+/// Validate configuration shared by create-pull-request and update-pr.
+pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    if front_matter
+        .safe_outputs
+        .contains_key("create-pull-request")
+        && front_matter.safe_outputs.contains_key("update-pr")
+    {
+        require_same_approval_lane(front_matter, "create-pull-request", "update-pr")?;
+        require_same_staged_lane(front_matter, "create-pull-request", "update-pr")?;
+    }
+
+    if let Some(max_reviewers) = front_matter
+        .safe_outputs
+        .get("update-pr")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get("max-reviewers"))
+    {
+        let max_reviewers =
+            serde_json::from_value::<usize>(max_reviewers.clone()).map_err(|_| {
+                anyhow::anyhow!(
+                    "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                )
+            })?;
+        anyhow::ensure!(
+            max_reviewers > 0,
+            "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+        );
+    }
+
     Ok(())
 }
 
@@ -6243,6 +6360,248 @@ safe-outputs:
     }
 
     #[test]
+    fn test_validate_rejects_mixed_approval_lanes_for_pull_request_tools() {
+        for (create_approval, update_approval) in [(true, false), (false, true)] {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-pull-request:
+    require-approval: {create_approval}
+  update-pr:
+    require-approval: {update_approval}
+    allowed-operations:
+      - update-description
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_pull_request_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("temporary pull-request IDs")
+                    && error.contains("same effective require-approval"),
+                "error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_matching_pull_request_approval_lanes() {
+        for approval in [true, false] {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-pull-request:
+    require-approval: {approval}
+  update-pr:
+    require-approval: {approval}
+    allowed-operations:
+      - update-description
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            assert!(validate_pull_request_outputs_config(&fm).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_validate_pull_request_approval_lane_uses_effective_section_default() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  require-approval: true
+  create-pull-request: {}
+  update-pr:
+    allowed-operations:
+      - update-description
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_pull_request_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_matching_pull_request_staged_settings() {
+        for staged in [false, true] {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-pull-request:
+    staged: {staged}
+  update-pr:
+    staged: {staged}
+    allowed-operations:
+      - update-description
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            assert!(
+                validate_pull_request_outputs_config(&fm).is_ok(),
+                "matching staged={staged} should validate"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_pull_request_staged_mismatch_in_both_directions() {
+        for (create_staged, update_staged) in [(true, false), (false, true)] {
+            let yaml = format!(
+                r#"---
+name: test
+description: test
+safe-outputs:
+  create-pull-request:
+    staged: {create_staged}
+  update-pr:
+    staged: {update_staged}
+    allowed-operations:
+      - update-description
+---
+"#
+            );
+            let (fm, _) = parse_markdown(&yaml).unwrap();
+            let error = validate_pull_request_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("same effective staged setting")
+                    && error.contains("temporary pull-request IDs")
+                    && error.contains("staged create-pull-request")
+                    && error.contains("staged update-pr"),
+                "create staged={create_staged}, update staged={update_staged}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_pull_request_staged_uses_effective_section_default_and_override() {
+        let matching_default = r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-pull-request: {}
+  update-pr:
+    allowed-operations:
+      - update-description
+---
+"#;
+        let (fm, _) = parse_markdown(matching_default).unwrap();
+        assert!(validate_pull_request_outputs_config(&fm).is_ok());
+
+        let mismatched_override = r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-pull-request:
+    staged: false
+  update-pr:
+    allowed-operations:
+      - update-description
+---
+"#;
+        let (fm, _) = parse_markdown(mismatched_override).unwrap();
+        let error = validate_pull_request_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same effective staged setting"), "{error}");
+
+        let matching_override = r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-pull-request:
+    staged: false
+  update-pr:
+    staged: false
+    allowed-operations:
+      - update-description
+---
+"#;
+        let (fm, _) = parse_markdown(matching_override).unwrap();
+        assert!(validate_pull_request_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_max_reviewers() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+---
+"#;
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("2"),
+            serde_json::json!(0),
+        ] {
+            let (mut fm, _) = parse_markdown(yaml).unwrap();
+            fm.safe_outputs
+                .get_mut("update-pr")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("max-reviewers".to_string(), value.clone());
+            let error = validate_pull_request_outputs_config(&fm)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(
+                    "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                ),
+                "value {value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_positive_max_reviewers() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+    max-reviewers: 3
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_pull_request_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
+    fn test_validate_allows_omitted_reviewer_allowlist() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  update-pr:
+    allowed-operations:
+      - add-reviewers
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        assert!(validate_pull_request_outputs_config(&fm).is_ok());
+    }
+
+    #[test]
     fn test_validate_rejects_mixed_approval_lanes_for_create_and_comment_work_item() {
         let yaml = r#"---
 name: test
@@ -6263,6 +6622,82 @@ safe-outputs:
             error.contains("same effective require-approval"),
             "error: {error}"
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_staged_for_every_work_item_temporary_id_consumer() {
+        for consumer in crate::compile::types::WORK_ITEM_TEMPORARY_ID_CONSUMERS {
+            for (create_staged, consumer_staged) in [(true, false), (false, true)] {
+                let yaml = format!(
+                    r#"---
+name: test
+description: test
+safe-outputs:
+  create-work-item:
+    staged: {create_staged}
+  {consumer}:
+    staged: {consumer_staged}
+---
+"#
+                );
+                let (fm, _) = parse_markdown(&yaml).unwrap();
+                let error = validate_work_item_assignment_outputs_config(&fm)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains(consumer)
+                        && error.contains("same effective staged setting")
+                        && error.contains("temporary work-item IDs")
+                        && error.contains("preview"),
+                    "create staged={create_staged}, {consumer} staged={consumer_staged}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_work_item_staged_uses_effective_section_default_and_override() {
+        for yaml in [
+            r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-work-item: {}
+  assign-work-item: {}
+---
+"#,
+            r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-work-item:
+    staged: false
+  assign-work-item:
+    staged: false
+---
+"#,
+        ] {
+            let (fm, _) = parse_markdown(yaml).unwrap();
+            assert!(validate_work_item_assignment_outputs_config(&fm).is_ok());
+        }
+
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-work-item:
+    staged: false
+  assign-work-item: {}
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_work_item_assignment_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same effective staged setting"), "{error}");
     }
 
     #[test]
@@ -6340,6 +6775,90 @@ safe-outputs:
                 "unexpected error for {consumer}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn test_validate_rejects_mixed_staged_for_every_github_temporary_id_consumer() {
+        for consumer in crate::compile::types::GITHUB_TEMPORARY_ID_CONSUMERS {
+            for (create_staged, consumer_staged) in [(true, false), (false, true)] {
+                let yaml = format!(
+                    r#"---
+name: test
+description: test
+safe-outputs:
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    staged: {create_staged}
+  {consumer}:
+    target-repo: githubnext/ado-aw
+    staged: {consumer_staged}
+---
+"#
+                );
+                let (fm, _) = parse_markdown(&yaml).unwrap();
+                let error = validate_github_issue_outputs_config(&fm)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains(consumer)
+                        && error.contains("same effective staged")
+                        && error.contains("temporary issue IDs")
+                        && error.contains("preview"),
+                    "create staged={create_staged}, {consumer} staged={consumer_staged}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_github_issue_staged_uses_effective_section_default_and_override() {
+        for yaml in [
+            r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+  set-github-issue-type:
+    target-repo: githubnext/ado-aw
+---
+"#,
+            r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    staged: false
+  set-github-issue-type:
+    target-repo: githubnext/ado-aw
+    staged: false
+---
+"#,
+        ] {
+            let (fm, _) = parse_markdown(yaml).unwrap();
+            assert!(validate_github_issue_outputs_config(&fm).is_ok());
+        }
+
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  staged: true
+  create-github-issue:
+    target-repo: githubnext/ado-aw
+    staged: false
+  set-github-issue-type:
+    target-repo: githubnext/ado-aw
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same effective staged"), "{error}");
     }
 
     #[test]
@@ -8136,8 +8655,7 @@ safe-outputs:
         .unwrap();
         let declarations = vec![Declarations {
             pipeline_env: vec![
-                crate::compile::extensions::PipelineEnvMapping::new("TOKEN", "EXTENSION")
-                    .unwrap(),
+                crate::compile::extensions::PipelineEnvMapping::new("TOKEN", "EXTENSION").unwrap(),
             ],
             ..Default::default()
         }];
@@ -8403,14 +8921,11 @@ safe-outputs:
         let (_extensions, declarations) = collect_exts_and_decls_with_org(&fm, "myorg");
         let compilation = compile_mcpg(&fm, &declarations, false).unwrap();
         assert!(
-            compilation
-                .launch_env
-                .iter()
-                .all(|(_, value)| !matches!(
-                    value,
-                    crate::compile::ir::env::EnvValue::PipelineVar(source)
-                        if source == "SC_READ_TOKEN"
-                )),
+            compilation.launch_env.iter().all(|(_, value)| !matches!(
+                value,
+                crate::compile::ir::env::EnvValue::PipelineVar(source)
+                    if source == "SC_READ_TOKEN"
+            )),
             "the real bearer must never reach the MCP container"
         );
     }

@@ -32,6 +32,20 @@ interface RequestOptions {
   headers?: Record<string, string>;
 }
 
+function asciiEqualsIgnoreCase(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    const leftCode = left.charCodeAt(i);
+    const rightCode = right.charCodeAt(i);
+    const foldedLeft =
+      leftCode >= 65 && leftCode <= 90 ? leftCode + 32 : leftCode;
+    const foldedRight =
+      rightCode >= 65 && rightCode <= 90 ? rightCode + 32 : rightCode;
+    if (foldedLeft !== foldedRight) return false;
+  }
+  return true;
+}
+
 export class AdoRest {
   private readonly base: string;
   private readonly project: string;
@@ -112,6 +126,85 @@ export class AdoRest {
   /** Resolve the collection host base (org URL trimmed). */
   get orgBase(): string {
     return this.base;
+  }
+
+  /**
+   * Resolve an identity using the same exact-match fields as update-pr's
+   * production add-reviewers implementation. Canonical GUIDs are verified
+   * through the identityIds query; names and emails use exact field matching.
+   */
+  async resolveIdentityId(identity: string): Promise<string | undefined> {
+    const value = identity.trim();
+    const vsspsBase = this.base.replace(
+      "://dev.azure.com/",
+      "://vssps.dev.azure.com/",
+    );
+    if (vsspsBase === this.base) {
+      throw new Error(
+        `cannot derive VSSPS identity endpoint from org URL '${this.base}'`,
+      );
+    }
+
+    if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        value,
+      )
+    ) {
+      const query = new URLSearchParams({
+        identityIds: value,
+        "api-version": "7.1",
+      });
+      const res = await this.request<{
+        value?: Array<{ id?: string }>;
+      }>(`${vsspsBase}/_apis/identities?${query.toString()}`);
+      const identities = res?.value ?? [];
+      if (identities.length !== 1) return undefined;
+      const id = identities[0]?.id;
+      return typeof id === "string" && asciiEqualsIgnoreCase(id, value)
+        ? id
+        : undefined;
+    }
+
+    const query = new URLSearchParams({
+      searchFilter: "General",
+      filterValue: value,
+      "api-version": "7.1",
+    });
+    const res = await this.request<{
+      value?: Array<{
+        id?: string;
+        providerDisplayName?: string;
+        customDisplayName?: string;
+        displayName?: string;
+        properties?: Record<string, { $value?: string }>;
+      }>;
+    }>(`${vsspsBase}/_apis/identities?${query.toString()}`);
+
+    const matchingIds = new Set(
+      (res?.value ?? [])
+        .filter((candidate) => {
+          const directMatch = [
+            candidate.providerDisplayName,
+            candidate.customDisplayName,
+            candidate.displayName,
+          ].some(
+            (field) =>
+              typeof field === "string" &&
+              asciiEqualsIgnoreCase(field, value),
+          );
+          const propertyMatch = ["Account", "Mail"].some((field) => {
+            const propertyValue = candidate.properties?.[field]?.$value;
+            return (
+              typeof propertyValue === "string" &&
+              asciiEqualsIgnoreCase(propertyValue, value)
+            );
+          });
+          return directMatch || propertyMatch;
+        })
+        .map((candidate) => candidate.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    );
+    return matchingIds.size === 1 ? matchingIds.values().next().value : undefined;
   }
 
   // ---- Work items -------------------------------------------------------
