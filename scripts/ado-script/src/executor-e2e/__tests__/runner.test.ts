@@ -177,6 +177,10 @@ fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), ${JSON.stringif
       };
       const result = await runScenario({ ...fakeCtx(), adoAwBin: bin, workDir: dir }, scenario);
       expect(result).toMatchObject({ ok: false, phase: "execute" });
+      expect(result.message).toContain(status === null
+        ? "no executed record"
+        : "expected rejection was not observed");
+      expect(result.message).not.toMatch(/EACCES|ENOENT|spawn/);
       expect(flags).toEqual({ asserted: false, cleaned: true });
     } finally {
       await rm(dir, { recursive: true, force: true });

@@ -313,6 +313,10 @@ export const addPrLabels: Scenario<PrState> = {
     const state = await setupPr(ctx, "add-pull-request-labels", false);
     try {
       await ctx.rest.setPullRequestLabels(state.repo, state.prId, ["existing-label"]);
+      const seeded = await ctx.rest.listPullRequestLabels(state.repo, state.prId);
+      if (!seeded.some((label) => label.name === "existing-label")) {
+        throw new Error(`Label setup did not persist existing-label: ${JSON.stringify(seeded)}`);
+      }
     } catch (error) {
       await teardownPr(ctx, state);
       throw error;
@@ -323,10 +327,10 @@ export const addPrLabels: Scenario<PrState> = {
     pull_request_id: state.prId, repository: ctx.adoRepo, labels: ["new-label"],
   }),
   assert: async (ctx, state) => {
-    const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
-    const labels = pr.labels?.map((label) => label.name) ?? [];
+    const labels = (await ctx.rest.listPullRequestLabels(state.repo, state.prId))
+      .map((label) => label.name);
     if (!labels.includes("existing-label") || !labels.includes("new-label")) {
-      throw new Error("Label addition did not preserve the existing label");
+      throw new Error(`Label addition did not preserve both labels: ${JSON.stringify(labels)}`);
     }
   },
   cleanup: teardownPr,

@@ -20,15 +20,51 @@
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { AdoRest } from "./ado-rest.js";
 import { fileFailureIssue, loadIssueEnv } from "./github-issue.js";
 import { runAll } from "./runner.js";
 import { allScenarios } from "./scenarios/index.js";
-import type { ScenarioContext, ScenarioResult } from "./scenario.js";
+import type { Scenario, ScenarioContext, ScenarioResult } from "./scenario.js";
+import { resolveCrossOrgEnv } from "./scenarios/cross-org.js";
+import { resolveExecutorE2eReviewer } from "./scenarios/create-pull-request.js";
+
+export function selectScenarios(
+  available: Scenario<unknown>[],
+  requested: string | undefined,
+): Scenario<unknown>[] {
+  if (requested === undefined || requested === "") return available;
+  const names = requested.split(",").map((name) => name.trim());
+  if (names.some((name) => !name) || new Set(names).size !== names.length) {
+    throw new Error("EXECUTOR_E2E_SCENARIOS must contain distinct nonempty scenario IDs");
+  }
+  return names.map((name) => {
+    const scenario = available.find((scenario) => (scenario.id ?? scenario.tool) === name);
+    if (!scenario) throw new Error(`Unknown executor E2E scenario '${name}'`);
+    return scenario;
+  });
+}
+
+export function booleanOption(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === "") return fallback;
+  if (value.toLowerCase() === "true") return true;
+  if (value.toLowerCase() === "false") return false;
+  throw new Error("E2E boolean options must be true or false");
+}
+
+async function requiredPreflight(ctx: ScenarioContext, scenarios: Scenario<unknown>[]): Promise<void> {
+  const names = scenarios.map((scenario) => scenario.id ?? scenario.tool);
+  if (names.some((name) => name.includes("cross-org"))) resolveCrossOrgEnv(ctx);
+  if (names.some((name) => name.includes("add-reviewers"))) {
+    const reviewer = resolveExecutorE2eReviewer();
+    if (!await ctx.rest.resolveIdentityId(reviewer)) {
+      throw new Error("Required reviewer does not resolve to exactly one existing identity");
+    }
+  }
+}
 
 function requireEnv(name: string, alt?: string): string {
   const value = process.env[name]?.trim() || (alt ? process.env[alt]?.trim() : undefined);
@@ -59,6 +95,9 @@ export function summarise(results: ScenarioResult[]): string {
 }
 
 export async function main(): Promise<number> {
+  const selected = selectScenarios(allScenarios, process.env.EXECUTOR_E2E_SCENARIOS);
+  const required = booleanOption(process.env.EXECUTOR_E2E_REQUIRE_SELECTED, false);
+  const fileIssues = booleanOption(process.env.EXECUTOR_E2E_FILE_FAILURE_ISSUE, true);
   const orgUrl = requireEnv("SYSTEM_COLLECTIONURI", "AZURE_DEVOPS_ORG_URL");
   const project = requireEnv("SYSTEM_TEAMPROJECT");
   const token = requireEnv("SYSTEM_ACCESSTOKEN");
@@ -82,16 +121,34 @@ export async function main(): Promise<number> {
     prefix: (tool) => `ado-aw-det-${buildId}-${tool}`,
   };
 
-  log(`Running ${allScenarios.length} executor E2E scenarios against ${orgUrl}${project}`);
+  log(`Running ${selected.length} executor E2E scenarios against ${orgUrl}${project}`);
+  let results: ScenarioResult[] = [];
   try {
-    const results = await runAll(ctx, allScenarios);
+    if (required) {
+      try {
+        await requiredPreflight(ctx, selected);
+      } catch (error) {
+        results = [{ tool: "required-preflight", ok: false, phase: "preflight",
+          message: (error as Error).message, durationMs: 0 }];
+        log(summarise(results));
+        return 1;
+      }
+    }
+    results = await runAll(ctx, selected);
+    if (required) results = results.map((result) => result.skipped
+      ? { ...result, ok: false, skipped: false, phase: "required-coverage", message: `Required scenario skipped: ${result.message}` }
+      : result);
     log(summarise(results));
 
-    const issueEnv = loadIssueEnv();
-    try {
-      await fileFailureIssue(results, issueEnv, log);
-    } catch (err) {
-      log(`WARNING: failed to file GitHub issue: ${(err as Error).message}`);
+    if (fileIssues) {
+      const issueEnv = loadIssueEnv();
+      try {
+        await fileFailureIssue(results, issueEnv, log);
+      } catch (err) {
+        log(`WARNING: failed to file GitHub issue: ${(err as Error).message}`);
+      }
+    } else {
+      log("Failure-issue filing disabled for this run.");
     }
 
     const failed = results.filter((r) => !r.ok).length;
@@ -100,7 +157,22 @@ export async function main(): Promise<number> {
     // Remove the scratch dir so CI agents and local runs don't accumulate
     // ado-aw-e2e-* directories (scenarios clean their own children, but the
     // parent mkdtemp dir would otherwise persist).
-    await rm(workDir, { recursive: true, force: true });
+    try {
+      const report = process.env.EXECUTOR_E2E_RESULTS_PATH;
+      if (report) {
+        await mkdir(dirname(report), { recursive: true });
+        await writeFile(report, JSON.stringify({
+          schema: "ado-aw/executor-e2e-results/1",
+          commit: process.env.BUILD_SOURCEVERSION ?? null,
+          buildId,
+          required,
+          selected: selected.map((scenario) => scenario.id ?? scenario.tool),
+          results,
+        }, null, 2));
+      }
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
   }
 }
 

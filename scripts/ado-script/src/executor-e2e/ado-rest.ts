@@ -548,6 +548,23 @@ export class AdoRest {
     return res?.value ?? [];
   }
 
+  async listPullRequestLabels(repo: string, prId: number): Promise<{ name: string }[]> {
+    const path = this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/labels?api-version=7.1`,
+    );
+    const res = await this.request<{ value?: unknown }>(path);
+    if (!Array.isArray(res?.value)) {
+      throw new Error(`listPullRequestLabels(${prId}) response missing value array`);
+    }
+    return res.value.map((label: unknown) => {
+      if (label === null || typeof label !== "object" || !("name" in label)
+        || typeof label.name !== "string") {
+        throw new Error(`listPullRequestLabels(${prId}) returned an invalid label`);
+      }
+      return { name: label.name };
+    });
+  }
+
   /** Abandon a PR (status=abandoned). Best-effort cleanup. */
   async abandonPullRequest(repo: string, prId: number): Promise<void> {
     const path = this.projPath(

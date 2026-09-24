@@ -1,8 +1,60 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { summarise } from "../index.js";
+import { booleanOption, main, selectScenarios, summarise } from "../index.js";
+import { fileFailureIssue } from "../github-issue.js";
 import { allScenarios } from "../scenarios/index.js";
 import type { ScenarioResult } from "../scenario.js";
+
+vi.mock("../github-issue.js", () => ({
+  loadIssueEnv: () => ({ repo: "test/repo" }),
+  fileFailureIssue: vi.fn(async () => ({ filed: false })),
+}));
+
+describe("diagnostic selection", () => {
+  afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
+  it("only selects requested existing scenarios and rejects ambiguous input", () => {
+    expect(selectScenarios(allScenarios, "noop,add-pull-request-labels")
+      .map((scenario) => scenario.id ?? scenario.tool)).toEqual(["noop", "add-pull-request-labels"]);
+    for (const invalid of ["missing-case", ",", "noop,", "noop,noop", " "]) {
+      expect(() => selectScenarios(allScenarios, invalid)).toThrow();
+    }
+    expect(selectScenarios(allScenarios, "")).toBe(allScenarios);
+    expect(booleanOption("False", true)).toBe(false);
+    expect(() => booleanOption("off", true)).toThrow();
+  });
+
+  it("persists failed-run results and disables failure-issue reporting", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-diagnostic-report-"));
+    try {
+      const bin = join(dir, "fixture.js");
+      await writeFile(bin, `
+const fs=require("node:fs"),path=require("node:path");
+const out=process.argv[process.argv.indexOf("--safe-output-dir")+1];
+fs.writeFileSync(path.join(out,"safe-outputs-executed.ndjson"), JSON.stringify({
+name:"noop",status:"failed",error:"synthetic diagnostic failure"})+"\\n");
+`);
+      for (const [key, value] of Object.entries({
+        SYSTEM_COLLECTIONURI: "https://example.test/", SYSTEM_TEAMPROJECT: "test",
+        SYSTEM_ACCESSTOKEN: "not-a-real-token", EXECUTOR_E2E_ADO_AW_BIN: bin,
+        EXECUTOR_E2E_SCENARIOS: "noop", EXECUTOR_E2E_REQUIRE_SELECTED: "true",
+        EXECUTOR_E2E_FILE_FAILURE_ISSUE: "false",
+        EXECUTOR_E2E_RESULTS_PATH: join(dir, "results.json"),
+        BUILD_SOURCEVERSION: "candidate-sha", BUILD_BUILDID: "123",
+      })) vi.stubEnv(key, value);
+      expect(await main()).toBe(1);
+      expect(fileFailureIssue).not.toHaveBeenCalled();
+      const report = JSON.parse(await readFile(join(dir, "results.json"), "utf8"));
+      expect(report).toMatchObject({
+        commit: "candidate-sha", buildId: "123", selected: ["noop"],
+        results: [{tool: "noop", ok: false, phase: "execute"}],
+      });
+      expect(JSON.stringify(report)).not.toContain("not-a-real-token");
+    } finally { await rm(dir, {recursive: true, force: true}); }
+  });
+});
 
 describe("summarise", () => {
   it("renders PASS/FAIL/SKIP lines and a total", () => {

@@ -220,13 +220,10 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
     ...opts.extraEnv,
   };
 
-  // On Windows, a .js file cannot be spawned directly (no OS-level shebang
-  // support). When the configured binary is a Node script, invoke it through
-  // the current Node executable instead so both Linux and Windows work
-  // identically.  The real ado-aw binary is always a native executable and is
-  // never a .js file, so this branch is only exercised by test fixtures.
+  // Test fixtures are JavaScript, not native executables. Use Node on every OS
+  // rather than depending on shebangs or executable permission bits.
   const [spawnCmd, spawnArgs] =
-    process.platform === "win32" && opts.adoAwBin.endsWith(".js")
+    opts.adoAwBin.endsWith(".js")
       ? [process.execPath, [opts.adoAwBin, ...args]]
       : [opts.adoAwBin, args];
 

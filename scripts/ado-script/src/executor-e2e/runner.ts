@@ -36,7 +36,8 @@ export async function runScenario<S>(
   let setupDone = false;
   let executedRecords: ExecutedRecord[] | undefined;
 
-  const finish = (partial: Omit<ScenarioResult, "tool" | "durationMs">): ScenarioResult => ({
+  let outcome: ScenarioResult | undefined;
+  const finish = (partial: Omit<ScenarioResult, "tool" | "durationMs">): ScenarioResult => (outcome = {
     tool: scenarioId,
     durationMs: Date.now() - start,
     ...partial,
@@ -210,6 +211,13 @@ export async function runScenario<S>(
         ctx.log(`[${scenarioId}] cleanup done`);
       } catch (err) {
         ctx.log(`[${scenarioId}] cleanup WARNING: ${errMessage(err)}`);
+        if (outcome) {
+          outcome.cleanupError = errMessage(err);
+          outcome.ok = false;
+          outcome.skipped = false;
+          outcome.message = `${outcome.message ? `${outcome.message}; ` : ""}cleanup failed: ${errMessage(err)}`;
+          outcome.phase ??= "cleanup";
+        }
       }
     }
   }

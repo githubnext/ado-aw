@@ -238,6 +238,7 @@ export interface ScenarioResult {
   durationMs: number;
   /** True when the scenario was skipped for a missing precondition (not a failure). */
   skipped?: boolean;
+  cleanupError?: string;
 }
 
 /**

@@ -14,6 +14,33 @@ function stubFetch(responder: (url: string) => Response): ReturnType<typeof vi.f
   return fetchMock;
 }
 
+describe("AdoRest.listPullRequestLabels", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uses authoritative labels endpoint and preserves every returned label", async () => {
+    const fetch = stubFetch((url) => url.includes("/labels?")
+      ? Response.json({ count: 2, value: [{name: "existing-label"}, {name: "new-label"}] })
+      : Response.json({ pullRequestId: 42, title: "PR without labels property" }));
+    const labels = await new AdoRest(options).listPullRequestLabels("repo name", 42);
+    expect(labels.map((label) => label.name)).toEqual(["existing-label", "new-label"]);
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "https://dev.azure.com/org/My%20Project/_apis/git/repositories/repo%20name/pullRequests/42/labels?api-version=7.1",
+    );
+  });
+
+  it.each([{}, { value: null }, { value: [null] }, { value: [{name: 1}] }])(
+    "does not report malformed %j as no labels", async (response) => {
+      stubFetch(() => Response.json(response));
+      await expect(new AdoRest(options).listPullRequestLabels("repo", 42)).rejects.toThrow(/missing value|invalid label/);
+    },
+  );
+
+  it("surfaces API failures instead of reporting missing labels", async () => {
+    stubFetch(() => new Response("forbidden", { status: 403 }));
+    await expect(new AdoRest(options).listPullRequestLabels("repo", 42)).rejects.toThrow("403");
+  });
+});
+
 describe("AdoRest.workItemTypeExists", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

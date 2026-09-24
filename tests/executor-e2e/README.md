@@ -43,6 +43,21 @@ gitignored, non-root path) and is **deliberately excluded** from the released
 
 ## Coverage
 
+### Focused diagnostic runs
+
+Queue the existing pipeline with `scenarios` set to comma-separated exact IDs
+(for example `add-pull-request-labels`), `requireSelected: true`, and
+`fileFailureIssue: false`. Unknown selections fail rather than running a
+different suite. Required reviewer/cross-org inputs are checked before scenario
+resources are created; a required scenario that skips is not a pass.
+
+The harness environment equivalents are `EXECUTOR_E2E_SCENARIOS`,
+`EXECUTOR_E2E_REQUIRE_SELECTED`, and `EXECUTOR_E2E_FILE_FAILURE_ISSUE`.
+`EXECUTOR_E2E_RESULTS_PATH` writes a structured report with the candidate commit,
+selected IDs, outcomes and cleanup failures. The pipeline publishes it as
+`executor-e2e-results` even when scenarios fail. Normal scheduled runs retain
+their existing failure-issue behavior unless explicitly disabled.
+
 Negative scenarios may provide `assertFailure` to verify postconditions after
 the expected status/error matches (for example, that a rejected description
 left the PR unchanged). A matching error alone does not bypass that hook.

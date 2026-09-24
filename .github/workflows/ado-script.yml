@@ -50,6 +50,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  executor-harness-windows:
+    name: Executor harness (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: scripts/ado-script/package-lock.json
+      - name: Install workspace dependencies
+        working-directory: scripts/ado-script
+        run: npm ci
+      - name: Exercise cross-platform process fixtures
+        working-directory: scripts/ado-script
+        run: npm test -- runner.test.ts execute-cli.test.ts ado-rest.test.ts
   ado-script:
     name: Build, Test & Drift-Check
     runs-on: ubuntu-latest
