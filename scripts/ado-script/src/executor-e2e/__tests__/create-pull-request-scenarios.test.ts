@@ -1,6 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import type { ExecutedRecord, ScenarioContext } from "../scenario.js";
+import { beforeAll, describe, expect, it } from "vitest";
+
+import { runExecute } from "../execute-cli.js";
+import type {
+  ExecutedRecord,
+  PriorEntry,
+  Scenario,
+  ScenarioContext,
+} from "../scenario.js";
 import { SkipError } from "../scenario.js";
 import {
   createPullRequestAddReviewers,
@@ -302,5 +314,151 @@ describe("create-pull-request add-reviewers handoff", () => {
         [created, updated],
       ),
     ).rejects.toThrow("does not contain reviewer identity");
+  });
+});
+
+describe("Rust executor payload contract", () => {
+  let adoAwBin: string;
+  const cargoTimeoutMs = 10 * 60 * 1000;
+
+  beforeAll(() => {
+    const manifest = fileURLToPath(
+      new URL("../../../../../Cargo.toml", import.meta.url),
+    );
+    const build = spawnSync(
+      "cargo",
+      [
+        "build",
+        "--manifest-path",
+        manifest,
+        "--bin",
+        "ado-aw",
+        "--message-format=json",
+      ],
+      { encoding: "utf8", timeout: cargoTimeoutMs, maxBuffer: 16 * 1024 * 1024 },
+    );
+    if (build.error) throw build.error;
+    expect(build.status, `Failed to build the Rust executor:\n${build.stderr}`).toBe(0);
+
+    for (const line of build.stdout.trim().split(/\r?\n/)) {
+      const artifact = JSON.parse(line) as {
+        reason: string;
+        target?: { name: string };
+        executable?: string | null;
+      };
+      if (
+        artifact.reason === "compiler-artifact" &&
+        artifact.target?.name === "ado-aw" &&
+        artifact.executable
+      ) {
+        adoAwBin = artifact.executable;
+      }
+    }
+    expect(adoAwBin, "Cargo must report the freshly built ado-aw executable").toBeTruthy();
+  }, cargoTimeoutMs);
+
+  async function parseScenario(
+    scenario: Scenario<unknown>,
+    mutate?: (prior: PriorEntry[], entry: Record<string, unknown>) => void,
+  ) {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-payload-contract-"));
+    try {
+      // Use the live scenario's builders, but never its remote setup/assert/cleanup.
+      const priorEntries = await scenario.priorEntries?.(ctx, state) ?? [];
+      const entry = await scenario.ndjson(ctx, state);
+      mutate?.(priorEntries, entry);
+      return await runExecute({
+        adoAwBin,
+        dryRun: true,
+        scenarioDir: dir,
+        tool: scenario.tool,
+        config: scenario.config(ctx, state),
+        entry,
+        priorEntries,
+        adoRepo: state.repo,
+        orgUrl: ctx.orgUrl,
+        project: ctx.project,
+        token: "",
+        extraEnv: {
+          ADO_AW_LOG_DIR: join(dir, "logs"),
+          EXECUTOR_E2E_EXECUTE_TIMEOUT_MS: "15000",
+        },
+        log: () => {},
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.each(createPullRequestScenarios)(
+    "accepts generated $id proposals without credentials or remote setup",
+    async (scenario) => {
+      const prior = await scenario.priorEntries?.(ctx, state) ?? [];
+      const expectedNames = [...prior.map(({ tool }) => tool), scenario.tool]
+        .map((name) => name.replaceAll("-", "_"));
+      const result = await parseScenario(scenario);
+
+      expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+      expect(result.records.map(({ name, status }) => ({ name, status }))).toEqual(
+        expectedNames.map((name) => ({ name, status: "succeeded" })),
+      );
+      expect(result.stdout.match(/\[DRY-RUN\]/g)).toHaveLength(expectedNames.length);
+    },
+  );
+
+  it.each([
+    { target: "producer", tool: "create-pull-request", index: 0 },
+    { target: "consumer", tool: "update-pr", index: 1 },
+  ] as const)(
+    "rejects an overlong $target temporary ID through Rust deserialization",
+    async ({ target, tool, index }) => {
+      const result = await parseScenario(
+        createPullRequestAddReviewersGeneral,
+        (prior, entry) => {
+          // Regression: this former fixture ID passed the string-equality tests.
+          const invalidId = "#aw_prreviewersgeneral";
+          if (target === "producer") {
+            prior[0]!.entry.temporary_id = invalidId;
+          } else {
+            entry.pull_request_id = invalidId;
+          }
+        },
+      );
+
+      expect(result.exitCode, result.stdout + result.stderr).toBe(1);
+      expect(result.records).toHaveLength(2);
+      expect(result.records[index]?.status).toBe("failed");
+      expect(result.records[index]?.error).toContain(`Failed to parse ${tool}:`);
+      expect(result.records[index]?.error).toContain("3-12 ASCII alphanumeric/underscore");
+      expect(result.records[1 - index]?.status).toBe("succeeded");
+    },
+  );
+
+  it("rejects a producer missing its internal temporary_id", async () => {
+    const result = await parseScenario(createPullRequestAddReviewers, (prior) => {
+      delete prior[0]!.entry.temporary_id;
+    });
+
+    expect(result.exitCode, result.stdout + result.stderr).toBe(1);
+    expect(result.records).toHaveLength(2);
+    expect(result.records[0]?.status).toBe("failed");
+    expect(result.records[0]?.error).toContain("Failed to parse create-pull-request:");
+    expect(result.records[0]?.error).toContain("missing field `temporary_id`");
+  });
+
+  it("rejects a consumer with a non-array reviewers payload", async () => {
+    const result = await parseScenario(
+      createPullRequestAddReviewersGeneral,
+      (_prior, entry) => {
+        entry.reviewers = state.reviewer;
+      },
+    );
+
+    expect(result.exitCode, result.stdout + result.stderr).toBe(1);
+    expect(result.records).toHaveLength(2);
+    expect(result.records[0]?.status).toBe("succeeded");
+    expect(result.records[1]?.status).toBe("failed");
+    expect(result.records[1]?.error).toContain("Failed to parse update-pr:");
+    expect(result.records[1]?.error).toContain("expected a sequence");
   });
 });

@@ -90,6 +90,8 @@ export function renderNdjsonLine(tool: string, entry: Record<string, unknown>): 
 
 export interface RunExecuteOptions {
   adoAwBin: string;
+  /** Parse proposals through the real executor without performing writes. */
+  dryRun?: boolean;
   /** Directory into which source.md + ndjson + extra files are written. */
   scenarioDir: string;
   tool: string;
@@ -195,6 +197,7 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
     "--ado-project",
     opts.project,
   ];
+  if (opts.dryRun) args.push("--dry-run");
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
