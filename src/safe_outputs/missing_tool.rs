@@ -48,7 +48,13 @@ impl Executor for MissingToolResult {
         if let Some(context) = &self.context {
             message.push_str(&format!(" [{context}]"));
         }
-        Ok(ExecutionResult::success(message))
+        Ok(ExecutionResult::success_with_data(
+            message,
+            serde_json::json!({
+                "tool_name": self.tool_name,
+                "context": self.context,
+            }),
+        ))
     }
 }
 
@@ -119,6 +125,13 @@ mod tests {
         assert_eq!(
             exec.message,
             "Missing tool reported: bash [needed for script execution]"
+        );
+        assert_eq!(
+            exec.data,
+            Some(serde_json::json!({
+                "tool_name": "bash",
+                "context": "needed for script execution",
+            }))
         );
     }
 }

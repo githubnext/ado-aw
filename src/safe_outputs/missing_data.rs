@@ -57,7 +57,14 @@ impl Executor for MissingDataResult {
         if let Some(context) = &self.context {
             message.push_str(&format!(" [{context}]"));
         }
-        Ok(ExecutionResult::success(message))
+        Ok(ExecutionResult::success_with_data(
+            message,
+            serde_json::json!({
+                "data_type": self.data_type,
+                "reason": self.reason,
+                "context": self.context,
+            }),
+        ))
     }
 }
 
@@ -85,6 +92,32 @@ mod tests {
         assert_eq!(
             result.context,
             Some("checked GitHub and internal wiki, neither had it".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_impl_preserves_report_details() {
+        let result: MissingDataResult = MissingDataParams {
+            data_type: "API docs".to_string(),
+            reason: "needed for integration".to_string(),
+            context: Some("checked available sources".to_string()),
+        }
+        .try_into()
+        .unwrap();
+
+        let exec = result
+            .execute_impl(&crate::safe_outputs::ExecutionContext::default())
+            .await
+            .unwrap();
+
+        assert!(exec.success);
+        assert_eq!(
+            exec.data,
+            Some(serde_json::json!({
+                "data_type": "API docs",
+                "reason": "needed for integration",
+                "context": "checked available sources",
+            }))
         );
     }
 }

@@ -249,6 +249,18 @@ pub fn catalog() -> Catalog {
 }
 
 pub fn operations() -> Vec<Operation> {
+    let mut ops = discovery_operations();
+    ops.extend(core_operations());
+    ops.extend(repos_operations());
+    ops.extend(pipelines_operations());
+    ops.extend(boards_operations());
+    ops
+}
+
+/// Discovery-capability operations: unauthenticated host/area/resource-area
+/// probes plus the connection-data handshake that every ADO client issues
+/// before its first data call.
+fn discovery_operations() -> Vec<Operation> {
     vec![
         Operation {
             id: "discovery.host-options",
@@ -325,6 +337,12 @@ pub fn operations() -> Vec<Operation> {
             Json,
             &["connectOptions", "lastChangeId", "lastChangeId64"]
         ),
+    ]
+}
+
+/// Core-capability operations: project lookup and validation probes.
+fn core_operations() -> Vec<Operation> {
+    vec![
         get!(
             "core.project-get",
             Core,
@@ -352,6 +370,13 @@ pub fn operations() -> Vec<Operation> {
                 "getDefaultTeamImageUrl",
             ]
         ),
+    ]
+}
+
+/// Repos-capability operations: repository metadata, refs, items, commits,
+/// and pull-request read paths.
+fn repos_operations() -> Vec<Operation> {
+    vec![
         get!(
             "repos.repository-get",
             Repos,
@@ -498,6 +523,13 @@ pub fn operations() -> Vec<Operation> {
             Json,
             NO_QUERY
         ),
+    ]
+}
+
+/// Pipelines-capability operations: build/release definitions, builds,
+/// timelines, and pipeline runs.
+fn pipelines_operations() -> Vec<Operation> {
+    vec![
         get!(
             "pipelines.definitions-list",
             Pipelines,
@@ -601,6 +633,13 @@ pub fn operations() -> Vec<Operation> {
             Json,
             NO_QUERY
         ),
+    ]
+}
+
+/// Boards-capability operations: work item read, comments, updates, and
+/// revision history.
+fn boards_operations() -> Vec<Operation> {
+    vec![
         get!(
             "boards.work-item-get",
             Boards,

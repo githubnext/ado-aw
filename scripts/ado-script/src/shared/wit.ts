@@ -202,9 +202,9 @@ export async function createWorkItem(
       { "Content-Type": "application/json-patch+json" },
       patch,
       project,
-      `$${type}`,
+      type,
     );
-    if (typeof created.id !== "number") {
+    if (!created || typeof created.id !== "number") {
       throw new Error("createWorkItem returned a work item without a numeric id");
     }
     const url =
