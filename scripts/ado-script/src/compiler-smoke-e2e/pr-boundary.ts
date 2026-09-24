@@ -7,8 +7,10 @@ export function verifyPrBoundary(
   after: string | undefined,
   records: readonly BoundaryTimelineRecord[],
 ): void {
-  const job = (id: string) => records.find((record) =>
-    record.type === "Job" && (record.identifier === id || record.identifier?.endsWith(`.${id}`)));
+  const job = (id: string) => records.find((record) => {
+    const identifier = record.identifier?.replace(/\.__default$/, "");
+    return record.type === "Job" && (identifier === id || identifier?.endsWith(`.${id}`));
+  });
   for (const id of ["Setup", "Agent", "Detection", "SafeOutputs"]) {
     if (job(id)?.result !== "succeeded") throw new Error(`Boundary prerequisite ${id} did not succeed`);
   }

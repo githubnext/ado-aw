@@ -12,6 +12,17 @@ const rejection = [
 ];
 
 describe("PR pipeline boundary proof", () => {
+  it.each(["", "stage."])("recognizes real ADO job identifiers with prefix '%s'", (prefix) => {
+    const records = rejection.map((record) => ({
+      ...record, identifier: `${prefix}${record.identifier}.__default`,
+    }));
+    expect(() => verifyPrBoundary("rejected", 42, "original", "original", records)).not.toThrow();
+    const wrongJob = records.map((record) => ({
+      ...record, identifier: record.identifier.replace("Setup.__default", "Setup.Other.__default"),
+    }));
+    expect(() => verifyPrBoundary("rejected", 42, "original", "original", wrongJob)).toThrow("Setup");
+  });
+
   it("requires a real proposal/gate rejection and unchanged PR", () => {
     expect(() => verifyPrBoundary("rejected", 42, "original", "original", rejection)).not.toThrow();
     expect(() => verifyPrBoundary("rejected", 42, "original", "changed", rejection)).toThrow("changed");
