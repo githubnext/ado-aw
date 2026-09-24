@@ -1297,6 +1297,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn abandonment_connection_loss_never_posts_a_followup_comment() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for fail_patch in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut lookup, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                let read = lookup.read(&mut buffer).await.unwrap();
+                assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("GET "));
+                if fail_patch {
+                    let body = r#"{"status":"active"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    lookup.write_all(response.as_bytes()).await.unwrap();
+                    drop(lookup);
+                    let (mut write, _) = listener.accept().await.unwrap();
+                    let read = write.read(&mut buffer).await.unwrap();
+                    assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("PATCH "));
+                }
+            });
+            let ctx = ExecutionContext {
+                ado_org_url: Some(url),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "abandon-pull-request".into(),
+                    serde_json::json!({"target":"*","include-stats":false}),
+                )]),
+                ..Default::default()
+            };
+            let entry = serde_json::json!({
+                "name":"abandon-pull-request","pull_request_id":7,"body":"Must not be posted."
+            });
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                execute_safe_output(&entry, &ctx),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.to_string().contains(if fail_patch {
+                "Failed to abandon"
+            } else {
+                "Failed to fetch"
+            }));
+            tokio::time::timeout(std::time::Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn required_pr_labels_use_the_authoritative_list_and_fail_closed() {
         use wiremock::{
             Mock, MockServer, ResponseTemplate,
