@@ -293,11 +293,14 @@ export const updatePullRequestOversized: Scenario<PrState> = {
     pull_request_id: state.prId, repository: ctx.adoRepo, body: "x".repeat(4001),
   }),
   expectedFailure: { error: /4000|4,000/ },
-  assert: async (ctx, state) => {
+  assertFailure: async (ctx, state) => {
     const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
     if (pr.description !== detBody(ctx, "update-pull-request-oversized")) {
       throw new Error("Rejected oversized body changed the live description");
     }
+  },
+  assert: async () => {
+    throw new Error("Oversized PR description unexpectedly succeeded");
   },
   cleanup: teardownPr,
 };

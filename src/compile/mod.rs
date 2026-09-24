@@ -6,15 +6,15 @@
 //! - **Standalone**: Self-contained pipeline with AWF network isolation
 //! - **1ES**: Integration with 1ES Pipeline Templates for SDL compliance
 
-mod common;
 pub mod az_wrapper;
+mod common;
 pub(crate) use common::resolve_repos;
 pub(crate) mod ado_bundle;
 pub(crate) mod agentic_pipeline;
-pub(crate) mod container_invocation;
 #[cfg(test)]
 mod codemod_integration_test;
 pub(crate) mod codemods;
+pub(crate) mod container_invocation;
 pub mod custom_tools;
 pub mod extensions;
 pub(crate) mod filter_ir;
@@ -48,17 +48,17 @@ pub use common::ADO_MCP_HOST_NODE_MODULES;
 pub use common::ADO_MCP_IMAGE;
 pub use common::ADO_MCP_NODE_MODULES;
 pub use common::ADO_MCP_SERVER_NAME;
-pub use common::ADO_MCP_VERSION;
 pub use common::ADO_MCP_TOKEN_SENTINEL;
+pub use common::ADO_MCP_VERSION;
 pub use common::ADO_PROXY_NETWORK_NAME;
 pub use common::ADO_PROXY_PUBLIC_CA_HOST_PATH;
 pub use common::AWF_VERSION;
 pub use common::HEADER_MARKER;
 pub use common::MCPG_VERSION;
 pub use common::normalize_source_path;
-pub use common::resolve_ado_organization_bash;
 #[allow(unused_imports)]
 pub use common::parse_markdown;
+pub use common::resolve_ado_organization_bash;
 #[allow(unused_imports)]
 pub use common::{
     ParsedSource, atomic_write, parse_markdown_detailed, parse_markdown_detailed_for_source,
@@ -173,48 +173,21 @@ async fn compile_pipeline_inner(
     let yaml_output_path = resolve_output_path(input_path, output_path)?;
     let existing_version = read_existing_pipeline_version(&yaml_output_path).await;
 
-    let parsed = common::parse_markdown_detailed_with_registry(
+    let mut parsed = common::parse_markdown_detailed_with_registry(
         &content,
         registry,
         existing_version.as_deref(),
     )?;
     pr_migration::warn_prompt_references(input_path, &content, &parsed.body_raw);
+    let (imported_prompt_body, merged_body) =
+        prepare_parsed_source(&mut parsed, input_path, registry).await?;
     let mut front_matter = parsed.front_matter;
-    let mut markdown_body = parsed.markdown_body;
+    let markdown_body = merged_body;
     let codemod_report = parsed.codemods;
     let front_matter_mapping = parsed.front_matter_mapping;
     let leading_whitespace = parsed.leading_whitespace;
     let body_raw = parsed.body_raw;
     let source_sha256 = parsed.source_sha256;
-
-    // Resolve and merge cross-repository / local `imports:` (D8/D9). Runs only
-    // when the workflow declares imports, so import-free workflows are
-    // unaffected. The merge is applied to a CLONE of the front-matter mapping —
-    // the original `front_matter_mapping` is preserved untouched so that any
-    // codemod source-rewrite keeps the author's `imports:` in their file rather
-    // than writing the expanded/merged form back to disk.
-    //
-    // `imported_prompt_body` is the substituted, joined bodies of any imported
-    // components, inlined into the agent prompt at compile time (they cannot be
-    // delivered by the default runtime-import path, which reads the consumer's
-    // own source). Empty when the workflow declares no imports.
-    let (imported_prompt_body, merged_body) = resolve_and_merge_imports(
-        &mut front_matter,
-        &front_matter_mapping,
-        &markdown_body,
-        input_path,
-    )
-    .await?;
-    if !imported_prompt_body.is_empty() {
-        for line in pr_migration::deprecated_pr_prompt_lines(&imported_prompt_body) {
-            eprintln!(
-                "warning: imported prompt for {} (combined import body line {line}): {}",
-                crate::sanitize::neutralize_pipeline_commands(&input_path.display().to_string()),
-                pr_migration::PR_PROMPT_GUIDANCE
-            );
-        }
-    }
-    markdown_body = merged_body;
 
     // Sanitize all front matter text fields before any further processing.
     // This neutralizes pipeline command injection (##vso[), strips control
@@ -662,11 +635,13 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             )
         })?;
 
-    let parsed = parse_markdown_detailed_for_source(
+    let mut parsed = parse_markdown_detailed_for_source(
         &content,
         Some(header_meta.version.as_str()).filter(|v| !v.is_empty()),
     )?;
     pr_migration::warn_prompt_references(&source_path, &content, &parsed.body_raw);
+    let (imported_prompt_body, markdown_body) =
+        prepare_parsed_source(&mut parsed, &source_path, codemods::CODEMODS).await?;
 
     // Pending-migration enforcement: `check` MUST NOT silently let
     // a stale source pass. The runtime integrity check inside
@@ -686,18 +661,6 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
     }
 
     let mut front_matter = parsed.front_matter;
-
-    // Resolve + merge `imports:` so `check` validates the same fully-merged
-    // pipeline that `compile` produces. Reads the committed `.ado-aw/imports`
-    // cache (SHA-keyed), so this is offline when the cache is vendored. Uses the
-    // absolute `source_path` so the repo root (holding the cache) resolves.
-    let (imported_prompt_body, markdown_body) = resolve_and_merge_imports(
-        &mut front_matter,
-        &parsed.front_matter_mapping,
-        &parsed.markdown_body,
-        &source_path,
-    )
-    .await?;
 
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();
@@ -1046,6 +1009,48 @@ async fn resolve_and_merge_imports(
     Ok((imported, combined))
 }
 
+/// Resolve effective policy on a clone, then finish only root-authored codemods.
+/// The rewrite mapping retains `imports:` and never acquires imported content.
+async fn prepare_parsed_source(
+    parsed: &mut ParsedSource,
+    source_path: &Path,
+    registry: &[&'static codemods::Codemod],
+) -> Result<(String, String)> {
+    let has_imports = !parsed.front_matter.imports.is_empty();
+    let bodies = resolve_and_merge_imports(
+        &mut parsed.front_matter,
+        &parsed.front_matter_mapping,
+        &parsed.markdown_body,
+        source_path,
+    )
+    .await?;
+    if has_imports {
+        common::finish_import_codemods(parsed, registry)?;
+    }
+    Ok(bodies)
+}
+
+/// Read-only effective source policy, including in-memory import migrations.
+///
+/// Execution callers apply their usual sanitization, repository resolution and
+/// policy validation to this result; this function does not build or write IR.
+pub async fn prepare_source_front_matter(input_path: &Path) -> Result<FrontMatter> {
+    let content = tokio::fs::read_to_string(input_path)
+        .await
+        .with_context(|| format!("Failed to read source file: {}", input_path.display()))?;
+    let version = read_existing_pipeline_version(&input_path.with_extension("lock.yml")).await;
+    let mut parsed = common::parse_markdown_detailed_for_source(&content, version.as_deref())?;
+    prepare_parsed_source(&mut parsed, input_path, codemods::CODEMODS).await?;
+    if parsed.codemods.changed() {
+        log::warn!(
+            "front matter at {} contains deprecated shapes; running with in-memory codemod fixes applied. Run `ado-aw compile {}` to update the source.",
+            input_path.display(),
+            input_path.display(),
+        );
+    }
+    Ok(parsed.front_matter)
+}
+
 /// Public, read-only entry point that returns the typed [`ir::Pipeline`]
 /// for an agent source file **without** writing any YAML.
 ///
@@ -1071,20 +1076,16 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
     // reading the IR without it would diverge from what `compile` produces.
     let existing_version =
         read_existing_pipeline_version(&input_path.with_extension("lock.yml")).await;
-    let parsed = common::parse_markdown_detailed_for_source(&content, existing_version.as_deref())?;
-    let mut front_matter = parsed.front_matter;
+    let mut parsed =
+        common::parse_markdown_detailed_for_source(&content, existing_version.as_deref())?;
 
     // Resolve + merge `imports:` so `inspect`/`graph`/`whatif`/`lint`/`trace`
     // reason about the same fully-merged pipeline `compile` and `check` produce
     // (imported tools, safe-outputs, custom jobs, and inlined bodies). Reads the
     // vendored SHA-keyed cache, so it stays offline when the cache is present.
-    let (imported_prompt_body, markdown_body) = resolve_and_merge_imports(
-        &mut front_matter,
-        &parsed.front_matter_mapping,
-        &parsed.markdown_body,
-        input_path,
-    )
-    .await?;
+    let (imported_prompt_body, markdown_body) =
+        prepare_parsed_source(&mut parsed, input_path, codemods::CODEMODS).await?;
+    let mut front_matter = parsed.front_matter;
 
     use crate::sanitize::SanitizeConfig;
     front_matter.sanitize_config_fields();

@@ -179,8 +179,8 @@ fn atomic_write_blocking(path: &Path, contents: &str) -> Result<()> {
 /// See [`parse_markdown_detailed`].
 #[derive(Debug)]
 pub struct ParsedSource {
-    /// Typed front matter, after codemods have been applied to the
-    /// underlying mapping.
+    /// Typed root front matter. PR migrations are deferred when imports exist;
+    /// callers needing effective policy must use the import preparation path.
     pub front_matter: FrontMatter,
     /// Body for compilation, with leading/trailing whitespace trimmed
     /// (matches the legacy `parse_markdown` second tuple element).
@@ -268,6 +268,8 @@ pub(crate) fn split_markdown_front_matter(
 /// Use this from callers that may rewrite the source (the `compile`
 /// command). Callers that only want the typed view of the front matter
 /// should use the backward-compatible [`parse_markdown`] wrapper.
+/// Neither parser resolves imports; use `prepare_source_front_matter` for
+/// effective execution policy, including import-aware PR migrations.
 pub fn parse_markdown_detailed(content: &str) -> Result<ParsedSource> {
     parse_markdown_detailed_with_registry(content, super::codemods::CODEMODS, None)
 }
@@ -326,10 +328,22 @@ pub(crate) fn parse_markdown_detailed_with_registry(
         }
     };
 
-    // Stage 2: run the codemod registry against the untyped mapping.
-    let report =
-        super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
-            .context("Failed to apply codemods")?;
+    // PR identity/ownership must survive until import substitution and merging.
+    let has_imports = mapping
+        .get("imports")
+        .and_then(serde_yaml::Value::as_sequence)
+        .is_some_and(|imports| !imports.is_empty());
+    let initial_registry: Vec<_> = registry
+        .iter()
+        .copied()
+        .filter(|codemod| !has_imports || !is_import_deferred_codemod(codemod.id))
+        .collect();
+    let report = super::codemods::apply_codemods_with(
+        &mut mapping,
+        &initial_registry,
+        source_compiler_version,
+    )
+    .context("Failed to apply codemods")?;
 
     // Stage 3: deserialize the (possibly modified) mapping into the
     // typed FrontMatter. Errors here mean either the user wrote an
@@ -358,6 +372,41 @@ pub(crate) fn parse_markdown_detailed_with_registry(
         body_raw: parts.body_raw,
         source_sha256,
     })
+}
+
+fn is_import_deferred_codemod(id: &str) -> bool {
+    matches!(id, "split_update_pr" | "pull_request_tool_names")
+}
+
+/// Finish root-only source migration after imported custom-job ownership is known.
+pub(crate) fn finish_import_codemods(
+    parsed: &mut ParsedSource,
+    registry: &[&'static super::codemods::Codemod],
+) -> Result<()> {
+    let deferred: Vec<_> = registry
+        .iter()
+        .copied()
+        .filter(|codemod| is_import_deferred_codemod(codemod.id))
+        .collect();
+    let mut mapping = parsed.front_matter_mapping.clone();
+    let mut custom = Vec::new();
+    if let Some(serde_yaml::Value::Mapping(outputs)) = mapping.get_mut("safe-outputs") {
+        for name in parsed.front_matter.custom_safe_output_tool_names() {
+            let key = serde_yaml::Value::String(name);
+            if let Some(value) = outputs.remove(&key) {
+                custom.push((key, value));
+            }
+        }
+    }
+    let report = super::codemods::apply_codemods_with(&mut mapping, &deferred, None)?;
+    if report.changed() {
+        if let Some(serde_yaml::Value::Mapping(outputs)) = mapping.get_mut("safe-outputs") {
+            outputs.extend(custom);
+        }
+        parsed.front_matter_mapping = mapping;
+        parsed.codemods.applied.extend(report.applied);
+    }
+    Ok(())
 }
 
 /// Reconstruct full source content from codemod outputs.
@@ -3061,6 +3110,7 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
 
 /// Validate the PR tool family, including temporary-reference lanes and shared budgets.
 pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    super::pr_migration::validate_legacy_metadata(front_matter)?;
     super::pr_migration::validate_budget_groups(front_matter)?;
     if let Some(config) = front_matter
         .typed_safe_output_config::<crate::safe_outputs::AddPrLabelsConfig>(
@@ -3161,12 +3211,22 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
 /// runtime error. Catching this at compile time is consistent with how
 /// `validate_submit_pr_review_events` handles the analogous case.
 pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("update-pr").or_else(|| {
-        front_matter
-            .safe_outputs
-            .get("submit-pull-request-review")
-            .and_then(|config| config.get(super::pr_migration::LEGACY_PR_CONFIG))
-    }) && let Some(obj) = config_value.as_object()
+    if let Some(config_value) = front_matter
+        .safe_outputs
+        .get("update-pr")
+        .filter(|_| {
+            !front_matter
+                .custom_safe_output_tool_names()
+                .iter()
+                .any(|name| name == "update-pr")
+        })
+        .or_else(|| {
+            front_matter
+                .safe_outputs
+                .get("submit-pull-request-review")
+                .and_then(|config| config.get(super::pr_migration::LEGACY_PR_CONFIG))
+        })
+        && let Some(obj) = config_value.as_object()
     {
         // Determine whether the vote operation is reachable:
         // - allowed-operations absent or empty → all operations allowed (includes vote)

@@ -22,7 +22,7 @@ describe("focused PR tools", () => {
       new Set(["update-pull-request"]),
       {
         policies: new Map(),
-        prPolicies: new Map([["update-pull-request", { target: 42, operation: "append", "target-repo": "tools" }]]),
+        prPolicies: new Map([["update-pull-request", { target: {kind: "fixed", id: "42"}, operation: "append", "target-repo": "tools" }]]),
       },
     );
     expect(summary).toContain("| PR | 42 |");
@@ -37,10 +37,95 @@ describe("focused PR tools", () => {
       { name: "create-pull-request", temporary_id: "#aw_created", repository: "tools" },
       { name: "add-pull-request-reviewers", pull_request_id: "#aw_created", reviewers: ["person@example.test"] },
       { name: "abandon-pull-request", pull_request_id: "#aw_missing", body: "reason" },
-    )), new Set());
-    expect(summary).toContain("real ID assigned at execution");
+    )), new Set(), {
+      policies: new Map(),
+      prPolicies: new Map([
+        ["add-pull-request-reviewers", {target: {kind: "explicit"}}],
+        ["abandon-pull-request", {target: {kind: "explicit"}}],
+      ]),
+    });
+    expect(summary).toContain("real ID unknown until successful execution");
     expect(summary).toContain("no earlier create proposal");
     expect(summary).toContain("person@example.test");
+  });
+
+  const trigger = {
+    collection_uri: "https://dev.azure.com/org/", project: "Other", repository_name: "trigger-repo",
+    repository_id: "11111111-1111-1111-1111-111111111111", id: "7",
+  };
+
+  it("shows fixed string targets instead of the triggering number and retains full u64", () => {
+    for (const [id, proposal] of [
+      ["42", '{"name":"update-pull-request","body":"new body"}'],
+      ["18446744073709551615", '{"name":"update-pull-request","pull_request_id":18446744073709551615}'],
+    ]) {
+      const summary = renderSummary(parseProposals(proposal!), new Set(), {
+        policies: new Map(), triggeringPr: trigger,
+        prPolicies: new Map([["update-pull-request", {target: {kind: "fixed", id: id!}}]]),
+      });
+      expect(summary).toContain(`| PR | ${id} |`);
+      expect(summary).not.toContain("| PR | 7 |");
+      expect(summary).not.toContain("18446744073709552000");
+    }
+  });
+
+  it("distinguishes required explicit IDs from complete triggering identities", () => {
+    const policies: TrustedRepositoryContext = {
+      policies: new Map(), triggeringPr: trigger, prPolicies: new Map([
+        ["update-pull-request", {target: {kind: "triggering"}}],
+        ["add-pull-request-labels", {target: {kind: "explicit"}}],
+      ]),
+    };
+    const text = ndjson({name:"update-pull-request", title:"new"}, {name:"add-pull-request-labels", labels:["ready"]});
+    const summary = renderSummary(parseProposals(text), new Set(), policies);
+    expect(summary).toContain("| PR | 7 |");
+    expect(summary).toContain(sanitizeInline("https://dev.azure.com/org/Other/trigger-repo"));
+    expect(summary).toContain("explicit PR ID required");
+    const unresolved = renderSummary(parseProposals(text), new Set(), {...policies, triggeringPr:undefined});
+    expect(unresolved).toContain("complete triggering PR identity unavailable");
+    expect(unresolved).not.toContain("| PR | 7 |");
+  });
+
+  it("preserves explicit empty or mismatched repository selectors for temporary references", () => {
+    for (const [selector, expected] of [["", "invalid explicit repository selector"], ["self", "possible conflict"]]) {
+      const summary = renderSummary(parseProposals(ndjson(
+        {name:"create-pull-request", temporary_id:"#aw_new", repository:"other"},
+        {name:"add-pull-request-labels", pull_request_id:"#aw_new", repository:selector, labels:["ready"]},
+      )), new Set(), {policies:new Map(), prPolicies:new Map([
+        ["add-pull-request-labels", {target:{kind:"explicit"}}],
+      ])});
+      expect(summary).toContain(expected!);
+      expect(summary).not.toContain("producer&apos;s proposed selector");
+    }
+  });
+
+  it("reports fixed and triggering ID conflicts and never resolves a same-run unknown number", () => {
+    for (const target of [{kind:"fixed" as const,id:"42"}, {kind:"triggering" as const}]) {
+      const context: TrustedRepositoryContext = {policies:new Map(),triggeringPr:trigger,
+        prPolicies:new Map([["update-pull-request", {target}]])};
+      const conflict = renderSummary(parseProposals(ndjson({
+        name:"update-pull-request",pull_request_id:99,title:"new",
+      })),new Set(),context);
+      expect(conflict).toContain("conflict: configured target is PR");
+      const temporary = renderSummary(parseProposals(ndjson(
+        {name:"create-pull-request",temporary_id:"#aw_new",repository:"other"},
+        {name:"update-pull-request",pull_request_id:"#aw_new",title:"new"},
+      )),new Set(),context);
+      expect(temporary).toContain("real ID unknown");
+      expect(temporary).toContain("must equal configured PR");
+    }
+  });
+
+  it("does not accept unsupported aliases or fractional numbers as explicit PR IDs", () => {
+    const summary = renderSummary(parseProposals([
+      '{"name":"add-pull-request-labels","pr":42,"labels":["ready"]}',
+      '{"name":"add-pull-request-labels","pull_request_id":42.0,"labels":["ready"]}',
+    ].join("\n")),new Set(),{policies:new Map(),prPolicies:new Map([
+      ["add-pull-request-labels",{target:{kind:"explicit"}}],
+    ])});
+    expect(summary).toContain("explicit PR ID required");
+    expect(summary).toContain("invalid PR reference");
+    expect(summary).not.toContain("| PR | 42 |");
   });
 });
 

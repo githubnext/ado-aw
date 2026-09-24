@@ -13,6 +13,7 @@
  * (markdown-escaped, single line) or `sanitizeBlock` (fenced, neutralised)
  * before they reach the output.
  */
+import { positivePrId, type TriggeringPullRequest } from "../shared/ado-remote.js";
 
 /** A parsed safe-output proposal record (one NDJSON line). */
 export interface Proposal {
@@ -53,8 +54,19 @@ export interface TrustedRepositoryContext {
   currentRepository?: string;
   currentProvider?: string;
   githubApiUrl?: string;
-  prPolicies?: ReadonlyMap<string, Readonly<Record<string, unknown>>>;
-  triggeringPr?: string;
+  prPolicies?: ReadonlyMap<string, PrPolicy>;
+  triggeringPr?: TriggeringPullRequest;
+}
+
+export type PrTargetPolicy =
+  | { kind: "triggering" }
+  | { kind: "explicit" }
+  | { kind: "fixed"; id: string };
+
+export interface PrPolicy {
+  target: PrTargetPolicy;
+  operation?: string;
+  "target-repo"?: string;
 }
 
 interface RepositoryResolution {
@@ -151,6 +163,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     fields: [
       { label: "PR", key: "pull_request_id" },
       { label: "Event", key: "event" },
+      { label: "Repository selector", key: "repository" },
     ],
     body: "body",
   },
@@ -974,23 +987,7 @@ export function renderSummary(
       producers.set(record.temporary_id.replace(/^#/, ""), proposal);
     }
     const policy = repositoryContext?.prPolicies?.get(proposal.name);
-    if (policy) {
-      record.operation ??= policy.operation;
-      record.repository ??= policy["target-repo"] ?? "self";
-      record.pull_request_id ??= record.pull_request_number ?? record.pr_number ?? record.pr
-        ?? (policy.target === "*" ? "<unresolved: explicit PR ID required>"
-          : typeof policy.target === "number" ? policy.target
-          : repositoryContext?.triggeringPr || "<unresolved: triggering PR ID unavailable>");
-    }
-    if (typeof record.pull_request_id === "string" && /^#?aw_/.test(record.pull_request_id)) {
-      const producer = producers.get(record.pull_request_id.replace(/^#/, ""));
-      record.pull_request_id = producer
-        ? `${record.pull_request_id} (from earlier create proposal ${producer.index + 1}; real ID assigned at execution)`
-        : `${record.pull_request_id} (unresolved: no earlier create proposal)`;
-      if (producer && !proposal.record.repository) {
-        record.repository = `${String(producer.record.repository ?? "self")} (producer's proposed selector; validated at execution)`;
-      }
-    }
+    if (policy) renderPrTarget(proposal.name, record, policy, repositoryContext?.triggeringPr, producers);
     return { ...proposal, record };
   });
 
@@ -1035,6 +1032,106 @@ export function renderSummary(
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 
+function renderPrTarget(
+    tool: string,
+    record: Record<string, unknown>,
+    policy: PrPolicy,
+    triggering: TriggeringPullRequest | undefined,
+    producers: ReadonlyMap<string, Proposal>,
+  ): void {
+    record.operation ??= policy.operation;
+    const keys = tool === "update-pull-request"
+      ? ["pull_request_id", "pullRequestId", "pull_request_number", "pullRequestNumber", "pr_number", "prNumber", "pr", "id"]
+      : tool === "abandon-pull-request" ? ["pull_request_id", "pull_request_number"] : ["pull_request_id"];
+    const refs = keys
+      .map((key) => record[key]).filter((value) => value !== undefined && value !== null);
+    const normalized = refs.map((value) => {
+      if (typeof value === "string") {
+        const text = value.trim();
+        if (/^#?aw_[A-Za-z0-9_-]+$/.test(text)) return `#${text.replace(/^#/, "")}`;
+        return positivePrId(text.replace(/^#/, "")) ?? "<invalid PR reference>";
+      }
+      return positivePrId(value) ?? "<invalid PR reference>";
+    });
+    const reference = normalized[0];
+    const selector = record.repository ?? policy["target-repo"];
+    const explicitSelector = selector !== undefined && selector !== null;
+    record.repository = explicitSelector ? selector : "self";
+    if (normalized.some((value) => value !== reference)) {
+      record.pull_request_id = "<conflict: PR ID aliases disagree>";
+      return;
+    }
+    if (reference === "<invalid PR reference>") {
+      record.pull_request_id = reference;
+      return;
+    }
+    if (explicitSelector && (typeof selector !== "string" || selector.trim().length === 0)) {
+      record.pull_request_id = `${reference ?? "<omitted>"} (unresolved: invalid explicit repository selector)`;
+      return;
+    }
+    const configured = policy.target.kind === "fixed" ? policy.target.id
+      : policy.target.kind === "triggering" ? triggering?.id : undefined;
+    if (policy.target.kind === "triggering") {
+      if (!triggering) {
+        record.pull_request_id = `${reference ?? "<omitted>"} (unresolved: complete triggering PR identity unavailable)`;
+        record.repository = explicitSelector ? selector : "<unresolved: triggering destination unavailable>";
+        return;
+      }
+      const destination = `${triggering.collection_uri.replace(/\/$/, "")}/${triggering.project}/${triggering.repository_name} (repository ID ${triggering.repository_id})`;
+      record.repository = explicitSelector
+        ? `${destination}; explicit selector '${String(selector)}' must identify this destination (verified at execution)`
+        : `${destination}; checkout/write authorization verified at execution`;
+    }
+    if (reference?.startsWith("#aw_")) {
+      const producer = producers.get(reference.slice(1));
+      record.pull_request_id = producer
+        ? `${reference} (from earlier create proposal ${producer.index + 1}; real ID unknown until successful execution)`
+        : `${reference} (unresolved: no earlier create proposal)`;
+      if (configured) record.pull_request_id += `; must equal configured PR ${configured}`;
+      if (policy.target.kind !== "triggering" && producer) {
+        const producerSelector = producer.record.repository ?? "self";
+        if (!explicitSelector) {
+          record.repository = `${String(producerSelector)} (producer's proposed selector; validated at execution)`;
+        } else if (selector !== producerSelector) {
+          record.repository = `${String(selector)} (possible conflict: producer requested '${String(producerSelector)}'; verified at execution)`;
+        }
+      }
+      return;
+    }
+    if (reference && configured && reference !== configured) {
+      record.pull_request_id = `${reference} (conflict: configured target is PR ${configured})`;
+      return;
+    }
+    record.pull_request_id = reference ?? configured ?? "<unresolved: explicit PR ID required>";
+  }
+
+  /** Preserve full-u64 integer tokens before JSON.parse can round proposal identifiers. */
+  function preserveLargeIntegers(json: string): string {
+    let out = "";
+    let index = 0;
+    while (index < json.length) {
+      if (json[index] === '"') {
+        const start = index++;
+        while (index < json.length) {
+          const char = json[index++];
+          if (char === "\\") index++;
+          else if (char === '"') break;
+        }
+        out += json.slice(start, index);
+      } else {
+        const number = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(json.slice(index));
+        if (number) {
+          const raw = number[0];
+          out += !/^-?\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) ? JSON.stringify(raw) : raw;
+          index += raw.length;
+        } else {
+          out += json[index++];
+        }
+      }
+    }
+    return out;
+  }
+
 /**
  * Parse NDJSON text into proposals, skipping blank lines and records that
  * fail to parse or lack a string `name`. Index is the proposal position so
@@ -1048,7 +1145,7 @@ export function parseProposals(ndjson: string): Proposal[] {
     if (line.length === 0) continue;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(line);
+      parsed = JSON.parse(preserveLargeIntegers(line));
     } catch {
       continue;
     }

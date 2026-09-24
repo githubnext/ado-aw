@@ -882,6 +882,18 @@ safe-outputs:
 - `repository` *(optional)* - Target repository alias, constrained by
   `allowed-repositories`.
 
+`target: triggering` binds the **collection/organization, repository, and PR
+ID together**. It is not an ID default that can be redirected to another
+repository. Native PR builds and trusted synthetic-PR resolution both provide
+this identity; an incomplete or mismatched identity fails before mutation.
+When omitted, the repository is the trusted triggering repository, which may
+differ from the pipeline's `self` checkout. This does not grant write access:
+repository allowlists and write-scope authorization still apply.
+
+For another PR, use an explicit fixed target or `target: "*"`, subject to the
+same repository permissions. Numeric and quoted numeric fixed targets have the
+same meaning, including in the human-review preview.
+
 Numeric IDs, quoted numeric IDs and same-run temporary PR references are
 accepted. Repository destinations resolve their configured organization and
 project; cross-organization writes require the normal explicit write policy.
@@ -1446,6 +1458,18 @@ compiler release.
 The catch-all is no longer exposed by MCP or executable by the new Stage 3
 executor.
 
+Legacy `allowed-votes` accepts exactly `approve`, `approve-with-suggestions`,
+`wait-for-author`, `reject`, and `reset`. Unsupported values, including the
+review-only events `comment` and `request-changes`, stop migration with an
+actionable error rather than being reinterpreted. The same restriction applies
+to retained legacy policy metadata; native review configuration still supports
+its normal review events.
+
+Bare `update-pr:`, `update-pr: null`, and `update-pr: true` migrate to the four
+non-voting operations with their original shared limit. They do not generate
+an empty review configuration or acquire voting permission. An object-form
+configuration that enables voting but omits `allowed-votes` remains invalid.
+
 | Old operation | Replacement |
 |---|---|
 | `update-description` | `update-pull-request` (`body`) |
@@ -1498,8 +1522,8 @@ safe-outputs:
     max: 1                            # Maximum per run (default: 1)
 ```
 
-When `target` is `"triggering"`, Stage 3 uses
-`SYSTEM_PULLREQUEST_PULLREQUESTID`. When `target` is a number, that configured
+When `target` is `"triggering"`, Stage 3 requires the complete trusted native or
+synthetic PR identity, not just a matching numeric ID. When `target` is a number, that configured
 ADO PR ID is used. The tool fetches the PR first, applies the optional
 title/label filters, patches the PR status to `abandoned`, then optionally
 posts `body` as a PR thread comment.

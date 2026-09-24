@@ -987,27 +987,10 @@ async fn run_execute(options: RunExecuteOptions) -> Result<()> {
     }
 
     let source = source.context("--source or --resolved-config is required for execution")?;
-    // Read and parse source markdown to get tool configs.
-    // Use parse_markdown_detailed so Stage 3 benefits from in-memory
-    // codemod fixes when a source has deprecated shapes. Stage 3 must
-    // NOT rewrite the source file (the executor's working tree is not
-    // the source-of-truth tree), so we just emit a log warning.
-    let content = tokio::fs::read_to_string(&source)
+    // Match compile's effective imported policy without rewriting source/cache files.
+    let mut front_matter = compile::prepare_source_front_matter(&source)
         .await
-        .with_context(|| format!("Failed to read source file: {}", source.display()))?;
-
-    let parsed = compile::parse_markdown_detailed(&content)
-        .with_context(|| format!("Failed to parse source file: {}", source.display()))?;
-
-    if parsed.codemods.changed() {
-        log::warn!(
-            "front matter at {} contains deprecated shapes; running with in-memory codemod fixes applied. Run `ado-aw compile {}` to update the source.",
-            source.display(),
-            source.display(),
-        );
-    }
-
-    let mut front_matter = parsed.front_matter;
+        .with_context(|| format!("Failed to prepare source file: {}", source.display()))?;
 
     // Sanitize before lowering repos, mirroring compile_pipeline_inner
     // and check_pipeline so unsanitized fields never flow into the

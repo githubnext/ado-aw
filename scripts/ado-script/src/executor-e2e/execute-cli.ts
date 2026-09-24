@@ -241,7 +241,8 @@ export async function runExecute(opts: RunExecuteOptions): Promise<RunExecuteRes
     records = parseExecutedRecords(await readFile(executedPath, "utf8"));
   }
   const snake = opts.tool.replaceAll("-", "_");
-  const record = records.find((r) => r.name === snake);
+  const priorOccurrences = priorEntries.filter((prior) => prior.tool === opts.tool).length;
+  const record = records.filter((r) => r.name === snake)[priorOccurrences];
 
   return { exitCode, stdout, stderr, records, record, safeOutputDir };
 }

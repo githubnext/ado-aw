@@ -129,6 +129,12 @@ tool references are highlighted with source locations and replacement guidance;
 the markdown body is never automatically rewritten. The warning persists on
 subsequent compile/lint passes until the author updates the instructions.
 
+The original declaration shape is significant: bare/null/true `update-pr`
+declarations migrate without voting, whereas vote-enabled mappings must carry
+explicit legacy `allowed-votes`. The legacy vocabulary is validated before
+translation; review-only values are not silently accepted as old votes.
+Invalid policy and migration conflicts leave the source untouched.
+
 You need a codemod whenever you introduce a breaking change to the
 front-matter grammar:
 

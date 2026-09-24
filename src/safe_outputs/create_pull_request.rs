@@ -3566,6 +3566,7 @@ index 0000000..abcdefg
                 std::collections::HashMap::new(),
             )),
             budget_groups: Default::default(),
+            triggering_pr: Default::default(),
             triggered_by_build_id: None,
             triggered_by_definition_name: None,
             triggered_by_build_number: None,

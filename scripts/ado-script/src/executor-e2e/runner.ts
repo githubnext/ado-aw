@@ -143,17 +143,29 @@ export async function runScenario<S>(
         message: `no executed record for '${tool}' (exit ${result.exitCode}); stderr: ${result.stderr.trim().slice(0, 500)}`,
       });
     }
-    if (result.record.status !== "succeeded") {
-      const expected = scenario.expectedFailure;
+    const expected = scenario.expectedFailure;
+    if (expected) {
       const error = result.record.error ?? "";
-      if (
-        expected &&
-        (expected.status === undefined || result.record.status === expected.status) &&
-        expected.error.test(error)
-      ) {
-        ctx.log(`[${scenarioId}] expected failure: ${error}`);
-        return finish({ ok: true });
+      if (result.record.status === "succeeded"
+        || result.record.status !== (expected.status ?? "failed")
+        || !expected.error.test(error)) {
+        return finish({
+          ok: false,
+          phase: "execute",
+          message: `expected rejection was not observed: status='${result.record.status}', error='${error}'`,
+        });
       }
+      if (scenario.assertFailure) {
+        try {
+          await scenario.assertFailure(ctx, state, result.record, result.records);
+        } catch (err) {
+          return finish({ ok: false, phase: "assert", message: errMessage(err) });
+        }
+      }
+      ctx.log(`[${scenarioId}] expected failure verified: ${error}`);
+      return finish({ ok: true });
+    }
+    if (result.record.status !== "succeeded") {
       return finish({
         ok: false,
         phase: "execute",

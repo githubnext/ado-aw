@@ -191,6 +191,13 @@ export interface Scenario<State = unknown> {
     readonly status?: string;
     readonly error: RegExp;
   };
+  /** Verify postconditions after a matching expected failure, such as no mutation. */
+  assertFailure?(
+    ctx: ScenarioContext,
+    state: State,
+    record: ExecutedRecord,
+    records: ExecutedRecord[],
+  ): Promise<void>;
   /**
    * Assert the ADO side-effect actually happened. Throw on failure.
    *

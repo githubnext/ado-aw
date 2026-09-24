@@ -43,6 +43,14 @@ gitignored, non-root path) and is **deliberately excluded** from the released
 
 ## Coverage
 
+Negative scenarios may provide `assertFailure` to verify postconditions after
+the expected status/error matches (for example, that a rejected description
+left the PR unchanged). A matching error alone does not bypass that hook.
+Ordinary `assert` and `postExecute` remain success-only, and cleanup still runs
+after a failed assertion. An unexpected success is a scenario failure.
+When `priorEntries` repeat the primary tool, the harness selects the primary
+record after those occurrences rather than reusing the first matching record.
+
 The PR family includes focused content updates (including the exact
 4,000-character description boundary), abandonment with comment verification,
 and create-then-follow-up reviewer/content scenarios. Reviewer handoffs use

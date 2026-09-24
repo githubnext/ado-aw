@@ -259,6 +259,8 @@ pub struct ExecutionContext {
     /// PR ID when `BUILD_REASON=PullRequest` (`SYSTEM_PULLREQUEST_PULLREQUESTID`)
     #[allow(dead_code)]
     pub pull_request_id: Option<String>,
+    /// Trusted trigger identity, independent of compiler-owned self and CLI routing overrides.
+    pub triggering_pr: Option<super::pr_common::TriggeringPullRequest>,
     /// PR source branch (`SYSTEM_PULLREQUEST_SOURCEBRANCH`)
     #[allow(dead_code)]
     pub pull_request_source_branch: Option<String>,
@@ -536,6 +538,7 @@ impl ExecutionContext {
 
             // Pull request variables
             pull_request_id: env("SYSTEM_PULLREQUEST_PULLREQUESTID"),
+            triggering_pr: super::pr_common::TriggeringPullRequest::from_env(&env),
             pull_request_source_branch: env("SYSTEM_PULLREQUEST_SOURCEBRANCH"),
             pull_request_target_branch: env("SYSTEM_PULLREQUEST_TARGETBRANCH"),
 

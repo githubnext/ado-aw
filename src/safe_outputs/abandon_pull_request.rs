@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::pr_common::{
-    PullRequestReference, repository_api_base, resolve_pr_target, resolved_reference_id,
+    PrTargetPolicy, PullRequestReference, repository_api_base, resolve_pr_policy_target,
     validate_reference,
 };
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
@@ -227,10 +227,14 @@ pub(crate) fn validate_abandon_pull_request_config(
     Ok(())
 }
 
-fn parse_positive(value: Option<&str>) -> Option<u64> {
-    value
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|id| *id > 0)
+impl AbandonPullRequestConfig {
+    pub(crate) fn target_policy(&self) -> anyhow::Result<PrTargetPolicy> {
+        match self.target {
+            AbandonPullRequestTarget::Id(id) => PrTargetPolicy::fixed(id),
+            AbandonPullRequestTarget::Triggering => Ok(PrTargetPolicy::Triggering),
+            AbandonPullRequestTarget::Any => Ok(PrTargetPolicy::Explicit),
+        }
+    }
 }
 
 fn pr_labels(pr: &serde_json::Value) -> Vec<String> {
@@ -244,50 +248,6 @@ fn pr_labels(pr: &serde_json::Value) -> Vec<String> {
 }
 
 impl AbandonPullRequestResult {
-    fn resolve_target_id(
-        &self,
-        config: &AbandonPullRequestConfig,
-        ctx: &ExecutionContext,
-    ) -> Result<u64, ExecutionResult> {
-        let requested = self
-            .pull_request_id
-            .as_ref()
-            .map(|reference| resolved_reference_id(reference, ctx))
-            .transpose()?;
-        match config.target {
-            AbandonPullRequestTarget::Id(id) => {
-                if let Some(requested) = requested
-                    && requested != id
-                {
-                    return Err(ExecutionResult::failure(format!(
-                        "requested pull_request_id #{requested} does not match configured target #{id}"
-                    )));
-                }
-                Ok(id)
-            }
-            AbandonPullRequestTarget::Any => requested.ok_or_else(|| {
-                ExecutionResult::failure(
-                    "pull_request_id is required when safe-outputs.abandon-pull-request.target is '*'",
-                )
-            }),
-            AbandonPullRequestTarget::Triggering => {
-                let triggering = parse_positive(ctx.pull_request_id.as_deref()).ok_or_else(|| {
-                    ExecutionResult::failure(
-                        "safe-outputs.abandon-pull-request.target is 'triggering' but no Azure DevOps pull request context is available; use target: '*' and pass pull_request_id, or configure a numeric target",
-                    )
-                })?;
-                if let Some(requested) = requested
-                    && requested != triggering
-                {
-                    return Err(ExecutionResult::failure(format!(
-                        "requested pull_request_id #{requested} does not match triggering pull request #{triggering}"
-                    )));
-                }
-                Ok(triggering)
-            }
-        }
-    }
-
     fn repository_selector<'a>(&'a self, config: &'a AbandonPullRequestConfig) -> Option<&'a str> {
         self.repository.as_deref().or(config.target_repo.as_deref())
     }
@@ -472,16 +432,9 @@ impl Executor for AbandonPullRequestResult {
             return Ok(ExecutionResult::failure(error.to_string()));
         }
 
-        let pull_request_id = match self.resolve_target_id(&config, ctx) {
-            Ok(id) => id,
-            Err(result) => return Ok(result),
-        };
-        let reference = self
-            .pull_request_id
-            .clone()
-            .unwrap_or(PullRequestReference::Number(pull_request_id));
-        let (_, target) = match resolve_pr_target(
-            &reference,
+        let (pull_request_id, target) = match resolve_pr_policy_target(
+            &config.target_policy()?,
+            self.pull_request_id.as_ref(),
             self.repository_selector(&config),
             &config.allowed_repositories,
             ctx,
@@ -1030,14 +983,18 @@ mod tests {
     async fn triggering_target_uses_context_pull_request_id() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/proj/_apis/git/repositories/repo/pullRequests/9"))
+            .and(path(
+                "/proj/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/9",
+            ))
             .and(query_param("api-version", "7.1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(pr("active")))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
-            .and(path("/proj/_apis/git/repositories/repo/pullRequests/9"))
+            .and(path(
+                "/proj/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/9",
+            ))
             .and(query_param("api-version", "7.1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .expect(1)
@@ -1045,6 +1002,13 @@ mod tests {
             .await;
         let mut ctx = context(&server, serde_json::json!({}));
         ctx.pull_request_id = Some("9".to_string());
+        ctx.triggering_pr = Some(super::super::pr_common::TriggeringPullRequest {
+            collection_uri: server.uri(),
+            project: "proj".into(),
+            repository_name: "repo".into(),
+            repository_id: "11111111-1111-1111-1111-111111111111".into(),
+            id: "9".into(),
+        });
         let mut result: AbandonPullRequestResult = AbandonPullRequestParams {
             pull_request_id: None,
             body: None,

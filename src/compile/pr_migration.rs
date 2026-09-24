@@ -7,6 +7,42 @@ use serde_json::{Map, Value, json};
 use super::types::FrontMatter;
 
 pub const LEGACY_PR_CONFIG: &str = "legacy-update-pr";
+pub(crate) const LEGACY_PR_VOTES: &[&str] = &[
+    "approve",
+    "approve-with-suggestions",
+    "wait-for-author",
+    "reject",
+    "reset",
+];
+
+pub fn validate_legacy_votes(votes: &[String]) -> Result<()> {
+    for vote in votes {
+        ensure!(
+            LEGACY_PR_VOTES.contains(&vote.as_str()),
+            "update-pr.allowed-votes contains unsupported legacy vote '{}'; supported values: {}",
+            crate::sanitize::neutralize_pipeline_commands(vote),
+            LEGACY_PR_VOTES.join(", ")
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_legacy_metadata(front_matter: &FrontMatter) -> Result<()> {
+    for (_, tool) in PR_OPERATIONS {
+        let Some(metadata) = front_matter.safe_outputs.get(*tool)
+            .and_then(|config| config.get(LEGACY_PR_CONFIG)) else {
+            continue;
+        };
+        ensure!(metadata.is_object(), "safe-outputs.{tool}.{LEGACY_PR_CONFIG} must be an object");
+        let votes: Vec<String> = metadata.get("allowed-votes").cloned()
+            .map(serde_json::from_value).transpose()
+            .with_context(|| format!("safe-outputs.{tool}.{LEGACY_PR_CONFIG}.allowed-votes must be a list"))?
+            .unwrap_or_default();
+        validate_legacy_votes(&votes)
+            .with_context(|| format!("safe-outputs.{tool}.{LEGACY_PR_CONFIG} has invalid vote policy"))?;
+    }
+    Ok(())
+}
 pub const PR_TOOL_RENAMES: &[(&str, &str)] = &[
     ("add-pr-comment", "add-pull-request-comment"),
     ("reply-to-pr-comment", "reply-to-pull-request-comment"),
@@ -44,6 +80,7 @@ pub fn migrate_safe_outputs(outputs: &mut Map<String, Value>) -> Result<bool> {
     let Some(raw) = outputs.get("update-pr") else {
         return Ok(false);
     };
+    let bare = raw.is_null() || raw == &Value::Bool(true);
     let original = match raw {
         Value::Null | Value::Bool(true) => Map::new(),
         Value::Object(config) => config.clone(),
@@ -65,7 +102,8 @@ pub fn migrate_safe_outputs(outputs: &mut Map<String, Value>) -> Result<bool> {
     let selected: Vec<_> = PR_OPERATIONS
         .iter()
         .filter(|(operation, _)| {
-            operations.is_empty() || operations.iter().any(|allowed| allowed == operation)
+            (!bare || *operation != "vote")
+                && (operations.is_empty() || operations.iter().any(|allowed| allowed == operation))
         })
         .copied()
         .collect();
@@ -83,6 +121,7 @@ pub fn migrate_safe_outputs(outputs: &mut Map<String, Value>) -> Result<bool> {
         .transpose()
         .context("update-pr.allowed-votes must be a list")?
         .unwrap_or_default();
+    validate_legacy_votes(&votes)?;
 
     let mut migrated = outputs.clone();
     let mut groups: BudgetGroups = outputs
@@ -255,39 +294,17 @@ pub fn validate_execution_budget_groups(ctx: &crate::safe_outputs::ExecutionCont
     Ok(())
 }
 
-pub fn rename_pr_tools(outputs: &mut Map<String, Value>) -> Result<bool> {
-    let mut renamed = outputs.clone();
-    let mut changed = false;
-    for (old, new) in PR_TOOL_RENAMES {
-        if let Some(config) = renamed.get(*old).cloned() {
-            ensure!(
-                !renamed.contains_key(*new),
-                "manual migration required: both {old} and {new} are configured"
-            );
-            renamed.remove(*old);
-            renamed.insert((*new).to_string(), config);
-            changed = true;
-        }
-    }
-    if let Some(raw_groups) = renamed.get("budget-groups") {
-        let mut groups: BudgetGroups = serde_json::from_value(raw_groups.clone())
-            .context("safe-outputs.budget-groups has invalid configuration")?;
-        let mut groups_changed = false;
-        for group in groups.values_mut() {
-            for tool in &mut group.tools {
-                if let Some((_, new)) = PR_TOOL_RENAMES.iter().find(|(old, _)| *old == tool) {
-                    *tool = (*new).to_string();
-                    groups_changed = true;
-                }
-            }
-        }
-        if groups_changed {
-            renamed.insert("budget-groups".to_string(), serde_json::to_value(groups)?);
-            changed = true;
-        }
-    }
+#[cfg(test)]
+fn rename_pr_tools(outputs: &mut Map<String, Value>) -> Result<bool> {
+    let mut manifest = serde_yaml::Mapping::new();
+    manifest.insert(
+        serde_yaml::Value::String("safe-outputs".into()),
+        serde_yaml::to_value(&*outputs)?,
+    );
+    let custom = super::imports::pr_policy::local_custom_job_names(&manifest)?;
+    let changed = super::imports::pr_policy::rename_declarations(&mut manifest, &custom)?;
     if changed {
-        *outputs = renamed;
+        *outputs = serde_json::from_value(serde_json::to_value(&manifest["safe-outputs"])?)?;
     }
     Ok(changed)
 }
@@ -336,6 +353,61 @@ pub fn warn_prompt_references(source: &std::path::Path, content: &str, body: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_votes_are_validated_before_translating_and_without_mutation() {
+        for vote in ["comment", "request-changes", "Approve", "unknown"] {
+            let mut outputs = json!({
+                "update-pr": {"allowed-operations": ["vote"], "allowed-votes": [vote]}
+            }).as_object().unwrap().clone();
+            let original = outputs.clone();
+            let error = migrate_safe_outputs(&mut outputs).unwrap_err().to_string();
+            assert!(error.contains("unsupported legacy vote"), "{error}");
+            assert!(error.contains(vote), "{error}");
+            assert_eq!(outputs, original);
+        }
+        for vote in LEGACY_PR_VOTES {
+            let mut outputs = json!({
+                "update-pr": {"allowed-operations": ["vote"], "allowed-votes": [vote]}
+            }).as_object().unwrap().clone();
+            migrate_safe_outputs(&mut outputs).unwrap();
+            assert_eq!(outputs["submit-pull-request-review"]["allowed-events"], json!([vote]));
+            assert_eq!(outputs["submit-pull-request-review"][LEGACY_PR_CONFIG]["allowed-votes"], json!([vote]));
+        }
+    }
+
+    #[test]
+    fn bare_declarations_keep_non_voting_capabilities_and_one_shared_budget() {
+        for config in [Value::Null, Value::Bool(true)] {
+            let mut outputs = Map::from_iter([("update-pr".to_string(), config)]);
+            migrate_safe_outputs(&mut outputs).unwrap();
+            assert!(!outputs.contains_key("submit-pull-request-review"));
+            for tool in ["add-pull-request-reviewers", "add-pull-request-labels",
+                         "set-pull-request-auto-complete", "update-pull-request"] {
+                assert!(outputs.contains_key(tool), "missing {tool}");
+            }
+            assert_eq!(outputs["budget-groups"]["update-pr"]["max"], 1);
+            assert_eq!(outputs["budget-groups"]["update-pr"]["tools"].as_array().unwrap().len(), 4);
+            let snapshot = outputs.clone();
+            assert!(!migrate_safe_outputs(&mut outputs).unwrap());
+            assert_eq!(outputs, snapshot);
+        }
+    }
+
+    #[test]
+    fn invalid_persisted_legacy_votes_are_rejected_but_native_review_events_are_not() {
+        for event in ["comment", "request-changes"] {
+            let source = format!("---\nname: test\ndescription: d\nsafe-outputs:\n  submit-pull-request-review:\n    allowed-events: [{event}]\n    legacy-update-pr:\n      allowed-operations: [vote]\n      allowed-votes: [{event}]\n---\nbody\n");
+            let parsed = crate::compile::parse_markdown_detailed(&source).unwrap();
+            let error = validate_legacy_metadata(&parsed.front_matter).unwrap_err();
+            assert!(format!("{error:#}").contains("unsupported legacy vote"));
+            let mut native = parsed.front_matter;
+            native.safe_outputs.get_mut("submit-pull-request-review").unwrap()
+                .as_object_mut().unwrap().remove(LEGACY_PR_CONFIG);
+            validate_legacy_metadata(&native).unwrap();
+            crate::compile::common::validate_pull_request_outputs_config(&native).unwrap();
+        }
+    }
 
     #[test]
     fn renamed_tools_preserve_configuration_and_are_idempotent() {

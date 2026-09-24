@@ -10,8 +10,8 @@ use ado_aw_derive::SanitizeConfig;
 
 use super::authenticate_ado_request;
 use super::pr_common::{
-    PullRequestReference, legacy_policy, repository_api_base, resolve_pr_target,
-    resolved_reference_id, validate_description, validate_reference,
+    PrTargetPolicy, PullRequestReference, legacy_policy, repository_api_base,
+    resolve_pr_policy_target, resolve_pr_target, validate_description, validate_reference,
 };
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{
@@ -292,6 +292,15 @@ pub(crate) fn validate_update_pull_request_config(
     Ok(())
 }
 
+impl UpdatePullRequestConfig {
+    pub(crate) fn target_policy(&self) -> anyhow::Result<PrTargetPolicy> {
+        match &self.target {
+            UpdatePullRequestTarget::Id(id) => PrTargetPolicy::fixed(*id),
+            UpdatePullRequestTarget::Named(value) => PrTargetPolicy::named(value),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RawPullRequest {
     #[serde(rename = "pullRequestId")]
@@ -407,20 +416,6 @@ fn build_updated_body(
     Ok(updated)
 }
 
-fn ctx_pull_request_id(ctx: &ExecutionContext) -> Result<u64, ExecutionResult> {
-    let raw = ctx.pull_request_id.as_deref().ok_or_else(|| {
-        ExecutionResult::failure(
-            "SYSTEM_PULLREQUEST_PULLREQUESTID is required for target \"triggering\"",
-        )
-    })?;
-    raw.parse::<u64>().ok().filter(|id| *id > 0).ok_or_else(|| {
-        ExecutionResult::failure(format!(
-            "SYSTEM_PULLREQUEST_PULLREQUESTID '{}' is not a positive pull request ID",
-            crate::sanitize::neutralize_pipeline_commands(raw)
-        ))
-    })
-}
-
 impl UpdatePullRequestResult {
     fn requested_id(&self) -> anyhow::Result<Option<PullRequestReference>> {
         UpdatePullRequestParams {
@@ -435,58 +430,6 @@ impl UpdatePullRequestResult {
             repository: self.repository.clone(),
         }
         .requested_id()
-    }
-
-    fn resolve_id(
-        &self,
-        config: &UpdatePullRequestConfig,
-        ctx: &ExecutionContext,
-    ) -> Result<u64, ExecutionResult> {
-        let requested = self
-            .requested_id()
-            .map_err(|error| ExecutionResult::failure(error.to_string()))?
-            .as_ref()
-            .map(|reference| resolved_reference_id(reference, ctx))
-            .transpose()?;
-        match &config.target {
-            UpdatePullRequestTarget::Id(id) => {
-                if let Some(requested) = requested
-                    && requested != *id
-                {
-                    return Err(ExecutionResult::failure(format!(
-                        "requested pull_request_id #{requested} does not match configured target #{id}"
-                    )));
-                }
-                Ok(*id)
-            }
-            UpdatePullRequestTarget::Named(target) if target == "*" => requested.ok_or_else(|| {
-                ExecutionResult::failure(
-                    "pull_request_id is required when safe-outputs.update-pull-request.target is \"*\"",
-                )
-            }),
-            UpdatePullRequestTarget::Named(target) if target == "triggering" => {
-                let triggering = ctx_pull_request_id(ctx)?;
-                if let Some(requested) = requested
-                    && requested != triggering
-                {
-                    return Err(ExecutionResult::failure(format!(
-                        "requested pull_request_id #{requested} does not match triggering pull request #{triggering}"
-                    )));
-                }
-                Ok(triggering)
-            }
-            UpdatePullRequestTarget::Named(target) if target.parse::<u64>().is_ok_and(|id| id > 0) => {
-                let id = target.parse::<u64>().map_err(|error| ExecutionResult::failure(error.to_string()))?;
-                if requested.is_some_and(|requested| requested != id) {
-                    return Err(ExecutionResult::failure(format!("requested pull_request_id does not match configured target #{id}")));
-                }
-                Ok(id)
-            }
-            UpdatePullRequestTarget::Named(target) => Err(ExecutionResult::failure(format!(
-                "unsupported update-pull-request target '{}'",
-                crate::sanitize::neutralize_pipeline_commands(target)
-            ))),
-        }
     }
 
     fn requested_fields(&self) -> Vec<&'static str> {
@@ -630,15 +573,10 @@ impl Executor for UpdatePullRequestResult {
                 "at least one of title or body is required",
             ));
         }
-        let pr_id = match self.resolve_id(&config, ctx) {
-            Ok(pr_id) => pr_id,
-            Err(result) => return Ok(result),
-        };
-        let reference = self
-            .requested_id()?
-            .unwrap_or(PullRequestReference::Number(pr_id));
-        let (_, target) = match resolve_pr_target(
-            &reference,
+        let requested = self.requested_id()?;
+        let (pr_id, target) = match resolve_pr_policy_target(
+            &config.target_policy()?,
+            requested.as_ref(),
             self.repository.as_deref(),
             &config.allowed_repositories,
             ctx,
@@ -646,6 +584,7 @@ impl Executor for UpdatePullRequestResult {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
+        let reference = requested.unwrap_or(PullRequestReference::Number(pr_id));
         if let Some(legacy) = &legacy
             && let Err(failure) = resolve_pr_target(
                 &reference,
@@ -777,6 +716,13 @@ mod tests {
             access_token: Some("token".to_string()),
             repository_name: Some("repo".to_string()),
             pull_request_id: Some("7".to_string()),
+            triggering_pr: Some(super::super::pr_common::TriggeringPullRequest {
+                collection_uri: server.uri(),
+                project: "project".into(),
+                repository_name: "repo".into(),
+                repository_id: "11111111-1111-1111-1111-111111111111".into(),
+                id: "7".into(),
+            }),
             tool_configs,
             definition_id: Some(123),
             ..Default::default()
@@ -1018,13 +964,13 @@ mod tests {
         {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
-                .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+                .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
                 .expect(1)
                 .mount(&server)
                 .await;
             Mock::given(method("PATCH"))
-                .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+                .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
                 .and(body_json(
                     serde_json::json!({"description": "Existing body\n\n---\n\n`<safe>`"}),
                 ))
@@ -1101,13 +1047,13 @@ mod tests {
     async fn updates_triggering_pr_title_and_body() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
             .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
-            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
             .and(body_json(serde_json::json!({
                 "title": "Updated title",
                 "description": "Existing body\n\n---\n\nNew body"
@@ -1178,13 +1124,13 @@ mod tests {
     async fn repository_allowlist_uses_canonical_aliases() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
             .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
-            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
             .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
             .expect(1)
             .mount(&server)
@@ -1205,13 +1151,13 @@ mod tests {
     async fn rejects_filters_before_patch() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
             .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
-            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
             .respond_with(ResponseTemplate::new(200))
             .expect(0)
             .mount(&server)
@@ -1245,7 +1191,7 @@ mod tests {
         ] {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
-                .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+                .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
                 .respond_with(ResponseTemplate::new(get_status).set_body_json(
                     if get_status == 200 {
                         pr(7)
@@ -1257,7 +1203,7 @@ mod tests {
                 .mount(&server)
                 .await;
             Mock::given(method("PATCH"))
-                .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+                .and(path("/project/_apis/git/repositories/11111111-1111-1111-1111-111111111111/pullRequests/7"))
                 .respond_with(ResponseTemplate::new(patch_status))
                 .expect(if get_status == 200 { 1 } else { 0 })
                 .mount(&server)

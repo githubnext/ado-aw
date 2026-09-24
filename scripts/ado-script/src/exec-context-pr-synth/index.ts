@@ -36,6 +36,12 @@
  *   - `AW_PR_TARGETBRANCH` — resolved target ref (`refs/heads/<name>`)
  *   - `AW_PR_SOURCEBRANCH` — resolved source ref
  *   - `AW_PR_IS_DRAFT`     — "true"/"false"/"" (only meaningful on synth path)
+ *   - `AW_PR_TRIGGERING_IDENTITY` — JSON {collection_uri, project,
+ *                            repository_name, repository_id, id}; empty when
+ *                            complete trusted Azure Repos identity is unavailable.
+ *                            The ID is a decimal string. Consumed directly from
+ *                            Setup by preview and both SafeOutputs job variants,
+ *                            never relayed through agent-authored files.
  *   - `AW_SYNTHETIC_PR`    — "true" iff this build was synth-promoted
  *                            (i.e. CI build + matched open PR). Empty
  *                            on real PR builds and on non-promoted CI.
@@ -65,6 +71,7 @@ import {
   listActivePullRequestsBySourceRef,
 } from "../shared/ado-client.js";
 import { logError, logInfo, setOutput, setVar } from "../shared/vso-logger.js";
+import { isCurrentAdoOrganization, nativeTriggeringPrIdentity, parseAdoRepoUrl, positivePrId, type TriggeringPullRequest } from "../shared/ado-remote.js";
 
 import { matchesIncludeExclude, normalisePath, pathMatchesIncludeExclude } from "./match.js";
 import { decodeSpec, type PrSynthSpec } from "./spec.js";
@@ -111,6 +118,7 @@ function emitPrIdentifiers(
   targetBranch: string,
   sourceBranch: string,
   isDraft: string,
+  identity?: TriggeringPullRequest,
 ): void {
   const emitBoth = (name: string, value: string): void => {
     setOutput(name, value);
@@ -120,6 +128,7 @@ function emitPrIdentifiers(
   emitBoth("AW_PR_TARGETBRANCH", targetBranch);
   emitBoth("AW_PR_SOURCEBRANCH", sourceBranch);
   emitBoth("AW_PR_IS_DRAFT", isDraft);
+  emitBoth("AW_PR_TRIGGERING_IDENTITY", identity ? JSON.stringify(identity) : "");
 }
 
 function emitSkip(reason: string): void {
@@ -146,6 +155,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
       resolveAdoMacroEnv(env.SYSTEM_PULLREQUEST_TARGETBRANCH),
       resolveAdoMacroEnv(env.SYSTEM_PULLREQUEST_SOURCEBRANCH),
       resolveAdoMacroEnv(env.SYSTEM_PULLREQUEST_ISDRAFT),
+      nativeTriggeringPrIdentity(env),
     );
     logInfo(
       `[synth-pr] real PR build #${realPrId}; propagating SYSTEM_PULLREQUEST_* to AW_PR_*`,
@@ -180,7 +190,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     return 0;
   }
 
-  const project = env.SYSTEM_TEAMPROJECT ?? "";
+  const buildRepository = parseAdoRepoUrl(env.BUILD_REPOSITORY_URI ?? "");
+  const project = buildRepository && isCurrentAdoOrganization(buildRepository, env)
+    ? buildRepository.project : env.SYSTEM_TEAMPROJECT ?? "";
   const repoId = env.BUILD_REPOSITORY_ID ?? "";
   if (project.length === 0 || repoId.length === 0) {
     logError(
@@ -225,7 +237,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
 
   const pr = matched[0]!;
   const prId = pr.pullRequestId;
-  if (typeof prId !== "number") {
+  if (typeof prId !== "number" || !positivePrId(prId)) {
     emitPrIdentifiers("", "", "", "");
     emitSkip("matched PR has no pullRequestId");
     return 0;
@@ -300,6 +312,15 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     pr.targetRefName ?? "",
     pr.sourceRefName ?? sourceBranch,
     pr.isDraft === true ? "true" : "false",
+    // The existing exact repo-scoped lookup selected this PR; no second lookup.
+    // A contradictory repository identity in its response fails closed.
+    (pr.repository?.id && pr.repository.id.toLowerCase() !== repoId.toLowerCase())
+      || (pr.repository?.project?.name && pr.repository.project.name.toLowerCase() !== project.toLowerCase())
+      || (pr.repository?.name && buildRepository && pr.repository.name.toLowerCase() !== buildRepository.repository.toLowerCase())
+      ? undefined
+      : nativeTriggeringPrIdentity({
+          ...env, BUILD_REASON: "PullRequest", SYSTEM_PULLREQUEST_PULLREQUESTID: String(prId),
+        }),
   );
   setOutput("AW_SYNTHETIC_PR", "true");
   setVar("AW_SYNTHETIC_PR", "true");

@@ -938,6 +938,31 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
+    async fn invalid_legacy_review_metadata_cannot_reset_a_vote() {
+        let server = wiremock::MockServer::start().await;
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("org".into()),
+            ado_project: Some("project".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("test-token".into()),
+            tool_configs: HashMap::from([("submit-pull-request-review".into(), serde_json::json!({
+                "allowed-events": ["comment"],
+                "legacy-update-pr": {"allowed-operations": ["vote"], "allowed-votes": ["comment"]}
+            }))]),
+            ..Default::default()
+        };
+        let error = execute_safe_output(&serde_json::json!({
+            "name": "submit-pull-request-review",
+            "pull_request_id": 42,
+            "event": "comment",
+            "legacy-update-pr": {"allowed-votes": ["reset"]}
+        }), &ctx).await.expect_err("trusted invalid legacy policy must fail before requests");
+        assert!(format!("{error:#}").contains("unsupported legacy vote"), "{error:#}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn old_pull_request_names_have_no_stage_three_aliases() {
         let ctx = ExecutionContext {
             dry_run: true,

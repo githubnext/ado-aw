@@ -32,13 +32,7 @@ const VALID_OPERATIONS: &[&str] = &[
 ];
 
 /// Valid vote values
-const VALID_VOTES: &[&str] = &[
-    "approve",
-    "approve-with-suggestions",
-    "wait-for-author",
-    "reject",
-    "reset",
-];
+const VALID_VOTES: &[&str] = crate::compile::pr_migration::LEGACY_PR_VOTES;
 
 /// Valid merge strategy values accepted by ADO's completionOptions.mergeStrategy
 const VALID_MERGE_STRATEGIES: &[&str] = &["squash", "noFastForward", "rebase", "rebaseMerge"];

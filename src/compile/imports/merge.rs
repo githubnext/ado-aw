@@ -1,11 +1,12 @@
 //! Field-specific merge policy for compile-time reusable imports.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde_yaml::{Mapping, Value};
 
+use super::pr_policy;
 use super::schema::apply_import_inputs;
 use super::{ManifestFetcher, ResolvedImport, resolve_imports_with_repo_root};
 use crate::compile::custom_tools::COMPONENT_PROVENANCE_KEYS;
@@ -69,7 +70,7 @@ pub fn merge_resolved_imported_body(
     consumer_fm: &mut Mapping,
     resolved: &[ResolvedImport],
 ) -> Result<String> {
-    let mut state = MergeState::default();
+    let mut components = Vec::new();
     let mut body_parts = Vec::new();
 
     for import in resolved {
@@ -82,8 +83,15 @@ pub fn merge_resolved_imported_body(
                     )
                 })?;
         stamp_component_provenance(&mut front_matter, import);
+        for line in crate::compile::pr_migration::deprecated_pr_prompt_lines(&body) {
+            eprintln!(
+                "warning: imported component `{}` (body line {line}): {}",
+                crate::sanitize::neutralize_pipeline_commands(&import.provenance.source),
+                crate::compile::pr_migration::PR_PROMPT_GUIDANCE,
+            );
+        }
         if let Value::Mapping(mapping) = front_matter {
-            state.merge_import(&mapping, &import.provenance.source)?;
+            components.push((mapping, &import.provenance.source));
         }
         let body = body.trim();
         if !body.is_empty() {
@@ -91,7 +99,33 @@ pub fn merge_resolved_imported_body(
         }
     }
 
-    state.overlay_consumer(consumer_fm)?;
+    let custom_jobs = pr_policy::custom_job_names(
+        std::iter::once(&*consumer_fm).chain(components.iter().map(|(mapping, _)| mapping)),
+    )?;
+    let mut consumer = consumer_fm.clone();
+    pr_policy::rename_declarations(&mut consumer, &custom_jobs)
+        .context("failed to normalize consumer safe-output declarations")?;
+    let mut state = MergeState {
+        custom_jobs,
+        ..Default::default()
+    };
+    for (mut component, source) in components {
+        pr_policy::rename_declarations(&mut component, &state.custom_jobs)
+            .with_context(|| format!("failed to normalize imported component `{source}`"))?;
+        state.merge_import(&component, source)?;
+    }
+    state.overlay_consumer(&consumer)?;
+    pr_policy::transform_builtins(
+        &mut state.merged,
+        &state.custom_jobs,
+        crate::compile::pr_migration::migrate_safe_outputs,
+    )
+    .with_context(|| {
+        format!(
+            "failed to migrate effective safe-outputs from `{}` after resolving imports",
+            state.legacy_family_origin.as_deref().unwrap_or("consumer")
+        )
+    })?;
     dedupe_repos(&mut state.merged)?;
     state.merged.remove(Value::String("imports".to_string()));
     *consumer_fm = state.merged;
@@ -104,10 +138,24 @@ struct MergeState {
     env_origins: HashMap<String, String>,
     mcp_origins: HashMap<String, String>,
     safe_output_origins: HashMap<String, String>,
+    custom_jobs: HashSet<String>,
+    legacy_family_origin: Option<String>,
 }
 
 impl MergeState {
     fn merge_import(&mut self, component: &Mapping, source: &str) -> Result<()> {
+        if let Some(Value::Mapping(outputs)) = component.get("safe-outputs")
+            && pr_policy::legacy_family(outputs, &self.custom_jobs)
+                .with_context(|| format!("invalid legacy PR declaration in `{source}`"))?
+                .is_some()
+        {
+            if let Some(previous) = &self.legacy_family_origin {
+                anyhow::bail!(
+                    "import conflict: `safe-outputs.update-pr` legacy family is defined by both `{previous}` and `{source}`"
+                );
+            }
+            self.legacy_family_origin = Some(source.to_string());
+        }
         for (key, value) in component {
             let Some(key) = key.as_str() else {
                 continue;
@@ -144,6 +192,11 @@ impl MergeState {
     }
 
     fn overlay_consumer(&mut self, consumer: &Mapping) -> Result<()> {
+        if let Some(Value::Mapping(outputs)) = consumer.get("safe-outputs")
+            && pr_policy::legacy_family(outputs, &self.custom_jobs)?.is_some()
+        {
+            self.legacy_family_origin = Some("consumer".to_string());
+        }
         for (key, value) in consumer {
             let Some(key) = key.as_str() else {
                 continue;
@@ -161,7 +214,9 @@ impl MergeState {
                     // imported requirement.
                     merge_permissions_required(&mut self.merged, value)?;
                 }
-                "safe-outputs" => overlay_consumer_safe_outputs(&mut self.merged, value)?,
+                "safe-outputs" => {
+                    overlay_consumer_safe_outputs(&mut self.merged, value, &self.custom_jobs)?
+                }
                 "repos" => overlay_consumer_repos(&mut self.merged, value)?,
                 "steps" => append_sequence(&mut self.merged, key, value)?,
                 "post-steps" => prepend_sequence(&mut self.merged, key, value)?,
@@ -461,6 +516,23 @@ fn merge_import_safe_outputs(
             "jobs" => {
                 merge_import_custom_jobs(safe_outputs, value, source, origins)?;
             }
+            "budget-groups" => {
+                let groups = value
+                    .as_mapping()
+                    .context("imported safe-outputs.budget-groups must be a mapping")?;
+                let target_groups = ensure_mapping_field(safe_outputs, "budget-groups")?;
+                for (key, group) in groups {
+                    let name = key.as_str().context("budget group names must be strings")?;
+                    let origin_key = format!("safe-outputs.budget-groups.{name}");
+                    if let Some(previous) = origins.get(&origin_key) {
+                        anyhow::bail!(
+                            "import conflict: `{origin_key}` is defined by both `{previous}` and `{source}`"
+                        );
+                    }
+                    origins.insert(origin_key, source.to_string());
+                    target_groups.insert(key.clone(), group.clone());
+                }
+            }
             _ => {
                 let origin_key = format!("safe-outputs.{name}");
                 if let Some(previous) = origins.get(&origin_key) {
@@ -507,14 +579,24 @@ fn merge_import_custom_jobs(
     Ok(())
 }
 
-fn overlay_consumer_safe_outputs(target: &mut Mapping, incoming: &Value) -> Result<()> {
+fn overlay_consumer_safe_outputs(
+    target: &mut Mapping,
+    incoming: &Value,
+    custom_jobs: &HashSet<String>,
+) -> Result<()> {
     let incoming = incoming
         .as_mapping()
         .context("consumer `safe-outputs` must be a mapping")?;
     let safe_outputs = ensure_mapping_field(target, "safe-outputs")?;
+    pr_policy::replace_legacy_family(safe_outputs, incoming, custom_jobs)?;
     for (key, value) in incoming {
         if key.as_str() == Some("jobs") {
             overlay_consumer_custom_jobs(safe_outputs, value)?;
+        } else if key.as_str() == Some("budget-groups") {
+            let groups = value
+                .as_mapping()
+                .context("consumer safe-outputs.budget-groups must be a mapping")?;
+            ensure_mapping_field(safe_outputs, "budget-groups")?.extend(groups.clone());
         } else {
             // Built-in safe-output configuration is consumer-owned.
             safe_outputs.insert(key.clone(), value.clone());
@@ -987,7 +1069,10 @@ mod tests {
         merge_resolved(
             &mut consumer,
             "",
-            &[local("safe-outputs:\n  create-github-issue:\n    max: 1", "")],
+            &[local(
+                "safe-outputs:\n  create-github-issue:\n    max: 1",
+                "",
+            )],
         )
         .unwrap();
         assert_eq!(consumer["safe-outputs"]["create-github-issue"]["max"], 9);

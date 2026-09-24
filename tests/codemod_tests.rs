@@ -186,6 +186,74 @@ fn abbreviated_and_full_pr_keys_conflict_without_rewriting() {
     assert!(!source.with_extension("lock.yml").exists());
 }
 
+#[test]
+fn bare_update_pr_migrates_without_voting_and_stays_stable() {
+    for spelling in ["", "null", "true"] {
+        let dir = fresh_git_temp_dir();
+        let original = format!("---\nname: bare-pr\ndescription: d\nsafe-outputs:\n  update-pr: {spelling}\n---\nbody\n");
+        let source = write_source(dir.path(), &original);
+        let output = run_compile(&source);
+        assert!(output.status.success(), "{spelling}: {}", String::from_utf8_lossy(&output.stderr));
+        let after = fs::read_to_string(&source).unwrap();
+        let fm: serde_yaml::Value = serde_yaml::from_str(after.split("---").nth(1).unwrap()).unwrap();
+        assert!(fm["safe-outputs"]["submit-pull-request-review"].is_null());
+        assert_eq!(fm["safe-outputs"]["budget-groups"]["update-pr"]["max"], 1);
+        assert_eq!(fm["safe-outputs"]["budget-groups"]["update-pr"]["tools"].as_sequence().unwrap().len(), 4);
+        assert!(run_compile(&source).status.success());
+        assert_eq!(fs::read_to_string(&source).unwrap(), after);
+    }
+}
+
+#[test]
+fn invalid_legacy_votes_fail_before_rewrite_but_empty_object_is_not_bare() {
+    for config in [
+        "{allowed-operations: [vote], allowed-votes: [comment]}",
+        "{allowed-operations: [vote], allowed-votes: [request-changes]}",
+        "{allowed-operations: [vote], allowed-votes: [unknown]}",
+        "{allowed-operations: [vote], allowed-votes: comment}",
+        "{}",
+        "{allowed-operations: [vote]}",
+    ] {
+        let dir = fresh_git_temp_dir();
+        let original = format!("---\nname: invalid-vote\ndescription: d\nsafe-outputs:\n  update-pr: {config}\n---\nbody\n");
+        let source = write_source(dir.path(), &original);
+        let output = run_compile(&source);
+        assert!(!output.status.success(), "accepted {config}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("allowed-votes"));
+        assert_eq!(fs::read_to_string(&source).unwrap(), original);
+        assert!(!source.with_extension("lock.yml").exists());
+    }
+
+}
+
+#[test]
+fn execute_source_uses_imported_migrated_policy_without_rewriting_files() {
+    let dir = fresh_git_temp_dir();
+    let component = "---\nsafe-outputs:\n  add-pr-labels:\n    max: 0\n---\nImported instructions.\n";
+    let component_path = dir.path().join("shared.md");
+    fs::write(&component_path, component).unwrap();
+    let original = "---\nname: imported-execution\ndescription: d\nimports: [./shared.md]\n---\nRoot instructions.\n";
+    let source = write_source(dir.path(), original);
+    fs::write(
+        dir.path().join("safe_outputs.ndjson"),
+        "{\"name\":\"add-pull-request-labels\",\"pull_request_id\":42,\"labels\":[\"test\"]}\n",
+    ).unwrap();
+    let output = Command::new(ado_aw_binary())
+        .arg("execute")
+        .arg("--source").arg(&source)
+        .arg("--safe-output-dir").arg(dir.path())
+        .arg("--log-output-dir").arg(dir.path().join("logs"))
+        .arg("--dry-run")
+        .output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", String::from_utf8_lossy(&output.stderr));
+    let records = fs::read_to_string(dir.path().join("safe-outputs-executed.ndjson")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(records.trim()).unwrap();
+    assert_eq!(record["status"], "budget_exhausted");
+    assert!(record["error"].as_str().unwrap().contains("(0)"));
+    assert_eq!(fs::read_to_string(source).unwrap(), original);
+    assert_eq!(fs::read_to_string(component_path).unwrap(), component);
+}
+
 // ─── Legacy directory marker migration (codemod 0004) ──────────────────────
 
 #[test]

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use serde_yaml::{Mapping, Value};
+use serde_yaml::Mapping;
 
 use super::{Codemod, CodemodContext};
 
@@ -11,17 +11,16 @@ pub static CODEMOD: Codemod = Codemod {
 };
 
 fn apply(front_matter: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
-    let key = Value::String("safe-outputs".to_string());
-    let Some(raw) = front_matter.get(&key) else {
+    let Some(outputs) = front_matter.get("safe-outputs") else {
         return Ok(false);
     };
-    let value = serde_json::to_value(raw)?;
-    let Some(mut outputs) = value.as_object().cloned() else {
-        return Ok(false);
-    };
-    if !crate::compile::pr_migration::rename_pr_tools(&mut outputs)? {
+    if !crate::compile::pr_migration::PR_TOOL_RENAMES
+        .iter()
+        .any(|(old, _)| outputs.get(*old).is_some())
+        && outputs.get("budget-groups").is_none()
+    {
         return Ok(false);
     }
-    front_matter.insert(key, serde_yaml::to_value(outputs)?);
-    Ok(true)
+    let custom_jobs = crate::compile::imports::pr_policy::local_custom_job_names(front_matter)?;
+    crate::compile::imports::pr_policy::rename_declarations(front_matter, &custom_jobs)
 }
