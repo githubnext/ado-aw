@@ -9,7 +9,9 @@ use serde_json::{Map, Value};
 
 use ado_aw_derive::SanitizeConfig;
 
-use super::{PATH_SEGMENT, resolve_repo_name};
+use super::{
+    PATH_SEGMENT, authenticate_ado_request, canonical_repository_alias, resolve_repo_name,
+};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
@@ -496,12 +498,11 @@ impl UpdatePullRequestResult {
         repo_name: &str,
         token: &str,
         pr_id: i32,
+        ctx: &ExecutionContext,
     ) -> anyhow::Result<Result<RawPullRequest, ExecutionResult>> {
         let encoded_repo = utf8_percent_encode(repo_name, PATH_SEGMENT).to_string();
         let url = format!("{base_url}/{encoded_repo}/pullRequests/{pr_id}?api-version=7.1");
-        let response = client
-            .get(&url)
-            .basic_auth("", Some(token))
+        let response = authenticate_ado_request(client.get(&url), token, ctx.write_connection_type)
             .send()
             .await
             .context("Failed to fetch Azure DevOps pull request")?;
@@ -622,20 +623,27 @@ impl Executor for UpdatePullRequestResult {
             Ok(pr_id) => pr_id,
             Err(result) => return Ok(result),
         };
-        let repo_alias = self.repository.as_deref().unwrap_or("self");
+        let repo_selector = self.repository.as_deref().unwrap_or("self");
+        let Some(repo_alias) = canonical_repository_alias(repo_selector, ctx) else {
+            return Ok(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the configured checkout list",
+                crate::sanitize::neutralize_pipeline_commands(repo_selector)
+            )));
+        };
         if !config.allowed_repositories.is_empty()
             && !config
                 .allowed_repositories
                 .iter()
+                .filter_map(|allowed| canonical_repository_alias(allowed, ctx))
                 .any(|allowed| allowed == repo_alias)
         {
             return Ok(ExecutionResult::failure(format!(
                 "Repository '{}' is not in the allowed-repositories list: [{}]",
-                crate::sanitize::neutralize_pipeline_commands(repo_alias),
+                crate::sanitize::neutralize_pipeline_commands(repo_selector),
                 config.allowed_repositories.join(", ")
             )));
         }
-        let repo_name = match resolve_repo_name(self.repository.as_deref(), ctx) {
+        let repo_name = match resolve_repo_name(Some(&repo_alias), ctx) {
             Ok(name) => name,
             Err(failure) => return Ok(failure),
         };
@@ -647,7 +655,7 @@ impl Executor for UpdatePullRequestResult {
             encoded_project,
         );
         let current = match self
-            .fetch_pr(&client, &base_url, &repo_name, token, pr_id)
+            .fetch_pr(&client, &base_url, &repo_name, token, pr_id, ctx)
             .await?
         {
             Ok(pr) => pr,
@@ -679,14 +687,17 @@ impl Executor for UpdatePullRequestResult {
             "Updating Azure DevOps PR #{pr_id}: {}",
             self.requested_fields().join(", ")
         );
-        let response = client
-            .patch(&patch_url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&Value::Object(patch))
-            .send()
-            .await
-            .context("Failed to update Azure DevOps pull request")?;
+        let response = authenticate_ado_request(
+            client
+                .patch(&patch_url)
+                .header("Content-Type", "application/json")
+                .json(&Value::Object(patch)),
+            token,
+            ctx.write_connection_type,
+        )
+        .send()
+        .await
+        .context("Failed to update Azure DevOps pull request")?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response
@@ -886,6 +897,135 @@ mod tests {
         let execution = result.execute_sanitized(&ctx).await.unwrap();
         assert!(!execution.success);
         assert!(execution.message.contains("pull_request_id is required"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_disallowed_repository_before_network() {
+        let server = MockServer::start().await;
+        let ctx = context(
+            &server,
+            serde_json::json!({"allowed-repositories": ["other"]}),
+        );
+        let mut result: UpdatePullRequestResult = params().try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("allowed-repositories"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_allowlist_uses_canonical_aliases() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = context(
+            &server,
+            serde_json::json!({"allowed-repositories": ["self"]}),
+        );
+        let mut request = params();
+        request.repository = Some("REPO".to_string());
+        let mut result: UpdatePullRequestResult = request.try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "{}", execution.message);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn rejects_filters_before_patch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(7)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let ctx = context(&server, serde_json::json!({"required-labels": ["missing"]}));
+        let mut result: UpdatePullRequestResult = params().try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("missing required labels"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn rejects_request_level_update_branch() {
+        let server = MockServer::start().await;
+        let ctx = context(&server, serde_json::json!({}));
+        let mut request = params();
+        request.update_branch = Some(true);
+        let mut result: UpdatePullRequestResult = request.try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("not supported"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reports_fetch_and_patch_failures() {
+        for (get_status, patch_status, expected) in [
+            (404, 200, "Failed to fetch PR #7"),
+            (200, 500, "Failed to update PR #7"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+                .respond_with(ResponseTemplate::new(get_status).set_body_json(
+                    if get_status == 200 {
+                        pr(7)
+                    } else {
+                        serde_json::json!({})
+                    },
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("PATCH"))
+                .and(path("/project/_apis/git/repositories/repo/pullRequests/7"))
+                .respond_with(ResponseTemplate::new(patch_status))
+                .expect(if get_status == 200 { 1 } else { 0 })
+                .mount(&server)
+                .await;
+            let ctx = context(&server, serde_json::json!({}));
+            let mut result: UpdatePullRequestResult = params().try_into().unwrap();
+            let execution = result.execute_sanitized(&ctx).await.unwrap();
+            assert!(!execution.success);
+            assert!(
+                execution.message.contains(expected),
+                "{}",
+                execution.message
+            );
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_target_rejects_mismatched_request_id() {
+        let server = MockServer::start().await;
+        let ctx = context(&server, serde_json::json!({"target": 42}));
+        let mut request = params();
+        request.pull_request_id = Some(AdoPullRequestId::Number(7));
+        let mut result: UpdatePullRequestResult = request.try_into().unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("#7"));
+        assert!(execution.message.contains("#42"));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

@@ -834,6 +834,8 @@ write.
 Azure DevOps pull requests. It updates the PR title or description (`body`);
 both fields are enabled by default. The `operation` field controls description
 updates: `replace` (default), `append`, `prepend`, or `replace-island`.
+For `replace-island`, missing or duplicate markers cause a fresh pipeline-scoped
+island to be appended; out-of-order markers fail the update.
 
 ```yaml
 safe-outputs:

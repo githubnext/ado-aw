@@ -86,6 +86,7 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     CreateBranchResult,
     UpdatePrResult,
     AbandonPullRequestResult,
+    UpdatePullRequestResult,
     UploadBuildAttachmentResult,
     UploadPipelineArtifactResult,
     UploadWorkitemAttachmentResult,
@@ -93,7 +94,6 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     ReplyToPrCommentResult,
     ResolvePrThreadResult,
     CreateGithubIssueResult,
-    UpdatePullRequestResult,
     SetGithubIssueTypeResult,
     CommentOnGithubIssueResult,
     HideGithubIssueCommentResult,
@@ -765,6 +765,7 @@ macro_rules! impl_temporary_reference_deserialize {
     };
 }
 
+mod abandon_pull_request;
 mod add_build_tag;
 mod add_github_issue_labels;
 mod add_pr_comment;
@@ -772,7 +773,6 @@ mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
 mod assign_work_item;
 mod close_github_issue;
-mod abandon_pull_request;
 mod comment_on_github_issue;
 mod comment_on_work_item;
 mod create_branch;
@@ -808,6 +808,7 @@ mod upload_build_attachment;
 mod upload_pipeline_artifact;
 mod upload_workitem_attachment;
 
+pub use abandon_pull_request::*;
 pub use add_build_tag::*;
 pub use add_github_issue_labels::*;
 pub use add_pr_comment::*;
@@ -815,7 +816,6 @@ pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;
 pub use assign_work_item::*;
 pub use close_github_issue::*;
-pub use abandon_pull_request::*;
 pub use comment_on_github_issue::*;
 pub use comment_on_work_item::*;
 pub use create_branch::*;
@@ -907,6 +907,9 @@ mod tests {
             assert!(CreatePrResult::REQUIRES_WRITE);
         }
         const {
+            assert!(AbandonPullRequestResult::REQUIRES_WRITE);
+        }
+        const {
             assert!(CreateWikiPageResult::REQUIRES_WRITE);
         }
         const {
@@ -932,6 +935,9 @@ mod tests {
         }
         const {
             assert!(UpdatePrResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(UpdatePullRequestResult::REQUIRES_WRITE);
         }
         const {
             assert!(UploadBuildAttachmentResult::REQUIRES_WRITE);

@@ -2422,11 +2422,6 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
                     crate::safe_outputs::validate_close_github_issue_config(&config)?;
                 }
             }
-            "abandon-pull-request" => {
-                if let Some(config) = front_matter.abandon_pull_request_config()? {
-                    crate::safe_outputs::validate_abandon_pull_request_config(&config)?;
-                }
-            }
             "update-github-issue" => {
                 if let Some(config) = front_matter.update_github_issue_config()? {
                     crate::safe_outputs::validate_update_github_issue_config(&config)?;
@@ -2462,6 +2457,9 @@ pub fn validate_github_issue_outputs_config(front_matter: &FrontMatter) -> Resul
     }
     if let Some(config) = front_matter.update_pull_request_config()? {
         crate::safe_outputs::validate_update_pull_request_config(&config)?;
+    }
+    if let Some(config) = front_matter.abandon_pull_request_config()? {
+        crate::safe_outputs::validate_abandon_pull_request_config(&config)?;
     }
     if let Some(config) = front_matter.create_github_issue_config()? {
         if let Some(prefix) = config.title_prefix.as_deref() {
@@ -5935,6 +5933,23 @@ safe-outputs:
                 "unexpected strict-config error for {tool}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_abandon_pull_request_config() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  abandon-pull-request:
+    required-labels: [""]
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_github_issue_outputs_config(&fm)
+            .expect_err("invalid abandon-pull-request config must fail compilation")
+            .to_string();
+        assert!(error.contains("required-labels"), "unexpected error: {error}");
     }
 
     #[test]

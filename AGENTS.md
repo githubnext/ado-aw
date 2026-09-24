@@ -211,6 +211,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
 │   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
+│   │   ├── abandon_pull_request.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_github_issue_labels.rs
 │   │   ├── add_pr_comment.rs
@@ -246,6 +247,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── unassign_github_issue_from_user.rs
 │   │   ├── update_github_issue.rs
 │   │   ├── update_pr.rs
+│   │   ├── update_pull_request.rs
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs
 │   │   ├── upload_build_attachment.rs

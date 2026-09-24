@@ -6,7 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::safe_outputs::{
-    ExecutionContext, ExecutionResult, Executor, PATH_SEGMENT, Validate, resolve_repo_name,
+    ExecutionContext, ExecutionResult, Executor, PATH_SEGMENT, Validate,
+    canonical_repository_alias, resolve_repo_name,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
@@ -15,17 +16,12 @@ use percent_encoding::utf8_percent_encode;
 
 const MAX_COMMENT_LEN: usize = 65_536;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AbandonPullRequestTarget {
+    #[default]
     Triggering,
     Any,
     Id(u64),
-}
-
-impl Default for AbandonPullRequestTarget {
-    fn default() -> Self {
-        Self::Triggering
-    }
 }
 
 impl Serialize for AbandonPullRequestTarget {
@@ -120,7 +116,7 @@ impl Validate for AbandonPullRequestParams {
         if let Some(body) = self.body.as_deref() {
             ensure!(!body.trim().is_empty(), "body must not be empty");
             ensure!(
-                body.len() <= MAX_COMMENT_LEN,
+                body.chars().count() <= MAX_COMMENT_LEN,
                 "body must be {MAX_COMMENT_LEN} characters or fewer"
             );
         }
@@ -231,18 +227,35 @@ impl AbandonPullRequestResult {
         ctx: &ExecutionContext,
     ) -> Result<u64, ExecutionResult> {
         match config.target {
-            AbandonPullRequestTarget::Id(id) => Ok(id),
+            AbandonPullRequestTarget::Id(id) => {
+                if let Some(requested) = self.pull_request_id
+                    && requested != id
+                {
+                    return Err(ExecutionResult::failure(format!(
+                        "requested pull_request_id #{requested} does not match configured target #{id}"
+                    )));
+                }
+                Ok(id)
+            }
             AbandonPullRequestTarget::Any => self.pull_request_id.ok_or_else(|| {
                 ExecutionResult::failure(
                     "pull_request_id is required when safe-outputs.abandon-pull-request.target is '*'",
                 )
             }),
             AbandonPullRequestTarget::Triggering => {
-                parse_positive(ctx.pull_request_id.as_deref()).ok_or_else(|| {
+                let triggering = parse_positive(ctx.pull_request_id.as_deref()).ok_or_else(|| {
                     ExecutionResult::failure(
                         "safe-outputs.abandon-pull-request.target is 'triggering' but no Azure DevOps pull request context is available; use target: '*' and pass pull_request_id, or configure a numeric target",
                     )
-                })
+                })?;
+                if let Some(requested) = self.pull_request_id
+                    && requested != triggering
+                {
+                    return Err(ExecutionResult::failure(format!(
+                        "requested pull_request_id #{requested} does not match triggering pull request #{triggering}"
+                    )));
+                }
+                Ok(triggering)
             }
         }
     }
@@ -260,19 +273,26 @@ impl AbandonPullRequestResult {
         ctx: &ExecutionContext,
     ) -> Result<String, ExecutionResult> {
         let selector = self.repository_selector(config);
+        let Some(alias) = canonical_repository_alias(selector, ctx) else {
+            return Err(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the configured checkout list",
+                crate::sanitize::neutralize_pipeline_commands(selector)
+            )));
+        };
         if !config.allowed_repositories.is_empty()
             && !config
                 .allowed_repositories
                 .iter()
-                .any(|allowed| allowed == selector)
+                .filter_map(|allowed| canonical_repository_alias(allowed, ctx))
+                .any(|allowed| allowed == alias)
         {
             return Err(ExecutionResult::failure(format!(
                 "Repository '{}' is not in the allowed-repositories list: [{}]",
-                selector,
+                crate::sanitize::neutralize_pipeline_commands(selector),
                 config.allowed_repositories.join(", ")
             )));
         }
-        resolve_repo_name(Some(selector), ctx)
+        resolve_repo_name(Some(&alias), ctx)
     }
 
     fn validate_filters(
@@ -296,7 +316,11 @@ impl AbandonPullRequestResult {
                 .required_labels
                 .iter()
                 .map(String::as_str)
-                .filter(|required| !labels.iter().any(|actual| actual == required))
+                .filter(|required| {
+                    !labels
+                        .iter()
+                        .any(|actual| actual.eq_ignore_ascii_case(required))
+                })
                 .collect();
             if !missing.is_empty() {
                 return Err(ExecutionResult::failure(format!(
@@ -430,6 +454,14 @@ impl Executor for AbandonPullRequestResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        let params = AbandonPullRequestParams {
+            pull_request_id: self.pull_request_id,
+            body: self.body.clone(),
+            repository: self.repository.clone(),
+        };
+        if let Err(error) = params.validate() {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         if !ctx.tool_configs.contains_key("abandon-pull-request") {
             return Ok(ExecutionResult::failure(
                 "abandon-pull-request is not configured for this workflow",
@@ -742,5 +774,129 @@ mod tests {
         let execution = result.execute_sanitized(&ctx).await.unwrap();
         assert!(!execution.success);
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn stage_three_revalidates_params() {
+        let server = MockServer::start().await;
+        let ctx = context(&server, serde_json::json!({"target": "*"}));
+        let mut result: AbandonPullRequestResult = serde_json::from_value(serde_json::json!({
+            "name": "abandon-pull-request",
+            "pull_request_id": 7,
+            "body": " "
+        }))
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("body must not be empty"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_disallowed_repository_before_network() {
+        let server = MockServer::start().await;
+        let ctx = context(
+            &server,
+            serde_json::json!({"target": "*", "allowed-repositories": ["other"]}),
+        );
+        let mut result: AbandonPullRequestResult = AbandonPullRequestParams {
+            pull_request_id: Some(7),
+            body: None,
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("allowed-repositories"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_title_prefix_before_patch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/proj/_apis/git/repositories/repo/pullRequests/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr("active")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/proj/_apis/git/repositories/repo/pullRequests/7"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let ctx = context(
+            &server,
+            serde_json::json!({"target": "*", "required-title-prefix": "[manual]"}),
+        );
+        let mut result: AbandonPullRequestResult = AbandonPullRequestParams {
+            pull_request_id: Some(7),
+            body: None,
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("required prefix"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn handles_already_abandoned_and_rejects_completed() {
+        for (status, success, expected) in [
+            ("abandoned", true, "already abandoned"),
+            ("completed", false, "expected active"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/proj/_apis/git/repositories/repo/pullRequests/7"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(pr(status)))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("PATCH"))
+                .and(path("/proj/_apis/git/repositories/repo/pullRequests/7"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let ctx = context(&server, serde_json::json!({"target": "*"}));
+            let mut result: AbandonPullRequestResult = AbandonPullRequestParams {
+                pull_request_id: Some(7),
+                body: None,
+                repository: None,
+            }
+            .try_into()
+            .unwrap();
+            let execution = result.execute_sanitized(&ctx).await.unwrap();
+            assert_eq!(execution.success, success);
+            assert!(
+                execution.message.contains(expected),
+                "{}",
+                execution.message
+            );
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_target_rejects_mismatched_request_id() {
+        let server = MockServer::start().await;
+        let ctx = context(&server, serde_json::json!({"target": 42}));
+        let mut result: AbandonPullRequestResult = AbandonPullRequestParams {
+            pull_request_id: Some(7),
+            body: None,
+            repository: None,
+        }
+        .try_into()
+        .unwrap();
+        let execution = result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!execution.success);
+        assert!(execution.message.contains("#7"));
+        assert!(execution.message.contains("#42"));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

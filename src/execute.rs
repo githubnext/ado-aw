@@ -246,6 +246,7 @@ pub async fn execute_safe_outputs(
         AddBuildTagResult,
         CreateBranchResult,
         UpdatePrResult,
+        AbandonPullRequestResult,
         UploadBuildAttachmentResult,
         UploadPipelineArtifactResult,
         UploadWorkitemAttachmentResult,
@@ -2127,6 +2128,32 @@ mod tests {
             1,
             "Expected 1 budget_exhausted record"
         );
+    }
+
+    #[tokio::test]
+    async fn test_budget_enforcement_abandon_pull_request_max() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+        let ndjson = r#"{"name":"abandon-pull-request","pull_request_id":7}
+{"name":"abandon-pull-request","pull_request_id":8}
+"#;
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let ctx = ExecutionContext {
+            dry_run: true,
+            tool_configs: HashMap::from([(
+                "abandon-pull-request".to_string(),
+                serde_json::json!({"target": "*", "max": 1}),
+            )]),
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].success);
+        assert!(results[1].is_budget_exhausted());
     }
 
     #[tokio::test]

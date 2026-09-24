@@ -291,6 +291,7 @@ fn safe_output_description(name: &str) -> &'static str {
         "hide-github-issue-comment" => {
             "Minimizes a configured GitHub issue, pull-request, or discussion comment"
         }
+        "abandon-pull-request" => "Abandons an Azure DevOps pull request without merging",
         "link-github-sub-issue" => "Links two GitHub issues as parent and sub-issue",
         "remove-github-issue-labels" => "Removes operator-permitted labels from a GitHub issue",
         "create-pull-request" => "Parameters for creating a pull request",
