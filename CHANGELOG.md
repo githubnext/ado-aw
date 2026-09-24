@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.53.0](https://github.com/githubnext/ado-aw/compare/v0.52.1...v0.53.0) (2026-09-24)
+
+
+### Features
+
+* **safe-outputs:** allow model-selected PR reviewers ([#2099](https://github.com/githubnext/ado-aw/issues/2099)) ([1425411](https://github.com/githubnext/ado-aw/commit/1425411bd6a8fa16580e7b98d84da5cb397126a1))
+
 ## [0.52.1](https://github.com/githubnext/ado-aw/compare/v0.52.0...v0.52.1) (2026-09-22)
 
 
