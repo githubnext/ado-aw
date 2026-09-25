@@ -65,7 +65,7 @@ set -eo pipefail
 
 ado_aw_runtime_model() {
   local specific_var="$1"
-  local specific_value="${!specific_var-}"
+  local specific_value="$2"
   local candidate
   for candidate in "$specific_value" "${ADO_AW_DEFAULT_MODEL_COPILOT:-}"; do
     if [ -z "$candidate" ] \
@@ -104,14 +104,18 @@ AW_INFO_EOF
 
 ADO_AW_INFO_JSON="$AGENT_TEMP/staging/aw_info.json"
 if ! grep -q '"model"' "$ADO_AW_INFO_JSON"; then
-  ADO_AW_AGENT_RUNTIME_MODEL="$(ado_aw_runtime_model ADO_AW_MODEL_AGENT_COPILOT)"
+  ADO_AW_AGENT_RUNTIME_MODEL="$(ado_aw_runtime_model \
+    ADO_AW_MODEL_AGENT_COPILOT \
+    "$ADO_AW_MODEL_AGENT_COPILOT")"
   ado_aw_append_model_field \
     "model" \
     "$ADO_AW_AGENT_RUNTIME_MODEL" \
     "$ADO_AW_INFO_JSON"
 fi
 if ! grep -q '"detection_model"' "$ADO_AW_INFO_JSON"; then
-  ADO_AW_DETECTION_RUNTIME_MODEL="$(ado_aw_runtime_model ADO_AW_MODEL_DETECTION_COPILOT)"
+  ADO_AW_DETECTION_RUNTIME_MODEL="$(ado_aw_runtime_model \
+    ADO_AW_MODEL_DETECTION_COPILOT \
+    "$ADO_AW_MODEL_DETECTION_COPILOT")"
   ado_aw_append_model_field \
     "detection_model" \
     "$ADO_AW_DETECTION_RUNTIME_MODEL" \
@@ -657,7 +661,7 @@ mod tests {
             step.script
         );
         assert!(
-            !step.script.contains("\"model\""),
+            !step.script.contains("\"model\":\""),
             "step should omit model when no model is configured:\n{}",
             step.script
         );
