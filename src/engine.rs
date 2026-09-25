@@ -460,6 +460,23 @@ impl Engine {
         )
     }
 
+    /// Generate an invocation using an explicit engine configuration.
+    ///
+    /// Retained for callers that need a plain invocation with no role-specific
+    /// runtime model controls.
+    #[allow(dead_code)]
+    pub fn invocation_with_config(
+        &self,
+        engine_config: &EngineConfig,
+        front_matter: &FrontMatter,
+        extension_declarations: &[Declarations],
+        prompt_path: &str,
+        mcp_config_path: Option<&str>,
+    ) -> Result<String> {
+        let args = self.args_with_config(engine_config, front_matter, extension_declarations)?;
+        self.invocation_with_args(engine_config, prompt_path, mcp_config_path, &args, None)
+    }
+
     /// Generate a Detection-job invocation using an explicit engine configuration.
     pub fn detection_invocation_with_config(
         &self,
@@ -1417,15 +1434,16 @@ fn copilot_invocation(
     args: &str,
     runtime_model_role: Option<RuntimeModelRole>,
 ) -> String {
-    let mut base_parts = vec![
+    let mut common_parts = vec![
         command_path.to_string(),
         format!("--prompt=\"$(cat {prompt_path})\""),
     ];
 
     if let Some(mcp_path) = mcp_config_path {
-        base_parts.push(format!("--additional-mcp-config @{mcp_path}"));
+        common_parts.push(format!("--additional-mcp-config @{mcp_path}"));
     }
 
+    let mut base_parts = common_parts.clone();
     if !args.is_empty() {
         base_parts.push(args.to_string());
     }
@@ -1434,13 +1452,7 @@ fn copilot_invocation(
         return base_parts.join(" ");
     };
 
-    let mut model_parts = vec![
-        command_path.to_string(),
-        format!("--prompt=\"$(cat {prompt_path})\""),
-    ];
-    if let Some(mcp_path) = mcp_config_path {
-        model_parts.push(format!("--additional-mcp-config @{mcp_path}"));
-    }
+    let mut model_parts = common_parts;
     model_parts.push("--model \"$ADO_AW_EFFECTIVE_MODEL\"".to_string());
     if !args.is_empty() {
         model_parts.push(args.to_string());
@@ -1459,6 +1471,7 @@ fn runtime_model_preamble(role: RuntimeModelRole) -> String {
     format!(
         "ADO_AW_EFFECTIVE_MODEL=\"\"\n\
          for ADO_AW_CANDIDATE_MODEL in \"${{{specific}:-}}\" \"${{{ADO_AW_DEFAULT_MODEL_COPILOT}:-}}\"; do\n\
+         \x20\x20# Azure DevOps leaves an undefined macro as the literal $(VAR); treat that as unset.\n\
          \x20\x20if [ -z \"$ADO_AW_CANDIDATE_MODEL\" ] || [ \"$ADO_AW_CANDIDATE_MODEL\" = \"\\$({specific})\" ] || [ \"$ADO_AW_CANDIDATE_MODEL\" = \"\\$({ADO_AW_DEFAULT_MODEL_COPILOT})\" ]; then\n\
          \x20\x20\x20\x20continue\n\
          \x20\x20fi\n\

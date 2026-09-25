@@ -68,6 +68,7 @@ ado_aw_runtime_model() {
   local specific_value="$2"
   local candidate
   for candidate in "$specific_value" "${ADO_AW_DEFAULT_MODEL_COPILOT:-}"; do
+    # Azure DevOps leaves an undefined macro as the literal $(VAR); treat that as unset.
     if [ -z "$candidate" ] \
       || [ "$candidate" = "\$($specific_var)" ] \
       || [ "$candidate" = "\$(ADO_AW_DEFAULT_MODEL_COPILOT)" ]; then
@@ -82,6 +83,7 @@ ado_aw_runtime_model() {
     printf '%s' "$candidate"
     return 0
   done
+  return 0
 }
 
 ado_aw_append_model_field() {
@@ -91,9 +93,23 @@ ado_aw_append_model_field() {
   if [ -z "$value" ] || grep -q "\"$field\"" "$file"; then
     return 0
   fi
+  local json
   local tmp
+  local separator=","
+  json="$(cat "$file")"
+  if [ "$json" = "{}" ]; then
+    separator=""
+  else
+    case "$json" in
+      \{*\}) ;;
+      *)
+        echo "ERROR: aw_info.json is not a single-line JSON object" >&2
+        exit 1
+        ;;
+    esac
+  fi
   tmp="$(mktemp)"
-  sed "$ s/}$/,\"$field\":\"$value\"/" "$file" > "$tmp"
+  printf '%s%s"%s":"%s"}' "${json%?}" "$separator" "$field" "$value" > "$tmp"
   mv "$tmp" "$file"
 }
 
