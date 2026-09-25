@@ -128,6 +128,7 @@ describe("create-pull-request add-reviewers handoff", () => {
     "configures and submits one $name reviewer",
     async ({ scenario, temporaryId, submittedReviewer }) => {
       expect(scenario.config(ctx, state)).toEqual({
+        target: "*",
         "allowed-repositories": ["agent-definitions"],
         "allowed-reviewers": [submittedReviewer],
         "max-reviewers": 1,

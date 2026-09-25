@@ -5,19 +5,21 @@ use anyhow::{Context, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::pr_common::{PullRequestReference, legacy_policy, resolve_pr_target};
+use super::pr_common::{PullRequestReference, legacy_policy};
 use super::pr_mutations::{
     UpdatePrContext, execute_add_reviewers, validate_and_normalize_reviewers,
 };
-use super::update_pr::{UpdatePrConfig, UpdatePrParams};
+use super::update_pr::UpdatePrConfig;
 use super::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
+use super::ToolResult;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddPrReviewersParams {
-    pub pull_request_id: PullRequestReference,
+    #[serde(default)]
+    pub pull_request_id: Option<PullRequestReference>,
     #[serde(default)]
     pub repository: Option<String>,
     /// Reviewer GUIDs, exact identity names or email addresses.
@@ -26,16 +28,13 @@ pub struct AddPrReviewersParams {
 
 impl Validate for AddPrReviewersParams {
     fn validate(&self) -> anyhow::Result<()> {
-        UpdatePrParams {
-            pull_request_id: self.pull_request_id.clone(),
-            repository: self.repository.clone(),
-            operation: "add-reviewers".into(),
-            reviewers: Some(self.reviewers.clone()),
-            labels: None,
-            vote: None,
-            description: None,
+        if let Some(reference) = &self.pull_request_id {
+            super::pr_common::validate_reference(reference)?;
         }
-        .validate()
+        if let Some(repository) = &self.repository {
+            crate::validate::reject_pipeline_injection(repository, "repository")?;
+        }
+        super::pr_mutations::validate_reviewer_inputs(&self.reviewers)
     }
 }
 
@@ -45,7 +44,8 @@ tool_result! {
     params = AddPrReviewersParams,
     #[serde(deny_unknown_fields)]
     pub struct AddPrReviewersResult {
-        pull_request_id: PullRequestReference,
+        #[serde(default)]
+        pull_request_id: Option<PullRequestReference>,
         #[serde(default)]
         repository: Option<String>,
         reviewers: Vec<String>,
@@ -66,6 +66,15 @@ fn default_max_reviewers() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct AddPrReviewersConfig {
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     /// Empty or literal "*" permits any otherwise-valid reviewer.
@@ -82,6 +91,10 @@ pub struct AddPrReviewersConfig {
 impl Default for AddPrReviewersConfig {
     fn default() -> Self {
         Self {
+            target: Default::default(),
+            target_repo: None,
+            required_labels: Vec::new(),
+            required_title_prefix: None,
             allowed_repositories: Vec::new(),
             allowed_reviewers: Vec::new(),
             max_reviewers: default_max_reviewers(),
@@ -121,7 +134,7 @@ pub(crate) fn validate_add_pr_reviewers_config(
 #[async_trait::async_trait]
 impl Executor for AddPrReviewersResult {
     fn dry_run_summary(&self) -> String {
-        format!("add reviewers to PR #{}", self.pull_request_id)
+        format!("add reviewers to {}", super::pr_common::describe_pr_reference(self.pull_request_id.as_ref()))
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -148,23 +161,17 @@ impl Executor for AddPrReviewersResult {
         if let Err(failure) = validate_and_normalize_reviewers(&self.reviewers, &policy) {
             return Ok(failure);
         }
-        let (pr_id, target) = match resolve_pr_target(
-            &self.pull_request_id,
-            self.repository.as_deref(),
-            &policy.allowed_repositories,
-            ctx,
-        )? {
+        let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+        ).await? {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
         let legacy = legacy_policy(ctx, "add-pull-request-reviewers", "add-reviewers")?;
         if let Some(legacy) = &legacy
-            && let Err(failure) = resolve_pr_target(
-                &self.pull_request_id,
-                self.repository.as_deref(),
-                &legacy.allowed_repositories,
-                ctx,
-            )?
+            && let Err(failure) = super::pr_common::validate_pr_repository_policy(
+                &target, &legacy.allowed_repositories, ctx,
+            )
         {
             return Ok(failure);
         }
@@ -235,7 +242,7 @@ mod tests {
         ] {
             assert!(
                 AddPrReviewersParams {
-                    pull_request_id: PullRequestReference::Number(1),
+                    pull_request_id: Some(PullRequestReference::Number(1)),
                     repository: None,
                     reviewers,
                 }
@@ -255,7 +262,7 @@ mod tests {
             }),
         );
         let result: AddPrReviewersResult = AddPrReviewersParams {
-            pull_request_id: PullRequestReference::Number(1),
+            pull_request_id: Some(PullRequestReference::Number(1)),
             repository: None,
             reviewers: vec!["forbidden".into()],
         }

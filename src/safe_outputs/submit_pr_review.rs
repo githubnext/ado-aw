@@ -7,13 +7,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::pr_common::{
-    PullRequestReference, legacy_policy, resolve_pr_target, validate_reference,
+    PullRequestReference, legacy_policy, validate_reference,
 };
 use super::pr_mutations::UpdatePrContext;
 use super::{PATH_SEGMENT, authenticate_ado_request};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
+use super::ToolResult;
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
@@ -45,7 +46,8 @@ fn event_to_vote(event: &str) -> Option<i32> {
 #[serde(deny_unknown_fields)]
 pub struct SubmitPrReviewParams {
     /// Positive PR ID, or a same-run temporary ID when allow-temporary-ids is enabled.
-    pub pull_request_id: PullRequestReference,
+    #[serde(default)]
+    pub pull_request_id: Option<PullRequestReference>,
 
     /// Review decision: approve, approve-with-suggestions, request-changes, comment,
     /// wait-for-author, reject, or reset.
@@ -64,7 +66,9 @@ pub struct SubmitPrReviewParams {
 
 impl Validate for SubmitPrReviewParams {
     fn validate(&self) -> anyhow::Result<()> {
-        validate_reference(&self.pull_request_id)?;
+        if let Some(reference) = &self.pull_request_id {
+            validate_reference(reference)?;
+        }
         if let Some(repository) = &self.repository {
             reject_pipeline_injection(repository, "repository")?;
         }
@@ -93,7 +97,8 @@ tool_result! {
     /// Result of submitting a pull request review
     #[serde(deny_unknown_fields)]
     pub struct SubmitPrReviewResult {
-        pull_request_id: PullRequestReference,
+        #[serde(default)]
+        pull_request_id: Option<PullRequestReference>,
         event: String,
         body: Option<String>,
         repository: Option<String>,
@@ -123,6 +128,15 @@ impl SanitizeContent for SubmitPrReviewResult {
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitPrReviewConfig {
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
     /// Existing numeric-only configurations do not implicitly gain create-then-review authority.
     #[serde(default, rename = "allow-temporary-ids")]
     #[sanitize_config(skip)]
@@ -385,18 +399,18 @@ pub(crate) async fn execute_review_vote(
 impl Executor for SubmitPrReviewResult {
     fn dry_run_summary(&self) -> String {
         format!(
-            "submit '{}' review on PR #{}",
-            self.event, self.pull_request_id
+            "submit '{}' review on {}",
+            self.event, super::pr_common::describe_pr_reference(self.pull_request_id.as_ref())
         )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         info!(
-            "Submitting review on PR #{} — event: {}",
+            "Submitting review on {:?} — event: {}",
             self.pull_request_id, self.event
         );
         debug!(
-            "submit-pull-request-review: pr_id={}, event='{}'",
+            "submit-pull-request-review: pr_id={:?}, event='{}'",
             self.pull_request_id, self.event
         );
 
@@ -416,7 +430,7 @@ impl Executor for SubmitPrReviewResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         let config: SubmitPrReviewConfig = ctx.get_tool_config("submit-pull-request-review")?;
         validate_submit_pr_review_config(&config)?;
-        if matches!(self.pull_request_id, PullRequestReference::Temporary(_))
+        if matches!(self.pull_request_id, Some(PullRequestReference::Temporary(_)))
             && !config.allow_temporary_ids
         {
             return Ok(ExecutionResult::failure(
@@ -457,22 +471,16 @@ impl Executor for SubmitPrReviewResult {
             )));
         }
 
-        let (pr_id, target) = match resolve_pr_target(
-            &self.pull_request_id,
-            self.repository.as_deref(),
-            &config.allowed_repositories,
-            ctx,
-        )? {
+        let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+        ).await? {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
         if let Some(legacy) = &legacy
-            && let Err(failure) = resolve_pr_target(
-                &self.pull_request_id,
-                self.repository.as_deref(),
-                &legacy.allowed_repositories,
-                ctx,
-            )?
+            && let Err(failure) = super::pr_common::validate_pr_repository_policy(
+                &target, &legacy.allowed_repositories, ctx,
+            )
         {
             return Ok(failure);
         }
@@ -507,7 +515,7 @@ impl Executor for SubmitPrReviewResult {
             return Ok(ExecutionResult::success_with_data(
                 format!(
                     "Review '{}' submitted on PR #{} with comment thread #{}",
-                    self.event, self.pull_request_id, thread_id
+                    self.event, pr_id, thread_id
                 ),
                 serde_json::json!({
                     "pull_request_id": pr_id,
@@ -522,7 +530,7 @@ impl Executor for SubmitPrReviewResult {
         Ok(ExecutionResult::success_with_data(
             format!(
                 "Review '{}' submitted on PR #{}",
-                self.event, self.pull_request_id
+                self.event, pr_id
             ),
             serde_json::json!({
                 "pull_request_id": pr_id,
@@ -548,7 +556,7 @@ mod tests {
     fn test_params_deserializes() {
         let json = r#"{"pull_request_id": 42, "event": "approve"}"#;
         let params: SubmitPrReviewParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.pull_request_id, PullRequestReference::Number(42));
+        assert_eq!(params.pull_request_id, Some(PullRequestReference::Number(42)));
         assert_eq!(params.event, "approve");
         assert!(params.body.is_none());
         assert!(params.repository.is_none());
@@ -557,21 +565,21 @@ mod tests {
     #[test]
     fn test_params_converts_to_result() {
         let params = SubmitPrReviewParams {
-            pull_request_id: PullRequestReference::Number(42),
+            pull_request_id: Some(PullRequestReference::Number(42)),
             event: "approve".to_string(),
             body: None,
             repository: Some("self".to_string()),
         };
         let result: SubmitPrReviewResult = params.try_into().unwrap();
         assert_eq!(result.name, "submit-pull-request-review");
-        assert_eq!(result.pull_request_id, PullRequestReference::Number(42));
+        assert_eq!(result.pull_request_id, Some(PullRequestReference::Number(42)));
         assert_eq!(result.event, "approve");
     }
 
     #[test]
     fn test_validation_rejects_zero_pr_id() {
         let params = SubmitPrReviewParams {
-            pull_request_id: PullRequestReference::Number(0),
+            pull_request_id: Some(PullRequestReference::Number(0)),
             event: "approve".to_string(),
             body: None,
             repository: Some("self".to_string()),
@@ -587,7 +595,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_invalid_event() {
         let params = SubmitPrReviewParams {
-            pull_request_id: PullRequestReference::Number(1),
+            pull_request_id: Some(PullRequestReference::Number(1)),
             event: "merge".to_string(),
             body: None,
             repository: Some("self".to_string()),
@@ -602,7 +610,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_request_changes_without_body() {
         let params = SubmitPrReviewParams {
-            pull_request_id: PullRequestReference::Number(1),
+            pull_request_id: Some(PullRequestReference::Number(1)),
             event: "request-changes".to_string(),
             body: None,
             repository: Some("self".to_string()),
@@ -618,7 +626,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_repository_pipeline_command() {
         let params = SubmitPrReviewParams {
-            pull_request_id: PullRequestReference::Number(1),
+            pull_request_id: Some(PullRequestReference::Number(1)),
             event: "approve".to_string(),
             body: None,
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
@@ -633,7 +641,7 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = SubmitPrReviewParams {
-            pull_request_id: PullRequestReference::Number(99),
+            pull_request_id: Some(PullRequestReference::Number(99)),
             event: "request-changes".to_string(),
             body: Some("This needs significant rework before merging.".to_string()),
             repository: Some("self".to_string()),
@@ -667,7 +675,7 @@ mod tests {
         ] {
             assert_eq!(event_to_vote(event), Some(vote));
             let params = SubmitPrReviewParams {
-                pull_request_id: PullRequestReference::Number(u64::MAX),
+                pull_request_id: Some(PullRequestReference::Number(u64::MAX)),
                 event: event.into(),
                 body: None,
                 repository: None,

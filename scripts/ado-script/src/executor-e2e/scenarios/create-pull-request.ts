@@ -540,6 +540,7 @@ function createPullRequestAddReviewersScenario(
       return { ...state, reviewer, reviewerId };
     },
     config: (_ctx, state) => ({
+      target: "*",
       "allowed-repositories": [state.repo],
       "allowed-reviewers": [submittedReviewer(state)],
       "max-reviewers": 1,

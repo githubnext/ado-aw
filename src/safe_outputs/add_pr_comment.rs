@@ -1,12 +1,12 @@
 //! Add PR comment safe output tool
 
 use log::{debug, info};
-use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use super::PATH_SEGMENT;
+use super::pr_common::{PullRequestReference, describe_pr_reference, repository_api_base, resolve_configured_pr_target, validate_reference};
+use super::{ToolResult, authenticate_ado_request};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::tool_result;
@@ -19,15 +19,16 @@ use anyhow::{Context, ensure};
 #[serde(deny_unknown_fields)]
 pub struct AddPrCommentParams {
     /// The pull request ID to comment on
-    pub pull_request_id: i32,
+    #[serde(default)]
+    pub pull_request_id: Option<PullRequestReference>,
 
     /// Comment text in markdown format. Ensure adequate content > 10 characters.
     pub content: String,
 
     /// Repository alias: "self" for pipeline repo, or an alias from the checkout list.
     /// Defaults to "self" if omitted.
-    #[serde(default = "default_repository")]
-    pub repository: String,
+    #[serde(default)]
+    pub repository: Option<String>,
 
     /// File path for an inline comment. When set, the comment is anchored to this file.
     #[serde(default)]
@@ -49,10 +50,6 @@ pub struct AddPrCommentParams {
     pub status: String,
 }
 
-fn default_repository() -> String {
-    "self".to_string()
-}
-
 fn default_status() -> String {
     "active".to_string()
 }
@@ -67,7 +64,9 @@ fn validate_repository_selector(repository: &str) -> anyhow::Result<()> {
 
 impl Validate for AddPrCommentParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(self.pull_request_id > 0, "pull_request_id must be positive");
+        if let Some(reference) = &self.pull_request_id {
+            validate_reference(reference)?;
+        }
         ensure!(
             self.content.len() >= 10,
             "content must be at least 10 characters"
@@ -97,7 +96,9 @@ impl Validate for AddPrCommentParams {
         if let Some(fp) = &self.file_path {
             validate_file_path(fp)?;
         }
-        validate_repository_selector(&self.repository)?;
+        if let Some(repository) = &self.repository {
+            validate_repository_selector(repository)?;
+        }
         Ok(())
     }
 }
@@ -109,9 +110,10 @@ tool_result! {
     /// Result of adding a comment thread on a pull request
     #[serde(deny_unknown_fields)]
     pub struct AddPrCommentResult {
-        pull_request_id: i32,
+        #[serde(default)]
+        pull_request_id: Option<PullRequestReference>,
         content: String,
-        repository: String,
+        repository: Option<String>,
         file_path: Option<String>,
         start_line: Option<i32>,
         line: Option<i32>,
@@ -122,7 +124,7 @@ tool_result! {
 impl SanitizeContent for AddPrCommentResult {
     fn sanitize_content_fields(&mut self) {
         self.content = sanitize_text(&self.content);
-        self.repository = sanitize_config(&self.repository);
+        self.repository = self.repository.as_deref().map(sanitize_config);
         // Strip control characters from remaining structural fields for defense-in-depth
         self.status = self.status.chars().filter(|c| !c.is_control()).collect();
         self.file_path = self
@@ -149,6 +151,18 @@ impl SanitizeContent for AddPrCommentResult {
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddPrCommentConfig {
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
+    #[serde(default, rename = "allow-temporary-ids")]
+    #[sanitize_config(skip)]
+    pub allow_temporary_ids: bool,
     /// Prefix prepended to all comments (e.g., "[Agent Review] ")
     #[serde(default, rename = "comment-prefix")]
     pub comment_prefix: Option<String>,
@@ -176,6 +190,11 @@ pub struct AddPrCommentConfig {
 impl Default for AddPrCommentConfig {
     fn default() -> Self {
         Self {
+            target: Default::default(),
+            target_repo: None,
+            required_labels: Vec::new(),
+            required_title_prefix: None,
+            allow_temporary_ids: false,
             comment_prefix: None,
             allowed_repositories: Vec::new(),
             allowed_statuses: Vec::new(),
@@ -276,15 +295,6 @@ impl AddPrCommentResult {
     /// file_path shape). Returns the resolved ADO status integer on success,
     /// or a human-readable failure message on the first violated rule.
     fn validate_against_config(&self, config: &AddPrCommentConfig) -> Result<i32, String> {
-        if !config.allowed_repositories.is_empty()
-            && !config.allowed_repositories.contains(&self.repository)
-        {
-            return Err(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                self.repository
-            ));
-        }
-
         if !config.allowed_statuses.is_empty()
             && !config
                 .allowed_statuses
@@ -312,28 +322,6 @@ impl AddPrCommentResult {
         Ok(status_int)
     }
 
-    /// Resolves the Azure DevOps repository name to comment on, honoring the
-    /// "self" alias as well as the checkout allowlist.
-    fn resolve_repo_name(&self, ctx: &ExecutionContext) -> Result<String, String> {
-        if self.repository == "self" || self.repository.is_empty() {
-            ctx.repository_name
-                .clone()
-                .ok_or_else(|| "BUILD_REPOSITORY_NAME not set and repository is 'self'".into())
-        } else {
-            crate::safe_outputs::lookup_allowed_repository(
-                &self.repository,
-                &ctx.allowed_repositories,
-            )
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Repository alias '{}' not found in allowed repositories",
-                    self.repository
-                )
-            })
-        }
-    }
-
     /// Builds the JSON body for the ADO "create thread" API call, attaching
     /// `threadContext` for inline (file-anchored) comments.
     fn build_thread_body(
@@ -341,6 +329,7 @@ impl AddPrCommentResult {
         ctx: &ExecutionContext,
         config: &AddPrCommentConfig,
         status_int: i32,
+        repository_alias: &str,
     ) -> Result<serde_json::Value, String> {
         let comment_body = match &config.comment_prefix {
             Some(prefix) => format!("{}{}", prefix, self.content),
@@ -364,7 +353,7 @@ impl AddPrCommentResult {
             let end_line = self.line.unwrap_or(1);
             let start_line = self.start_line.unwrap_or(end_line);
             let repo_root =
-                crate::safe_outputs::resolve_repository_checkout_dir(&self.repository, ctx)
+                crate::safe_outputs::resolve_repository_checkout_dir(repository_alias, ctx)
                     .and_then(|path| {
                         crate::validate::ensure_path_within_base(
                             &path,
@@ -375,7 +364,7 @@ impl AddPrCommentResult {
                     .map_err(|err| {
                         format!(
                             "Failed to resolve repository checkout for '{}': {}",
-                            self.repository, err
+                            repository_alias, err
                         )
                     })?;
             let thread_context = build_inline_thread_context(
@@ -396,34 +385,25 @@ impl AddPrCommentResult {
 #[async_trait::async_trait]
 impl Executor for AddPrCommentResult {
     fn dry_run_summary(&self) -> String {
-        format!("add comment to PR #{}", self.pull_request_id)
+        format!("add comment to {}", describe_pr_reference(self.pull_request_id.as_ref()))
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        info!(
-            "Adding comment to PR #{}: {} chars",
-            self.pull_request_id,
-            self.content.len()
-        );
-        debug!(
-            "add-pull-request-comment: pr_id={}, content length={}",
-            self.pull_request_id,
-            self.content.len()
-        );
-
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
+        if let Err(error) = (AddPrCommentParams {
+            pull_request_id: self.pull_request_id.clone(),
+            repository: self.repository.clone(),
+            content: self.content.clone(),
+            file_path: self.file_path.clone(),
+            line: self.line,
+            start_line: self.start_line,
+            status: self.status.clone(),
+        }).validate() {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         let token = ctx
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        debug!("ADO org: {}, project: {}", org_url, project);
 
         let config: AddPrCommentConfig = ctx.get_tool_config("add-pull-request-comment")?;
         debug!("Config: {:?}", config);
@@ -433,32 +413,33 @@ impl Executor for AddPrCommentResult {
             Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
 
-        let repo_name = match self.resolve_repo_name(ctx) {
-            Ok(name) => name,
-            Err(msg) => return Ok(ExecutionResult::failure(msg)),
+        super::pr_common::validate_temporary_opt_in(self.pull_request_id.as_ref(), config.allow_temporary_ids)?;
+        let (pull_request_id, target) = match resolve_configured_pr_target(
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+        ).await? {
+            Ok(target) => target,
+            Err(failure) => return Ok(failure),
         };
+        let repo_name = target.qualified_repository();
+        let project = &target.project;
 
-        let thread_body = match self.build_thread_body(ctx, &config, status_int) {
+        let thread_body = match self.build_thread_body(ctx, &config, status_int, &target.alias) {
             Ok(body) => body,
             Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
 
         let url = format!(
-            "{}/{}/_apis/git/repositories/{}/pullRequests/{}/threads?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            utf8_percent_encode(&repo_name, PATH_SEGMENT),
-            self.pull_request_id,
+            "{}/pullRequests/{}/threads?api-version=7.1",
+            repository_api_base(&target),
+            pull_request_id,
         );
         debug!("API URL: {}", url);
 
         let client = reqwest::Client::new();
 
-        info!("Sending comment thread to PR #{}", self.pull_request_id);
-        let response = client
-            .post(&url)
+        info!("Sending comment thread to PR #{}", pull_request_id);
+        let response = authenticate_ado_request(client.post(&url), token, ctx.write_connection_type)
             .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
             .json(&thread_body)
             .send()
             .await
@@ -470,21 +451,22 @@ impl Executor for AddPrCommentResult {
                 .await
                 .context("Failed to parse response JSON")?;
 
-            let thread_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let thread_id = body.get("id").and_then(|v| v.as_i64()).filter(|id| *id > 0)
+                .context("Comment response missing a positive thread ID")?;
 
             info!(
                 "Comment thread added to PR #{}: thread #{}",
-                self.pull_request_id, thread_id
+                pull_request_id, thread_id
             );
 
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Added comment thread #{} to PR #{}",
-                    thread_id, self.pull_request_id
+                    thread_id, pull_request_id
                 ),
                 serde_json::json!({
                     "thread_id": thread_id,
-                    "pull_request_id": self.pull_request_id,
+                    "pull_request_id": pull_request_id,
                     "repository": repo_name,
                     "project": project,
                     "status": self.status,
@@ -499,7 +481,7 @@ impl Executor for AddPrCommentResult {
 
             Ok(ExecutionResult::failure(format!(
                 "Failed to add comment to PR #{} (HTTP {}): {}",
-                self.pull_request_id, status, error_body
+                pull_request_id, status, error_body
             )))
         }
     }
@@ -520,9 +502,9 @@ mod tests {
     fn test_params_deserializes() {
         let json = r#"{"pull_request_id": 42, "content": "This is a review comment on the PR."}"#;
         let params: AddPrCommentParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.pull_request_id, 42);
+        assert_eq!(params.pull_request_id, Some(PullRequestReference::Number(42)));
         assert!(params.content.contains("review comment"));
-        assert_eq!(params.repository, "self");
+        assert_eq!(params.repository, None);
         assert!(params.file_path.is_none());
         assert!(params.line.is_none());
         assert_eq!(params.status, "active");
@@ -531,9 +513,9 @@ mod tests {
     #[test]
     fn test_params_converts_to_result() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "This is a test comment with enough characters.".to_string(),
-            repository: "self".to_string(),
+            repository: Some("self".to_string()),
             file_path: None,
             start_line: None,
             line: None,
@@ -541,16 +523,16 @@ mod tests {
         };
         let result: AddPrCommentResult = params.try_into().unwrap();
         assert_eq!(result.name, "add-pull-request-comment");
-        assert_eq!(result.pull_request_id, 42);
+        assert_eq!(result.pull_request_id, Some(PullRequestReference::Number(42)));
         assert!(result.content.contains("test comment"));
     }
 
     #[test]
     fn test_validation_rejects_zero_pr_id() {
         let params = AddPrCommentParams {
-            pull_request_id: 0,
+            pull_request_id: Some(PullRequestReference::Number(0)),
             content: "This is a valid comment body text.".to_string(),
-            repository: "self".to_string(),
+            repository: Some("self".to_string()),
             file_path: None,
             start_line: None,
             line: None,
@@ -559,7 +541,7 @@ mod tests {
         let err: Result<AddPrCommentResult, _> = params.try_into();
         let err = err.unwrap_err().to_string();
         assert!(
-            err.contains("pull_request_id must be positive"),
+            err.contains("pull_request_id must be a positive integer"),
             "got: {err}"
         );
     }
@@ -567,9 +549,9 @@ mod tests {
     #[test]
     fn test_validation_rejects_short_content() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "Too short".to_string(),
-            repository: "self".to_string(),
+            repository: Some("self".to_string()),
             file_path: None,
             start_line: None,
             line: None,
@@ -586,9 +568,9 @@ mod tests {
     #[test]
     fn test_validation_rejects_repository_pipeline_command() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "This is a valid comment body text.".to_string(),
-            repository: "##vso[task.setvariable variable=x]y".to_string(),
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
             file_path: None,
             start_line: None,
             line: None,
@@ -602,9 +584,9 @@ mod tests {
     #[test]
     fn test_validation_rejects_repository_traversal_selector() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "This is a valid comment body text.".to_string(),
-            repository: "../sibling-repo".to_string(),
+            repository: Some("../sibling-repo".to_string()),
             file_path: None,
             start_line: None,
             line: None,
@@ -617,9 +599,9 @@ mod tests {
     #[test]
     fn test_validation_accepts_project_scoped_repository_selector() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "This is a valid comment body text.".to_string(),
-            repository: "4x4/sdk-FtdiDeviceControl".to_string(),
+            repository: Some("4x4/sdk-FtdiDeviceControl".to_string()),
             file_path: None,
             start_line: None,
             line: None,
@@ -632,9 +614,9 @@ mod tests {
     #[test]
     fn test_validation_rejects_line_without_file_path() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "This is a valid comment body text.".to_string(),
-            repository: "self".to_string(),
+            repository: Some("self".to_string()),
             file_path: None,
             start_line: None,
             line: Some(10),
@@ -648,9 +630,9 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "A comment body that is definitely longer than ten characters.".to_string(),
-            repository: "self".to_string(),
+            repository: Some("self".to_string()),
             file_path: Some("src/main.rs".to_string()),
             start_line: None,
             line: Some(10),
@@ -728,9 +710,9 @@ allowed-statuses:
     #[test]
     fn test_validation_rejects_invalid_status() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "This is a valid comment body text.".to_string(),
-            repository: "self".to_string(),
+            repository: Some("self".to_string()),
             file_path: None,
             start_line: None,
             line: None,
@@ -754,9 +736,9 @@ allowed-statuses:
             "WontFix",
         ] {
             let params = AddPrCommentParams {
-                pull_request_id: 42,
+                pull_request_id: Some(PullRequestReference::Number(42)),
                 content: "This is a valid comment body text.".to_string(),
-                repository: "self".to_string(),
+                repository: Some("self".to_string()),
                 file_path: None,
                 start_line: None,
                 line: None,
@@ -776,6 +758,7 @@ allowed-statuses:
             allowed_statuses: vec!["Active".to_string(), "Closed".to_string()],
             include_stats: true,
             max: None,
+            ..Default::default()
         };
         // Test the exact comparison logic extracted from execute_impl
         let status = "active";
@@ -792,9 +775,9 @@ allowed-statuses:
     #[test]
     fn test_sanitize_content_neutralizes_repository_pipeline_command() {
         let params = AddPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             content: "This is a valid comment body text.".to_string(),
-            repository: "##vso[task.setvariable variable=x]y".to_string(),
+            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
             file_path: None,
             start_line: None,
             line: None,
@@ -812,8 +795,8 @@ allowed-statuses:
         };
         result.sanitize_content_fields();
         assert!(
-            result.repository.contains("`##vso[`"),
-            "repository pipeline command should be neutralized with backticks: {}",
+            result.repository.as_deref().unwrap().contains("`##vso[`"),
+            "repository pipeline command should be neutralized with backticks: {:?}",
             result.repository
         );
     }

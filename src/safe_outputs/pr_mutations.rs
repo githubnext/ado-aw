@@ -1,13 +1,16 @@
 //! Shared Azure DevOps PR mutations and legacy configuration validation.
 
-pub use super::pr_common::PullRequestReference;
+#[cfg(test)]
+use super::pr_common::PullRequestReference;
 use super::pr_common::repository_api_base;
 #[cfg(test)]
 use super::pr_common::resolve_pr_target;
 use super::result::AdoRepositoryTarget;
 #[cfg(test)]
 use crate::safe_outputs::ExecutionContext;
-use crate::safe_outputs::{ExecutionResult, Validate};
+use crate::safe_outputs::ExecutionResult;
+#[cfg(test)]
+use crate::safe_outputs::Validate;
 #[cfg(test)]
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::secure::Guid;
@@ -19,10 +22,12 @@ use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 use log::{debug, info, warn};
+#[cfg(test)]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Valid operation names for update-pr
+#[cfg(test)]
 const VALID_OPERATIONS: &[&str] = &[
     "add-reviewers",
     "add-labels",
@@ -32,6 +37,7 @@ const VALID_OPERATIONS: &[&str] = &[
 ];
 
 /// Valid vote values
+#[cfg(test)]
 const VALID_VOTES: &[&str] = crate::compile::pr_migration::LEGACY_PR_VOTES;
 
 /// Valid merge strategy values accepted by ADO's completionOptions.mergeStrategy
@@ -39,8 +45,21 @@ const VALID_MERGE_STRATEGIES: &[&str] = &["squash", "noFastForward", "rebase", "
 const DEFAULT_MAX_REVIEWERS: usize = 3;
 const MAX_REVIEWER_LEN: usize = 256;
 
+pub(crate) fn validate_reviewer_inputs(reviewers: &[String]) -> anyhow::Result<()> {
+    ensure!(!reviewers.is_empty(), "reviewers list must not be empty for add-reviewers operation");
+    ensure!(reviewers.len() <= 100, "reviewers list must contain at most 100 entries");
+    for reviewer in reviewers {
+        let reviewer = reviewer.trim();
+        ensure!(!reviewer.is_empty(), "reviewer must not be empty");
+        ensure!(reviewer.len() <= MAX_REVIEWER_LEN, "reviewer must be {MAX_REVIEWER_LEN} characters or fewer");
+        reject_pipeline_injection(reviewer, "update-pr.reviewer")?;
+    }
+    Ok(())
+}
+
 /// Parameters for updating a pull request
 #[derive(Deserialize, JsonSchema)]
+#[cfg(test)]
 pub struct UpdatePrParams {
     /// Positive pull request ID or a temporary ID from create-pull-request.
     pub pull_request_id: PullRequestReference,
@@ -65,6 +84,7 @@ pub struct UpdatePrParams {
     pub description: Option<String>,
 }
 
+#[cfg(test)]
 impl Validate for UpdatePrParams {
     fn validate(&self) -> anyhow::Result<()> {
         if let PullRequestReference::Number(id) = self.pull_request_id {
@@ -85,23 +105,7 @@ impl Validate for UpdatePrParams {
                     .reviewers
                     .as_ref()
                     .context("reviewers must be provided for add-reviewers operation")?;
-                ensure!(
-                    !reviewers.is_empty(),
-                    "reviewers list must not be empty for add-reviewers operation"
-                );
-                ensure!(
-                    reviewers.len() <= 100,
-                    "reviewers list must contain at most 100 entries"
-                );
-                for reviewer in reviewers {
-                    let reviewer = reviewer.trim();
-                    ensure!(!reviewer.is_empty(), "reviewer must not be empty");
-                    ensure!(
-                        reviewer.len() <= MAX_REVIEWER_LEN,
-                        "reviewer must be {MAX_REVIEWER_LEN} characters or fewer"
-                    );
-                    reject_pipeline_injection(reviewer, "update-pr.reviewer")?;
-                }
+                validate_reviewer_inputs(reviewers)?;
             }
             "add-labels" => {
                 let labels = self

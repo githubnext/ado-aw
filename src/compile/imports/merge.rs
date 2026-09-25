@@ -126,6 +126,14 @@ pub fn merge_resolved_imported_body(
             state.legacy_family_origin.as_deref().unwrap_or("consumer")
         )
     })?;
+    let policy_report = crate::compile::codemods::apply_codemods_with(
+        &mut state.merged,
+        &[&crate::compile::codemods::PR_POLICY_DEFAULTS],
+        None,
+    )?;
+    if policy_report.changed() {
+        log::warn!("Imported PR policies use triggering-only defaults when no legacy target provenance is available; sync-stack has no ADO effect and is removed");
+    }
     dedupe_repos(&mut state.merged)?;
     state.merged.remove(Value::String("imports".to_string()));
     *consumer_fm = state.merged;

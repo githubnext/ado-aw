@@ -1,13 +1,14 @@
 //! Enable Azure DevOps auto-complete, without immediately merging.
 
 use super::pr_common::{
-    PullRequestReference, legacy_policy, resolve_pr_target, validate_reference,
+    PullRequestReference, legacy_policy, validate_reference,
 };
 use super::pr_mutations::{UpdatePrContext, execute_set_auto_complete};
 use super::update_pr::UpdatePrConfig;
 use super::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
+use super::ToolResult;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 use schemars::JsonSchema;
@@ -16,13 +17,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetPrAutoCompleteParams {
-    pub pull_request_id: PullRequestReference,
+    #[serde(default)]
+    pub pull_request_id: Option<PullRequestReference>,
     #[serde(default)]
     pub repository: Option<String>,
 }
 impl Validate for SetPrAutoCompleteParams {
     fn validate(&self) -> anyhow::Result<()> {
-        validate_reference(&self.pull_request_id)?;
+        if let Some(reference) = &self.pull_request_id {
+            validate_reference(reference)?;
+        }
         if let Some(repository) = &self.repository {
             crate::validate::reject_pipeline_injection(repository, "repository")?;
         }
@@ -35,7 +39,8 @@ tool_result! {
     params = SetPrAutoCompleteParams,
     #[serde(deny_unknown_fields)]
     pub struct SetPrAutoCompleteResult {
-        pull_request_id: PullRequestReference,
+        #[serde(default)]
+        pull_request_id: Option<PullRequestReference>,
         #[serde(default)]
         repository: Option<String>,
     }
@@ -55,6 +60,15 @@ fn default_merge_strategy() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct SetPrAutoCompleteConfig {
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     #[serde(default = "default_true", rename = "delete-source-branch")]
@@ -68,6 +82,10 @@ pub struct SetPrAutoCompleteConfig {
 impl Default for SetPrAutoCompleteConfig {
     fn default() -> Self {
         Self {
+            target: Default::default(),
+            target_repo: None,
+            required_labels: Vec::new(),
+            required_title_prefix: None,
             allowed_repositories: Vec::new(),
             delete_source_branch: true,
             merge_strategy: default_merge_strategy(),
@@ -97,7 +115,7 @@ pub(crate) fn validate_set_pr_auto_complete_config(
 #[async_trait::async_trait]
 impl Executor for SetPrAutoCompleteResult {
     fn dry_run_summary(&self) -> String {
-        format!("enable auto-complete on PR #{}", self.pull_request_id)
+        format!("enable auto-complete on {}", super::pr_common::describe_pr_reference(self.pull_request_id.as_ref()))
     }
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         if let Err(error) = (SetPrAutoCompleteParams {
@@ -122,23 +140,17 @@ impl Executor for SetPrAutoCompleteResult {
             merge_strategy: config.merge_strategy,
             ..Default::default()
         };
-        let (pr_id, target) = match resolve_pr_target(
-            &self.pull_request_id,
-            self.repository.as_deref(),
-            &policy.allowed_repositories,
-            ctx,
-        )? {
+        let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+        ).await? {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
         let legacy = legacy_policy(ctx, "set-pull-request-auto-complete", "set-auto-complete")?;
         if let Some(legacy) = &legacy
-            && let Err(failure) = resolve_pr_target(
-                &self.pull_request_id,
-                self.repository.as_deref(),
-                &legacy.allowed_repositories,
-                ctx,
-            )?
+            && let Err(failure) = super::pr_common::validate_pr_repository_policy(
+                &target, &legacy.allowed_repositories, ctx,
+            )
         {
             return Ok(failure);
         }

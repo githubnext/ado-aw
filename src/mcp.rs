@@ -1304,8 +1304,8 @@ The comment will be posted during safe output processing."
         params: Parameters<AddPrCommentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: add-pull-request-comment - PR #{}",
-            params.0.pull_request_id
+            "Tool called: add-pull-request-comment - {}",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref())
         );
         debug!("Content length: {} chars", params.0.content.len());
         let mut sanitized = params.0;
@@ -1314,10 +1314,10 @@ The comment will be posted during safe output processing."
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
-        info!("PR comment queued for PR #{}", result.pull_request_id);
+        info!("PR comment queued for {}", crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref()));
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Comment queued for PR #{}. The comment will be posted during safe output processing.",
-            result.pull_request_id
+            "Comment queued for {}. The comment will be posted during safe output processing.",
+            crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
     }
 
@@ -1778,8 +1778,8 @@ submitted during safe output processing. Requires 'allowed-events' to be configu
         params: Parameters<SubmitPrReviewParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: submit-pull-request-review - PR #{} event '{}'",
-            params.0.pull_request_id, params.0.event
+            "Tool called: submit-pull-request-review - {} event '{}'",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.event
         );
         let mut sanitized = params.0;
         sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
@@ -1788,8 +1788,8 @@ submitted during safe output processing. Requires 'allowed-events' to be configu
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "PR review '{}' queued for PR #{}. The review will be submitted during safe output processing.",
-            result.event, result.pull_request_id
+            "PR review '{}' queued for {}. The review will be submitted during safe output processing.",
+            result.event, crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
     }
 
@@ -1803,8 +1803,8 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
         params: Parameters<ReplyToPrCommentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: reply-to-pull-request-comment - PR #{} thread #{}",
-            params.0.pull_request_id, params.0.thread_id
+            "Tool called: reply-to-pull-request-comment - {} thread #{}",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.thread_id
         );
         let mut sanitized = params.0;
         sanitized.content = sanitize_text(&sanitized.content);
@@ -1813,8 +1813,8 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Reply queued for thread #{} on PR #{}. The reply will be posted during safe output processing.",
-            result.thread_id, result.pull_request_id
+            "Reply queued for thread #{} on {}. The reply will be posted during safe output processing.",
+            result.thread_id, crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
     }
 
@@ -1829,16 +1829,16 @@ The status change will be applied during safe output processing."
         params: Parameters<ResolvePrThreadParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: resolve-pull-request-thread - PR #{} thread #{} → '{}'",
-            params.0.pull_request_id, params.0.thread_id, params.0.status
+            "Tool called: resolve-pull-request-thread - {} thread #{} → '{}'",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.thread_id, params.0.status
         );
         let result: ResolvePrThreadResult = params.0.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Thread #{} status change to '{}' queued for PR #{}. The change will be applied during safe output processing.",
-            result.thread_id, result.status, result.pull_request_id
+            "Thread #{} status change to '{}' queued for {}. The change will be applied during safe output processing.",
+            result.thread_id, result.status, crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
     }
 

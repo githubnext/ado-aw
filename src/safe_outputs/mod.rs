@@ -224,6 +224,7 @@ pub(crate) async fn resolve_wiki_branch(
 /// Azure DevOps repository names are case-insensitive, so the name-based
 /// fallbacks match case-insensitively. Returns the resolved alias key only when
 /// the match is unique; ambiguous names are rejected.
+#[cfg(test)]
 pub(crate) fn lookup_allowed_repository_alias<'a>(
     input: &str,
     allowed_repositories: &'a std::collections::HashMap<String, String>,
@@ -274,6 +275,7 @@ pub(crate) fn lookup_allowed_repository_alias<'a>(
 /// Azure DevOps repository names are case-insensitive, so the trailing-name fallback
 /// matches case-insensitively. Returns the resolved ADO repo name (the map value) on
 /// success, or `None` if no entry matches.
+#[cfg(test)]
 pub(crate) fn lookup_allowed_repository<'a>(
     input: &str,
     allowed_repositories: &'a std::collections::HashMap<String, String>,
@@ -312,7 +314,7 @@ pub(crate) fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool 
 ///
 /// **Idempotent**: passing an already-canonical alias returns it unchanged
 /// (`"self"` short-circuits on [`input_refers_to_self`]; an alias key hits the
-/// exact-key arm of [`lookup_allowed_repository_alias`]), so callers may
+/// exact-key lookup), so callers may
 /// canonicalize defensively without changing the result.
 ///
 /// **Precedence**: literal `"self"`/empty selects self; an exact checkout alias
@@ -597,6 +599,7 @@ pub(crate) fn resolve_repository_checkout_dir(
 /// against the trailing repo-name part of either `ctx.repository_name` or any
 /// configured allowed repository. See [`lookup_allowed_repository`] for the
 /// matching rules used against `ctx.allowed_repositories`.
+#[cfg(test)]
 pub(crate) fn resolve_repo_name(
     repo_alias: Option<&str>,
     ctx: &ExecutionContext,

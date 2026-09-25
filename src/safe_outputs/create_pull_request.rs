@@ -402,6 +402,9 @@ pub enum ProtectedFiles {
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePrConfig {
+    /// Optional restriction within the compiler-authorized checkout destinations.
+    #[serde(default, rename = "allowed-repositories")]
+    pub allowed_repositories: Vec<String>,
     /// Target branch to merge into (default: "main"). This is the literal
     /// fallback applied to every repo unless overridden by `target_branches`
     /// or `infer_target_from_checkout_ref`. It is always a plain branch name —
@@ -572,6 +575,7 @@ fn repository_api_base(target: &crate::safe_outputs::result::AdoRepositoryTarget
 impl Default for CreatePrConfig {
     fn default() -> Self {
         Self {
+            allowed_repositories: Vec::new(),
             target_branch: default_target_branch(),
             target_branches: std::collections::HashMap::new(),
             infer_target_from_checkout_ref: false,
@@ -706,6 +710,11 @@ impl Executor for CreatePrResult {
             Err(failure) => return Ok(failure),
         };
         debug!("Resolved repository ID: {}", target.repository_locator());
+        if let Err(failure) = super::pr_common::validate_pr_repository_policy(
+            &target, &config.allowed_repositories, ctx,
+        ) {
+            return Ok(failure);
+        }
         if ctx.has_resolved_pull_request(&self.temporary_id)? {
             return Ok(ExecutionResult::failure(format!(
                 "temporary_id '{}' was already used in this run",

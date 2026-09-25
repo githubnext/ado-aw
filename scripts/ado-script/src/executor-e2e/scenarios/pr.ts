@@ -105,6 +105,7 @@ export const addPrComment: Scenario<PrState> = {
   tool: "add-pull-request-comment",
   targetsAdoRepo: true,
   config: (ctx) => ({
+    target: "*",
     "allowed-repositories": [ctx.adoRepo],
     max: 1,
     "include-stats": false,
@@ -129,7 +130,7 @@ export const addPrComment: Scenario<PrState> = {
 export const replyToPrComment: Scenario<PrState> = {
   tool: "reply-to-pull-request-comment",
   targetsAdoRepo: true,
-  config: (ctx) => ({ "allowed-repositories": [ctx.adoRepo], max: 1 }),
+  config: (ctx) => ({ target: "*", "allowed-repositories": [ctx.adoRepo], max: 1 }),
   setup: (ctx) => setupPr(ctx, "reply-to-pull-request-comment", true),
   ndjson: async (ctx, state) => {
     if (state.threadId === undefined) throw new Error(`[reply-to-pull-request-comment] threadId not set by setup`);
@@ -153,6 +154,7 @@ export const resolvePrThread: Scenario<PrState> = {
   tool: "resolve-pull-request-thread",
   targetsAdoRepo: true,
   config: (ctx) => ({
+    target: "*",
     "allowed-repositories": [ctx.adoRepo],
     "allowed-statuses": ["fixed"],
     max: 1,
@@ -187,6 +189,7 @@ export const submitPrReview: Scenario<PrState> = {
   tool: "submit-pull-request-review",
   targetsAdoRepo: true,
   config: (ctx) => ({
+    target: "*",
     "allowed-events": ["request-changes"],
     "allowed-repositories": [ctx.adoRepo],
     max: 1,
@@ -376,6 +379,7 @@ export const addPrReviewers: Scenario<ReviewerState> = {
   tool: "add-pull-request-reviewers",
   targetsAdoRepo: true,
   config: (ctx, state) => ({
+    target: "*",
     "allowed-repositories": [ctx.adoRepo], "allowed-reviewers": [state.reviewer], "max-reviewers": 1,
   }),
   setup: async (ctx) => {
@@ -399,7 +403,7 @@ export const addPrReviewers: Scenario<ReviewerState> = {
 export const addPrLabels: Scenario<PrState> = {
   tool: "add-pull-request-labels",
   targetsAdoRepo: true,
-  config: (ctx) => ({ "allowed-repositories": [ctx.adoRepo] }),
+  config: (ctx) => ({ target: "*", "allowed-repositories": [ctx.adoRepo] }),
   setup: (ctx) => setupLabeledPr(ctx, "add-pull-request-labels"),
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId, repository: ctx.adoRepo, labels: ["new-label"],
@@ -420,6 +424,7 @@ export const setPrAutoComplete: Scenario<AutoCompleteState> = {
   tool: "set-pull-request-auto-complete",
   targetsAdoRepo: true,
   config: (ctx) => ({
+    target: "*",
     "allowed-repositories": [ctx.adoRepo],
     "delete-source-branch": false,
     "merge-strategy": "squash",

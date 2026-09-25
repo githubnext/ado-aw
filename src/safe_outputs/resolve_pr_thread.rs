@@ -2,12 +2,11 @@
 
 use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
-use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::PATH_SEGMENT;
-use super::resolve_repo_name;
+use super::pr_common::{PullRequestReference, describe_pr_reference, repository_api_base, resolve_configured_pr_target, validate_reference};
+use super::{ToolResult, authenticate_ado_request};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
@@ -36,16 +35,13 @@ fn status_to_int(status: &str) -> Option<i32> {
     }
 }
 
-fn default_repository() -> Option<String> {
-    Some("self".to_string())
-}
-
 /// Parameters for resolving or reactivating a PR review thread
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvePrThreadParams {
     /// The pull request ID containing the thread
-    pub pull_request_id: i32,
+    #[serde(default)]
+    pub pull_request_id: Option<PullRequestReference>,
 
     /// The thread ID to resolve or reactivate
     pub thread_id: i32,
@@ -55,13 +51,15 @@ pub struct ResolvePrThreadParams {
 
     /// Repository alias: "self" for pipeline repo, or an alias from the checkout list.
     /// Defaults to "self" if omitted.
-    #[serde(default = "default_repository")]
+    #[serde(default)]
     pub repository: Option<String>,
 }
 
 impl Validate for ResolvePrThreadParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(self.pull_request_id > 0, "pull_request_id must be positive");
+        if let Some(reference) = &self.pull_request_id {
+            validate_reference(reference)?;
+        }
         ensure!(self.thread_id > 0, "thread_id must be positive");
         ensure!(
             VALID_STATUSES.contains(&self.status.as_str()),
@@ -83,7 +81,8 @@ tool_result! {
     /// Result of resolving or reactivating a PR review thread
     #[serde(deny_unknown_fields)]
     pub struct ResolvePrThreadResult {
-        pull_request_id: i32,
+        #[serde(default)]
+        pull_request_id: Option<PullRequestReference>,
         thread_id: i32,
         status: String,
         repository: Option<String>,
@@ -115,6 +114,18 @@ impl SanitizeContent for ResolvePrThreadResult {
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvePrThreadConfig {
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
+    #[serde(default, rename = "allow-temporary-ids")]
+    #[sanitize_config(skip)]
+    pub allow_temporary_ids: bool,
     /// Restrict which repositories the agent can operate on.
     /// If empty, all repositories in the checkout list (plus "self") are allowed.
     #[serde(default, rename = "allowed-repositories")]
@@ -133,34 +144,24 @@ pub struct ResolvePrThreadConfig {
 impl Executor for ResolvePrThreadResult {
     fn dry_run_summary(&self) -> String {
         format!(
-            "resolve thread #{} on PR #{} as '{}'",
-            self.thread_id, self.pull_request_id, self.status
+            "resolve thread #{} on {} as '{}'",
+            self.thread_id, describe_pr_reference(self.pull_request_id.as_ref()), self.status
         )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        info!(
-            "Resolving thread #{} on PR #{} with status '{}'",
-            self.thread_id, self.pull_request_id, self.status
-        );
-        debug!(
-            "resolve-pull-request-thread: pr_id={}, thread_id={}, status='{}'",
-            self.pull_request_id, self.thread_id, self.status
-        );
-
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
+        if let Err(error) = (ResolvePrThreadParams {
+            pull_request_id: self.pull_request_id.clone(),
+            thread_id: self.thread_id,
+            status: self.status.clone(),
+            repository: self.repository.clone(),
+        }).validate() {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         let token = ctx
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        debug!("ADO org: {}, project: {}", org_url, project);
 
         let config: ResolvePrThreadConfig = ctx.get_tool_config("resolve-pull-request-thread")?;
         debug!("Config: {:?}", config);
@@ -186,20 +187,6 @@ impl Executor for ResolvePrThreadResult {
             )));
         }
 
-        let effective_repo = self.repository.as_deref().unwrap_or("self");
-
-        // Validate repository against allowed-repositories config
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&effective_repo.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                effective_repo
-            )));
-        }
-
         // Map status string to ADO integer
         let status_int = match status_to_int(&self.status) {
             Some(v) => v,
@@ -212,22 +199,22 @@ impl Executor for ResolvePrThreadResult {
             }
         };
 
-        // Resolve repository alias to actual repo name via the shared helper.
-        // Treat an empty string the same as "self" (pipeline repository).
-        let alias = self.repository.as_deref().filter(|s| !s.is_empty());
-        let repo_name = match resolve_repo_name(alias, ctx) {
-            Ok(name) => name,
-            Err(result) => return Ok(result),
+        super::pr_common::validate_temporary_opt_in(self.pull_request_id.as_ref(), config.allow_temporary_ids)?;
+        let (pull_request_id, target) = match resolve_configured_pr_target(
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+        ).await? {
+            Ok(target) => target,
+            Err(failure) => return Ok(failure),
         };
+        let repo_name = target.qualified_repository();
+        let project = &target.project;
 
         // Build the Azure DevOps REST API URL for updating a thread
         // PATCH https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}/pullRequests/{prId}/threads/{threadId}?api-version=7.1
         let url = format!(
-            "{}/{}/_apis/git/repositories/{}/pullRequests/{}/threads/{}?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            utf8_percent_encode(&repo_name, PATH_SEGMENT),
-            self.pull_request_id,
+            "{}/pullRequests/{}/threads/{}?api-version=7.1",
+            repository_api_base(&target),
+            pull_request_id,
             self.thread_id,
         );
         debug!("API URL: {}", url);
@@ -240,12 +227,10 @@ impl Executor for ResolvePrThreadResult {
 
         info!(
             "Updating thread #{} on PR #{} to status '{}'",
-            self.thread_id, self.pull_request_id, self.status
+            self.thread_id, pull_request_id, self.status
         );
-        let response = client
-            .patch(&url)
+        let response = authenticate_ado_request(client.patch(&url), token, ctx.write_connection_type)
             .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
             .json(&body)
             .send()
             .await
@@ -257,21 +242,23 @@ impl Executor for ResolvePrThreadResult {
                 .await
                 .context("Failed to parse response JSON")?;
 
-            let returned_id = resp_body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let returned_id = resp_body.get("id").and_then(|v| v.as_i64())
+                .filter(|id| *id == i64::from(self.thread_id))
+                .context("Thread update response missing the requested thread ID")?;
 
             info!(
                 "Thread #{} on PR #{} updated to status '{}'",
-                self.thread_id, self.pull_request_id, self.status
+                self.thread_id, pull_request_id, self.status
             );
 
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Updated thread #{} on PR #{} to status '{}'",
-                    self.thread_id, self.pull_request_id, self.status
+                    self.thread_id, pull_request_id, self.status
                 ),
                 serde_json::json!({
                     "thread_id": returned_id,
-                    "pull_request_id": self.pull_request_id,
+                    "pull_request_id": pull_request_id,
                     "repository": repo_name,
                     "project": project,
                     "status": self.status,
@@ -286,7 +273,7 @@ impl Executor for ResolvePrThreadResult {
 
             Ok(ExecutionResult::failure(format!(
                 "Failed to update thread #{} on PR #{} (HTTP {}): {}",
-                self.thread_id, self.pull_request_id, status, error_body
+                self.thread_id, pull_request_id, status, error_body
             )))
         }
     }
@@ -300,23 +287,23 @@ mod tests {
     fn test_params_deserializes() {
         let json = r#"{"pull_request_id": 42, "thread_id": 7, "status": "fixed"}"#;
         let params: ResolvePrThreadParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.pull_request_id, 42);
+        assert_eq!(params.pull_request_id, Some(PullRequestReference::Number(42)));
         assert_eq!(params.thread_id, 7);
         assert_eq!(params.status, "fixed");
-        assert_eq!(params.repository, Some("self".to_string()));
+        assert_eq!(params.repository, None);
     }
 
     #[test]
     fn test_params_converts_to_result() {
         let params = ResolvePrThreadParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             status: "fixed".to_string(),
             repository: Some("self".to_string()),
         };
         let result: ResolvePrThreadResult = params.try_into().unwrap();
         assert_eq!(result.name, "resolve-pull-request-thread");
-        assert_eq!(result.pull_request_id, 42);
+        assert_eq!(result.pull_request_id, Some(PullRequestReference::Number(42)));
         assert_eq!(result.thread_id, 7);
         assert_eq!(result.status, "fixed");
         assert_eq!(result.repository, Some("self".to_string()));
@@ -325,14 +312,14 @@ mod tests {
     #[test]
     fn test_validation_rejects_zero_pr_id() {
         let params = ResolvePrThreadParams {
-            pull_request_id: 0,
+            pull_request_id: Some(PullRequestReference::Number(0)),
             thread_id: 7,
             status: "fixed".to_string(),
             repository: Some("self".to_string()),
         };
         let err = <ResolvePrThreadResult as TryFrom<_>>::try_from(params).unwrap_err();
         assert!(
-            err.to_string().contains("pull_request_id must be positive"),
+            err.to_string().contains("pull_request_id must be a positive integer"),
             "unexpected error: {err}"
         );
     }
@@ -340,7 +327,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_zero_thread_id() {
         let params = ResolvePrThreadParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 0,
             status: "fixed".to_string(),
             repository: Some("self".to_string()),
@@ -355,7 +342,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_invalid_status() {
         let params = ResolvePrThreadParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             status: "invalid-status".to_string(),
             repository: Some("self".to_string()),
@@ -374,7 +361,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_repository_pipeline_command() {
         let params = ResolvePrThreadParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             status: "fixed".to_string(),
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
@@ -390,7 +377,7 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = ResolvePrThreadParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             status: "fixed".to_string(),
             repository: Some("self".to_string()),

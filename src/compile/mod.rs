@@ -171,12 +171,13 @@ async fn compile_pipeline_inner(
     // changed default need it to tell an old source from a new one, and
     // it also drives the version upgrade note below.
     let yaml_output_path = resolve_output_path(input_path, output_path)?;
-    let existing_version = read_existing_pipeline_version(&yaml_output_path).await;
+    let (existing_version, current_pr_policy) = read_existing_pipeline_provenance(&yaml_output_path).await;
 
-    let mut parsed = common::parse_markdown_detailed_with_registry(
+    let mut parsed = common::parse_markdown_detailed_with_policy(
         &content,
         registry,
         existing_version.as_deref(),
+        current_pr_policy,
     )?;
     pr_migration::warn_prompt_references(input_path, &content, &parsed.body_raw);
     let (imported_prompt_body, merged_body) =
@@ -635,9 +636,11 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             )
         })?;
 
-    let mut parsed = parse_markdown_detailed_for_source(
+    let mut parsed = common::parse_markdown_detailed_with_policy(
         &content,
+        codemods::CODEMODS,
         Some(header_meta.version.as_str()).filter(|v| !v.is_empty()),
+        common::has_current_pr_policy(&existing),
     )?;
     pr_migration::warn_prompt_references(&source_path, &content, &parsed.body_raw);
     let (imported_prompt_body, markdown_body) =
@@ -807,14 +810,20 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
 /// header written by every compilation. Returns the version string when found,
 /// `None` when the file does not exist, is unreadable, or has no recognisable
 /// header.
-async fn read_existing_pipeline_version(path: &Path) -> Option<String> {
-    let content = tokio::fs::read_to_string(path).await.ok()?;
-    content
+async fn read_existing_pipeline_provenance(path: &Path) -> (Option<String>, bool) {
+    let Ok(content) = tokio::fs::read_to_string(path).await else { return (None, false); };
+    let version = content
         .lines()
         .take(5)
         .find_map(crate::detect::parse_header_line)
         .filter(|meta| !meta.version.is_empty())
-        .map(|meta| meta.version)
+        .map(|meta| meta.version);
+    (version, common::has_current_pr_policy(&content))
+}
+
+#[cfg(test)]
+async fn read_existing_pipeline_version(path: &Path) -> Option<String> {
+    read_existing_pipeline_provenance(path).await.0
 }
 
 /// Map a [`CompileTarget`] to the corresponding boxed [`Compiler`] implementation.
@@ -1038,8 +1047,10 @@ pub async fn prepare_source_front_matter(input_path: &Path) -> Result<FrontMatte
     let content = tokio::fs::read_to_string(input_path)
         .await
         .with_context(|| format!("Failed to read source file: {}", input_path.display()))?;
-    let version = read_existing_pipeline_version(&input_path.with_extension("lock.yml")).await;
-    let mut parsed = common::parse_markdown_detailed_for_source(&content, version.as_deref())?;
+    let (version, current_pr_policy) = read_existing_pipeline_provenance(&input_path.with_extension("lock.yml")).await;
+    let mut parsed = common::parse_markdown_detailed_with_policy(
+        &content, codemods::CODEMODS, version.as_deref(), current_pr_policy,
+    )?;
     prepare_parsed_source(&mut parsed, input_path, codemods::CODEMODS).await?;
     if parsed.codemods.changed() {
         log::warn!(
@@ -1074,10 +1085,11 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
     // Match `compile`'s view of the source: codemods that migrate a changed
     // default are gated on the version recorded in the committed output, so
     // reading the IR without it would diverge from what `compile` produces.
-    let existing_version =
-        read_existing_pipeline_version(&input_path.with_extension("lock.yml")).await;
-    let mut parsed =
-        common::parse_markdown_detailed_for_source(&content, existing_version.as_deref())?;
+    let (existing_version, current_pr_policy) =
+        read_existing_pipeline_provenance(&input_path.with_extension("lock.yml")).await;
+    let mut parsed = common::parse_markdown_detailed_with_policy(
+        &content, codemods::CODEMODS, existing_version.as_deref(), current_pr_policy,
+    )?;
 
     // Resolve + merge `imports:` so `inspect`/`graph`/`whatif`/`lint`/`trace`
     // reason about the same fully-merged pipeline `compile` and `check` produce

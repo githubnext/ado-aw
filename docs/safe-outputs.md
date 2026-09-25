@@ -864,11 +864,11 @@ safe-outputs:
     title: true               # enable title updates (default: true)
     body: true                # enable description updates (default: true)
     update-branch: false      # must be false; ADO has no equivalent branch-update API
-    sync-stack: true          # accepted legacy spelling; no ADO stack synchronization
     include-stats: false      # omit stats (default: true); footer is a legacy alias
     operation: replace        # replace, append, prepend, or replace-island
     max: 1                    # maximum updates per run (default: 1)
     target: "*"               # "triggering" (default), "*", or an ADO PR ID
+    target-repo: self          # optional default destination within authorized repositories
     allowed-repositories: [self]
     required-labels: [automated]
     required-title-prefix: "[bot] "
@@ -1294,9 +1294,9 @@ Reports that a task could not be completed.
 Adds a new comment thread to a pull request.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID to comment on (required, must be positive)
+- `pull_request_id` - Positive PR ID; required with `target: "*"`, otherwise optional and checked against the configured target.
 - `content` - Comment text in markdown format (required, at least 10 characters)
-- `repository` - Repository alias (default: "self")
+- `repository` - Optional repository alias; defaults to the configured/trusted target.
 - `file_path` *(optional)* - File path for an inline comment anchored to a specific file
 - `line` *(optional)* - Line number for an inline comment. Requires `file_path`.
 - `start_line` *(optional)* - Starting line for a multi-line inline comment range. Requires `file_path` and `line`, and must be strictly less than `line`.
@@ -1317,10 +1317,10 @@ safe-outputs:
 Replies to an existing review comment thread on a pull request.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID containing the thread (required)
+- `pull_request_id` - Positive PR ID containing the thread; required with `target: "*"`.
 - `thread_id` - The thread ID to reply to (required)
 - `content` - Reply text in markdown format (required, at least 10 characters)
-- `repository` - Repository alias (default: "self")
+- `repository` - Optional repository alias; defaults to the configured/trusted target.
 
 **Configuration options (front matter):**
 ```yaml
@@ -1335,10 +1335,10 @@ safe-outputs:
 Resolves or updates the status of a pull request review thread.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID containing the thread (required)
+- `pull_request_id` - Positive PR ID containing the thread; required with `target: "*"`.
 - `thread_id` - The thread ID to resolve (required)
 - `status` - Target status: `fixed`, `wont-fix`, `closed`, `by-design`, or `active` (to reactivate)
-- `repository` - Repository alias (default: "self")
+- `repository` - Optional repository alias; defaults to the configured/trusted target.
 
 **Configuration options (front matter):**
 ```yaml
@@ -1353,10 +1353,10 @@ safe-outputs:
 Submits a review vote on a pull request.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID to review (required)
+- `pull_request_id` - Positive PR ID to review; required with `target: "*"`.
 - `event` - Review decision: `approve`, `approve-with-suggestions`, `request-changes`, or `comment` (required)
 - `body` *(optional)* - Review rationale in markdown (required for `request-changes`, at least 10 characters)
-- `repository` - Repository alias (default: "self")
+- `repository` - Optional repository alias; defaults to the configured/trusted target.
 
 **Configuration options (front matter):**
 ```yaml
@@ -1381,7 +1381,14 @@ Each PR intent has one agent-facing tool:
 | Enable auto-complete | `set-pull-request-auto-complete` |
 | Abandon | `abandon-pull-request` |
 
-Reviewer, label, auto-complete and review tools require `pull_request_id` and
+All PR mutation tools support `target`, `target-repo`, `allowed-repositories`,
+`required-labels` and `required-title-prefix`. New configurations default to
+`target: triggering`: the complete trusted triggering identity is required,
+and an optional supplied PR ID must agree. Use a fixed ID or `target: "*"` for
+another PR. With `"*"`, `pull_request_id` is required. Repository routing and
+filters are enforced in Stage 3, including comment/reply/thread operations.
+
+Reviewer, label, auto-complete and review tools accept `pull_request_id` and
 accept an optional `repository`. Reviewer and label tools additionally require
 `reviewers` and `labels`, respectively. These are additive operations.
 Auto-complete uses the authenticated actor and does not bypass branch policy
@@ -1390,14 +1397,17 @@ or perform an immediate merge.
 ```yaml
 safe-outputs:
   add-pull-request-reviewers:
+    target: "*"
     allowed-repositories: [self]
     allowed-reviewers: ["owner@example.com"]
     max-reviewers: 3
     max: 1
   add-pull-request-labels:
+    target: "*"
     allowed-repositories: [self]
     max: 1
   set-pull-request-auto-complete:
+    target: "*"
     allowed-repositories: [self]
     delete-source-branch: true
     merge-strategy: squash
@@ -1431,6 +1441,10 @@ Existing `submit-pull-request-review` configurations remain numeric-only unless
 `allow-temporary-ids: true` is configured. Automatic migration enables this for
 legacy votes that already supported temporary references.
 
+Comment, reply and thread-status tools likewise require
+`allow-temporary-ids: true` to consume a same-run PR reference. This does not
+create temporary thread/comment IDs: those parameters remain existing server IDs.
+
 Example agent call sequence:
 
 ```json
@@ -1444,7 +1458,8 @@ temporary ID returned by that call in the later `add-pull-request-reviewers` cal
 ### Migrating PR tool names
 
 All public Azure DevOps safe-output tool names use `pull-request`, not `pr`.
-Compilation migrates the following keys without changing their configuration:
+Compilation migrates the following keys, preserving their settings and
+explicit-ID scope as `target: "*"`:
 
 | Previous name | Canonical name |
 |---|---|
@@ -1462,6 +1477,12 @@ to old tool names are highlighted for manual correction; prompt text is not
 rewritten. These are source migrations, not runtime aliases: MCP and Stage 3
 accept only canonical names. Existing compiled pipelines use their pinned
 compiler release.
+
+The `explicit_pr_policy` migration also preserves the explicit-ID scope of
+root configurations with a pre-0.53.0 compiled source version. New configurations
+are pinned to `target: triggering`; ambiguous imported provenance does not
+grant wildcard authority. Existing explicit targets are never overwritten.
+`sync-stack` is removed with a warning because it never acted in ADO.
 
 ### Migrating the update-pr operation-based tool
 

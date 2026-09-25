@@ -53,6 +53,9 @@ mod m0008_explicit_mcp_pipeline_env;
 mod m0009_split_update_pr;
 #[path = "0010_pull_request_tool_names.rs"]
 mod m0010_pull_request_tool_names;
+#[path = "0011_explicit_pr_policy.rs"]
+mod m0011_explicit_pr_policy;
+pub(crate) use m0011_explicit_pr_policy::CODEMOD as PR_POLICY_DEFAULTS;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
@@ -161,6 +164,7 @@ pub static CODEMODS: &[&Codemod] = &[
     &m0008_explicit_mcp_pipeline_env::CODEMOD,
     &m0009_split_update_pr::CODEMOD,
     &m0010_pull_request_tool_names::CODEMOD,
+    &m0011_explicit_pr_policy::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter

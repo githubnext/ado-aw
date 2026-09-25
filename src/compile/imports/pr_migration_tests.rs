@@ -445,12 +445,47 @@ async fn mixed_custom_ownership_survives_unrelated_builtin_root_rewrite() {
     assert_eq!(after.safe_outputs["add-pr-labels"], json!({"max": 3}));
     assert_eq!(
         after.safe_outputs["add-pull-request-comment"],
-        json!({"max": 1})
+        json!({"max": 1, "target": "*"})
     );
     let rewritten = fs::read_to_string(&source).unwrap();
     assert!(rewritten.contains("echo add-pr-labels"));
     assert!(!rewritten.contains("add-pull-request-labels"));
     assert!(!compile_source(&source).await.unwrap());
+}
+
+#[tokio::test]
+async fn legacy_consumer_provenance_does_not_grant_new_import_wildcard_authority() {
+    let repo = temp_repo();
+    let component = "---\nsafe-outputs:\n  add-pull-request-labels:\n    max: 2\n---\nComponent";
+    let source = local_workflow(repo.path(), component, "  add-pull-request-comment:\n    max: 1\n");
+    write(&source.with_extension("lock.yml"),
+        "# @ado-aw source=\"agent.md\" version=0.52.0\n");
+    let (fm, _) = compile::build_pipeline_ir(&source).await.unwrap();
+    assert_eq!(fm.safe_outputs["add-pull-request-comment"]["target"], "*");
+    assert_eq!(fm.safe_outputs["add-pull-request-labels"]["target"], "triggering");
+    compile_source(&source).await.unwrap();
+    let (again, _) = compile::build_pipeline_ir(&source).await.unwrap();
+    assert_eq!(fm.safe_outputs, again.safe_outputs);
+    assert_eq!(fs::read_to_string(repo.path().join("component.md")).unwrap(), component);
+}
+
+#[tokio::test]
+async fn new_policy_header_prevents_development_version_from_restoring_wildcard() {
+    let repo = temp_repo();
+    let source = repo.path().join("agent.md");
+    let authored = workflow("", "  add-pull-request-labels:\n    max: 2\n");
+    write(&source, &authored);
+    compile_source(&source).await.unwrap();
+    // Simulate an author removing the explicit target to request the new default.
+    write(&source, &authored);
+    let (fm, _) = compile::build_pipeline_ir(&source).await.unwrap();
+    assert_eq!(fm.safe_outputs["add-pull-request-labels"]["target"], "triggering");
+    assert_eq!(
+        compile::prepare_source_front_matter(&source).await.unwrap().safe_outputs,
+        fm.safe_outputs,
+    );
+    compile_source(&source).await.unwrap();
+    compile::check_pipeline(&source.with_extension("lock.yml").to_string_lossy()).await.unwrap();
 }
 
 #[tokio::test]

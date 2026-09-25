@@ -45,11 +45,17 @@ pub(crate) fn rename_declarations(
         if custom_jobs.contains(*old) {
             continue;
         }
-        if let Some(value) = renamed.remove(*old) {
+        if let Some(mut value) = renamed.remove(*old) {
             ensure!(
                 !renamed.contains_key(*new),
                 "manual migration required: both {old} and {new} are configured"
             );
+            if value.is_null() {
+                value = Value::Mapping(Mapping::new());
+            }
+            if let Some(config) = value.as_mapping_mut() {
+                config.entry(Value::String("target".into())).or_insert(Value::String("*".into()));
+            }
             renamed.insert(Value::String((*new).to_string()), value);
         }
     }

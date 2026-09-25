@@ -16,6 +16,120 @@ use crate::secure::PullRequestTemporaryId;
 
 pub(crate) const MAX_DESCRIPTION_UTF16: usize = 4_000;
 
+pub(crate) const PR_MUTATION_TOOLS: &[&str] = &[
+    "update-pull-request", "abandon-pull-request", "add-pull-request-reviewers",
+    "add-pull-request-labels", "set-pull-request-auto-complete", "submit-pull-request-review",
+    "add-pull-request-comment", "reply-to-pull-request-comment", "resolve-pull-request-thread",
+];
+
+/// Shared projection of an already closed, tool-specific configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct PrMutationPolicy {
+    #[serde(default)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "allowed-repositories")]
+    pub allowed_repositories: Vec<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
+}
+
+impl PrMutationPolicy {
+    pub(crate) fn parse(value: &serde_json::Value) -> anyhow::Result<Self> {
+        let policy: Self = if value.is_null() {
+            Self::default()
+        } else {
+            serde_json::from_value(value.clone()).context("invalid PR target policy")?
+        };
+        policy.target_policy()?;
+        for (field, values) in [
+            ("target-repo", policy.target_repo.iter().collect::<Vec<_>>()),
+            ("allowed-repositories", policy.allowed_repositories.iter().collect()),
+            ("required-labels", policy.required_labels.iter().collect()),
+            ("required-title-prefix", policy.required_title_prefix.iter().collect()),
+        ] {
+            for value in values {
+                ensure!(!value.trim().is_empty(), "{field} must not be empty");
+                crate::validate::reject_pipeline_injection(value, field)?;
+            }
+        }
+        Ok(policy)
+    }
+
+    pub(crate) fn target_policy(&self) -> anyhow::Result<PrTargetPolicy> {
+        match &self.target {
+            super::update_pull_request::UpdatePullRequestTarget::Id(id) => PrTargetPolicy::fixed(*id),
+            super::update_pull_request::UpdatePullRequestTarget::Named(value) => PrTargetPolicy::named(value),
+        }
+    }
+}
+
+pub(crate) fn describe_pr_reference(reference: Option<&PullRequestReference>) -> String {
+    reference.map(|id| format!("#{id}")).unwrap_or_else(|| "the configured PR".into())
+}
+
+pub(crate) fn validate_temporary_opt_in(reference: Option<&PullRequestReference>, allowed: bool) -> anyhow::Result<()> {
+    ensure!(
+        allowed || !matches!(reference, Some(PullRequestReference::Temporary(_))),
+        "temporary PR references require allow-temporary-ids: true",
+    );
+    Ok(())
+}
+
+pub(crate) async fn resolve_configured_pr_target(
+    tool: &str,
+    reference: Option<&PullRequestReference>,
+    repository: Option<&str>,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<Result<(u64, AdoRepositoryTarget), ExecutionResult>> {
+    let raw = ctx.tool_configs.get(tool).with_context(|| format!("{tool} is not configured"))?;
+    let policy = PrMutationPolicy::parse(raw)?;
+    let resolved = match resolve_pr_policy_target(
+        &policy.target_policy()?, reference, repository.or(policy.target_repo.as_deref()),
+        &policy.allowed_repositories, ctx,
+    )? {
+        Ok(resolved) => resolved,
+        Err(failure) => return Ok(Err(failure)),
+    };
+    let (id, target) = &resolved;
+    if !policy.required_labels.is_empty() || policy.required_title_prefix.is_some() {
+        let token = ctx.access_token.as_deref().context("No access token available")?;
+        let client = reqwest::Client::new();
+        let base = repository_api_base(target);
+        if !policy.required_labels.is_empty() {
+            let labels = match fetch_pr_labels(&client, &base, *id, token, ctx).await? {
+                Ok(labels) => labels,
+                Err(failure) => return Ok(Err(failure)),
+            };
+            if let Some(missing) = policy.required_labels.iter()
+                .find(|required| !labels.iter().any(|actual| actual.eq_ignore_ascii_case(required)))
+            {
+                return Ok(Err(ExecutionResult::failure(format!("PR #{id} is missing required label '{missing}'"))));
+            }
+        }
+        if let Some(prefix) = &policy.required_title_prefix {
+            let response = super::authenticate_ado_request(
+                client.get(format!("{base}/pullRequests/{id}?api-version=7.1")), token, ctx.write_connection_type,
+            ).send().await.context("Failed to fetch PR title policy metadata")?;
+            if !response.status().is_success() {
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "Failed to fetch PR #{id} title (HTTP {})", response.status(),
+                ))));
+            }
+            #[derive(Deserialize)]
+            struct Metadata { title: String }
+            let metadata: Metadata = response.json().await.context("Invalid PR title policy metadata")?;
+            if !metadata.title.starts_with(prefix) {
+                return Ok(Err(ExecutionResult::failure(format!("PR #{id} does not match required-title-prefix"))));
+            }
+        }
+    }
+    Ok(Ok(resolved))
+}
+
 pub(crate) async fn fetch_pr_labels(
     client: &reqwest::Client,
     base_url: &str,
@@ -443,6 +557,20 @@ fn repository_is_allowed(allowed: &[String], alias: &str, ctx: &ExecutionContext
         })
 }
 
+pub(crate) fn validate_pr_repository_policy(
+    target: &AdoRepositoryTarget,
+    allowed: &[String],
+    ctx: &ExecutionContext,
+) -> Result<(), ExecutionResult> {
+    if !repository_is_allowed(allowed, &target.alias, ctx) {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{}' is not in the allowed-repositories list: [{}]",
+            target.alias, allowed.join(", "),
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_pr_target(
     reference: &PullRequestReference,
     requested_repository: Option<&str>,
@@ -618,6 +746,95 @@ pub(crate) mod tests {
     }
 
     const TRIGGER_REPO_ID: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn mutation_fields(tool: &str) -> serde_json::Value {
+        match tool {
+            "update-pull-request" => serde_json::json!({"title":"Updated title"}),
+            "abandon-pull-request" => serde_json::json!({}),
+            "add-pull-request-reviewers" => serde_json::json!({"reviewers":["reviewer"]}),
+            "add-pull-request-labels" => serde_json::json!({"labels":["label"]}),
+            "set-pull-request-auto-complete" => serde_json::json!({}),
+            "submit-pull-request-review" => serde_json::json!({"event":"comment","body":"Informational feedback."}),
+            "add-pull-request-comment" => serde_json::json!({"content":"Informational feedback.","status":"active","repository":null}),
+            "reply-to-pull-request-comment" => serde_json::json!({"thread_id":1,"content":"Informational feedback."}),
+            "resolve-pull-request-thread" => serde_json::json!({"thread_id":1,"status":"fixed"}),
+            _ => panic!("missing test fields for {tool}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_pr_mutation_binds_triggering_identity_and_fails_closed_on_label_readback() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+        for tool in PR_MUTATION_TOOLS {
+            let server = MockServer::start().await;
+            let mut ctx = triggering_context(&server, tool, true);
+            ctx.tool_configs.insert((*tool).into(), serde_json::json!({
+                "required-labels":["automated"], "allowed-events":["comment"]
+            }));
+            // Only this tool's closed configuration fields are admitted.
+            if *tool != "submit-pull-request-review" {
+                ctx.tool_configs.get_mut(*tool).unwrap().as_object_mut().unwrap().remove("allowed-events");
+            }
+            if *tool == "resolve-pull-request-thread" {
+                ctx.tool_configs.get_mut(*tool).unwrap()["allowed-statuses"] = serde_json::json!(["fixed"]);
+            }
+            let route = format!("/Other/_apis/git/repositories/{TRIGGER_REPO_ID}/pullRequests/42");
+            Mock::given(method("GET")).and(path(&route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "pullRequestId":42,"title":"Title","status":"active"
+                }))).mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("{route}/labels")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"value":[]})))
+                .mount(&server).await;
+            let mut fields = mutation_fields(tool);
+            fields["name"] = serde_json::json!(tool);
+            let (_, result) = crate::execute::execute_safe_output(&fields, &ctx).await.unwrap();
+            assert!(!result.success, "{tool}");
+            assert!(result.message.to_lowercase().contains("label"), "{tool}: {}",result.message);
+            assert!(server.received_requests().await.unwrap().iter().all(|r| r.method.as_str()=="GET"));
+
+            let before = server.received_requests().await.unwrap().len();
+            fields["pull_request_id"] = serde_json::json!(43);
+            let (_, result) = crate::execute::execute_safe_output(&fields, &ctx).await.unwrap();
+            assert!(!result.success, "{tool}");
+            assert_eq!(server.received_requests().await.unwrap().len(), before, "{tool}");
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_repository_cannot_escape_retained_legacy_repository_policy() {
+        let server = wiremock::MockServer::start().await;
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()), ado_organization: Some("org".into()),
+            ado_project: Some("P".into()), repository_name: Some("repo".into()),
+            access_token: Some("token".into()), ..Default::default()
+        };
+        ctx.allowed_repositories.insert("other".into(),"Other/repo".into());
+        for tool in ["update-pull-request","add-pull-request-labels","add-pull-request-reviewers",
+            "set-pull-request-auto-complete","submit-pull-request-review"] {
+            ctx.tool_configs.insert(tool.into(), serde_json::json!({
+                "target":"*", "target-repo":"other", "legacy-update-pr":{"allowed-repositories":["self"]}
+            }));
+            let mut fields = mutation_fields(tool);
+            fields["name"] = serde_json::json!(tool);
+            fields["pull_request_id"] = serde_json::json!(42);
+            if tool == "submit-pull-request-review" {
+                fields["event"] = serde_json::json!("reset");
+                fields.as_object_mut().unwrap().remove("body");
+                ctx.tool_configs.get_mut(tool).unwrap()["allowed-events"] = serde_json::json!(["reset"]);
+                ctx.tool_configs.get_mut(tool).unwrap()["legacy-update-pr"]["allowed-votes"] = serde_json::json!(["reset"]);
+            }
+            if tool == "update-pull-request" {
+                fields.as_object_mut().unwrap().remove("title");
+                fields["body"] = serde_json::json!("Replacement legacy description.");
+                ctx.tool_configs.get_mut(tool).unwrap()["include-stats"] = serde_json::json!(false);
+            }
+            let (_, result) = crate::execute::execute_safe_output(&fields,&ctx).await.unwrap();
+            assert!(!result.success,"{tool}");
+            assert!(result.message.contains("allowed-repositories"),"{tool}: {}",result.message);
+            assert!(server.received_requests().await.unwrap().is_empty(),"{tool}");
+        }
+    }
 
     fn native_env() -> std::collections::HashMap<String, String> {
         [
@@ -945,7 +1162,7 @@ pub(crate) mod tests {
     pub(crate) fn registered_context(
         organization_url: &str,
         tool: &str,
-        config: serde_json::Value,
+        mut config: serde_json::Value,
     ) -> ExecutionContext {
         let mut ctx = ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/current-org".into()),
@@ -955,6 +1172,9 @@ pub(crate) mod tests {
             access_token: Some("token".into()),
             ..Default::default()
         };
+        if let Some(object) = config.as_object_mut() {
+            object.entry("target").or_insert(serde_json::json!("*"));
+        }
         ctx.tool_configs.insert(tool.into(), config);
         ctx.register_resolved_pull_request(
             &PullRequestTemporaryId::parse("#aw_pr123").unwrap(),

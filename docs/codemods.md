@@ -118,6 +118,27 @@ such as `add-pr-comment` to `add-pull-request-comment`, preserving configuration
 and updating shared-budget members. Old/new key collisions fail atomically.
 Only source configuration is migrated; old tool spellings are not runtime aliases.
 
+`explicit_pr_policy` pins the target of each PR mutation. New configurations
+use `triggering`; root declarations with a pre-0.53.0 compiled source version
+retain their previous explicit-ID scope as `target: "*"`. Update/abandon already
+defaulted to triggering and retain that behavior. The source rewrite also pins
+new defaults explicitly, so recompiling a development build cannot reinterpret
+its own source as legacy on the next `check`.
+Compiled headers also record the PR policy contract. This distinguishes
+pre-release builds sharing the same package version: removing an explicit target
+or adding a tool after compiling under the new contract cannot accidentally
+restore the old wildcard default.
+
+Abbreviated old tool keys and migrated `update-pr` operations prove their old
+explicit-ID contract independently and preserve it, including inside imports.
+An old consumer lock does not establish the age of a newly imported canonical
+declaration: absent separate proof or an explicit target, it uses triggering.
+Imported files and pinned cache bytes are never rewritten.
+
+The same codemod removes `update-pull-request.sync-stack`, with a warning:
+it never synchronized Azure DevOps branches. Unsupported `update-branch: true`
+still fails instead of silently doing nothing.
+
 The `split_update_pr` codemod replaces the old operation-based `update-pr`
 declaration with focused PR tools. It preserves the original aggregate `max`
 in a persisted `budget-groups` declaration and retains operator-owned legacy

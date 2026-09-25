@@ -4,4 +4,4 @@
 pub use super::pr_common::PullRequestReference;
 #[cfg(test)]
 pub use super::pr_mutations::UpdatePrResult;
-pub use super::pr_mutations::{UpdatePrConfig, UpdatePrParams};
+pub use super::pr_mutations::UpdatePrConfig;

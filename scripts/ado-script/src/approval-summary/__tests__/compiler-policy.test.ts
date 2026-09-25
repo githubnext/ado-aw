@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
 import { parsePrPolicies } from "../index.js";
@@ -27,7 +27,14 @@ function findSummaryEnv(value: unknown): Record<string, string> | undefined {
   return undefined;
 }
 
-describe.skipIf(!existsSync(binary))("compiler-to-preview target policy contract", () => {
+describe("compiler-to-preview target policy contract", () => {
+  beforeAll(() => {
+    if (!process.env.ADO_AW_BIN) {
+      execFileSync("cargo", ["build", "--quiet", "--bin", "ado-aw"], {
+        cwd: resolve(process.cwd(), "..", ".."), stdio: "pipe",
+      });
+    }
+  }, 600_000);
   it("normalizes quoted/numeric fixed IDs and full-u64 targets before rendering", () => {
     const directory = mkdtempSync(join(process.cwd(), ".approval-policy-contract-"));
     directories.push(directory);
@@ -52,7 +59,7 @@ describe.skipIf(!existsSync(binary))("compiler-to-preview target policy contract
         const policies = parsePrPolicies(env!.AW_PR_POLICIES);
         expect(policies.get("update-pull-request")?.target).toEqual({kind:"fixed",id});
         expect(policies.get("abandon-pull-request")?.target).toEqual({kind:"fixed",id});
-        expect(policies.get("add-pull-request-labels")?.target).toEqual({kind:"explicit"});
+        expect(policies.get("add-pull-request-labels")?.target).toEqual({kind:"triggering"});
         const summary = renderSummary(parseProposals('{"name":"update-pull-request","title":"New"}'), new Set(), {
           policies:new Map(),prPolicies:policies,
           triggeringPr:{collection_uri:"https://dev.azure.com/org/",project:"Project",repository_name:"policy",

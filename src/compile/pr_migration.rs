@@ -142,6 +142,7 @@ pub fn migrate_safe_outputs(outputs: &mut Map<String, Value>) -> Result<bool> {
              their permissions, budgets and approval policies cannot be silently combined"
         );
         let mut config = Map::new();
+        config.insert("target".into(), json!("*"));
         for key in ["allowed-repositories", "max", "require-approval", "staged"] {
             if let Some(value) = original.get(key) {
                 config.insert(key.to_string(), value.clone());
@@ -418,7 +419,9 @@ mod tests {
             });
             let mut outputs = Map::from_iter([((*old).to_string(), config.clone())]);
             assert!(rename_pr_tools(&mut outputs).unwrap());
-            assert_eq!(outputs.get(*new), Some(&config));
+            let mut expected = config;
+            expected["target"] = json!("*");
+            assert_eq!(outputs.get(*new), Some(&expected));
             assert!(!outputs.contains_key(*old));
             let snapshot = outputs.clone();
             assert!(!rename_pr_tools(&mut outputs).unwrap());

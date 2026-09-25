@@ -1,12 +1,13 @@
 //! Add labels without replacing or removing existing Azure DevOps PR labels.
 
 use super::pr_common::{
-    PullRequestReference, legacy_policy, resolve_pr_target, validate_reference,
+    PullRequestReference, legacy_policy, validate_reference,
 };
 use super::pr_mutations::{UpdatePrContext, execute_add_labels};
 use super::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
+use super::ToolResult;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 use schemars::JsonSchema;
@@ -15,7 +16,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddPrLabelsParams {
-    pub pull_request_id: PullRequestReference,
+    #[serde(default)]
+    pub pull_request_id: Option<PullRequestReference>,
     #[serde(default)]
     pub repository: Option<String>,
     pub labels: Vec<String>,
@@ -23,7 +25,9 @@ pub struct AddPrLabelsParams {
 
 impl Validate for AddPrLabelsParams {
     fn validate(&self) -> anyhow::Result<()> {
-        validate_reference(&self.pull_request_id)?;
+        if let Some(reference) = &self.pull_request_id {
+            validate_reference(reference)?;
+        }
         ensure!(!self.labels.is_empty(), "labels list must not be empty");
         if let Some(repository) = &self.repository {
             crate::validate::reject_pipeline_injection(repository, "repository")?;
@@ -38,7 +42,8 @@ tool_result! {
     params = AddPrLabelsParams,
     #[serde(deny_unknown_fields)]
     pub struct AddPrLabelsResult {
-        pull_request_id: PullRequestReference,
+        #[serde(default)]
+        pull_request_id: Option<PullRequestReference>,
         #[serde(default)]
         repository: Option<String>,
         labels: Vec<String>,
@@ -59,6 +64,15 @@ impl SanitizeContent for AddPrLabelsResult {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct AddPrLabelsConfig {
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,7 +94,7 @@ pub(crate) fn validate_add_pr_labels_config(config: &AddPrLabelsConfig) -> anyho
 #[async_trait::async_trait]
 impl Executor for AddPrLabelsResult {
     fn dry_run_summary(&self) -> String {
-        format!("add labels to PR #{}", self.pull_request_id)
+        format!("add labels to {}", super::pr_common::describe_pr_reference(self.pull_request_id.as_ref()))
     }
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         if let Err(error) = (AddPrLabelsParams {
@@ -98,22 +112,16 @@ impl Executor for AddPrLabelsResult {
         );
         let config: AddPrLabelsConfig = ctx.get_tool_config("add-pull-request-labels")?;
         validate_add_pr_labels_config(&config)?;
-        let (pr_id, target) = match resolve_pr_target(
-            &self.pull_request_id,
-            self.repository.as_deref(),
-            &config.allowed_repositories,
-            ctx,
-        )? {
+        let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+        ).await? {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
         if let Some(legacy) = legacy_policy(ctx, "add-pull-request-labels", "add-labels")?
-            && let Err(failure) = resolve_pr_target(
-                &self.pull_request_id,
-                self.repository.as_deref(),
-                &legacy.allowed_repositories,
-                ctx,
-            )?
+            && let Err(failure) = super::pr_common::validate_pr_repository_policy(
+                &target, &legacy.allowed_repositories, ctx,
+            )
         {
             return Ok(failure);
         }
@@ -187,7 +195,7 @@ mod tests {
         ctx.allowed_repositories
             .insert("other".into(), "Other/repo".into());
         ctx.tool_configs
-            .insert("add-pull-request-labels".into(), serde_json::json!({}));
+            .insert("add-pull-request-labels".into(), serde_json::json!({"target":"*"}));
         let result: AddPrLabelsResult = serde_json::from_value(serde_json::json!({
             "name": "add-pull-request-labels", "pull_request_id": "4294967296",
             "repository": "other", "labels": ["ready"]

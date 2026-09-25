@@ -11,7 +11,7 @@ use ado_aw_derive::SanitizeConfig;
 use super::authenticate_ado_request;
 use super::pr_common::{
     PrTargetPolicy, PullRequestReference, fetch_pr_labels, legacy_policy, repository_api_base,
-    resolve_pr_policy_target, resolve_pr_target, validate_description, validate_reference,
+    resolve_pr_policy_target, validate_description, validate_reference,
 };
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{
@@ -204,10 +204,6 @@ pub struct UpdatePullRequestConfig {
     #[serde(default, rename = "update-branch")]
     #[sanitize_config(skip)]
     pub update_branch: bool,
-    /// Accepted for gh-aw front matter parity; unused for Azure DevOps.
-    #[serde(default = "default_true", rename = "sync-stack")]
-    #[sanitize_config(skip)]
-    pub sync_stack: bool,
     /// Include agent stats in body updates.
     #[serde(default = "default_true", rename = "include-stats", alias = "footer")]
     #[sanitize_config(skip)]
@@ -219,6 +215,9 @@ pub struct UpdatePullRequestConfig {
     /// `"triggering"` (default), `"*"`, or a fixed PR ID.
     #[serde(default)]
     pub target: UpdatePullRequestTarget,
+    /// Default repository selector, still constrained by the common target policy.
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
     /// Repository aliases the agent may target. Empty means any checkout alias accepted by the compiler.
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
@@ -237,10 +236,10 @@ impl Default for UpdatePullRequestConfig {
             title: true,
             body: true,
             update_branch: false,
-            sync_stack: true,
             include_stats: true,
             operation: AdoPullRequestBodyOperation::Replace,
             target: UpdatePullRequestTarget::default(),
+            target_repo: None,
             allowed_repositories: Vec::new(),
             required_labels: Vec::new(),
             required_title_prefix: None,
@@ -252,6 +251,7 @@ impl Default for UpdatePullRequestConfig {
 pub(crate) fn validate_update_pull_request_config(
     config: &UpdatePullRequestConfig,
 ) -> anyhow::Result<()> {
+    super::pr_common::PrMutationPolicy::parse(&serde_json::to_value(config)?)?;
     ensure!(
         !config.update_branch,
         "safe-outputs.update-pull-request.update-branch is not supported for Azure DevOps PRs"
@@ -573,21 +573,17 @@ impl Executor for UpdatePullRequestResult {
         let (pr_id, target) = match resolve_pr_policy_target(
             &config.target_policy()?,
             requested.as_ref(),
-            self.repository.as_deref(),
+            self.repository.as_deref().or(config.target_repo.as_deref()),
             &config.allowed_repositories,
             ctx,
         )? {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
-        let reference = requested.unwrap_or(PullRequestReference::Number(pr_id));
         if let Some(legacy) = &legacy
-            && let Err(failure) = resolve_pr_target(
-                &reference,
-                self.repository.as_deref(),
-                &legacy.allowed_repositories,
-                ctx,
-            )?
+            && let Err(failure) = super::pr_common::validate_pr_repository_policy(
+                &target, &legacy.allowed_repositories, ctx,
+            )
         {
             return Ok(failure);
         }
@@ -769,7 +765,6 @@ mod tests {
         assert!(config.title);
         assert!(config.body);
         assert!(!config.update_branch);
-        assert!(config.sync_stack);
         assert!(config.include_stats);
         assert_eq!(config.operation, AdoPullRequestBodyOperation::Replace);
 

@@ -1082,7 +1082,7 @@ mod tests {
                 access_token: Some("token".into()),
                 tool_configs: HashMap::from([(
                     "set-pull-request-auto-complete".into(),
-                    serde_json::json!({}),
+                    serde_json::json!({"target":"*"}),
                 )]),
                 ..Default::default()
             };
@@ -1128,7 +1128,7 @@ mod tests {
                 access_token: Some("token".into()),
                 tool_configs: HashMap::from([(
                     "add-pull-request-labels".into(),
-                    serde_json::json!({}),
+                    serde_json::json!({"target":"*"}),
                 )]),
                 ..Default::default()
             };
@@ -1191,7 +1191,7 @@ mod tests {
                 tool_configs: HashMap::from([
                     (
                         "add-pull-request-labels".into(),
-                        serde_json::json!({"max":3}),
+                        serde_json::json!({"target":"*","max":3}),
                     ),
                     (
                         "update-pull-request".into(),
@@ -1260,7 +1260,7 @@ mod tests {
             tool_configs: HashMap::from([
                 (
                     "add-pull-request-labels".into(),
-                    serde_json::json!({"max":1}),
+                    serde_json::json!({"target":"*","max":1}),
                 ),
                 (
                     "update-pull-request".into(),
@@ -1328,7 +1328,7 @@ mod tests {
             access_token: Some("token".into()),
             tool_configs: HashMap::from([(
                 "set-pull-request-auto-complete".into(),
-                serde_json::json!({}),
+                serde_json::json!({"target":"*"}),
             )]),
             ..Default::default()
         };
@@ -1510,7 +1510,7 @@ mod tests {
                 access_token: Some("token".into()),
                 tool_configs: HashMap::from([(
                     "submit-pull-request-review".into(),
-                    serde_json::json!({"allowed-events":["comment"]}),
+                    serde_json::json!({"allowed-events":["comment"],"target":"*"}),
                 )]),
                 ..Default::default()
             };
@@ -1569,7 +1569,7 @@ mod tests {
             access_token: Some("token".into()),
             tool_configs: HashMap::from([(
                 "add-pull-request-labels".into(),
-                serde_json::json!({}),
+                serde_json::json!({"target":"*"}),
             )]),
             ..Default::default()
         };

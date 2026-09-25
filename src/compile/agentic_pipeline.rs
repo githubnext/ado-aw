@@ -4927,7 +4927,7 @@ fn safe_outputs_summary_step(front_matter: &FrontMatter, reviewed: &[String]) ->
 fn approval_summary_pr_policies(
     front_matter: &FrontMatter,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
-    use crate::safe_outputs::pr_common::PrTargetPolicy;
+    use crate::safe_outputs::pr_common::PrMutationPolicy;
     let mut policies = serde_json::Map::new();
     for tool in front_matter.safe_outputs.keys() {
         let policy = match tool.as_str() {
@@ -4935,7 +4935,7 @@ fn approval_summary_pr_policies(
                 let config = front_matter
                     .update_pull_request_config()?
                     .unwrap_or_default();
-                serde_json::json!({"target": config.target_policy()?, "operation": config.operation})
+                serde_json::json!({"target": config.target_policy()?, "operation": config.operation, "target-repo": config.target_repo})
             }
             "abandon-pull-request" => {
                 let config = front_matter
@@ -4950,7 +4950,8 @@ fn approval_summary_pr_policies(
             | "add-pull-request-comment"
             | "reply-to-pull-request-comment"
             | "resolve-pull-request-thread" => {
-                serde_json::json!({"target": PrTargetPolicy::Explicit})
+                let config = PrMutationPolicy::parse(&front_matter.safe_outputs[tool])?;
+                serde_json::json!({"target": config.target_policy()?, "target-repo": config.target_repo})
             }
             _ => continue,
         };
@@ -7075,7 +7076,7 @@ mod tests {
         );
         assert_eq!(
             policies["add-pull-request-labels"]["target"]["kind"],
-            "explicit"
+            "triggering"
         );
     }
 
