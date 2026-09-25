@@ -1469,21 +1469,21 @@ fn copilot_invocation(
 fn runtime_model_preamble(role: RuntimeModelRole) -> String {
     let specific = role.specific_var();
     format!(
-        "ADO_AW_EFFECTIVE_MODEL=\"\"\n\
-         for ADO_AW_CANDIDATE_MODEL in \"${{{specific}:-}}\" \"${{{ADO_AW_DEFAULT_MODEL_COPILOT}:-}}\"; do\n\
-         \x20\x20# Azure DevOps leaves an undefined macro as the literal $(VAR); treat that as unset.\n\
-         \x20\x20if [ -z \"$ADO_AW_CANDIDATE_MODEL\" ] || [ \"$ADO_AW_CANDIDATE_MODEL\" = \"\\$({specific})\" ] || [ \"$ADO_AW_CANDIDATE_MODEL\" = \"\\$({ADO_AW_DEFAULT_MODEL_COPILOT})\" ]; then\n\
-         \x20\x20\x20\x20continue\n\
-         \x20\x20fi\n\
-         \x20\x20case \"$ADO_AW_CANDIDATE_MODEL\" in\n\
-         \x20\x20\x20\x20*[!A-Za-z0-9._:-]*)\n\
-         \x20\x20\x20\x20\x20\x20echo \"ERROR: runtime Copilot model from {specific}/{ADO_AW_DEFAULT_MODEL_COPILOT} contains invalid characters. Only ASCII alphanumerics, ., _, :, and - are allowed.\" >&2\n\
-         \x20\x20\x20\x20\x20\x20exit 1\n\
-         \x20\x20\x20\x20\x20\x20;;\n\
-         \x20\x20esac\n\
-         \x20\x20ADO_AW_EFFECTIVE_MODEL=\"$ADO_AW_CANDIDATE_MODEL\"\n\
-         \x20\x20break\n\
-         done"
+        r#"ADO_AW_EFFECTIVE_MODEL=""
+for ADO_AW_CANDIDATE_MODEL in "${{{specific}:-}}" "${{{ADO_AW_DEFAULT_MODEL_COPILOT}:-}}"; do
+  # Azure DevOps leaves an undefined macro as the literal $(VAR); treat that as unset.
+  if [ -z "$ADO_AW_CANDIDATE_MODEL" ] || [ "$ADO_AW_CANDIDATE_MODEL" = "\$({specific})" ] || [ "$ADO_AW_CANDIDATE_MODEL" = "\$({ADO_AW_DEFAULT_MODEL_COPILOT})" ]; then
+    continue
+  fi
+  case "$ADO_AW_CANDIDATE_MODEL" in
+    *[!A-Za-z0-9._:-]*)
+      echo "ERROR: runtime Copilot model from {specific}/{ADO_AW_DEFAULT_MODEL_COPILOT} contains invalid characters. Only ASCII alphanumerics, ., _, :, and - are allowed." >&2
+      exit 1
+      ;;
+  esac
+  ADO_AW_EFFECTIVE_MODEL="$ADO_AW_CANDIDATE_MODEL"
+  break
+done"#
     )
 }
 
