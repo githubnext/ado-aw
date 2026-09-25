@@ -299,7 +299,7 @@ fn build_engine_setup(
         "/tmp/awf-tools/agent-prompt.md",
         Some("/tmp/awf-tools/mcp-config.json"),
     )?;
-    let engine_run_detection = detection_engine.invocation_with_config(
+    let engine_run_detection = detection_engine.detection_invocation_with_config(
         detection_engine_config,
         ctx.front_matter,
         extension_declarations,
