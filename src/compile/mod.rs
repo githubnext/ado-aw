@@ -1046,6 +1046,14 @@ async fn prepare_parsed_source(
             crate::sanitize::neutralize_pipeline_commands(&source_path.display().to_string()),
         );
     }
+    if let Some(config) = parsed.front_matter.safe_outputs.get("add-pull-request-labels")
+        && config.get("max-labels").is_none()
+    {
+        log::warn!(
+            "{}: safe-outputs.add-pull-request-labels: max-labels now defaults to 10 per call; configure a larger intentional batch explicitly",
+            crate::sanitize::neutralize_pipeline_commands(&source_path.display().to_string()),
+        );
+    }
     Ok(bodies)
 }
 

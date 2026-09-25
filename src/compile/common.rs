@@ -3144,6 +3144,9 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
     front_matter.typed_safe_output_config::<crate::safe_outputs::CreatePrConfig>(
         "create-pull-request",
     )?;
+    front_matter.typed_safe_output_config::<crate::safe_outputs::MarkPullRequestReadyConfig>(
+        "mark-pull-request-as-ready-for-review",
+    )?;
     front_matter.typed_safe_output_config::<crate::safe_outputs::AddPrCommentConfig>(
         "add-pull-request-comment",
     )?;
@@ -3159,6 +3162,16 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
         )?
     {
         crate::safe_outputs::validate_add_pr_labels_config(&config)?;
+    }
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::RemovePullRequestLabelsConfig>(
+        "remove-pull-request-labels",
+    )? {
+        crate::safe_outputs::validate_add_pr_labels_config(&config)?;
+    }
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::ReplacePullRequestLabelConfig>(
+        "replace-pull-request-label",
+    )? {
+        crate::safe_outputs::validate_replace_pr_label_config(&config)?;
     }
     if let Some(config) = front_matter
         .typed_safe_output_config::<crate::safe_outputs::SetPrAutoCompleteConfig>(
@@ -3183,6 +3196,9 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
     for tool in [
         "add-pull-request-reviewers",
         "add-pull-request-labels",
+        "remove-pull-request-labels",
+        "replace-pull-request-label",
+        "mark-pull-request-as-ready-for-review",
         "set-pull-request-auto-complete",
         "update-pull-request",
         "abandon-pull-request",

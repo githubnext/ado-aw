@@ -1381,6 +1381,9 @@ Each PR intent has one agent-facing tool:
 | Title/description | `update-pull-request` |
 | Add reviewers | `add-pull-request-reviewers` |
 | Add labels | `add-pull-request-labels` |
+| Remove labels | `remove-pull-request-labels` |
+| Replace one label | `replace-pull-request-label` |
+| Publish an existing draft | `mark-pull-request-as-ready-for-review` |
 | Review/vote | `submit-pull-request-review` |
 | Enable auto-complete | `set-pull-request-auto-complete` |
 | Abandon | `abandon-pull-request` |
@@ -1458,6 +1461,61 @@ Example agent call sequence:
 
 The first line represents the `create-pull-request` call; use the actual
 temporary ID returned by that call in the later `add-pull-request-reviewers` call.
+
+### PR label policies and transitions
+
+`add-pull-request-labels` and `remove-pull-request-labels` accept `labels` and the
+shared PR target policy. `allowed-labels` restricts names when nonempty;
+`blocked-labels` always wins. Matching is case-insensitive and exact, not glob
+matching. Names are trimmed and deduplicated before the configured count check.
+Labels must be nonempty, contain no control/pipeline-command characters, and
+fit 256 characters. A request has at most 1,000 raw entries.
+
+`max-labels` defaults to **10** per call, including recompiled existing workflows;
+configure a larger deliberate batch explicitly (range 1-1,000). This is separate
+from `max`, which limits proposals. Creation-only `allowed-labels` does not grant
+or restrict an independent label mutation tool.
+
+```yaml
+safe-outputs:
+  add-pull-request-labels:
+    allowed-labels: [triaged, ready]
+    blocked-labels: [approved]
+    max-labels: 10
+  remove-pull-request-labels:
+    allowed-labels: [stale]
+    max-labels: 10
+  replace-pull-request-label:
+    allowed-add: [done]
+    allowed-remove: [in-progress]
+    blocked-labels: [approved]
+    allowed-transitions:
+      - from: in-progress
+        to: done
+```
+
+Removal resolves IDs through the dedicated label-list endpoint and preserves
+unrelated labels. Absent labels are idempotent no-ops.
+
+Replacement takes one `from`/`to` pair. It validates both permissions and any
+`allowed-transitions` restriction before writes, adds/verifies `to`, then removes
+`from` and checks the resulting state. This is **not atomic**: partial/uncertain
+outcomes are recorded, with no blind replay or rollback. Failed or unverified
+addition never authorizes removing `from`. If `from` is already absent and `to`
+is present, the transition is a no-op; if both are absent, it fails.
+
+### mark-pull-request-as-ready-for-review
+
+Publishes an existing **active** draft PR by changing only `isDraft` to false.
+It accepts optional `pull_request_id`/`repository` under the shared target,
+repository and label/title policies. Default `max` is 1. Same-run temporary
+PR references require the creation and publication tools to share approval
+and staged settings.
+
+An already-ready PR is a no-op; completed/abandoned PRs are rejected. Stage 3
+reads the PR back and succeeds only when publication is persisted. Lost
+responses and failed read-back are reported without blind retries.
+Publishing does not vote, merge or enable auto-complete.
 
 ### Migrating PR tool names
 

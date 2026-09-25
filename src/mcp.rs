@@ -39,6 +39,9 @@ use crate::safe_outputs::{
 use crate::safe_outputs::{
     AddPrLabelsParams, AddPrLabelsResult, AddPrReviewersParams, AddPrReviewersResult,
     SetPrAutoCompleteParams, SetPrAutoCompleteResult,
+    RemovePullRequestLabelsParams, RemovePullRequestLabelsResult,
+    ReplacePullRequestLabelParams, ReplacePullRequestLabelResult,
+    MarkPullRequestReadyParams, MarkPullRequestReadyResult,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::{PullRequestTemporaryId, WorkItemTemporaryId};
@@ -1464,6 +1467,33 @@ pull request. The branch will be created during safe output processing."
     }
 
     #[tool(
+        name = "remove-pull-request-labels",
+        description = "Propose removal of policy-permitted labels from an Azure DevOps PR. Missing labels are no-ops. Does not remove other labels; writes happen in safe output processing."
+    )]
+    async fn remove_pr_labels(&self, params: Parameters<RemovePullRequestLabelsParams>) -> Result<CallToolResult, McpError> {
+        let result: RemovePullRequestLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "replace-pull-request-label",
+        description = "Propose one permitted PR label transition from one label to another. Adds and verifies the new label before removing the old label. This is not an atomic ADO operation; partial outcomes are reported."
+    )]
+    async fn replace_pr_label(&self, params: Parameters<ReplacePullRequestLabelParams>) -> Result<CallToolResult, McpError> {
+        let result: ReplacePullRequestLabelResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "mark-pull-request-as-ready-for-review",
+        description = "Propose publishing an existing active draft PR for review. Does not approve, merge or enable auto-complete. Already-ready PRs are no-ops; persisted publication is verified in Stage 3."
+    )]
+    async fn mark_pr_ready(&self, params: Parameters<MarkPullRequestReadyParams>) -> Result<CallToolResult, McpError> {
+        let result: MarkPullRequestReadyResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
         name = "set-pull-request-auto-complete",
         description = "Enable Azure DevOps PR auto-complete using configured completion options. Does not merge immediately or bypass branch policies."
     )]
@@ -2662,7 +2692,7 @@ safe-outputs:
 
     #[tokio::test]
     async fn test_all_configured_only_tools_are_routes() {
-        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 19);
+        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 22);
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled: Vec<String> = CONFIGURED_ONLY_TOOLS
             .iter()

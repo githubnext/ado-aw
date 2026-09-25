@@ -19,6 +19,8 @@ pub(crate) const MAX_DESCRIPTION_UTF16: usize = 4_000;
 pub(crate) const PR_MUTATION_TOOLS: &[&str] = &[
     "update-pull-request", "abandon-pull-request", "add-pull-request-reviewers",
     "add-pull-request-labels", "set-pull-request-auto-complete", "submit-pull-request-review",
+    "remove-pull-request-labels", "replace-pull-request-label",
+    "mark-pull-request-as-ready-for-review",
     "add-pull-request-comment", "reply-to-pull-request-comment", "resolve-pull-request-thread",
 ];
 
@@ -737,6 +739,12 @@ pub(crate) mod tests {
         check::<AddPrReviewersResult>();
         check::<AddPrLabelsParams>();
         check::<AddPrLabelsResult>();
+        check::<RemovePullRequestLabelsParams>();
+        check::<RemovePullRequestLabelsResult>();
+        check::<ReplacePullRequestLabelParams>();
+        check::<ReplacePullRequestLabelResult>();
+        check::<MarkPullRequestReadyParams>();
+        check::<MarkPullRequestReadyResult>();
         check::<SetPrAutoCompleteParams>();
         check::<SetPrAutoCompleteResult>();
         check::<UpdatePullRequestParams>();
@@ -753,6 +761,9 @@ pub(crate) mod tests {
             "abandon-pull-request" => serde_json::json!({}),
             "add-pull-request-reviewers" => serde_json::json!({"reviewers":["reviewer"]}),
             "add-pull-request-labels" => serde_json::json!({"labels":["label"]}),
+            "remove-pull-request-labels" => serde_json::json!({"labels":["label"]}),
+            "replace-pull-request-label" => serde_json::json!({"from":"old","to":"new"}),
+            "mark-pull-request-as-ready-for-review" => serde_json::json!({}),
             "set-pull-request-auto-complete" => serde_json::json!({}),
             "submit-pull-request-review" => serde_json::json!({"event":"comment","body":"Informational feedback."}),
             "add-pull-request-comment" => serde_json::json!({"content":"Informational feedback.","status":"active","repository":null}),

@@ -537,6 +537,98 @@ const reviewVoteScenarios: Scenario<PrState>[] = (["comment", "reset"] as const)
   cleanup: teardownPr,
 }));
 
+const labelLifecycleScenarios: Scenario<PrState>[] = (["remove", "replace"] as const).map((operation): Scenario<PrState> => ({
+  tool: operation === "remove" ? "remove-pull-request-labels" : "replace-pull-request-label",
+  targetsAdoRepo: true,
+  config: (ctx) => ({
+    target: "*", "allowed-repositories": [ctx.adoRepo],
+    ...(operation === "remove" ? { "allowed-labels": ["existing-label"] } : {
+      "allowed-add": ["replacement-label"], "allowed-remove": ["existing-label"],
+      "allowed-transitions": [{ from: "existing-label", to: "replacement-label" }],
+    }),
+  }),
+  setup: async (ctx) => {
+    const state = await setupLabeledPr(ctx, `pr-label-${operation}`);
+    try {
+      await ctx.rest.setPullRequestLabels(state.repo,state.prId,["preserved-label"]);
+      return state;
+    } catch (error) {
+      await teardownPr(ctx,state);
+      throw error;
+    }
+  },
+  ndjson: async (_ctx,state) => ({
+    pull_request_id: state.prId, repository: state.repo,
+    ...(operation === "remove" ? { labels: ["existing-label"] } : { from: "existing-label", to: "replacement-label" }),
+  }),
+  assert: async (ctx,state) => {
+    const labels=(await ctx.rest.listPullRequestLabels(state.repo,state.prId)).map((label)=>label.name);
+    if (labels.includes("existing-label") || !labels.includes("preserved-label")
+      || (operation === "replace" && !labels.includes("replacement-label"))) {
+      throw new Error(`Label ${operation} did not persist exactly or lost an unrelated label`);
+    }
+  },
+  cleanup: teardownPr,
+}));
+
+const labelPolicyScenarios: Scenario<PrState>[] = (["limit", "blocked"] as const).map((kind): Scenario<PrState> => ({
+  id: `pr-label-${kind}-denied`,
+  tool: "add-pull-request-labels",
+  targetsAdoRepo: true,
+  config: (ctx) => ({ target:"*", "allowed-repositories":[ctx.adoRepo], "max-labels":10,
+    ...(kind === "blocked" ? { "allowed-labels":["permitted","blocked"], "blocked-labels":["blocked"] } : {}),
+  }),
+  setup: (ctx) => setupLabeledPr(ctx,`pr-label-${kind}-denied`),
+  ndjson: async (_ctx,state) => ({pull_request_id:state.prId,repository:state.repo,
+    labels:kind === "limit" ? Array.from({length:11},(_,index)=>`limit-${index}`) : ["permitted","blocked"]}),
+  expectedFailure: { error:kind === "limit" ? /max-labels/ : /blocked-labels/ },
+  assert: async () => { throw new Error("A denied label batch must not succeed"); },
+  assertFailure: async (ctx,state) => {
+    const labels=await ctx.rest.listPullRequestLabels(state.repo,state.prId);
+    if (labels.length !== 1 || labels[0]?.name !== "existing-label") {
+      throw new Error("A denied label batch made a partial mutation");
+    }
+  },
+  cleanup: teardownPr,
+}));
+
+const publishDraft: Scenario<PrState> = {
+  tool: "mark-pull-request-as-ready-for-review",
+  targetsAdoRepo: true,
+  config: (ctx) => ({ target:"*", "allowed-repositories":[ctx.adoRepo], max:2 }),
+  setup: async (ctx) => {
+    const state=await setupPr(ctx,"publish-draft",false,true);
+    try {
+      if ((await ctx.rest.getPullRequest(state.repo,state.prId)).isDraft !== true) {
+        throw new Error("Publication test did not create a persisted draft");
+      }
+      return state;
+    } catch(error) {
+      await teardownPr(ctx,state);
+      throw error;
+    }
+  },
+  priorEntries: async (_ctx,state) => [{
+    tool:"mark-pull-request-as-ready-for-review",
+    config:{target:"*",max:2},
+    entry:{pull_request_id:state.prId,repository:state.repo},
+  }],
+  ndjson: async (_ctx,state) => ({pull_request_id:state.prId,repository:state.repo}),
+  assert: async (ctx,state,record,records) => {
+    const pr=await ctx.rest.getPullRequest(state.repo,state.prId);
+    if (pr.isDraft !== false || pr.status !== "active" || pr.autoCompleteSetBy) {
+      throw new Error("Publication was not persisted or unexpectedly enabled completion");
+    }
+    if (pr.title !== `${ctx.prefix("publish-draft")} (do not merge)` || pr.description !== detBody(ctx,"publish-draft")) {
+      throw new Error("Publication changed PR content");
+    }
+    if (records[0]?.result?.publication_status !== "confirmed" || record.result?.already_ready !== true) {
+      throw new Error("Publication/repeat no-op results are not authoritative");
+    }
+  },
+  cleanup:teardownPr,
+};
+
 export const prScenarios: Scenario<unknown>[] = [
   addPrComment,
   replyToPrComment,
@@ -554,5 +646,8 @@ export const prScenarios: Scenario<unknown>[] = [
   updatePullRequestComposedOversized,
   addPrReviewers,
   addPrLabels,
+  ...labelLifecycleScenarios,
+  ...labelPolicyScenarios,
+  publishDraft,
   setPrAutoComplete,
 ];

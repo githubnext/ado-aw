@@ -230,10 +230,8 @@ pub fn validate_budget_groups(front_matter: &FrontMatter) -> Result<()> {
                 "budget group '{name}' references unconfigured tool '{tool}'"
             );
             ensure!(
-                PR_OPERATIONS
-                    .iter()
-                    .any(|(_, candidate)| *candidate == tool),
-                "budget group '{name}' may only contain focused PR tools"
+                crate::safe_outputs::pr_common::PR_MUTATION_TOOLS.contains(&tool.as_str()),
+                "budget group '{name}' may only contain PR mutation tools"
             );
             ensure!(
                 members.insert(tool.clone()),
@@ -274,7 +272,7 @@ pub fn validate_execution_budget_groups(ctx: &crate::safe_outputs::ExecutionCont
                 "budget group '{name}' references unconfigured tool '{tool}'"
             );
             ensure!(
-                PR_OPERATIONS.iter().any(|(_, member)| *member == tool),
+                crate::safe_outputs::pr_common::PR_MUTATION_TOOLS.contains(&tool.as_str()),
                 "budget group '{name}' contains unsupported tool '{tool}'"
             );
             ensure!(

@@ -4945,6 +4945,9 @@ fn approval_summary_pr_policies(
             }
             "add-pull-request-reviewers"
             | "add-pull-request-labels"
+            | "remove-pull-request-labels"
+            | "replace-pull-request-label"
+            | "mark-pull-request-as-ready-for-review"
             | "set-pull-request-auto-complete"
             | "submit-pull-request-review"
             | "add-pull-request-comment"

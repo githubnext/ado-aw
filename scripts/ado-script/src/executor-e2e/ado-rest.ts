@@ -471,7 +471,7 @@ export class AdoRest {
     repo: string,
     prId: number,
   ): Promise<{
-    pullRequestId: number; status: string; title: string; description?: string;
+    pullRequestId: number; status: string; title: string; description?: string; isDraft?: boolean;
     labels?: { name: string }[]; autoCompleteSetBy?: { id?: string };
   }> {
     const path = this.projPath(
@@ -482,6 +482,7 @@ export class AdoRest {
       status: string;
       title: string;
       description?: string;
+      isDraft?: boolean;
       labels?: { name: string }[];
       autoCompleteSetBy?: { id?: string };
     }>(path);

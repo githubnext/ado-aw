@@ -30,6 +30,7 @@ use crate::safe_outputs::{
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
 use crate::safe_outputs::{AddPrLabelsResult, AddPrReviewersResult, SetPrAutoCompleteResult};
+use crate::safe_outputs::{RemovePullRequestLabelsResult, ReplacePullRequestLabelResult, MarkPullRequestReadyResult};
 use crate::sanitize::neutralize_pipeline_commands;
 
 // Re-export memory types for use by main.rs
@@ -249,6 +250,9 @@ pub async fn execute_safe_outputs(
         CreateBranchResult,
         AddPrReviewersResult,
         AddPrLabelsResult,
+        RemovePullRequestLabelsResult,
+        ReplacePullRequestLabelResult,
+        MarkPullRequestReadyResult,
         SetPrAutoCompleteResult,
         AbandonPullRequestResult,
         UploadBuildAttachmentResult,
@@ -770,6 +774,9 @@ async fn dispatch_pr_tools(
         "add-pull-request-comment" => AddPrCommentResult,
         "add-pull-request-reviewers" => AddPrReviewersResult,
         "add-pull-request-labels" => AddPrLabelsResult,
+        "remove-pull-request-labels" => RemovePullRequestLabelsResult,
+        "replace-pull-request-label" => ReplacePullRequestLabelResult,
+        "mark-pull-request-as-ready-for-review" => MarkPullRequestReadyResult,
         "set-pull-request-auto-complete" => SetPrAutoCompleteResult,
         "abandon-pull-request" => AbandonPullRequestResult,
         "update-pull-request" => UpdatePullRequestResult,

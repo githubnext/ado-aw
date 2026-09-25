@@ -49,6 +49,9 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
     AddPrReviewersResult,
     AddPrLabelsResult,
+    RemovePullRequestLabelsResult,
+    ReplacePullRequestLabelResult,
+    MarkPullRequestReadyResult,
     SetPrAutoCompleteResult,
     UpdatePullRequestResult,
     AbandonPullRequestResult,
@@ -92,6 +95,9 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     CreateBranchResult,
     AddPrReviewersResult,
     AddPrLabelsResult,
+    RemovePullRequestLabelsResult,
+    ReplacePullRequestLabelResult,
+    MarkPullRequestReadyResult,
     SetPrAutoCompleteResult,
     AbandonPullRequestResult,
     UpdatePullRequestResult,
@@ -781,6 +787,10 @@ mod add_build_tag;
 mod add_github_issue_labels;
 mod add_pr_comment;
 mod add_pr_labels;
+mod pr_labels;
+mod remove_pull_request_labels;
+mod replace_pull_request_label;
+mod mark_pull_request_as_ready_for_review;
 mod add_pr_reviewers;
 mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
@@ -829,6 +839,9 @@ pub use add_build_tag::*;
 pub use add_github_issue_labels::*;
 pub use add_pr_comment::*;
 pub use add_pr_labels::*;
+pub use remove_pull_request_labels::*;
+pub use replace_pull_request_label::*;
+pub use mark_pull_request_as_ready_for_review::*;
 pub use add_pr_reviewers::*;
 pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;

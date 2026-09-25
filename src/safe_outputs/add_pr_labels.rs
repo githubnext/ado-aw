@@ -7,6 +7,7 @@ use super::pr_mutations::{UpdatePrContext, execute_add_labels};
 use super::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
+use crate::secure::PrLabelName;
 use super::ToolResult;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
@@ -20,7 +21,8 @@ pub struct AddPrLabelsParams {
     pub pull_request_id: Option<PullRequestReference>,
     #[serde(default)]
     pub repository: Option<String>,
-    pub labels: Vec<String>,
+    /// Label names to add. The configured max-labels defaults to 10 unique names.
+    pub labels: Vec<PrLabelName>,
 }
 
 impl Validate for AddPrLabelsParams {
@@ -28,7 +30,7 @@ impl Validate for AddPrLabelsParams {
         if let Some(reference) = &self.pull_request_id {
             validate_reference(reference)?;
         }
-        ensure!(!self.labels.is_empty(), "labels list must not be empty");
+        validate_label_input(&self.labels)?;
         if let Some(repository) = &self.repository {
             crate::validate::reject_pipeline_injection(repository, "repository")?;
         }
@@ -46,22 +48,17 @@ tool_result! {
         pull_request_id: Option<PullRequestReference>,
         #[serde(default)]
         repository: Option<String>,
-        labels: Vec<String>,
+        labels: Vec<PrLabelName>,
     }
 }
 
 impl SanitizeContent for AddPrLabelsResult {
     fn sanitize_content_fields(&mut self) {
         self.repository = self.repository.as_deref().map(sanitize_config);
-        self.labels = self
-            .labels
-            .iter()
-            .map(|value| sanitize_config(value))
-            .collect();
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, SanitizeConfig)]
+#[derive(Debug, Clone, Serialize, Deserialize, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct AddPrLabelsConfig {
     #[serde(default)]
@@ -75,12 +72,65 @@ pub struct AddPrLabelsConfig {
     pub required_title_prefix: Option<String>,
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
+    #[serde(default, rename = "allowed-labels")]
+    pub allowed_labels: Vec<String>,
+    #[serde(default, rename = "blocked-labels")]
+    pub blocked_labels: Vec<String>,
+    #[serde(default = "default_max_labels", rename = "max-labels")]
+    #[sanitize_config(skip)]
+    pub max_labels: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
 }
 
+fn default_max_labels() -> usize { 10 }
+
+impl Default for AddPrLabelsConfig {
+    fn default() -> Self {
+        Self {
+            target: Default::default(), target_repo: None,
+            required_labels: Vec::new(), required_title_prefix: None,
+            allowed_repositories: Vec::new(), allowed_labels: Vec::new(),
+            blocked_labels: Vec::new(), max_labels: default_max_labels(), max: None,
+        }
+    }
+}
+
+pub(crate) fn validate_label_input<T: AsRef<str>>(labels: &[T]) -> anyhow::Result<()> {
+    ensure!(!labels.is_empty(), "labels list must not be empty");
+    ensure!(labels.len() <= 1_000, "labels list must contain at most 1000 raw entries");
+    for label in labels {
+        crate::secure::PrLabelName::parse(label.as_ref())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_label_batch<T: AsRef<str>>(
+    labels: &[T], allowed: &[String], blocked: &[String], max_labels: usize,
+) -> anyhow::Result<Vec<String>> {
+    validate_label_input(labels)?;
+    ensure!(max_labels > 0 && max_labels <= 1_000, "max-labels must be between 1 and 1000");
+    let mut normalized = Vec::<String>::new();
+    for label in labels {
+        let label = label.as_ref().trim();
+        ensure!(!blocked.iter().any(|item| item.trim().eq_ignore_ascii_case(label)),
+            "Label '{label}' is blocked by blocked-labels");
+        ensure!(allowed.is_empty() || allowed.iter().any(|item| item.trim().eq_ignore_ascii_case(label)),
+            "Label '{label}' is not in allowed-labels");
+        if !normalized.iter().any(|item| item.eq_ignore_ascii_case(label)) {
+            normalized.push(label.to_string());
+        }
+    }
+    ensure!(normalized.len() <= max_labels, "label batch exceeds max-labels: {max_labels}");
+    Ok(normalized)
+}
+
 pub(crate) fn validate_add_pr_labels_config(config: &AddPrLabelsConfig) -> anyhow::Result<()> {
+    ensure!(config.max_labels > 0 && config.max_labels <= 1_000, "max-labels must be between 1 and 1000");
+    for label in config.allowed_labels.iter().chain(&config.blocked_labels) {
+        crate::secure::PrLabelName::parse(label)?;
+    }
     for repository in &config.allowed_repositories {
         ensure!(
             !repository.trim().is_empty(),
@@ -112,6 +162,12 @@ impl Executor for AddPrLabelsResult {
         );
         let config: AddPrLabelsConfig = ctx.get_tool_config("add-pull-request-labels")?;
         validate_add_pr_labels_config(&config)?;
+        let labels = match normalize_label_batch(
+            &self.labels, &config.allowed_labels, &config.blocked_labels, config.max_labels,
+        ) {
+            Ok(labels) => labels,
+            Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
+        };
         let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
             Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
         ).await? {
@@ -137,7 +193,7 @@ impl Executor for AddPrLabelsResult {
                     .context("No access token available")?,
                 connection_type: ctx.write_connection_type,
             },
-            &self.labels,
+            &labels,
         )
         .await
     }
@@ -150,6 +206,23 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, method, path},
     };
+
+    #[test]
+    fn label_policy_limits_are_exact_and_blocking_wins() {
+        for count in [0,1,10,11] {
+            let labels=(0..count).map(|i|format!("label-{i}")).collect::<Vec<_>>();
+            assert_eq!(normalize_label_batch(&labels,&[],&[],10).is_ok(),(1..=10).contains(&count));
+        }
+        assert!(normalize_label_batch(&vec!["label".to_string();1_001],&[],&[],10).is_err());
+        assert_eq!(normalize_label_batch(&[" Label ".to_string(),"label".to_string()],&["LABEL".into()],&[],1).unwrap(),vec!["Label"]);
+        assert!(normalize_label_batch(&["label"],&["label".into()],&["LABEL".into()],10).is_err());
+        assert!(normalize_label_batch(&["other"],&["label".into()],&[],10).is_err());
+        let labels=(0..11).map(|i|format!("label-{i}")).collect::<Vec<_>>();
+        assert!(normalize_label_batch(&labels,&[],&[],11).is_ok());
+        for name in [""," ","bad\nlabel","##vso[task.complete]x"] {
+            assert!(validate_label_input(&[name]).is_err());
+        }
+    }
 
     #[test]
     fn typed_config_rejects_unknown_fields_and_invalid_allowlists() {

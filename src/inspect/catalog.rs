@@ -311,11 +311,14 @@ fn safe_output_description(name: &str) -> &'static str {
         }
         "set-github-issue-type" => "Sets or clears the native type on a GitHub issue",
         "set-github-issue-field" => "Sets a repository-defined field on a GitHub issue",
-        "submit-pull-request-review" => "Parameters for submitting a pull request review",
+        "submit-pull-request-review" => "Submits non-voting review feedback or an explicitly authorized ADO vote",
         "add-pull-request-reviewers" => "Adds policy-permitted Azure DevOps PR reviewers",
         "add-pull-request-labels" => {
             "Adds labels without replacing existing Azure DevOps PR labels"
         }
+        "remove-pull-request-labels" => "Removes policy-permitted PR labels while preserving unrelated labels",
+        "replace-pull-request-label" => "Adds and verifies a replacement PR label before removing the old one",
+        "mark-pull-request-as-ready-for-review" => "Publishes an active draft PR without approving or completing it",
         "set-pull-request-auto-complete" => {
             "Enables Azure DevOps PR auto-complete without bypassing branch policies"
         }

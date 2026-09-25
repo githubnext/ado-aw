@@ -132,6 +132,30 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "Repository selector", key: "repository" },
     ],
   },
+  "mark-pull-request-as-ready-for-review": {
+    title: "Publish draft pull request for review",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "remove-pull-request-labels": {
+    title: "Remove pull request labels",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Labels to remove", key: "labels" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "replace-pull-request-label": {
+    title: "Replace pull request label (non-atomic)",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Remove after addition", key: "from" },
+      { label: "Add first", key: "to" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
   "create-pull-request": {
     title: "Create pull request",
     fields: [
