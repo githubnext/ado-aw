@@ -3544,6 +3544,7 @@ index 0000000..abcdefg
             ado_organization: Some("test".to_string()),
             ado_project: Some("TestProject".to_string()),
             ado_project_id: None,
+            pipeline_collection_uri: None,
             access_token: Some("fake-token".to_string()),
             github_token: None,
             github_actor_login: None,

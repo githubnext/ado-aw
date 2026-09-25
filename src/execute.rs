@@ -31,6 +31,7 @@ use crate::safe_outputs::{
 };
 use crate::safe_outputs::{AddPrLabelsResult, AddPrReviewersResult, SetPrAutoCompleteResult};
 use crate::safe_outputs::{RemovePullRequestLabelsResult, ReplacePullRequestLabelResult, MarkPullRequestReadyResult};
+use crate::safe_outputs::UpdatePullRequestCommentResult;
 use crate::sanitize::neutralize_pipeline_commands;
 
 // Re-export memory types for use by main.rs
@@ -253,6 +254,7 @@ pub async fn execute_safe_outputs(
         RemovePullRequestLabelsResult,
         ReplacePullRequestLabelResult,
         MarkPullRequestReadyResult,
+        UpdatePullRequestCommentResult,
         SetPrAutoCompleteResult,
         AbandonPullRequestResult,
         UploadBuildAttachmentResult,
@@ -777,6 +779,7 @@ async fn dispatch_pr_tools(
         "remove-pull-request-labels" => RemovePullRequestLabelsResult,
         "replace-pull-request-label" => ReplacePullRequestLabelResult,
         "mark-pull-request-as-ready-for-review" => MarkPullRequestReadyResult,
+        "update-pull-request-comment" => UpdatePullRequestCommentResult,
         "set-pull-request-auto-complete" => SetPrAutoCompleteResult,
         "abandon-pull-request" => AbandonPullRequestResult,
         "update-pull-request" => UpdatePullRequestResult,

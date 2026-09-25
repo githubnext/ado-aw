@@ -6,15 +6,15 @@ use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::pr_common::{
-    PullRequestReference, legacy_policy, validate_reference,
-};
+use super::ToolResult;
+use super::pr_common::{PullRequestReference, legacy_policy, validate_reference};
+use super::pr_inline::PrInlineComment;
 use super::pr_mutations::UpdatePrContext;
 use super::{PATH_SEGMENT, authenticate_ado_request};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::sanitize::{SanitizeContent, sanitize_markdown, sanitize_config};
+use crate::sanitize::{SanitizeContent, sanitize_config, sanitize_markdown};
+use crate::secure::{CommitSha, Identifier};
 use crate::tool_result;
-use super::ToolResult;
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
@@ -57,6 +57,12 @@ pub struct SubmitPrReviewParams {
     /// Must be at least 10 characters when provided.
     #[serde(default)]
     pub body: Option<String>,
+    /// Inline findings in this review only; requires configured max-comments.
+    #[serde(default)]
+    pub comments: Vec<PrInlineComment>,
+    /// Exact reviewed source commit; required when comments is nonempty.
+    #[serde(default)]
+    pub expected_head_sha: Option<CommitSha>,
 
     /// Repository alias: "self" for pipeline repo, or an alias from the checkout list.
     /// Defaults to "self" if omitted.
@@ -84,11 +90,28 @@ impl Validate for SubmitPrReviewParams {
             );
         }
         if self.event == "comment" {
-            ensure!(self.body.as_deref().is_some_and(|body| !body.trim().is_empty()),
-                "body is required for a non-voting comment review");
+            ensure!(
+                self.body
+                    .as_deref()
+                    .is_some_and(|body| !body.trim().is_empty())
+                    || !self.comments.is_empty(),
+                "body or inline comments are required for a non-voting comment review"
+            );
         }
         if let Some(ref body) = self.body {
             ensure!(body.len() >= 10, "body must be at least 10 characters");
+            super::pr_comments::validate_body(body)?;
+        }
+        ensure!(
+            self.comments.len() <= 100,
+            "A review may contain at most 100 inline comments"
+        );
+        ensure!(
+            self.comments.is_empty() || self.expected_head_sha.is_some(),
+            "expected_head_sha is required for inline review comments"
+        );
+        for comment in &self.comments {
+            comment.validate()?;
         }
         Ok(())
     }
@@ -105,6 +128,10 @@ tool_result! {
         pull_request_id: Option<PullRequestReference>,
         event: String,
         body: Option<String>,
+        #[serde(default)]
+        comments: Vec<PrInlineComment>,
+        #[serde(default)]
+        expected_head_sha: Option<CommitSha>,
         repository: Option<String>,
     }
 }
@@ -113,6 +140,9 @@ impl SanitizeContent for SubmitPrReviewResult {
     fn sanitize_content_fields(&mut self) {
         self.event = sanitize_config(&self.event);
         self.body = self.body.as_deref().map(sanitize_markdown);
+        for comment in &mut self.comments {
+            comment.content = sanitize_markdown(&comment.content);
+        }
         self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
@@ -129,9 +159,24 @@ impl SanitizeContent for SubmitPrReviewResult {
 ///     allowed-repositories:
 ///       - self
 /// ```
-#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitPrReviewConfig {
+    #[serde(default, rename = "max-comments")]
+    #[sanitize_config(skip)]
+    pub max_comments: usize,
+    #[serde(default, rename = "supersede-older-comments")]
+    #[sanitize_config(skip)]
+    pub supersede_older_comments: bool,
+    #[serde(
+        default = "super::pr_comments::default_comment_key",
+        rename = "comment-key"
+    )]
+    #[sanitize_config(skip)]
+    pub comment_key: Identifier,
+    #[serde(default = "default_max_superseded", rename = "max-superseded-comments")]
+    #[sanitize_config(skip)]
+    pub max_superseded_comments: usize,
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
@@ -157,9 +202,44 @@ pub struct SubmitPrReviewConfig {
     pub max: Option<u32>,
 }
 
+fn default_max_superseded() -> usize {
+    20
+}
+
+impl Default for SubmitPrReviewConfig {
+    fn default() -> Self {
+        Self {
+            max_comments: 0,
+            supersede_older_comments: false,
+            comment_key: super::pr_comments::default_comment_key(),
+            max_superseded_comments: default_max_superseded(),
+            target: Default::default(),
+            target_repo: None,
+            required_labels: Vec::new(),
+            required_title_prefix: None,
+            allow_temporary_ids: false,
+            allowed_events: Vec::new(),
+            allowed_repositories: Vec::new(),
+            max: None,
+        }
+    }
+}
+
 pub(crate) fn validate_submit_pr_review_config(
     config: &SubmitPrReviewConfig,
 ) -> anyhow::Result<()> {
+    ensure!(
+        config.max_comments <= 100,
+        "max-comments must be between 0 and 100"
+    );
+    ensure!(
+        config.max_superseded_comments > 0 && config.max_superseded_comments <= 100,
+        "max-superseded-comments must be between 1 and 100"
+    );
+    ensure!(
+        config.comment_key.len() <= 100,
+        "comment-key must fit 100 bytes"
+    );
     for event in &config.allowed_events {
         ensure!(
             VALID_EVENTS.contains(&event.as_str()),
@@ -327,6 +407,9 @@ async fn submit_vote(
 async fn post_review_comment_thread(
     ctx: &PrVoteCtx<'_>,
     body: &str,
+    inline: Option<&serde_json::Value>,
+    owner: Option<&super::pr_comments::Owner>,
+    execution: &ExecutionContext,
 ) -> anyhow::Result<Result<i64, ExecutionResult>> {
     let pull_request_id = ctx.pr_id;
     let thread_url = format!(
@@ -339,13 +422,19 @@ async fn post_review_comment_thread(
         pull_request_id,
         body.len()
     );
+    let mut payload = serde_json::json!({
+        "comments": [{"parentCommentId": 0, "content": body, "commentType": 1}],
+        "status": 1
+    });
+    if let Some(inline) = inline {
+        payload["threadContext"] = inline["threadContext"].clone();
+        payload["pullRequestThreadContext"] = inline["pullRequestThreadContext"].clone();
+    }
+    super::pr_comments::stamp(&mut payload, owner, execution, body)?;
     let response =
         authenticate_ado_request(ctx.client.post(&thread_url), ctx.token, ctx.connection_type)
             .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "comments": [{"parentCommentId": 0, "content": body, "commentType": 1}],
-                "status": 1
-            }))
+            .json(&payload)
             .send()
             .await
             .context("Failed to post review comment thread")?;
@@ -367,7 +456,10 @@ async fn post_review_comment_thread(
         .await
         .context("Failed to parse comment thread response")?;
 
-    let thread_id = thread_resp.get("id").and_then(|v| v.as_i64()).filter(|id| *id > 0)
+    let thread_id = thread_resp
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .filter(|id| *id > 0)
         .context("Comment response missing a positive thread ID; delivery is uncertain")?;
     info!(
         "Review comment thread #{} posted on PR #{}",
@@ -404,7 +496,8 @@ impl Executor for SubmitPrReviewResult {
     fn dry_run_summary(&self) -> String {
         format!(
             "submit '{}' review on {}",
-            self.event, super::pr_common::describe_pr_reference(self.pull_request_id.as_ref())
+            self.event,
+            super::pr_common::describe_pr_reference(self.pull_request_id.as_ref())
         )
     }
 
@@ -422,6 +515,8 @@ impl Executor for SubmitPrReviewResult {
             pull_request_id: self.pull_request_id.clone(),
             event: self.event.clone(),
             body: self.body.clone(),
+            comments: self.comments.clone(),
+            expected_head_sha: self.expected_head_sha.clone(),
             repository: self.repository.clone(),
         })
         .validate()
@@ -434,8 +529,18 @@ impl Executor for SubmitPrReviewResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         let config: SubmitPrReviewConfig = ctx.get_tool_config("submit-pull-request-review")?;
         validate_submit_pr_review_config(&config)?;
-        if matches!(self.pull_request_id, Some(PullRequestReference::Temporary(_)))
-            && !config.allow_temporary_ids
+        ensure!(
+            self.comments.len() <= config.max_comments,
+            "Inline review comments require sufficient max-comments (default 0)"
+        );
+        ensure!(
+            !config.supersede_older_comments || self.body.is_some() || !self.comments.is_empty(),
+            "Supersession requires replacement review content, not a vote-only proposal"
+        );
+        if matches!(
+            self.pull_request_id,
+            Some(PullRequestReference::Temporary(_))
+        ) && !config.allow_temporary_ids
         {
             return Ok(ExecutionResult::failure(
                 "submit-pull-request-review temporary IDs require allow-temporary-ids: true",
@@ -443,7 +548,7 @@ impl Executor for SubmitPrReviewResult {
         }
         let legacy = legacy_policy(ctx, "submit-pull-request-review", "vote")?;
         if let Some(legacy) = &legacy {
-            if self.body.is_some() {
+            if self.body.is_some() || !self.comments.is_empty() {
                 return Ok(ExecutionResult::failure(
                     "legacy update-pr vote does not permit a rationale comment",
                 ));
@@ -476,14 +581,21 @@ impl Executor for SubmitPrReviewResult {
         }
 
         let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
-            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
-        ).await? {
+            Self::NAME,
+            self.pull_request_id.as_ref(),
+            self.repository.as_deref(),
+            ctx,
+        )
+        .await?
+        {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
         if let Some(legacy) = &legacy
             && let Err(failure) = super::pr_common::validate_pr_repository_policy(
-                &target, &legacy.allowed_repositories, ctx,
+                &target,
+                &legacy.allowed_repositories,
+                ctx,
             )
         {
             return Ok(failure);
@@ -492,7 +604,7 @@ impl Executor for SubmitPrReviewResult {
 
         let vote_value = event_to_vote(&self.event);
 
-        let client = reqwest::Client::new();
+        let client = super::pr_comments::client()?;
         let vote_ctx = PrVoteCtx {
             client: &client,
             target,
@@ -500,6 +612,19 @@ impl Executor for SubmitPrReviewResult {
             token,
             connection_type: ctx.write_connection_type,
         };
+        let inline_contexts = if self.comments.is_empty() {
+            Vec::new()
+        } else {
+            super::pr_inline::prepare(
+                &vote_ctx,
+                self.expected_head_sha
+                    .as_ref()
+                    .context("Inline review requires expected_head_sha")?,
+                &self.comments,
+            )
+            .await?
+        };
+        let owner = super::pr_comments::owner(ctx, "review", &config.comment_key)?;
         let actor = if let Some(vote) = vote_value {
             match prepare_review_actor(&vote_ctx, &self.event, vote).await? {
                 Ok(actor) => Some(actor),
@@ -508,28 +633,119 @@ impl Executor for SubmitPrReviewResult {
         } else {
             None
         };
+        let supersession = if config.supersede_older_comments {
+            let owner = owner
+                .as_ref()
+                .context("Supersession requires a complete trusted pipeline identity")?;
+            let author = super::pr_comments::actor(&vote_ctx).await?;
+            let (candidates, skipped) = super::pr_comments::older_threads(
+                &vote_ctx,
+                owner,
+                &author,
+                ctx.build_id.context("Supersession requires build ID")?,
+                config.max_superseded_comments,
+            )
+            .await?;
+            Some((author, candidates, skipped))
+        } else {
+            None
+        };
         let mut data = serde_json::json!({
             "pull_request_id": pr_id, "event": self.event, "repository": repo_name,
             "vote_value": vote_value, "vote_changed": false,
             "vote_status": if vote_value.is_some() { "not-attempted" } else { "not-requested" },
             "comment_status": "not-requested",
+            "inline_comments": [],
         });
+        for (index, (comment, context)) in self.comments.iter().zip(&inline_contexts).enumerate() {
+            if let Err(error) = super::pr_inline::verify_head(
+                &vote_ctx,
+                self.expected_head_sha
+                    .as_ref()
+                    .context("Inline review requires expected_head_sha")?,
+            )
+            .await
+            {
+                return Ok(ExecutionResult::failure_with_data(
+                    format!("Review stopped before further writes: {error:#}"),
+                    data,
+                ));
+            }
+            match post_review_comment_thread(
+                &vote_ctx,
+                &comment.content,
+                Some(context),
+                owner.as_ref(),
+                ctx,
+            )
+            .await
+            {
+                Ok(Ok(id)) => data["inline_comments"]
+                    .as_array_mut()
+                    .context("Invalid internal review result")?
+                    .push(serde_json::json!({"index":index,"thread_id":id,"status":"posted"})),
+                outcome => {
+                    let (status, message) = match outcome {
+                        Ok(Err(failure)) => ("failed", failure.message),
+                        Err(error) => ("uncertain", format!("{error:#}")),
+                        Ok(Ok(_)) => unreachable!("successful branch handled above"),
+                    };
+                    data["inline_comments"]
+                        .as_array_mut()
+                        .context("Invalid internal review result")?
+                        .push(serde_json::json!({"index":index,"status":status}));
+                    return Ok(ExecutionResult::failure_with_data(
+                        format!("Inline review stopped: {message}; vote not attempted"),
+                        data,
+                    ));
+                }
+            }
+        }
         if let Some(body) = &self.body {
+            if let Some(head) = &self.expected_head_sha
+                && let Err(error) = super::pr_inline::verify_head(&vote_ctx, head).await
+            {
+                return Ok(ExecutionResult::failure_with_data(
+                    format!("Review head changed before summary: {error:#}"),
+                    data,
+                ));
+            }
             data["comment_status"] = serde_json::json!("uncertain");
-            let thread_id = match post_review_comment_thread(&vote_ctx, body).await {
+            let thread_id = match post_review_comment_thread(
+                &vote_ctx,
+                body,
+                None,
+                owner.as_ref(),
+                ctx,
+            )
+            .await
+            {
                 Ok(Ok(id)) => id,
                 Ok(Err(failure)) => {
                     data["comment_status"] = serde_json::json!("failed");
                     return Ok(ExecutionResult::failure_with_data(failure.message, data));
                 }
-                Err(error) => return Ok(ExecutionResult::failure_with_data(
-                    format!("Review comment delivery is uncertain; vote was not attempted: {error:#}"), data,
-                )),
+                Err(error) => {
+                    return Ok(ExecutionResult::failure_with_data(
+                        format!(
+                            "Review comment delivery is uncertain; vote was not attempted: {error:#}"
+                        ),
+                        data,
+                    ));
+                }
             };
             data["thread_id"] = serde_json::json!(thread_id);
             data["comment_status"] = serde_json::json!("posted");
         }
         if let (Some(vote), Some(actor)) = (vote_value, actor) {
+            if let Some(head) = &self.expected_head_sha
+                && let Err(error) = super::pr_inline::verify_head(&vote_ctx, head).await
+            {
+                return Ok(ExecutionResult::failure_with_data(
+                    format!("Review head changed before vote: {error:#}"),
+                    data,
+                ));
+            }
             data["reviewer_id"] = serde_json::json!(actor);
             let encoded_actor = utf8_percent_encode(&actor, PATH_SEGMENT).to_string();
             match submit_vote(&vote_ctx, &encoded_actor, &self.event, vote).await {
@@ -544,17 +760,52 @@ impl Executor for SubmitPrReviewResult {
                 Err(error) => {
                     data["vote_status"] = serde_json::json!("uncertain");
                     return Ok(ExecutionResult::failure_with_data(
-                        format!("Review vote delivery is uncertain: {error:#}"), data,
+                        format!("Review vote delivery is uncertain: {error:#}"),
+                        data,
                     ));
                 }
             }
         }
 
+        if let Some((author, candidates, skipped)) = supersession {
+            let replacement = data["thread_id"]
+                .as_i64()
+                .or_else(|| data["inline_comments"][0]["thread_id"].as_i64())
+                .context("Supersession requires a confirmed replacement thread")?;
+            let result = super::pr_comments::supersede(
+                &vote_ctx,
+                owner.as_ref().context("Supersession requires ownership")?,
+                &author,
+                &candidates,
+                i32::try_from(replacement)?,
+                skipped,
+            )
+            .await;
+            match result {
+                Ok(details) => {
+                    let failed = details["failures"]
+                        .as_u64()
+                        .context("Invalid supersession outcome")?
+                        > 0;
+                    data["supersession"] = details;
+                    if failed {
+                        return Ok(ExecutionResult::warning_with_data(
+                            "Review completed, but older reports could not all be superseded",
+                            data,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    data["supersession_error"] = serde_json::json!(format!("{error:#}"));
+                    return Ok(ExecutionResult::warning_with_data(
+                        "Review completed, but supersession failed",
+                        data,
+                    ));
+                }
+            }
+        }
         Ok(ExecutionResult::success_with_data(
-            format!(
-                "Review '{}' submitted on PR #{}",
-                self.event, pr_id
-            ),
+            format!("Review '{}' submitted on PR #{}", self.event, pr_id),
             data,
         ))
     }
@@ -574,7 +825,10 @@ mod tests {
     fn test_params_deserializes() {
         let json = r#"{"pull_request_id": 42, "event": "approve"}"#;
         let params: SubmitPrReviewParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.pull_request_id, Some(PullRequestReference::Number(42)));
+        assert_eq!(
+            params.pull_request_id,
+            Some(PullRequestReference::Number(42))
+        );
         assert_eq!(params.event, "approve");
         assert!(params.body.is_none());
         assert!(params.repository.is_none());
@@ -583,6 +837,8 @@ mod tests {
     #[test]
     fn test_params_converts_to_result() {
         let params = SubmitPrReviewParams {
+            comments: Vec::new(),
+            expected_head_sha: None,
             pull_request_id: Some(PullRequestReference::Number(42)),
             event: "approve".to_string(),
             body: None,
@@ -590,13 +846,18 @@ mod tests {
         };
         let result: SubmitPrReviewResult = params.try_into().unwrap();
         assert_eq!(result.name, "submit-pull-request-review");
-        assert_eq!(result.pull_request_id, Some(PullRequestReference::Number(42)));
+        assert_eq!(
+            result.pull_request_id,
+            Some(PullRequestReference::Number(42))
+        );
         assert_eq!(result.event, "approve");
     }
 
     #[test]
     fn test_validation_rejects_zero_pr_id() {
         let params = SubmitPrReviewParams {
+            comments: Vec::new(),
+            expected_head_sha: None,
             pull_request_id: Some(PullRequestReference::Number(0)),
             event: "approve".to_string(),
             body: None,
@@ -613,6 +874,8 @@ mod tests {
     #[test]
     fn test_validation_rejects_invalid_event() {
         let params = SubmitPrReviewParams {
+            comments: Vec::new(),
+            expected_head_sha: None,
             pull_request_id: Some(PullRequestReference::Number(1)),
             event: "merge".to_string(),
             body: None,
@@ -628,6 +891,8 @@ mod tests {
     #[test]
     fn test_validation_rejects_request_changes_without_body() {
         let params = SubmitPrReviewParams {
+            comments: Vec::new(),
+            expected_head_sha: None,
             pull_request_id: Some(PullRequestReference::Number(1)),
             event: "request-changes".to_string(),
             body: None,
@@ -644,6 +909,8 @@ mod tests {
     #[test]
     fn test_validation_rejects_repository_pipeline_command() {
         let params = SubmitPrReviewParams {
+            comments: Vec::new(),
+            expected_head_sha: None,
             pull_request_id: Some(PullRequestReference::Number(1)),
             event: "approve".to_string(),
             body: None,
@@ -659,6 +926,8 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = SubmitPrReviewParams {
+            comments: Vec::new(),
+            expected_head_sha: None,
             pull_request_id: Some(PullRequestReference::Number(99)),
             event: "request-changes".to_string(),
             body: Some("This needs significant rework before merging.".to_string()),
@@ -692,6 +961,8 @@ mod tests {
         ] {
             assert_eq!(event_to_vote(event), Some(vote));
             let params = SubmitPrReviewParams {
+                comments: Vec::new(),
+                expected_head_sha: None,
                 pull_request_id: Some(PullRequestReference::Number(u64::MAX)),
                 event: event.into(),
                 body: None,
@@ -889,41 +1160,71 @@ mod tests {
     fn comment_requires_content_and_preserves_markdown() {
         for body in [None, Some(""), Some("           ")] {
             let params = SubmitPrReviewParams {
+                comments: Vec::new(),
+                expected_head_sha: None,
                 pull_request_id: Some(PullRequestReference::Number(1)),
-                event: "comment".into(), body: body.map(str::to_string), repository: None,
+                event: "comment".into(),
+                body: body.map(str::to_string),
+                repository: None,
             };
             assert!(params.validate().is_err());
         }
         let mut result: SubmitPrReviewResult = serde_json::from_value(serde_json::json!({
             "name":"submit-pull-request-review", "pull_request_id":1, "event":"comment",
             "body":"Check `Vec<T>` and this code:\n```rust\nlet x = a < b;\n```",
-        })).unwrap();
+        }))
+        .unwrap();
         result.sanitize_content_fields();
-        assert_eq!(result.body.as_deref(), Some("Check `Vec<T>` and this code:\n```rust\nlet x = a < b;\n```"));
+        assert_eq!(
+            result.body.as_deref(),
+            Some("Check `Vec<T>` and this code:\n```rust\nlet x = a < b;\n```")
+        );
     }
 
     #[tokio::test]
     async fn malformed_comment_success_is_uncertain_and_cannot_cast_vote() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
-        let server=MockServer::start().await;
-        Mock::given(method("GET")).and(path("/_apis/connectiondata"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"authenticatedUser":{"id":"actor"}})))
-            .expect(1).mount(&server).await;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_apis/connectiondata"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"authenticatedUser":{"id":"actor"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-            .expect(1).mount(&server).await;
-        let ctx=super::super::pr_common::tests::registered_context(&server.uri(),SubmitPrReviewResult::NAME,
-            serde_json::json!({"allowed-events":["request-changes"],"allow-temporary-ids":true}));
-        let mut result: SubmitPrReviewResult=serde_json::from_value(serde_json::json!({
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = super::super::pr_common::tests::registered_context(
+            &server.uri(),
+            SubmitPrReviewResult::NAME,
+            serde_json::json!({"allowed-events":["request-changes"],"allow-temporary-ids":true}),
+        );
+        let mut result: SubmitPrReviewResult = serde_json::from_value(serde_json::json!({
             "name":"submit-pull-request-review","pull_request_id":"#aw_pr123",
             "event":"request-changes","body":"Please correct this behavior."
-        })).unwrap();
-        let result=result.execute_sanitized(&ctx).await.unwrap();
+        }))
+        .unwrap();
+        let result = result.execute_sanitized(&ctx).await.unwrap();
         assert!(!result.success);
-        let data=result.data.unwrap();
-        assert_eq!(data["comment_status"],"uncertain");
-        assert_eq!(data["vote_status"],"not-attempted");
-        assert!(server.received_requests().await.unwrap().iter().all(|request|request.method.as_str()!="PUT"));
+        let data = result.data.unwrap();
+        assert_eq!(data["comment_status"], "uncertain");
+        assert_eq!(data["vote_status"], "not-attempted");
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method.as_str() != "PUT")
+        );
     }
 
     #[test]
@@ -939,5 +1240,146 @@ allowed-repositories:
         let config: SubmitPrReviewConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.allowed_events, vec!["approve", "comment"]);
         assert_eq!(config.allowed_repositories, vec!["self", "other-repo"]);
+    }
+
+    #[tokio::test]
+    async fn review_batch_preflights_all_findings_and_never_votes_after_partial_failure() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for scenario in [
+            "success",
+            "invalid-last",
+            "not-enabled",
+            "head-moved",
+            "vote-failed",
+        ] {
+            let server = MockServer::start().await;
+            let posts = Arc::new(AtomicUsize::new(0));
+            let observed = posts.clone();
+            let move_head = scenario == "head-moved";
+            Mock::given(method("GET")).and(path("/P/_apis/git/repositories/repo/pullRequests/42/iterations"))
+                .respond_with(move |_:&wiremock::Request|{
+                    let head=if move_head&&observed.load(Ordering::SeqCst)>0 {"c"}else{"a"};
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"value":[{
+                        "id":1,"sourceRefCommit":{"commitId":head.repeat(40)},"commonRefCommit":{"commitId":"b".repeat(40)}
+                    }]}))
+                }).mount(&server).await;
+            Mock::given(method("GET"))
+                .and(path(
+                    "/P/_apis/git/repositories/repo/pullRequests/42/iterations/1/changes",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"changeEntries":[{
+                        "changeTrackingId":1,"changeType":"edit","item":{"path":"/src.rs"}
+                    }]}),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/P/_apis/git/repositories/repo/items"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"content":"first\nsecond\n"})),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/_apis/connectiondata"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"authenticatedUser":{"id":"actor"}})),
+                )
+                .mount(&server)
+                .await;
+            let posted = posts.clone();
+            Mock::given(method("POST"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let id = posted.fetch_add(1, Ordering::SeqCst) + 10;
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":id}))
+                })
+                .mount(&server)
+                .await;
+            Mock::given(method("PUT"))
+                .respond_with(ResponseTemplate::new(if scenario == "vote-failed" {
+                    500
+                } else {
+                    200
+                }))
+                .mount(&server)
+                .await;
+            let mut ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                ..Default::default()
+            };
+            ctx.tool_configs.insert(SubmitPrReviewResult::NAME.into(),serde_json::json!({
+                "target":"*","allowed-events":["request-changes"],"max-comments":if scenario=="not-enabled"{0}else{2}
+            }));
+            let result=crate::execute::execute_safe_output(&serde_json::json!({
+                "name":"submit-pull-request-review","pull_request_id":42,"event":"request-changes",
+                "body":"Review summary requiring changes.","expected_head_sha":"a".repeat(40),
+                "comments":[
+                    {"file_path":"src.rs","line":1,"content":"First independent finding."},
+                    {"file_path":"src.rs","line":if scenario=="invalid-last"{3}else{2},"content":"Second independent finding."}
+                ]
+            }),&ctx).await;
+            let requests = server.received_requests().await.unwrap();
+            let writes = requests
+                .iter()
+                .filter(|request| request.method.as_str() != "GET")
+                .collect::<Vec<_>>();
+            match scenario {
+                "not-enabled" | "invalid-last" => {
+                    assert!(result.is_err(), "{scenario}");
+                    assert!(writes.is_empty(), "{scenario}");
+                    if scenario == "not-enabled" {
+                        assert!(requests.is_empty());
+                    }
+                }
+                "head-moved" => {
+                    let result = result.unwrap().1;
+                    assert!(!result.success);
+                    assert_eq!(writes.len(), 1);
+                    assert_eq!(
+                        result.data.unwrap()["inline_comments"][0]["status"],
+                        "posted"
+                    );
+                }
+                _ => {
+                    let result = result.unwrap().1;
+                    assert_eq!(result.success, scenario == "success");
+                    assert_eq!(
+                        writes
+                            .iter()
+                            .map(|request| request.method.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["POST", "POST", "POST", "PUT"]
+                    );
+                    let first: serde_json::Value = serde_json::from_slice(&writes[0].body).unwrap();
+                    assert_eq!(first["threadContext"]["filePath"], "/src.rs");
+                    assert_eq!(first["pullRequestThreadContext"]["changeTrackingId"], 1);
+                    let data = result.data.unwrap();
+                    assert_eq!(data["inline_comments"].as_array().unwrap().len(), 2);
+                    assert_eq!(data["thread_id"], 12);
+                    assert_eq!(
+                        data["vote_status"],
+                        if scenario == "success" {
+                            "applied"
+                        } else {
+                            "failed"
+                        }
+                    );
+                }
+            }
+        }
     }
 }

@@ -126,6 +126,8 @@ pub struct ExecutionContext {
     pub ado_project: Option<String>,
     /// Azure DevOps project GUID (`SYSTEM_TEAMPROJECTID`)
     pub ado_project_id: Option<String>,
+    /// Original pipeline collection, independent of CLI target overrides.
+    pub pipeline_collection_uri: Option<String>,
     /// Write-capable ADO access token used by Stage 3 executors. Populated
     /// from the `SYSTEM_ACCESSTOKEN` env var, which the compiler maps to
     /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)`
@@ -495,6 +497,7 @@ impl ExecutionContext {
             ado_organization,
             ado_project: env("SYSTEM_TEAMPROJECT"),
             ado_project_id: env("SYSTEM_TEAMPROJECTID"),
+            pipeline_collection_uri: env("SYSTEM_COLLECTIONURI"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
             github_token: env("ADO_AW_GITHUB_TOKEN"),
             github_actor_login: env("ADO_AW_GITHUB_ACTOR_LOGIN"),

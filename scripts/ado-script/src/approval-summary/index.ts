@@ -137,6 +137,8 @@ export function parsePrPolicies(value: string | undefined): Map<string, PrPolicy
           : { kind: target.kind as "triggering" | "explicit" },
         operation: typeof candidate.operation === "string" ? candidate.operation : undefined,
         "target-repo": typeof candidate["target-repo"] === "string" ? candidate["target-repo"] : undefined,
+        "supersede-older-comments": candidate["supersede-older-comments"] === true,
+        "comment-key": typeof candidate["comment-key"] === "string" ? candidate["comment-key"] : undefined,
       });
     } else {
       logWarning(`approval-summary: invalid trusted policy for ${tool}`);

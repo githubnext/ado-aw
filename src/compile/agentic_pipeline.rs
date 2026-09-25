@@ -4930,7 +4930,7 @@ fn approval_summary_pr_policies(
     use crate::safe_outputs::pr_common::PrMutationPolicy;
     let mut policies = serde_json::Map::new();
     for tool in front_matter.safe_outputs.keys() {
-        let policy = match tool.as_str() {
+        let mut policy = match tool.as_str() {
             "update-pull-request" => {
                 let config = front_matter
                     .update_pull_request_config()?
@@ -4948,6 +4948,7 @@ fn approval_summary_pr_policies(
             | "remove-pull-request-labels"
             | "replace-pull-request-label"
             | "mark-pull-request-as-ready-for-review"
+            | "update-pull-request-comment"
             | "set-pull-request-auto-complete"
             | "submit-pull-request-review"
             | "add-pull-request-comment"
@@ -4958,6 +4959,11 @@ fn approval_summary_pr_policies(
             }
             _ => continue,
         };
+        if matches!(tool.as_str(), "add-pull-request-comment" | "update-pull-request-comment" | "submit-pull-request-review") {
+            let raw = &front_matter.safe_outputs[tool];
+            policy["supersede-older-comments"] = serde_json::json!(raw.get("supersede-older-comments").and_then(serde_json::Value::as_bool).unwrap_or(false));
+            policy["comment-key"] = serde_json::json!(raw.get("comment-key").and_then(serde_json::Value::as_str).unwrap_or("default"));
+        }
         policies.insert(tool.clone(), policy);
     }
     Ok(policies)

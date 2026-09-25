@@ -319,6 +319,7 @@ fn safe_output_description(name: &str) -> &'static str {
         "remove-pull-request-labels" => "Removes policy-permitted PR labels while preserving unrelated labels",
         "replace-pull-request-label" => "Adds and verifies a replacement PR label before removing the old one",
         "mark-pull-request-as-ready-for-review" => "Publishes an active draft PR without approving or completing it",
+        "update-pull-request-comment" => "Edits a verified pipeline-owned PR comment without overwriting human conversations",
         "set-pull-request-auto-complete" => {
             "Enables Azure DevOps PR auto-complete without bypassing branch policies"
         }

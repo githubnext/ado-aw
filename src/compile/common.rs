@@ -3147,9 +3147,16 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
     front_matter.typed_safe_output_config::<crate::safe_outputs::MarkPullRequestReadyConfig>(
         "mark-pull-request-as-ready-for-review",
     )?;
-    front_matter.typed_safe_output_config::<crate::safe_outputs::AddPrCommentConfig>(
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::UpdatePullRequestCommentConfig>(
+        "update-pull-request-comment",
+    )? {
+        anyhow::ensure!(config.comment_key.len() <= 100, "comment-key must fit 100 bytes");
+    }
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::AddPrCommentConfig>(
         "add-pull-request-comment",
-    )?;
+    )? {
+        crate::safe_outputs::validate_add_pr_comment_config(&config)?;
+    }
     front_matter.typed_safe_output_config::<crate::safe_outputs::ReplyToPrCommentConfig>(
         "reply-to-pull-request-comment",
     )?;
@@ -3199,6 +3206,7 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
         "remove-pull-request-labels",
         "replace-pull-request-label",
         "mark-pull-request-as-ready-for-review",
+        "update-pull-request-comment",
         "set-pull-request-auto-complete",
         "update-pull-request",
         "abandon-pull-request",

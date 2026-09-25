@@ -52,6 +52,7 @@ pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
     RemovePullRequestLabelsResult,
     ReplacePullRequestLabelResult,
     MarkPullRequestReadyResult,
+    UpdatePullRequestCommentResult,
     SetPrAutoCompleteResult,
     UpdatePullRequestResult,
     AbandonPullRequestResult,
@@ -98,6 +99,7 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     RemovePullRequestLabelsResult,
     ReplacePullRequestLabelResult,
     MarkPullRequestReadyResult,
+    UpdatePullRequestCommentResult,
     SetPrAutoCompleteResult,
     AbandonPullRequestResult,
     UpdatePullRequestResult,
@@ -788,9 +790,12 @@ mod add_github_issue_labels;
 mod add_pr_comment;
 mod add_pr_labels;
 mod pr_labels;
+pub(crate) mod pr_comments;
+pub(crate) mod pr_inline;
 mod remove_pull_request_labels;
 mod replace_pull_request_label;
 mod mark_pull_request_as_ready_for_review;
+mod update_pull_request_comment;
 mod add_pr_reviewers;
 mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
@@ -842,6 +847,7 @@ pub use add_pr_labels::*;
 pub use remove_pull_request_labels::*;
 pub use replace_pull_request_label::*;
 pub use mark_pull_request_as_ready_for_review::*;
+pub use update_pull_request_comment::*;
 pub use add_pr_reviewers::*;
 pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;

@@ -1300,6 +1300,8 @@ Adds a new comment thread to a pull request.
 - `file_path` *(optional)* - File path for an inline comment anchored to a specific file
 - `line` *(optional)* - Line number for an inline comment. Requires `file_path`.
 - `start_line` *(optional)* - Starting line for a multi-line inline comment range. Requires `file_path` and `line`, and must be strictly less than `line`.
+- `side` *(optional)* - `right` (default) or `left` side of the PR diff.
+- `expected_head_sha` - Exact reviewed 40-character source commit; required for inline comments. A stale head, missing diff path, invalid range or unavailable revision fails before posting.
 - `status` *(optional)* - Initial thread status: `"active"` (default), `"fixed"`, `"wont-fix"`, `"closed"`, or `"by-design"`. Subject to the `allowed-statuses` allowlist.
 
 **Configuration options (front matter):**
@@ -1311,7 +1313,39 @@ safe-outputs:
     allowed-statuses: []               # Optional — restrict which thread statuses the agent can set (empty = any)
     max: 1                             # Maximum per run (default: 1)
     include-stats: true                # Append agent stats to comment (default: true)
+    comment-key: default               # Trusted report stream within this pipeline
+    supersede-older-comments: false    # Opt in to preserving/closing older owned reports
+    max-superseded-comments: 20        # Per-call cleanup bound (1-100)
 ```
+
+Standalone comments are independent proposals, not a buffer for a later review.
+Inline positioning uses the exact ADO iteration and source/common commits,
+including renamed/deleted left-side paths; it does not assume the file exists
+in the current checkout. Upgrade existing inline callers to provide the reviewed
+head SHA. Comment content, including any prefix/stats, is bounded to 65,536 bytes.
+
+Owned comments carry executor-generated pipeline identity, report key and content
+hash in thread properties, not merely a marker in their Markdown. Supersession
+creates the replacement first, then preserves old text, marks it superseded and
+closes eligible older active threads. It never deletes comments or changes votes.
+Unmarked history, other pipelines/actors, externally edited comments and **all
+conversations with replies** remain untouched: a shared PAT/build identity alone
+cannot prove that a reply was automated. Discovery is bounded to 2,000 threads.
+
+### update-pull-request-comment
+
+Edits a verified workflow-owned **root comment with no replies**. Parameters are
+`thread_id`, `comment_id`, `content`, and the shared optional PR/repository target.
+Configuration supports the shared target/filter policy, `comment-key` (default
+`default`), and normal budget/approval/staged controls. This edits a comment,
+not the PR description.
+
+Stage 3 checks pipeline identity, server author, the stored content hash and a
+fresh conversation snapshot. Missing ownership or external edits fail before
+writing. Content and ownership metadata are separate ADO writes; partial or
+uncertain results are retained in execution artifacts. ADO supplies no atomic
+conversation lock here, so concurrent changes discovered during/after writes are
+reported rather than silently overwritten or rolled back.
 
 ### reply-to-pull-request-comment
 Replies to an existing review comment thread on a pull request.
@@ -1359,7 +1393,9 @@ legacy behavior switch and prompt text is not rewritten automatically.
 **Agent parameters:**
 - `pull_request_id` - Positive PR ID to review; required with `target: "*"`.
 - `event` - Review decision: `approve`, `approve-with-suggestions`, `request-changes`, or `comment` (required)
-- `body` *(optional)* - Review rationale in markdown (required for `request-changes` and `comment`, at least 10 characters)
+- `body` *(optional)* - Review summary in Markdown (required for `request-changes`; a non-voting `comment` needs this or inline findings).
+- `comments` *(optional)* - Array of `{file_path, side, line, start_line?, content}` findings belonging to this review. `side` defaults to `right`.
+- `expected_head_sha` - Reviewed source commit, required with inline findings; checked during preflight and again before subsequent writes/voting.
 - `repository` - Optional repository alias; defaults to the configured/trusted target.
 
 **Configuration options (front matter):**
@@ -1370,7 +1406,22 @@ safe-outputs:
     allowed-repositories: []     # Optional — restrict which repos can be reviewed
     allow-temporary-ids: false   # Opt in to same-run create/follow-up references
     max: 1                       # Maximum per run (default: 1)
+    max-comments: 10             # Explicit nested-comment authority; default 0, maximum 100
+    supersede-older-comments: false # Optional same-workflow comment cleanup, never vote dismissal
 ```
+
+One call is one complete review proposal: summary, inline findings and an optional
+explicit vote. Standalone comment calls are never collected into it or reposted.
+Every finding is validated and anchored before the first write; comments are
+posted before the vote. Failed/uncertain comments or head drift prevent the vote.
+ADO does not provide an atomic review transaction or a SHA-bound vote lease:
+partial writes are reported, not rolled back or blindly repeated.
+
+`max` counts review proposals; `max-comments` independently bounds their inline
+writes. Omitting it does not grant nested-comment authority. Nested comments
+inherit the review's target, filter, approval and staged policy and cannot select
+another PR or repository. Comment supersession uses the same ownership/hash
+checks as standalone comments and runs only after the replacement review succeeds.
 
 ### Focused PR tools
 

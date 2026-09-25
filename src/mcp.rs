@@ -42,6 +42,7 @@ use crate::safe_outputs::{
     RemovePullRequestLabelsParams, RemovePullRequestLabelsResult,
     ReplacePullRequestLabelParams, ReplacePullRequestLabelResult,
     MarkPullRequestReadyParams, MarkPullRequestReadyResult,
+    UpdatePullRequestCommentParams, UpdatePullRequestCommentResult,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::{PullRequestTemporaryId, WorkItemTemporaryId};
@@ -1298,9 +1299,9 @@ structured output that should be visible in the project wiki."
 
     #[tool(
         name = "add-pull-request-comment",
-        description = "Add a comment thread to an Azure DevOps pull request. Supports both \
-general comments and file-specific inline comments with optional line positioning. \
-The comment will be posted during safe output processing."
+        description = "Propose an independent ad hoc comment thread on an Azure DevOps PR. \
+Supports general and inline feedback. It is never buffered into a later review; use \
+submit-pull-request-review for a complete review. Writes happen only during safe output processing."
     )]
     async fn add_pr_comment(
         &self,
@@ -1312,7 +1313,7 @@ The comment will be posted during safe output processing."
         );
         debug!("Content length: {} chars", params.0.content.len());
         let mut sanitized = params.0;
-        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.content = sanitize_markdown(&sanitized.content);
         let result: AddPrCommentResult = sanitized.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
@@ -1814,6 +1815,7 @@ never buffered into this review. Requires 'allowed-events'; writes happen only d
         );
         let mut sanitized = params.0;
         sanitized.body = sanitized.body.map(|b| sanitize_markdown(&b));
+        for comment in &mut sanitized.comments { comment.content = sanitize_markdown(&comment.content); }
         let result: SubmitPrReviewResult = sanitized.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
@@ -1822,6 +1824,15 @@ never buffered into this review. Requires 'allowed-events'; writes happen only d
             "PR review '{}' queued for {}. The review will be submitted during safe output processing.",
             result.event, crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
+    }
+
+    #[tool(
+        name = "update-pull-request-comment",
+        description = "Propose editing a verified root comment owned by this pipeline and actor, with no replies. Requires existing thread_id and comment_id. Refuses conversations, externally edited comments and unowned history. This edits a comment, not the PR description."
+    )]
+    async fn update_pr_comment(&self, params: Parameters<UpdatePullRequestCommentParams>) -> Result<CallToolResult, McpError> {
+        let result: UpdatePullRequestCommentResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
@@ -1838,7 +1849,7 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
             crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.thread_id
         );
         let mut sanitized = params.0;
-        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.content = sanitize_markdown(&sanitized.content);
         let result: ReplyToPrCommentResult = sanitized.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
@@ -2692,7 +2703,7 @@ safe-outputs:
 
     #[tokio::test]
     async fn test_all_configured_only_tools_are_routes() {
-        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 22);
+        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 23);
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled: Vec<String> = CONFIGURED_ONLY_TOOLS
             .iter()

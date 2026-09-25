@@ -1030,6 +1030,7 @@ attachment-type: "agent-artifact"
             ado_organization: None,
             ado_project: None,
             ado_project_id: None,
+            pipeline_collection_uri: None,
             access_token: None,
             github_token: None,
             github_actor_login: None,

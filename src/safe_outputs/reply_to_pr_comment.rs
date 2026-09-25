@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::pr_common::{PullRequestReference, describe_pr_reference, repository_api_base, resolve_configured_pr_target, validate_reference};
 use super::{ToolResult, authenticate_ado_request};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::sanitize::{SanitizeContent, sanitize_markdown, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
@@ -43,6 +43,7 @@ impl Validate for ReplyToPrCommentParams {
             self.content.len() >= 10,
             "content must be at least 10 characters"
         );
+        super::pr_comments::validate_body(&self.content)?;
         if let Some(repository) = &self.repository {
             reject_pipeline_injection(repository, "repository")?;
         }
@@ -67,7 +68,7 @@ tool_result! {
 
 impl SanitizeContent for ReplyToPrCommentResult {
     fn sanitize_content_fields(&mut self) {
-        self.content = sanitize_text(&self.content);
+        self.content = sanitize_markdown(&self.content);
         self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
@@ -153,6 +154,7 @@ impl Executor for ReplyToPrCommentResult {
             Some(prefix) => format!("{}{}", prefix, self.content),
             None => self.content.clone(),
         };
+        super::pr_comments::validate_body(&comment_body)?;
 
         // Build the API URL for adding a comment to an existing thread
         let url = format!(

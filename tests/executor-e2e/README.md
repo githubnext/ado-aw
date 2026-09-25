@@ -100,6 +100,18 @@ scenario code or the relevant Rust schemas, validators, or executor change.
 
 ### Live coverage
 
+Owned-comment scenarios seed through the real executor with controlled
+previous-run metadata, then exercise update, non-destructive supersession,
+manual-edit refusal and reply preservation. Same-actor replies are deliberately
+protected too: a PAT identity cannot distinguish a human reply from automation.
+These are real-service lifecycle checks with synthetic prior-run provenance,
+not evidence that build `1` actually created the seed.
+
+Inline cases cover current right-side content, a deleted left-side file on
+disposable source/target branches, and stale-head rejection. Review-batch cases
+verify distinct inline/summary threads, non-voting behavior, and zero comment
+writes when the last finding is invalid or nested-comment authority is absent.
+
 The `pr-api-draft-publication`, `pr-api-owned-comments`,
 `pr-api-label-replacement` and `pr-api-push-concurrency` scenarios probe ADO
 platform prerequisites directly on harness-owned disposable PRs. They use a

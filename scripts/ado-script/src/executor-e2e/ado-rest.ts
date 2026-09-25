@@ -390,6 +390,22 @@ export class AdoRest {
     return commitId;
   }
 
+  async pushDeleteFileBranch(repo: string, branch: string, parent: string, filePath: string): Promise<string> {
+    const response = await this.request<{ commits?: { commitId?: string }[] }>(this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pushes?api-version=7.1`,
+    ), {
+      method: "POST",
+      body: {
+        refUpdates: [{ name: `refs/heads/${branch}`, oldObjectId: "0".repeat(40) }],
+        commits: [{ parents: [parent], comment: "Disposable inline-comment deletion fixture",
+          changes: [{ changeType: "delete", item: { path: filePath } }] }],
+      },
+    });
+    const commit = response?.commits?.[0]?.commitId;
+    if (typeof commit !== "string" || !/^[a-f0-9]{40}$/i.test(commit)) throw new Error("Deletion fixture push returned no valid commit");
+    return commit;
+  }
+
   /**
    * Create a NEW branch and a single commit adding one OR MORE files in one
    * push. Returns the new commit id.
@@ -533,7 +549,8 @@ export class AdoRest {
     const res = await this.request<{ value?: { id: number; comments?: { content?: string }[] }[] }>(
       path,
     );
-    return res?.value ?? [];
+    if (!Array.isArray(res?.value)) throw new Error(`listThreads(${prId}) response missing value array`);
+    return res.value;
   }
 
   async listReviewers(

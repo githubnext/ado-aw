@@ -21,6 +21,7 @@ pub(crate) const PR_MUTATION_TOOLS: &[&str] = &[
     "add-pull-request-labels", "set-pull-request-auto-complete", "submit-pull-request-review",
     "remove-pull-request-labels", "replace-pull-request-label",
     "mark-pull-request-as-ready-for-review",
+    "update-pull-request-comment",
     "add-pull-request-comment", "reply-to-pull-request-comment", "resolve-pull-request-thread",
 ];
 
@@ -216,7 +217,7 @@ fn env_value(env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String>
 }
 
 /// Exact collection identity; known Services URL spellings normalize to one canonical URL.
-fn collection_identity(raw: &str) -> Option<String> {
+pub(crate) fn collection_identity(raw: &str) -> Option<String> {
     let url = url::Url::parse(raw).ok()?;
     if !matches!(url.scheme(), "https" | "http")
         || !url.username().is_empty()
@@ -745,6 +746,8 @@ pub(crate) mod tests {
         check::<ReplacePullRequestLabelResult>();
         check::<MarkPullRequestReadyParams>();
         check::<MarkPullRequestReadyResult>();
+        check::<UpdatePullRequestCommentParams>();
+        check::<UpdatePullRequestCommentResult>();
         check::<SetPrAutoCompleteParams>();
         check::<SetPrAutoCompleteResult>();
         check::<UpdatePullRequestParams>();
@@ -764,6 +767,7 @@ pub(crate) mod tests {
             "remove-pull-request-labels" => serde_json::json!({"labels":["label"]}),
             "replace-pull-request-label" => serde_json::json!({"from":"old","to":"new"}),
             "mark-pull-request-as-ready-for-review" => serde_json::json!({}),
+            "update-pull-request-comment" => serde_json::json!({"thread_id":1,"comment_id":1,"content":"Replacement owned content."}),
             "set-pull-request-auto-complete" => serde_json::json!({}),
             "submit-pull-request-review" => serde_json::json!({"event":"comment","body":"Informational feedback."}),
             "add-pull-request-comment" => serde_json::json!({"content":"Informational feedback.","status":"active","repository":null}),

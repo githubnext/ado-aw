@@ -67,6 +67,8 @@ export interface PrPolicy {
   target: PrTargetPolicy;
   operation?: string;
   "target-repo"?: string;
+  "supersede-older-comments"?: boolean;
+  "comment-key"?: string;
 }
 
 interface RepositoryResolution {
@@ -171,6 +173,8 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "PR", key: "pull_request_id" },
       { label: "File", key: "file_path" },
       { label: "Line", key: "line" },
+      { label: "Side", key: "side" },
+      { label: "Reviewed head", key: "expected_head_sha" },
     ],
     body: "content",
   },
@@ -182,11 +186,21 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     ],
     body: "content",
   },
+  "update-pull-request-comment": {
+    title: "Update verified owned PR comment",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Thread", key: "thread_id" },
+      { label: "Comment", key: "comment_id" },
+    ],
+    body: "content",
+  },
   "submit-pull-request-review": {
     title: "Submit PR review",
     fields: [
       { label: "PR", key: "pull_request_id" },
       { label: "Event", key: "event" },
+      { label: "Reviewed head", key: "expected_head_sha" },
       { label: "Repository selector", key: "repository" },
     ],
     body: "body",
@@ -968,6 +982,30 @@ function renderProposal(
       }
     }
   }
+  if (["add-pull-request-comment", "submit-pull-request-review", "update-pull-request-comment"].includes(p.name)) {
+    lines.push("", `Owned-comment policy: ${sanitizeInline(p.record._trusted_comment_policy)}.`);
+  }
+  if (p.name === "submit-pull-request-review") {
+    lines.push("", p.record.event === "comment" ? "Vote effect: none; existing votes are preserved."
+      : p.record.event === "reset" ? "Vote effect: explicitly clear the authenticated actor's vote."
+        : "Vote effect: the requested allowed ADO vote, only after all review comments succeed.");
+    const comments = p.record.comments;
+    if (comments !== undefined && comments !== null && !Array.isArray(comments)) {
+      lines.push("", "Invalid inline-comments array; execution will reject it.");
+    } else if (Array.isArray(comments) && comments.length > 0) {
+      lines.push("", `Inline findings: ${comments.length}. One proposal, multiple non-atomic ADO writes.`);
+      for (const [index, value] of comments.slice(0, 100).entries()) {
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          lines.push(`Finding ${index + 1}: invalid object.`);
+          continue;
+        }
+        const comment = value as Record<string, unknown>;
+        lines.push("", `Finding ${index + 1}: ${sanitizeInline(comment.file_path)}; side ${sanitizeInline(comment.side ?? "right")}; lines ${sanitizeInline(comment.start_line ?? comment.line)}-${sanitizeInline(comment.line)}`,
+          "```text", sanitizeBlock(comment.content), "```");
+      }
+      if (comments.length > 100) lines.push("Additional findings omitted; execution rejects more than 100.");
+    }
+  }
   return lines.join("\n");
 }
 
@@ -1007,6 +1045,12 @@ export function renderSummary(
   const producers = new Map<string, Proposal>();
   proposals = proposals.map((proposal) => {
     const record = { ...proposal.record };
+    if (["add-pull-request-comment", "submit-pull-request-review", "update-pull-request-comment"].includes(proposal.name)) {
+      const trusted = repositoryContext?.prPolicies?.get(proposal.name);
+      record._trusted_comment_policy = trusted
+        ? `key '${trusted["comment-key"] ?? "default"}'; supersede older comments: ${trusted["supersede-older-comments"] === true ? "yes, verified reply-free threads only" : "no"}`
+        : "<unresolved: trusted comment policy unavailable>";
+    }
     if (proposal.name === "create-pull-request" && typeof record.temporary_id === "string") {
       producers.set(record.temporary_id.replace(/^#/, ""), proposal);
     }

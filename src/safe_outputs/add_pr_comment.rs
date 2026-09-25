@@ -3,12 +3,19 @@
 use log::{debug, info};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::path::Path;
 
-use super::pr_common::{PullRequestReference, describe_pr_reference, repository_api_base, resolve_configured_pr_target, validate_reference};
+use super::pr_common::{
+    PullRequestReference, describe_pr_reference, repository_api_base, resolve_configured_pr_target,
+    validate_reference,
+};
+use super::pr_inline::{PrCommentSide, PrInlineComment};
+use super::pr_mutations::UpdatePrContext;
 use super::{ToolResult, authenticate_ado_request};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::sanitize::{SanitizeContent, sanitize_config, sanitize_markdown};
+use crate::secure::{CommitSha, Identifier, RelativeSafePath};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
@@ -43,6 +50,12 @@ pub struct AddPrCommentParams {
     /// Line number for an inline comment. Requires `file_path` to be set.
     #[serde(default)]
     pub line: Option<i32>,
+    /// Side of the PR diff; right by default.
+    #[serde(default)]
+    pub side: PrCommentSide,
+    /// Exact reviewed source commit. Required for inline comments.
+    #[serde(default)]
+    pub expected_head_sha: Option<CommitSha>,
 
     /// Thread status: "active" (default), "fixed", "wont-fix", "closed", or "by-design".
     /// CamelCase forms ("Active", "WontFix", etc.) are also accepted for backwards compatibility.
@@ -71,6 +84,7 @@ impl Validate for AddPrCommentParams {
             self.content.len() >= 10,
             "content must be at least 10 characters"
         );
+        super::pr_comments::validate_body(&self.content)?;
         ensure!(
             status_to_int(&self.status).is_some(),
             "status must be one of: {}",
@@ -95,6 +109,25 @@ impl Validate for AddPrCommentParams {
         }
         if let Some(fp) = &self.file_path {
             validate_file_path(fp)?;
+            RelativeSafePath::parse(fp)?;
+            ensure!(
+                self.expected_head_sha.is_some(),
+                "expected_head_sha is required for inline comments"
+            );
+            PrInlineComment {
+                file_path: RelativeSafePath::parse(fp)?,
+                side: self.side,
+                line: u32::try_from(self.line.unwrap_or(1)).context("line must be positive")?,
+                start_line: self
+                    .start_line
+                    .map(u32::try_from)
+                    .transpose()
+                    .context("start_line must be positive")?,
+                content: self.content.clone(),
+            }
+            .validate()?;
+        } else {
+            ensure!(self.side == PrCommentSide::Right, "side requires file_path");
         }
         if let Some(repository) = &self.repository {
             validate_repository_selector(repository)?;
@@ -117,13 +150,17 @@ tool_result! {
         file_path: Option<String>,
         start_line: Option<i32>,
         line: Option<i32>,
+        #[serde(default)]
+        side: PrCommentSide,
+        #[serde(default)]
+        expected_head_sha: Option<CommitSha>,
         status: String,
     }
 }
 
 impl SanitizeContent for AddPrCommentResult {
     fn sanitize_content_fields(&mut self) {
-        self.content = sanitize_text(&self.content);
+        self.content = sanitize_markdown(&self.content);
         self.repository = self.repository.as_deref().map(sanitize_config);
         // Strip control characters from remaining structural fields for defense-in-depth
         self.status = self.status.chars().filter(|c| !c.is_control()).collect();
@@ -151,6 +188,18 @@ impl SanitizeContent for AddPrCommentResult {
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddPrCommentConfig {
+    #[serde(default, rename = "supersede-older-comments")]
+    #[sanitize_config(skip)]
+    pub supersede_older_comments: bool,
+    #[serde(
+        default = "super::pr_comments::default_comment_key",
+        rename = "comment-key"
+    )]
+    #[sanitize_config(skip)]
+    pub comment_key: Identifier,
+    #[serde(default = "default_max_superseded", rename = "max-superseded-comments")]
+    #[sanitize_config(skip)]
+    pub max_superseded_comments: usize,
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
@@ -190,6 +239,9 @@ pub struct AddPrCommentConfig {
 impl Default for AddPrCommentConfig {
     fn default() -> Self {
         Self {
+            supersede_older_comments: false,
+            comment_key: super::pr_comments::default_comment_key(),
+            max_superseded_comments: default_max_superseded(),
             target: Default::default(),
             target_repo: None,
             required_labels: Vec::new(),
@@ -202,6 +254,22 @@ impl Default for AddPrCommentConfig {
             max: None,
         }
     }
+}
+
+fn default_max_superseded() -> usize {
+    20
+}
+
+pub(crate) fn validate_add_pr_comment_config(config: &AddPrCommentConfig) -> anyhow::Result<()> {
+    ensure!(
+        config.max_superseded_comments > 0 && config.max_superseded_comments <= 100,
+        "max-superseded-comments must be between 1 and 100"
+    );
+    ensure!(
+        config.comment_key.len() <= 100,
+        "comment-key must fit 100 bytes"
+    );
+    Ok(())
 }
 
 /// Map a thread status string to the ADO API integer value.
@@ -234,6 +302,7 @@ fn validate_file_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn build_inline_thread_context(
     workspace_root: &Path,
     repo_root: &Path,
@@ -329,7 +398,6 @@ impl AddPrCommentResult {
         ctx: &ExecutionContext,
         config: &AddPrCommentConfig,
         status_int: i32,
-        repository_alias: &str,
     ) -> Result<serde_json::Value, String> {
         let comment_body = match &config.comment_prefix {
             Some(prefix) => format!("{}{}", prefix, self.content),
@@ -337,10 +405,11 @@ impl AddPrCommentResult {
         };
         let comment_body =
             crate::agent_stats::append_stats_to_body(&comment_body, ctx, config.include_stats);
+        super::pr_comments::validate_body(&comment_body).map_err(|error| error.to_string())?;
 
         let comment_obj = serde_json::json!({
             "parentCommentId": 0,
-            "content": comment_body,
+            "content": &comment_body,
             "commentType": 1
         });
 
@@ -348,35 +417,10 @@ impl AddPrCommentResult {
             "comments": [comment_obj],
             "status": status_int
         });
-
-        if let Some(ref fp) = self.file_path {
-            let end_line = self.line.unwrap_or(1);
-            let start_line = self.start_line.unwrap_or(end_line);
-            let repo_root =
-                crate::safe_outputs::resolve_repository_checkout_dir(repository_alias, ctx)
-                    .and_then(|path| {
-                        crate::validate::ensure_path_within_base(
-                            &path,
-                            &ctx.source_directory,
-                            "Repository checkout root",
-                        )
-                    })
-                    .map_err(|err| {
-                        format!(
-                            "Failed to resolve repository checkout for '{}': {}",
-                            repository_alias, err
-                        )
-                    })?;
-            let thread_context = build_inline_thread_context(
-                &ctx.source_directory,
-                &repo_root,
-                fp,
-                start_line,
-                end_line,
-            )
-            .map_err(|err| format!("Failed to anchor inline comment for '{}': {}", fp, err))?;
-            thread_body["threadContext"] = thread_context;
-        }
+        let owner = super::pr_comments::owner(ctx, "comment", &config.comment_key)
+            .map_err(|error| format!("Comment ownership: {error:#}"))?;
+        super::pr_comments::stamp(&mut thread_body, owner.as_ref(), ctx, &comment_body)
+            .map_err(|error| format!("Comment ownership: {error:#}"))?;
 
         Ok(thread_body)
     }
@@ -385,7 +429,10 @@ impl AddPrCommentResult {
 #[async_trait::async_trait]
 impl Executor for AddPrCommentResult {
     fn dry_run_summary(&self) -> String {
-        format!("add comment to {}", describe_pr_reference(self.pull_request_id.as_ref()))
+        format!(
+            "add comment to {}",
+            describe_pr_reference(self.pull_request_id.as_ref())
+        )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
@@ -396,8 +443,12 @@ impl Executor for AddPrCommentResult {
             file_path: self.file_path.clone(),
             line: self.line,
             start_line: self.start_line,
+            side: self.side,
+            expected_head_sha: self.expected_head_sha.clone(),
             status: self.status.clone(),
-        }).validate() {
+        })
+        .validate()
+        {
             return Ok(ExecutionResult::failure(error.to_string()));
         }
         let token = ctx
@@ -406,6 +457,7 @@ impl Executor for AddPrCommentResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
 
         let config: AddPrCommentConfig = ctx.get_tool_config("add-pull-request-comment")?;
+        validate_add_pr_comment_config(&config)?;
         debug!("Config: {:?}", config);
 
         let status_int = match self.validate_against_config(&config) {
@@ -413,17 +465,25 @@ impl Executor for AddPrCommentResult {
             Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
 
-        super::pr_common::validate_temporary_opt_in(self.pull_request_id.as_ref(), config.allow_temporary_ids)?;
+        super::pr_common::validate_temporary_opt_in(
+            self.pull_request_id.as_ref(),
+            config.allow_temporary_ids,
+        )?;
         let (pull_request_id, target) = match resolve_configured_pr_target(
-            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
-        ).await? {
+            Self::NAME,
+            self.pull_request_id.as_ref(),
+            self.repository.as_deref(),
+            ctx,
+        )
+        .await?
+        {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
         let repo_name = target.qualified_repository();
         let project = &target.project;
 
-        let thread_body = match self.build_thread_body(ctx, &config, status_int, &target.alias) {
+        let mut thread_body = match self.build_thread_body(ctx, &config, status_int) {
             Ok(body) => body,
             Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
@@ -435,15 +495,61 @@ impl Executor for AddPrCommentResult {
         );
         debug!("API URL: {}", url);
 
-        let client = reqwest::Client::new();
+        let client = super::pr_comments::client()?;
+        let operation = UpdatePrContext {
+            client: &client,
+            target: target.clone(),
+            pr_id: pull_request_id,
+            token,
+            connection_type: ctx.write_connection_type,
+        };
+        if let Some(file_path) = &self.file_path {
+            let head = self
+                .expected_head_sha
+                .as_ref()
+                .context("Inline comments require expected_head_sha")?;
+            let inline = PrInlineComment {
+                file_path: RelativeSafePath::parse(file_path)?,
+                side: self.side,
+                line: u32::try_from(self.line.unwrap_or(1))?,
+                start_line: self.start_line.map(u32::try_from).transpose()?,
+                content: self.content.clone(),
+            };
+            let prepared = super::pr_inline::prepare(&operation, head, &[inline]).await?;
+            let context = prepared
+                .first()
+                .context("Inline comment context was not prepared")?;
+            thread_body["threadContext"] = context["threadContext"].clone();
+            thread_body["pullRequestThreadContext"] = context["pullRequestThreadContext"].clone();
+        }
+        let supersession = if config.supersede_older_comments {
+            let owner = super::pr_comments::owner(ctx, "comment", &config.comment_key)?
+                .context("Supersession requires a complete trusted pipeline identity")?;
+            let actor = super::pr_comments::actor(&operation).await?;
+            let (candidates, skipped) = super::pr_comments::older_threads(
+                &operation,
+                &owner,
+                &actor,
+                ctx.build_id.context("Supersession requires a build ID")?,
+                config.max_superseded_comments,
+            )
+            .await?;
+            Some((owner, actor, candidates, skipped))
+        } else {
+            None
+        };
 
         info!("Sending comment thread to PR #{}", pull_request_id);
-        let response = authenticate_ado_request(client.post(&url), token, ctx.write_connection_type)
-            .header("Content-Type", "application/json")
-            .json(&thread_body)
-            .send()
-            .await
-            .context("Failed to send request to Azure DevOps")?;
+        if let Some(head) = &self.expected_head_sha {
+            super::pr_inline::verify_head(&operation, head).await?;
+        }
+        let response =
+            authenticate_ado_request(client.post(&url), token, ctx.write_connection_type)
+                .header("Content-Type", "application/json")
+                .json(&thread_body)
+                .send()
+                .await
+                .context("Failed to send request to Azure DevOps")?;
 
         if response.status().is_success() {
             let body: serde_json::Value = response
@@ -451,7 +557,10 @@ impl Executor for AddPrCommentResult {
                 .await
                 .context("Failed to parse response JSON")?;
 
-            let thread_id = body.get("id").and_then(|v| v.as_i64()).filter(|id| *id > 0)
+            let thread_id = body
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .filter(|id| *id > 0)
                 .context("Comment response missing a positive thread ID")?;
 
             info!(
@@ -459,18 +568,49 @@ impl Executor for AddPrCommentResult {
                 pull_request_id, thread_id
             );
 
+            let mut data = serde_json::json!({
+                "thread_id": thread_id,
+                "pull_request_id": pull_request_id,
+                "repository": repo_name,
+                "project": project,
+                "status": self.status,
+            });
+            if let Some((owner, actor, candidates, skipped)) = supersession {
+                match super::pr_comments::supersede(
+                    &operation,
+                    &owner,
+                    &actor,
+                    &candidates,
+                    i32::try_from(thread_id).context("Thread ID is outside the ADO range")?,
+                    skipped,
+                )
+                .await
+                {
+                    Ok(details) => {
+                        let failed = details["failures"]
+                            .as_u64()
+                            .context("Missing supersession outcome count")?
+                            > 0;
+                        data["supersession"] = details;
+                        if failed {
+                            return Ok(ExecutionResult::warning_with_data(
+                                "New comment posted, but some older comments could not be superseded",
+                                data,
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        data["supersession_error"] = serde_json::json!(format!("{error:#}"));
+                        return Ok(ExecutionResult::warning_with_data(
+                            "New comment posted, but supersession failed",
+                            data,
+                        ));
+                    }
+                }
+            }
             Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Added comment thread #{} to PR #{}",
-                    thread_id, pull_request_id
-                ),
-                serde_json::json!({
-                    "thread_id": thread_id,
-                    "pull_request_id": pull_request_id,
-                    "repository": repo_name,
-                    "project": project,
-                    "status": self.status,
-                }),
+                format!("Added comment thread #{thread_id} to PR #{pull_request_id}"),
+                data,
             ))
         } else {
             let status = response.status();
@@ -502,7 +642,10 @@ mod tests {
     fn test_params_deserializes() {
         let json = r#"{"pull_request_id": 42, "content": "This is a review comment on the PR."}"#;
         let params: AddPrCommentParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.pull_request_id, Some(PullRequestReference::Number(42)));
+        assert_eq!(
+            params.pull_request_id,
+            Some(PullRequestReference::Number(42))
+        );
         assert!(params.content.contains("review comment"));
         assert_eq!(params.repository, None);
         assert!(params.file_path.is_none());
@@ -519,11 +662,16 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "active".to_string(),
         };
         let result: AddPrCommentResult = params.try_into().unwrap();
         assert_eq!(result.name, "add-pull-request-comment");
-        assert_eq!(result.pull_request_id, Some(PullRequestReference::Number(42)));
+        assert_eq!(
+            result.pull_request_id,
+            Some(PullRequestReference::Number(42))
+        );
         assert!(result.content.contains("test comment"));
     }
 
@@ -536,6 +684,8 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "active".to_string(),
         };
         let err: Result<AddPrCommentResult, _> = params.try_into();
@@ -555,6 +705,8 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "active".to_string(),
         };
         let err: Result<AddPrCommentResult, _> = params.try_into();
@@ -574,6 +726,8 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "active".to_string(),
         };
         let err: Result<AddPrCommentResult, _> = params.try_into();
@@ -590,6 +744,8 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "active".to_string(),
         };
         let result: Result<AddPrCommentResult, _> = params.try_into();
@@ -605,6 +761,8 @@ mod tests {
             file_path: None,
             start_line: None,
             line: None,
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "active".to_string(),
         };
         let result: Result<AddPrCommentResult, _> = params.try_into();
@@ -620,6 +778,8 @@ mod tests {
             file_path: None,
             start_line: None,
             line: Some(10),
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "active".to_string(),
         };
         let err: Result<AddPrCommentResult, _> = params.try_into();
@@ -636,6 +796,8 @@ mod tests {
             file_path: Some("src/main.rs".to_string()),
             start_line: None,
             line: Some(10),
+            side: PrCommentSide::Right,
+            expected_head_sha: Some(CommitSha::parse("a".repeat(40)).unwrap()),
             status: "active".to_string(),
         };
         let result: AddPrCommentResult = params.try_into().unwrap();
@@ -716,6 +878,8 @@ allowed-statuses:
             file_path: None,
             start_line: None,
             line: None,
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "unknown".to_string(),
         };
         let result: Result<AddPrCommentResult, _> = params.try_into();
@@ -742,6 +906,8 @@ allowed-statuses:
                 file_path: None,
                 start_line: None,
                 line: None,
+                side: PrCommentSide::Right,
+                expected_head_sha: None,
                 status: s.to_string(),
             };
             let result: Result<AddPrCommentResult, _> = params.try_into();
@@ -781,6 +947,8 @@ allowed-statuses:
             file_path: None,
             start_line: None,
             line: None,
+            side: PrCommentSide::Right,
+            expected_head_sha: None,
             status: "active".to_string(),
         };
         let mut result = AddPrCommentResult {
@@ -791,6 +959,8 @@ allowed-statuses:
             file_path: params.file_path,
             start_line: params.start_line,
             line: params.line,
+            side: params.side,
+            expected_head_sha: params.expected_head_sha,
             status: params.status,
         };
         result.sanitize_content_fields();
