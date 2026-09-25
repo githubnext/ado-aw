@@ -13,6 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddPrLabelsParams {
     pub pull_request_id: PullRequestReference,
     #[serde(default)]
@@ -35,6 +36,7 @@ tool_result! {
     name = "add-pull-request-labels",
     write = true,
     params = AddPrLabelsParams,
+    #[serde(deny_unknown_fields)]
     pub struct AddPrLabelsResult {
         pull_request_id: PullRequestReference,
         #[serde(default)]

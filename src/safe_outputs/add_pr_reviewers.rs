@@ -15,6 +15,7 @@ use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddPrReviewersParams {
     pub pull_request_id: PullRequestReference,
     #[serde(default)]
@@ -42,6 +43,7 @@ tool_result! {
     name = "add-pull-request-reviewers",
     write = true,
     params = AddPrReviewersParams,
+    #[serde(deny_unknown_fields)]
     pub struct AddPrReviewersResult {
         pull_request_id: PullRequestReference,
         #[serde(default)]

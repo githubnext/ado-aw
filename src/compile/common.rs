@@ -3112,6 +3112,18 @@ pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()
 pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Result<()> {
     super::pr_migration::validate_legacy_metadata(front_matter)?;
     super::pr_migration::validate_budget_groups(front_matter)?;
+    front_matter.typed_safe_output_config::<crate::safe_outputs::CreatePrConfig>(
+        "create-pull-request",
+    )?;
+    front_matter.typed_safe_output_config::<crate::safe_outputs::AddPrCommentConfig>(
+        "add-pull-request-comment",
+    )?;
+    front_matter.typed_safe_output_config::<crate::safe_outputs::ReplyToPrCommentConfig>(
+        "reply-to-pull-request-comment",
+    )?;
+    front_matter.typed_safe_output_config::<crate::safe_outputs::ResolvePrThreadConfig>(
+        "resolve-pull-request-thread",
+    )?;
     if let Some(config) = front_matter
         .typed_safe_output_config::<crate::safe_outputs::AddPrLabelsConfig>(
             "add-pull-request-labels",
@@ -6174,6 +6186,45 @@ safe-outputs:
                 error.contains(tool) && error.contains("unknown field"),
                 "unexpected strict-config error for {tool}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn pr_config_rejects_unknown_fields_and_preserves_shared_controls() {
+        for (tool, extra) in [
+            ("create-pull-request", serde_json::json!({})),
+            ("add-pull-request-comment", serde_json::json!({})),
+            ("reply-to-pull-request-comment", serde_json::json!({})),
+            ("resolve-pull-request-thread", serde_json::json!({"allowed-statuses": ["fixed"]})),
+            ("submit-pull-request-review", serde_json::json!({"allowed-events": ["comment"]})),
+            ("update-pull-request", serde_json::json!({})),
+            ("abandon-pull-request", serde_json::json!({})),
+            ("add-pull-request-reviewers", serde_json::json!({})),
+            ("add-pull-request-labels", serde_json::json!({})),
+            ("set-pull-request-auto-complete", serde_json::json!({})),
+        ] {
+            for max in [0, 1, 10] {
+                let mut config = extra.clone();
+                config["max"] = serde_json::json!(max);
+                config["staged"] = serde_json::json!(true);
+                config["require-approval"] = serde_json::json!(false);
+                let source = format!(
+                    "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}: {config}\n---\n"
+                );
+                let (fm, _) = parse_markdown(&source).unwrap();
+                validate_pull_request_outputs_config(&fm)
+                    .unwrap_or_else(|error| panic!("{tool}: {error:#}"));
+
+                config["unsupported-policy"] = serde_json::json!(true);
+                let source = format!(
+                    "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}: {config}\n---\n"
+                );
+                let (fm, _) = parse_markdown(&source).unwrap();
+                let error = validate_pull_request_outputs_config(&fm).unwrap_err();
+                let message = format!("{error:#}");
+                assert!(message.contains(tool), "{message}");
+                assert!(message.contains("unknown field `unsupported-policy`"), "{message}");
+            }
         }
     }
 

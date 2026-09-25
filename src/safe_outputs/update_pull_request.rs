@@ -35,6 +35,7 @@ pub enum AdoPullRequestBodyOperation {
 pub type AdoPullRequestId = PullRequestReference;
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePullRequestParams {
     /// Replacement Azure DevOps pull request title.
     #[serde(default)]
@@ -129,6 +130,7 @@ tool_result! {
     params = UpdatePullRequestParams,
     default_max = 1,
     /// Result of updating an Azure DevOps pull request.
+    #[serde(deny_unknown_fields)]
     pub struct UpdatePullRequestResult {
         #[serde(default)]
         title: Option<String>,

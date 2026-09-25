@@ -576,6 +576,47 @@ pub(crate) mod tests {
     use super::*;
     use crate::safe_outputs::{AbandonPullRequestResult, Executor, UpdatePullRequestResult};
 
+    #[test]
+    fn pr_tool_schemas_and_deserializers_are_closed() {
+        fn check<T: JsonSchema + serde::de::DeserializeOwned>() {
+            let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+            assert_eq!(
+                schema["additionalProperties"], false,
+                "{} must reject unknown properties", std::any::type_name::<T>(),
+            );
+            let error = serde_json::from_value::<T>(
+                serde_json::json!({"unsupported-policy": true}),
+            )
+            .err()
+            .expect("unknown property must be rejected");
+            assert!(
+                error.to_string().contains("unknown field `unsupported-policy`"),
+                "{}: {error}", std::any::type_name::<T>(),
+            );
+        }
+        use crate::safe_outputs::*;
+        check::<CreatePrParams>();
+        check::<CreatePrResult>();
+        check::<AddPrCommentParams>();
+        check::<AddPrCommentResult>();
+        check::<ReplyToPrCommentParams>();
+        check::<ReplyToPrCommentResult>();
+        check::<ResolvePrThreadParams>();
+        check::<ResolvePrThreadResult>();
+        check::<SubmitPrReviewParams>();
+        check::<SubmitPrReviewResult>();
+        check::<AddPrReviewersParams>();
+        check::<AddPrReviewersResult>();
+        check::<AddPrLabelsParams>();
+        check::<AddPrLabelsResult>();
+        check::<SetPrAutoCompleteParams>();
+        check::<SetPrAutoCompleteResult>();
+        check::<UpdatePullRequestParams>();
+        check::<UpdatePullRequestResult>();
+        check::<AbandonPullRequestParams>();
+        check::<AbandonPullRequestResult>();
+    }
+
     const TRIGGER_REPO_ID: &str = "11111111-1111-1111-1111-111111111111";
 
     fn native_env() -> std::collections::HashMap<String, String> {

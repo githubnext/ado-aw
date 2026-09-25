@@ -15,6 +15,7 @@ use anyhow::{Context, ensure};
 
 /// Parameters for replying to an existing review comment thread on a pull request
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReplyToPrCommentParams {
     /// The pull request ID containing the thread
     pub pull_request_id: i32,
@@ -55,6 +56,7 @@ tool_result! {
     write = true,
     params = ReplyToPrCommentParams,
     /// Result of replying to a review comment thread on a pull request
+    #[serde(deny_unknown_fields)]
     pub struct ReplyToPrCommentResult {
         pull_request_id: i32,
         thread_id: i32,
@@ -82,6 +84,7 @@ impl SanitizeContent for ReplyToPrCommentResult {
 ///       - other-repo
 /// ```
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplyToPrCommentConfig {
     /// Prefix prepended to all replies (e.g., `"[Agent] "`)
     #[serde(default, rename = "comment-prefix")]
@@ -91,6 +94,9 @@ pub struct ReplyToPrCommentConfig {
     /// If empty, all repositories in the checkout list (plus "self") are allowed.
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
 }
 
 #[async_trait::async_trait]

@@ -788,8 +788,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -831,8 +831,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -873,8 +873,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -914,8 +914,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,

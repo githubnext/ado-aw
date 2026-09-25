@@ -42,6 +42,7 @@ fn event_to_vote(event: &str) -> Option<i32> {
 
 /// Parameters for submitting a pull request review
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitPrReviewParams {
     /// Positive PR ID, or a same-run temporary ID when allow-temporary-ids is enabled.
     pub pull_request_id: PullRequestReference,
@@ -90,6 +91,7 @@ tool_result! {
     write = true,
     params = SubmitPrReviewParams,
     /// Result of submitting a pull request review
+    #[serde(deny_unknown_fields)]
     pub struct SubmitPrReviewResult {
         pull_request_id: PullRequestReference,
         event: String,
@@ -119,6 +121,7 @@ impl SanitizeContent for SubmitPrReviewResult {
 ///       - self
 /// ```
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitPrReviewConfig {
     /// Existing numeric-only configurations do not implicitly gain create-then-review authority.
     #[serde(default, rename = "allow-temporary-ids")]
@@ -131,6 +134,9 @@ pub struct SubmitPrReviewConfig {
     /// Which repositories the agent may target. Empty list means all allowed repos.
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
 }
 
 pub(crate) fn validate_submit_pr_review_config(

@@ -16,6 +16,7 @@ use anyhow::{Context, ensure};
 
 /// Parameters for adding a comment thread on a pull request
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddPrCommentParams {
     /// The pull request ID to comment on
     pub pull_request_id: i32,
@@ -106,6 +107,7 @@ tool_result! {
     write = true,
     params = AddPrCommentParams,
     /// Result of adding a comment thread on a pull request
+    #[serde(deny_unknown_fields)]
     pub struct AddPrCommentResult {
         pull_request_id: i32,
         content: String,
@@ -145,6 +147,7 @@ impl SanitizeContent for AddPrCommentResult {
 ///       - Closed
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddPrCommentConfig {
     /// Prefix prepended to all comments (e.g., "[Agent Review] ")
     #[serde(default, rename = "comment-prefix")]
@@ -165,6 +168,9 @@ pub struct AddPrCommentConfig {
         rename = "include-stats"
     )]
     pub include_stats: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
 }
 
 impl Default for AddPrCommentConfig {
@@ -174,6 +180,7 @@ impl Default for AddPrCommentConfig {
             allowed_repositories: Vec::new(),
             allowed_statuses: Vec::new(),
             include_stats: true,
+            max: None,
         }
     }
 }
@@ -768,6 +775,7 @@ allowed-statuses:
             allowed_repositories: Vec::new(),
             allowed_statuses: vec!["Active".to_string(), "Closed".to_string()],
             include_stats: true,
+            max: None,
         };
         // Test the exact comparison logic extracted from execute_impl
         let status = "active";

@@ -39,6 +39,12 @@ safe-outputs:
 
 Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
 
+PR safe-output configuration and proposal fields are checked strictly.
+Unsupported options fail instead of being silently ignored; a gh-aw option is
+not supported merely because the tool has a similar name. Shared `max`,
+`staged` and `require-approval` controls remain valid configuration. Proposal
+`context` is execution metadata, not a way to supply additional tool policy.
+
 ### Threat detection (`threat-detection`)
 
 Threat Detection runs between the Agent and SafeOutputs jobs. Configuration

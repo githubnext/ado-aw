@@ -648,10 +648,18 @@ async fn dispatch_tool<T>(
     ctx: &ExecutionContext,
 ) -> Result<ExecutionResult>
 where
-    T: DeserializeOwned + Executor,
+    T: DeserializeOwned + Executor + ToolResult,
 {
     debug!("Parsing {} payload", tool_name);
-    let mut output: T = serde_json::from_value(entry.clone())
+    let mut payload = entry.clone();
+    // Write proposals carry execution context in the envelope; diagnostics own
+    // their context field as tool input and must retain it.
+    if T::REQUIRES_WRITE
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.remove("context");
+    }
+    let mut output: T = serde_json::from_value(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", tool_name, e))?;
     output.execute_sanitized(ctx).await
 }
@@ -936,6 +944,46 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn pr_closed_payloads_preserve_execution_context_envelopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = serde_json::json!({
+            "name": "submit-pull-request-review",
+            "pull_request_id": 7,
+            "event": "comment",
+            "body": "A review body.",
+            "context": "proposal-context",
+        });
+        std::fs::write(
+            temp.path().join(SAFE_OUTPUT_FILENAME),
+            format!("{entry}\n"),
+        ).unwrap();
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(temp.path(), &ctx, &ToolFilter::default())
+            .await.unwrap();
+        assert!(results[0].success);
+        let records = ndjson::read_ndjson_file(&temp.path().join(EXECUTED_NDJSON_FILENAME))
+            .await.unwrap();
+        assert_eq!(records[0]["context"], "proposal-context");
+
+        let mut invalid = entry;
+        invalid["force"] = serde_json::json!(true);
+        let error = execute_safe_output(&invalid, &ctx).await.unwrap_err();
+        assert!(error.to_string().contains("unknown field `force`"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn pr_envelope_handling_does_not_strip_diagnostic_context() {
+        let (_, result) = execute_safe_output(
+            &serde_json::json!({"name": "noop", "context": "nothing needs changing"}),
+            &ExecutionContext::default(),
+        ).await.unwrap();
+        assert_eq!(result.message, "No operation needed: nothing needs changing");
+    }
 
     #[tokio::test]
     async fn abandonment_failures_never_post_a_comment() {
@@ -1567,10 +1615,16 @@ mod tests {
         let error = execute_safe_output(&serde_json::json!({
             "name": "submit-pull-request-review",
             "pull_request_id": 42,
-            "event": "comment",
-            "legacy-update-pr": {"allowed-votes": ["reset"]}
+            "event": "comment"
         }), &ctx).await.expect_err("trusted invalid legacy policy must fail before requests");
         assert!(format!("{error:#}").contains("unsupported legacy vote"), "{error:#}");
+        let error = execute_safe_output(&serde_json::json!({
+            "name": "submit-pull-request-review",
+            "pull_request_id": 42,
+            "event": "comment",
+            "legacy-update-pr": {"allowed-votes": ["reset"]}
+        }), &ctx).await.expect_err("agent-authored legacy policy is not a proposal field");
+        assert!(format!("{error:#}").contains("unknown field `legacy-update-pr`"), "{error:#}");
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 

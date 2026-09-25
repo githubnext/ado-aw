@@ -42,6 +42,7 @@ fn default_repository() -> Option<String> {
 
 /// Parameters for resolving or reactivating a PR review thread
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvePrThreadParams {
     /// The pull request ID containing the thread
     pub pull_request_id: i32,
@@ -80,6 +81,7 @@ tool_result! {
     write = true,
     params = ResolvePrThreadParams,
     /// Result of resolving or reactivating a PR review thread
+    #[serde(deny_unknown_fields)]
     pub struct ResolvePrThreadResult {
         pull_request_id: i32,
         thread_id: i32,
@@ -111,6 +113,7 @@ impl SanitizeContent for ResolvePrThreadResult {
 ///       - wont-fix
 /// ```
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvePrThreadConfig {
     /// Restrict which repositories the agent can operate on.
     /// If empty, all repositories in the checkout list (plus "self") are allowed.
@@ -121,6 +124,9 @@ pub struct ResolvePrThreadConfig {
     /// REQUIRED — empty list rejects all status transitions.
     #[serde(default, rename = "allowed-statuses")]
     pub allowed_statuses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
 }
 
 #[async_trait::async_trait]

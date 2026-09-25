@@ -300,6 +300,7 @@ tool_result! {
     write = true,
     params = CreatePrResultFields,
     /// Result of creating a pull request - stored as safe output
+    #[serde(deny_unknown_fields)]
     pub struct CreatePrResult {
         /// Title for the pull request
         title: String,
@@ -399,6 +400,7 @@ pub enum ProtectedFiles {
 ///       - "agent-created"
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePrConfig {
     /// Target branch to merge into (default: "main"). This is the literal
     /// fallback applied to every repo unless overridden by `target_branches`
@@ -487,6 +489,9 @@ pub struct CreatePrConfig {
     /// Whether to include agent execution stats in the PR description (default: true).
     #[serde(default = "default_true", rename = "include-stats")]
     pub include_stats: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
 }
 
 fn default_target_branch() -> String {
@@ -585,6 +590,7 @@ impl Default for CreatePrConfig {
             work_items: Vec::new(),
             fallback_record_branch: true,
             include_stats: true,
+            max: None,
         }
     }
 }

@@ -96,6 +96,7 @@ impl<'de> Deserialize<'de> for AbandonPullRequestTarget {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AbandonPullRequestParams {
     /// Positive Azure DevOps PR ID or same-run temporary ID. Required when target is "*".
     #[serde(default, alias = "pull_request_number")]
@@ -137,6 +138,7 @@ tool_result! {
     params = AbandonPullRequestParams,
     default_max = 1,
     /// Result of abandoning an Azure DevOps pull request.
+    #[serde(deny_unknown_fields)]
     pub struct AbandonPullRequestResult {
         #[serde(default, alias = "pull_request_number")]
         pull_request_id: Option<PullRequestReference>,

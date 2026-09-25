@@ -14,6 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetPrAutoCompleteParams {
     pub pull_request_id: PullRequestReference,
     #[serde(default)]
@@ -32,6 +33,7 @@ tool_result! {
     name = "set-pull-request-auto-complete",
     write = true,
     params = SetPrAutoCompleteParams,
+    #[serde(deny_unknown_fields)]
     pub struct SetPrAutoCompleteResult {
         pull_request_id: PullRequestReference,
         #[serde(default)]
