@@ -19,7 +19,7 @@ export interface ExecutedRecord {
   /** "succeeded" | "failed" | "warning" | "budget_exhausted". */
   status: string;
   context?: string | null;
-  /** Present only on success; carries the tool's result data. */
+  /** Tool result data, including partial/uncertain mutations on failure. */
   result?: Record<string, unknown> | null;
   /** Present only on non-success; the failure message. */
   error?: string | null;

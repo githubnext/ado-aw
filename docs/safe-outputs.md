@@ -1350,12 +1350,16 @@ safe-outputs:
 ```
 
 ### submit-pull-request-review
-Submits a review vote on a pull request.
+Submits review feedback and, for voting events, a review vote on a pull request.
+`comment` is non-voting: it posts feedback without changing an existing vote.
+Use the separately authorized `reset` event to clear the authenticated actor's
+vote. This is an intentional change for recompiled workflows; there is no
+legacy behavior switch and prompt text is not rewritten automatically.
 
 **Agent parameters:**
 - `pull_request_id` - Positive PR ID to review; required with `target: "*"`.
 - `event` - Review decision: `approve`, `approve-with-suggestions`, `request-changes`, or `comment` (required)
-- `body` *(optional)* - Review rationale in markdown (required for `request-changes`, at least 10 characters)
+- `body` *(optional)* - Review rationale in markdown (required for `request-changes` and `comment`, at least 10 characters)
 - `repository` - Optional repository alias; defaults to the configured/trusted target.
 
 **Configuration options (front matter):**
@@ -1530,7 +1534,7 @@ Review these warnings: front-matter migration cannot rewrite agent intent.
 
 Review votes retain their exact ADO meanings: approve=10,
 approve-with-suggestions=5, wait-for-author/request-changes=-5, reject=-10,
-reset/comment=0. Existing request-changes requires a rationale; migrated
+reset=0. `comment` no longer writes a vote. Existing request-changes requires a rationale; migrated
 wait-for-author does not. A discussion-only comment uses `add-pull-request-comment`.
 
 ### abandon-pull-request

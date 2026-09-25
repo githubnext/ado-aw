@@ -500,11 +500,49 @@ const updatePullRequestDeniedRepository: Scenario<PrState> = {
   },
 };
 
+const reviewVoteScenarios: Scenario<PrState>[] = (["comment", "reset"] as const).map((event): Scenario<PrState> => ({
+  id: `pr-review-${event}-vote`,
+  tool: "submit-pull-request-review",
+  targetsAdoRepo: true,
+  config: (ctx) => ({
+    target: "*", "allowed-repositories": [ctx.adoRepo],
+    "allowed-events": ["request-changes", event], max: 2,
+  }),
+  setup: (ctx) => setupPr(ctx, `pr-review-${event}-vote`, false),
+  priorEntries: async (ctx, state) => [{
+    tool: "submit-pull-request-review",
+    config: { target: "*", "allowed-events": ["request-changes", event], max: 2 },
+    entry: { pull_request_id: state.prId, repository: state.repo, event: "request-changes",
+      body: detBody(ctx, "seed negative review vote") },
+  }],
+  ndjson: async (ctx, state) => ({
+    pull_request_id: state.prId, repository: state.repo, event,
+    ...(event === "comment" ? { body: detBody(ctx, "non-voting informational review") } : {}),
+  }),
+  assert: async (ctx, state, record, records) => {
+    const actor = records[0]?.result?.reviewer_id;
+    if (typeof actor !== "string") throw new Error("Seed review did not report its authenticated reviewer ID");
+    const reviewers = await ctx.rest.listReviewers(state.repo,state.prId);
+    const own = reviewers.find((reviewer) => reviewer.id === actor);
+    if (own?.vote !== (event === "comment" ? -5 : 0)) {
+      throw new Error(`${event} did not preserve/reset the exact seeded actor's vote`);
+    }
+    if (record.result?.vote_changed !== (event === "reset")) {
+      throw new Error(`${event} misreported its vote effect`);
+    }
+    if (event === "comment" && record.result?.comment_status !== "posted") {
+      throw new Error("Non-voting review did not post its informational content");
+    }
+  },
+  cleanup: teardownPr,
+}));
+
 export const prScenarios: Scenario<unknown>[] = [
   addPrComment,
   replyToPrComment,
   resolvePrThread,
   submitPrReview,
+  ...reviewVoteScenarios,
   updatePullRequest,
   abandonPullRequest,
   ...requiredLabelScenarios,

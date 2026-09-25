@@ -1769,9 +1769,10 @@ restrictions may apply per the workflow's safe-outputs config."
 
     #[tool(
         name = "submit-pull-request-review",
-        description = "Submit a pull request review with a decision (approve, request-changes, \
-or comment-only) and an optional body explaining the rationale. The review will be \
-submitted during safe output processing. Requires 'allowed-events' to be configured."
+        description = "Propose a complete pull request review. The comment event posts \
+non-voting feedback and preserves any existing vote; reset explicitly clears your vote. \
+Other allowed events cast their documented ADO vote. Standalone comments are independent, \
+never buffered into this review. Requires 'allowed-events'; writes happen only during safe output processing."
     )]
     async fn submit_pr_review(
         &self,
@@ -1782,7 +1783,7 @@ submitted during safe output processing. Requires 'allowed-events' to be configu
             crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.event
         );
         let mut sanitized = params.0;
-        sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
+        sanitized.body = sanitized.body.map(|b| sanitize_markdown(&b));
         let result: SubmitPrReviewResult = sanitized.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))

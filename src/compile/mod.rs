@@ -1036,6 +1036,16 @@ async fn prepare_parsed_source(
     if has_imports {
         common::finish_import_codemods(parsed, registry)?;
     }
+    if parsed.front_matter.safe_outputs.get("submit-pull-request-review")
+        .and_then(|config| config.get("allowed-events"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|events| events.iter().any(|event| event == "comment"))
+    {
+        log::warn!(
+            "{}: safe-outputs.submit-pull-request-review: comment is non-voting and never clears an existing vote; configure and request reset explicitly when that is intended",
+            crate::sanitize::neutralize_pipeline_commands(&source_path.display().to_string()),
+        );
+    }
     Ok(bodies)
 }
 

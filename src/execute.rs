@@ -588,11 +588,7 @@ async fn append_execution_record_impl(
         name: tool_name.replace('-', "_"),
         status,
         context: proposal_context.map(str::to_owned),
-        result: if matches!(status, "succeeded" | "warning") {
-            result.data.clone()
-        } else {
-            None
-        },
+        result: result.data.clone(),
         error: if status == "succeeded" {
             None
         } else {
@@ -1474,7 +1470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_write_failure_does_not_post_a_rationale_or_report_success() {
+    async fn review_posts_rationale_before_vote_and_records_partial_failures() {
         use wiremock::{
             Mock, MockServer, ResponseTemplate,
             matchers::{body_json, method, path},
@@ -1491,15 +1487,15 @@ mod tests {
                 .await;
             Mock::given(method("PUT"))
                 .and(path("/P/_apis/git/repositories/repo/pullRequests/7/reviewers/actor"))
-                .and(body_json(serde_json::json!({"vote": 0})))
+                .and(body_json(serde_json::json!({"vote": -5})))
                 .respond_with(ResponseTemplate::new(vote_status))
-                .expect(1)
+                .expect(u64::from(comment_status == 200))
                 .mount(&server)
                 .await;
             Mock::given(method("POST"))
                 .and(path("/P/_apis/git/repositories/repo/pullRequests/7/threads"))
-                .respond_with(ResponseTemplate::new(comment_status))
-                .expect(u64::from(vote_status == 200))
+                .respond_with(ResponseTemplate::new(comment_status).set_body_json(serde_json::json!({"id": 12})))
+                .expect(1)
                 .mount(&server)
                 .await;
             let ctx = ExecutionContext {
@@ -1510,13 +1506,13 @@ mod tests {
                 access_token: Some("token".into()),
                 tool_configs: HashMap::from([(
                     "submit-pull-request-review".into(),
-                    serde_json::json!({"allowed-events":["comment"],"target":"*"}),
+                    serde_json::json!({"allowed-events":["request-changes"],"target":"*"}),
                 )]),
                 ..Default::default()
             };
             let (_, result) = execute_safe_output(
                 &serde_json::json!({
-                    "name":"submit-pull-request-review","pull_request_id":7,"event":"comment",
+                    "name":"submit-pull-request-review","pull_request_id":7,"event":"request-changes",
                     "body":"A review rationale."
                 }),
                 &ctx,
@@ -1530,13 +1526,24 @@ mod tests {
                 "vote"
             }));
             let requests = server.received_requests().await.unwrap();
-            assert_eq!(requests.len(), if vote_status == 200 { 3 } else { 2 });
+            assert_eq!(requests.len(), if comment_status == 200 { 3 } else { 2 });
             assert_eq!(requests[0].method.as_str(), "GET");
-            assert_eq!(requests[1].method.as_str(), "PUT");
-            if vote_status == 200 {
-                assert_eq!(requests[2].method.as_str(), "POST");
-                assert!(result.message.starts_with("Vote submitted but failed"));
+            assert_eq!(requests[1].method.as_str(), "POST");
+            let data = result.data.as_ref().unwrap();
+            if comment_status == 200 {
+                assert_eq!(requests[2].method.as_str(), "PUT");
+                assert_eq!(data["thread_id"],12);
+                assert_eq!(data["comment_status"],"posted");
+                assert_eq!(data["vote_status"],"failed");
+            } else {
+                assert_eq!(data["comment_status"],"failed");
+                assert_eq!(data["vote_status"],"not-attempted");
             }
+            let directory = tempfile::tempdir().unwrap();
+            append_execution_record(directory.path(),"submit-pull-request-review",&result,Some("review")).await;
+            let record = read_executed_manifest(&directory).await;
+            assert_eq!(record[0]["status"],"failed");
+            assert_eq!(record[0]["result"], *data);
         }
     }
 
@@ -1615,7 +1622,8 @@ mod tests {
         let error = execute_safe_output(&serde_json::json!({
             "name": "submit-pull-request-review",
             "pull_request_id": 42,
-            "event": "comment"
+            "event": "comment",
+            "body": "Informational review body."
         }), &ctx).await.expect_err("trusted invalid legacy policy must fail before requests");
         assert!(format!("{error:#}").contains("unsupported legacy vote"), "{error:#}");
         let error = execute_safe_output(&serde_json::json!({
@@ -1766,15 +1774,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_manifest_failure_preserves_error_without_result() {
+    async fn execution_manifest_failure_preserves_error_and_partial_result() {
         let record = append_and_read_execution_record(ExecutionResult::failure_with_data(
             "permission denied",
-            serde_json::json!({"ignored": true}),
+            serde_json::json!({"thread_id": 12, "vote_status": "failed"}),
         ))
         .await;
 
         assert_eq!(record["status"], "failed");
-        assert!(record["result"].is_null());
+        assert_eq!(record["result"], serde_json::json!({"thread_id": 12, "vote_status": "failed"}));
         assert_eq!(record["error"], "permission denied");
     }
 

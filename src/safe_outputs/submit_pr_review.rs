@@ -12,7 +12,7 @@ use super::pr_common::{
 use super::pr_mutations::UpdatePrContext;
 use super::{PATH_SEGMENT, authenticate_ado_request};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::sanitize::{SanitizeContent, sanitize_markdown, sanitize_config};
 use crate::tool_result;
 use super::ToolResult;
 use crate::validate::reject_pipeline_injection;
@@ -36,7 +36,7 @@ fn event_to_vote(event: &str) -> Option<i32> {
         "approve-with-suggestions" => Some(5),
         "request-changes" | "wait-for-author" => Some(-5),
         "reject" => Some(-10),
-        "comment" | "reset" => Some(0),
+        "reset" => Some(0),
         _ => None,
     }
 }
@@ -83,6 +83,10 @@ impl Validate for SubmitPrReviewParams {
                 "body is required when event is 'request-changes'"
             );
         }
+        if self.event == "comment" {
+            ensure!(self.body.as_deref().is_some_and(|body| !body.trim().is_empty()),
+                "body is required for a non-voting comment review");
+        }
         if let Some(ref body) = self.body {
             ensure!(body.len() >= 10, "body must be at least 10 characters");
         }
@@ -108,7 +112,7 @@ tool_result! {
 impl SanitizeContent for SubmitPrReviewResult {
     fn sanitize_content_fields(&mut self) {
         self.event = sanitize_config(&self.event);
-        self.body = self.body.as_deref().map(sanitize_text);
+        self.body = self.body.as_deref().map(sanitize_markdown);
         self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
@@ -353,7 +357,7 @@ async fn post_review_comment_thread(
             .await
             .unwrap_or_else(|_| "Unknown error".to_string());
         return Ok(Err(ExecutionResult::failure(format!(
-            "Vote submitted but failed to post review comment on PR #{} (HTTP {}): {}",
+            "Failed to post review comment on PR #{} (HTTP {}): {}",
             pull_request_id, status, error_body
         ))));
     }
@@ -363,7 +367,8 @@ async fn post_review_comment_thread(
         .await
         .context("Failed to parse comment thread response")?;
 
-    let thread_id = thread_resp.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let thread_id = thread_resp.get("id").and_then(|v| v.as_i64()).filter(|id| *id > 0)
+        .context("Comment response missing a positive thread ID; delivery is uncertain")?;
     info!(
         "Review comment thread #{} posted on PR #{}",
         thread_id, pull_request_id
@@ -371,12 +376,12 @@ async fn post_review_comment_thread(
     Ok(Ok(thread_id))
 }
 
-/// Sole vote mutation implementation for pull-request reviews.
-pub(crate) async fn execute_review_vote(
+/// Validate the authenticated actor before any part of a voting review is written.
+async fn prepare_review_actor(
     ctx: &UpdatePrContext<'_>,
     event: &str,
     vote_value: i32,
-) -> anyhow::Result<Option<ExecutionResult>> {
+) -> anyhow::Result<Result<String, ExecutionResult>> {
     let user_id = match fetch_authenticated_user_id(
         ctx.client,
         &ctx.target.organization_url,
@@ -386,13 +391,12 @@ pub(crate) async fn execute_review_vote(
     .await?
     {
         Ok(id) => id,
-        Err(failure) => return Ok(Some(failure)),
+        Err(failure) => return Ok(Err(failure)),
     };
     if let Some(failure) = check_self_approval(ctx, &user_id, event, vote_value).await? {
-        return Ok(Some(failure));
+        return Ok(Err(failure));
     }
-    let encoded_id = utf8_percent_encode(&user_id, PATH_SEGMENT).to_string();
-    submit_vote(ctx, &encoded_id, event, vote_value).await
+    Ok(Ok(user_id))
 }
 
 #[async_trait::async_trait]
@@ -486,12 +490,7 @@ impl Executor for SubmitPrReviewResult {
         }
         let repo_name = target.qualified_repository();
 
-        // Map event to vote value
-        let vote_value = event_to_vote(&self.event).context(format!(
-            "Invalid event: '{}'. Must be one of: {}",
-            self.event,
-            VALID_EVENTS.join(", ")
-        ))?;
+        let vote_value = event_to_vote(&self.event);
 
         let client = reqwest::Client::new();
         let vote_ctx = PrVoteCtx {
@@ -501,30 +500,54 @@ impl Executor for SubmitPrReviewResult {
             token,
             connection_type: ctx.write_connection_type,
         };
-        if let Some(failure) = execute_review_vote(&vote_ctx, &self.event, vote_value).await? {
-            return Ok(failure);
-        }
-
-        // If body is provided, also POST a comment thread with the review rationale
-        if let Some(ref body) = self.body {
-            let thread_id = match post_review_comment_thread(&vote_ctx, body).await? {
-                Ok(id) => id,
+        let actor = if let Some(vote) = vote_value {
+            match prepare_review_actor(&vote_ctx, &self.event, vote).await? {
+                Ok(actor) => Some(actor),
                 Err(failure) => return Ok(failure),
+            }
+        } else {
+            None
+        };
+        let mut data = serde_json::json!({
+            "pull_request_id": pr_id, "event": self.event, "repository": repo_name,
+            "vote_value": vote_value, "vote_changed": false,
+            "vote_status": if vote_value.is_some() { "not-attempted" } else { "not-requested" },
+            "comment_status": "not-requested",
+        });
+        if let Some(body) = &self.body {
+            data["comment_status"] = serde_json::json!("uncertain");
+            let thread_id = match post_review_comment_thread(&vote_ctx, body).await {
+                Ok(Ok(id)) => id,
+                Ok(Err(failure)) => {
+                    data["comment_status"] = serde_json::json!("failed");
+                    return Ok(ExecutionResult::failure_with_data(failure.message, data));
+                }
+                Err(error) => return Ok(ExecutionResult::failure_with_data(
+                    format!("Review comment delivery is uncertain; vote was not attempted: {error:#}"), data,
+                )),
             };
-
-            return Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Review '{}' submitted on PR #{} with comment thread #{}",
-                    self.event, pr_id, thread_id
-                ),
-                serde_json::json!({
-                    "pull_request_id": pr_id,
-                    "event": self.event,
-                    "vote_value": vote_value,
-                    "thread_id": thread_id,
-                    "repository": repo_name,
-                }),
-            ));
+            data["thread_id"] = serde_json::json!(thread_id);
+            data["comment_status"] = serde_json::json!("posted");
+        }
+        if let (Some(vote), Some(actor)) = (vote_value, actor) {
+            data["reviewer_id"] = serde_json::json!(actor);
+            let encoded_actor = utf8_percent_encode(&actor, PATH_SEGMENT).to_string();
+            match submit_vote(&vote_ctx, &encoded_actor, &self.event, vote).await {
+                Ok(None) => {
+                    data["vote_status"] = serde_json::json!("applied");
+                    data["vote_changed"] = serde_json::json!(true);
+                }
+                Ok(Some(failure)) => {
+                    data["vote_status"] = serde_json::json!("failed");
+                    return Ok(ExecutionResult::failure_with_data(failure.message, data));
+                }
+                Err(error) => {
+                    data["vote_status"] = serde_json::json!("uncertain");
+                    return Ok(ExecutionResult::failure_with_data(
+                        format!("Review vote delivery is uncertain: {error:#}"), data,
+                    ));
+                }
+            }
         }
 
         Ok(ExecutionResult::success_with_data(
@@ -532,12 +555,7 @@ impl Executor for SubmitPrReviewResult {
                 "Review '{}' submitted on PR #{}",
                 self.event, pr_id
             ),
-            serde_json::json!({
-                "pull_request_id": pr_id,
-                "event": self.event,
-                "vote_value": vote_value,
-                "repository": repo_name,
-            }),
+            data,
         ))
     }
 }
@@ -668,7 +686,6 @@ mod tests {
             ("approve", 10),
             ("approve-with-suggestions", 5),
             ("request-changes", -5),
-            ("comment", 0),
             ("wait-for-author", -5),
             ("reject", -10),
             ("reset", 0),
@@ -682,6 +699,7 @@ mod tests {
             };
             assert_eq!(params.validate().is_ok(), event != "request-changes");
         }
+        assert_eq!(event_to_vote("comment"), None);
     }
 
     #[tokio::test]
@@ -703,7 +721,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_comment_event_still_writes_zero_vote_and_optional_thread() {
+    async fn native_comment_event_never_looks_up_actor_or_writes_a_vote() {
         use wiremock::{
             Mock, MockServer, ResponseTemplate,
             matchers::{body_json, method, path},
@@ -715,7 +733,7 @@ mod tests {
                 ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({"authenticatedUser": {"id": "actor"}})),
             )
-            .expect(1)
+            .expect(0)
             .mount(&server)
             .await;
         Mock::given(method("PUT"))
@@ -724,7 +742,7 @@ mod tests {
             ))
             .and(body_json(serde_json::json!({"vote": 0})))
             .respond_with(ResponseTemplate::new(200))
-            .expect(1)
+            .expect(0)
             .mount(&server)
             .await;
         Mock::given(method("POST")).and(path("/Other/_apis/git/repositories/repo-id/pullRequests/4294967296/threads"))
@@ -746,7 +764,11 @@ mod tests {
         .unwrap();
         let execution = result.execute_sanitized(&ctx).await.unwrap();
         assert!(execution.success, "{}", execution.message);
-        assert_eq!(execution.data.unwrap()["thread_id"], 12);
+        let data = execution.data.unwrap();
+        assert_eq!(data["thread_id"], 12);
+        assert_eq!(data["vote_changed"], false);
+        assert_eq!(data["vote_status"], "not-requested");
+        assert!(data["vote_value"].is_null());
     }
 
     #[tokio::test]
@@ -861,6 +883,47 @@ mod tests {
             assert!(!result.execute_sanitized(&ctx).await.unwrap().success);
             assert_eq!(server.received_requests().await.unwrap().len(), 2);
         }
+    }
+
+    #[test]
+    fn comment_requires_content_and_preserves_markdown() {
+        for body in [None, Some(""), Some("           ")] {
+            let params = SubmitPrReviewParams {
+                pull_request_id: Some(PullRequestReference::Number(1)),
+                event: "comment".into(), body: body.map(str::to_string), repository: None,
+            };
+            assert!(params.validate().is_err());
+        }
+        let mut result: SubmitPrReviewResult = serde_json::from_value(serde_json::json!({
+            "name":"submit-pull-request-review", "pull_request_id":1, "event":"comment",
+            "body":"Check `Vec<T>` and this code:\n```rust\nlet x = a < b;\n```",
+        })).unwrap();
+        result.sanitize_content_fields();
+        assert_eq!(result.body.as_deref(), Some("Check `Vec<T>` and this code:\n```rust\nlet x = a < b;\n```"));
+    }
+
+    #[tokio::test]
+    async fn malformed_comment_success_is_uncertain_and_cannot_cast_vote() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+        let server=MockServer::start().await;
+        Mock::given(method("GET")).and(path("/_apis/connectiondata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"authenticatedUser":{"id":"actor"}})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1).mount(&server).await;
+        let ctx=super::super::pr_common::tests::registered_context(&server.uri(),SubmitPrReviewResult::NAME,
+            serde_json::json!({"allowed-events":["request-changes"],"allow-temporary-ids":true}));
+        let mut result: SubmitPrReviewResult=serde_json::from_value(serde_json::json!({
+            "name":"submit-pull-request-review","pull_request_id":"#aw_pr123",
+            "event":"request-changes","body":"Please correct this behavior."
+        })).unwrap();
+        let result=result.execute_sanitized(&ctx).await.unwrap();
+        assert!(!result.success);
+        let data=result.data.unwrap();
+        assert_eq!(data["comment_status"],"uncertain");
+        assert_eq!(data["vote_status"],"not-attempted");
+        assert!(server.received_requests().await.unwrap().iter().all(|request|request.method.as_str()!="PUT"));
     }
 
     #[test]
