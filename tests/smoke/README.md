@@ -112,6 +112,15 @@ GitHub githubnext/ado-aw @abc123
 Because every commit is parented on `abc123`, the per-case commits are
 siblings: one bulk object push plus N tiny deltas.
 
+Status polling recovers from transient transport failures, request timeouts,
+HTTP 408/429 and transient server errors without immediately cancelling healthy
+children. Three consecutive failed reads exhaust the retry budget; a successful
+read resets it. Backoff and `Retry-After` stay within the original run deadline,
+and sibling failure interrupts the backoff. Authentication/authorization errors,
+missing builds, malformed responses and identity mismatches cancel immediately.
+Only reads are retried: queueing and other mutations are not automatically
+replayed. Cancellation still requires observed terminal state before ref cleanup.
+
 ### `ado-aw-mirror` is not a mirror
 
 Nothing syncs GitHub into it, and `main` does not exist there. It holds exactly

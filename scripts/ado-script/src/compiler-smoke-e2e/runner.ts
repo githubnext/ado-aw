@@ -17,7 +17,9 @@
  *     stale-ref scanner's per-child-definition build check is what
  *     eventually proves (or disproves) that an orphaned build exists,
  *   - successfully queued builds are polled with bounded concurrency,
- *   - the FIRST failure or timeout flips a shared abort flag; every other
+ *   - up to three consecutive transient status-read failures are tolerated
+ *     within the original deadline; the third failure requests cancellation,
+ *   - the FIRST permanent failure or timeout flips a shared abort flag; every other
  *     still-polling build is cancelled and polled to a terminal state
  *     before this function returns,
  *   - each polled build's identity (definition id, sourceBranch,
@@ -38,6 +40,7 @@
  * Test-harness module; not shipped in `ado-script.zip`.
  */
 import { sleep as defaultSleep } from "./process.js";
+import { transientReadRetryAfter } from "./ado-rest.js";
 
 /** What a queued build looks like once polled — kept narrow (a subset of `AdoRest.BuildSummary`) so tests never need a full AdoRest fake. */
 export interface PolledBuild {
@@ -51,7 +54,7 @@ export interface PolledBuild {
 /** The minimal ADO Build surface this state machine needs. */
 export interface FixtureBuildClient {
   queueBuild(definitionId: number, opts: { sourceBranch: string; sourceVersion: string }): Promise<{ id: number }>;
-  getBuild(buildId: number): Promise<PolledBuild>;
+  getBuild(buildId: number, opts?: { timeoutMs?: number }): Promise<PolledBuild>;
   cancelBuild(buildId: number): Promise<void>;
   buildUrl(buildId: number): string;
   /** Best-effort run labelling; a tagging failure never fails the case. */
@@ -200,7 +203,10 @@ async function pollOne(
 ): Promise<PollOneResult> {
   let cancelRequestedAt: number | undefined;
   let mismatchReason: string | undefined;
-  let verified = false;
+  let readFailures = 0;
+  let lastReadFailure: string | undefined;
+  let nextReadAt: number | undefined;
+  let cancellationReason: string | undefined;
 
   const requestCancel = async (): Promise<void> => {
     opts.abort.signal();
@@ -211,36 +217,53 @@ async function pollOne(
   };
 
   for (;;) {
+    if (cancelRequestedAt !== undefined && Date.now() - cancelRequestedAt >= opts.cancelGraceMs) {
+      return {
+        status: lastReadFailure ? "failed" : "timed-out",
+        message: lastReadFailure
+          ? `build #${buildId}: getBuild kept failing and never confirmed a terminal state within the cancellation grace period: ${lastReadFailure}`
+          : mismatchReason ?? `build #${buildId} did not reach a terminal state within the cancellation grace period`,
+        terminalProven: false,
+      };
+    }
+    if (nextReadAt !== undefined && cancelRequestedAt === undefined) {
+      if (opts.abort.aborted || Date.now() >= opts.deadlineAt) {
+        await requestCancel();
+      } else if (Date.now() < nextReadAt) {
+        await opts.sleepImpl(Math.max(0, Math.min(opts.pollMs, nextReadAt - Date.now(), opts.deadlineAt - Date.now())));
+        continue;
+      }
+    }
+    const readDeadline = cancelRequestedAt === undefined
+      ? opts.deadlineAt
+      : cancelRequestedAt + opts.cancelGraceMs;
     let build: PolledBuild;
     try {
-      build = await client.getBuild(buildId);
+      build = await client.getBuild(buildId, { timeoutMs: Math.max(1, readDeadline - Date.now()) });
     } catch (err) {
-      // A poll error never proves the build stopped. Request cancellation
-      // and keep retrying (bounded by the same cancellation grace period)
-      // in case a LATER call confirms a genuinely terminal state; only
-      // give up as "unproven" once that grace period elapses.
-      opts.log(`WARNING: getBuild(${buildId}) failed: ${errMessage(err)}`);
-      const hadCancelRequest = cancelRequestedAt !== undefined;
-      await requestCancel();
-      if (hadCancelRequest && Date.now() - cancelRequestedAt! >= opts.cancelGraceMs) {
-        return {
-          status: "failed",
-          message: `build #${buildId}: getBuild kept failing and never confirmed a terminal state within the cancellation grace period: ${errMessage(err)}`,
-          terminalProven: false,
-        };
+      lastReadFailure = errMessage(err);
+      readFailures++;
+      opts.log(`WARNING: getBuild(${buildId}) failed (consecutive ${readFailures}/3): ${lastReadFailure}`);
+      const retryAfterMs = transientReadRetryAfter(err);
+      if (cancelRequestedAt === undefined && retryAfterMs !== undefined && readFailures < 3
+        && !opts.abort.aborted && Date.now() < opts.deadlineAt) {
+        nextReadAt = Date.now() + Math.max(opts.pollMs, retryAfterMs);
+        continue;
       }
-      await opts.sleepImpl(opts.pollMs);
+      cancellationReason ??= `build #${buildId}: status-read failure: ${lastReadFailure}`;
+      await requestCancel();
+      await opts.sleepImpl(Math.max(0, Math.min(opts.pollMs, cancelRequestedAt! + opts.cancelGraceMs - Date.now())));
       continue;
     }
+    readFailures = 0;
+    lastReadFailure = undefined;
+    nextReadAt = undefined;
 
-    if (!verified) {
-      const mismatch = describeMismatch(build, expected);
-      if (mismatch) {
-        mismatchReason = `build #${buildId} ${mismatch}`;
-        opts.log(`WARNING: ${mismatchReason}`);
-        await requestCancel();
-      }
-      verified = true;
+    const mismatch = describeMismatch(build, expected);
+    if (mismatch) {
+      mismatchReason ??= `build #${buildId} ${mismatch}`;
+      opts.log(`WARNING: ${mismatchReason}`);
+      await requestCancel();
     }
 
     if (build.status === "completed") {
@@ -248,7 +271,7 @@ async function pollOne(
         return { status: "failed", result: build.result, message: mismatchReason, terminalProven: true };
       }
       if (cancelRequestedAt !== undefined) {
-        return { status: "canceled", result: build.result, terminalProven: true };
+        return { status: "canceled", result: build.result, message: cancellationReason, terminalProven: true };
       }
       if (build.result === (expected.expectedResult ?? "succeeded")) {
         return { status: "succeeded", result: build.result, terminalProven: true };
@@ -273,7 +296,10 @@ async function pollOne(
       };
     }
 
-    await opts.sleepImpl(opts.pollMs);
+    const sleepDeadline = cancelRequestedAt === undefined
+      ? opts.deadlineAt
+      : cancelRequestedAt + opts.cancelGraceMs;
+    await opts.sleepImpl(Math.max(0, Math.min(opts.pollMs, sleepDeadline - Date.now())));
   }
 }
 

@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { FixtureBuildClient, FixtureBuildRequest } from "../runner.js";
 import { runFixtures } from "../runner.js";
+import { AdoHttpError } from "../ado-rest.js";
 
 interface FakeBuild {
   status: string;
@@ -29,7 +30,7 @@ interface FakeBuild {
 function makeFakeClient(opts: {
   queueResults: Record<number, { ok: true; id: number } | { ok: false; error: string }>;
   /** For each queued build id, the sequence of statuses returned on successive getBuild() polls (last value repeats). */
-  timelines: Record<number, FakeBuild[]>;
+  timelines: Record<number, (FakeBuild | Error)[]>;
   onCancel?: (buildId: number) => void;
 }): { client: FixtureBuildClient; cancelled: number[] } {
   const cancelled: number[] = [];
@@ -51,6 +52,7 @@ function makeFakeClient(opts: {
       const idx = pollCounts[buildId] ?? 0;
       pollCounts[buildId] = idx + 1;
       const entry = timeline[Math.min(idx, timeline.length - 1)]!;
+      if (entry instanceof Error) throw entry;
       const defaultIdentity = {
         definition: { id: definitionIdByBuildId.get(buildId) },
         sourceBranch: "refs/heads/x",
@@ -75,6 +77,165 @@ function req(caseId: string, definitionId: number): FixtureBuildRequest {
 }
 
 const noopSleep = async (): Promise<void> => {};
+
+describe("bounded status-read recovery", () => {
+  afterEach(() => vi.useRealTimers());
+
+  function options(overrides: Partial<Parameters<typeof runFixtures>[2]> = {}) {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    return {
+      concurrency: 1,
+      timeoutMs: 1_000,
+      pollMs: 10,
+      cancelGraceMs: 100,
+      log: vi.fn(),
+      sleepImpl: async (ms: number) => { vi.setSystemTime(Date.now() + ms); },
+      ...overrides,
+    };
+  }
+
+  const socketError = () => new TypeError("fetch failed", {
+    cause: Object.assign(new Error("connection reset"), { code: "ECONNRESET" }),
+  });
+
+  it.each([
+    socketError(),
+    new DOMException("request expired", "TimeoutError"),
+    new AdoHttpError("unavailable", 503),
+    new AdoHttpError("throttled", 429, 25),
+  ])("recovers from %s without cancelling healthy builds", async (error) => {
+    const { client, cancelled } = makeFakeClient({
+      queueResults: { 1: { ok: true, id: 101 } },
+      timelines: { 101: [error, { status: "completed", result: "succeeded" }] },
+    });
+    const reads = vi.spyOn(client, "getBuild");
+    const outcome = await runFixtures(client, [req("canary", 1)], options());
+    expect(outcome.ok).toBe(true);
+    expect(outcome.allTerminal).toBe(true);
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(cancelled).toEqual([]);
+    expect(Date.now()).toBe(error instanceof AdoHttpError && error.status === 429 ? 25 : 10);
+  });
+
+  it("resets the consecutive failure count after a successful observation", async () => {
+    const { client, cancelled } = makeFakeClient({
+      queueResults: { 1: { ok: true, id: 101 } },
+      timelines: { 101: [
+        socketError(), socketError(), { status: "inProgress" },
+        socketError(), socketError(), { status: "completed", result: "succeeded" },
+      ] },
+    });
+    const outcome = await runFixtures(client, [req("canary", 1)], options());
+    expect(outcome.ok).toBe(true);
+    expect(cancelled).toEqual([]);
+  });
+
+  it("cancels on the third failed read and preserves the reason after terminal proof", async () => {
+    const atCancel: number[] = [];
+    const { client, cancelled } = makeFakeClient({
+      queueResults: { 1: { ok: true, id: 101 } },
+      timelines: { 101: [
+        socketError(), socketError(), socketError(), { status: "completed", result: "canceled" },
+      ] },
+      onCancel: () => { atCancel.push(reads.mock.calls.length); },
+    });
+    const reads = vi.spyOn(client, "getBuild");
+    const outcome = await runFixtures(client, [req("canary", 1)], options());
+    expect(outcome.ok).toBe(false);
+    expect(cancelled).toEqual([101]);
+    expect(atCancel).toEqual([3]);
+    expect(outcome.allTerminal).toBe(true);
+    expect(outcome.results[0]).toMatchObject({ status: "canceled", message: expect.stringContaining("status-read failure") });
+  });
+
+  it.each([
+    new AdoHttpError("unauthenticated", 401),
+    new AdoHttpError("forbidden", 403),
+    new AdoHttpError("missing", 404),
+    new AdoHttpError("invalid", 400),
+    new SyntaxError("invalid JSON"),
+    new Error("unclassified error"),
+  ])("immediately cancels on permanent or unknown failure %s", async (error) => {
+    const atCancel: number[] = [];
+    const { client } = makeFakeClient({
+      queueResults: { 1: { ok: true, id: 101 } },
+      timelines: { 101: [error, { status: "completed", result: "canceled" }] },
+      onCancel: () => { atCancel.push(reads.mock.calls.length); },
+    });
+    const reads = vi.spyOn(client, "getBuild");
+    const outcome = await runFixtures(client, [req("canary", 1)], options());
+    expect(atCancel).toEqual([1]);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.allTerminal).toBe(true);
+  });
+
+  it("never treats persistent read failures as terminal proof", async () => {
+    const { client, cancelled } = makeFakeClient({
+      queueResults: { 1: { ok: true, id: 101 } },
+      timelines: { 101: [socketError()] },
+    });
+    const outcome = await runFixtures(client, [req("canary", 1)], options());
+    expect(outcome.ok).toBe(false);
+    expect(outcome.allTerminal).toBe(false);
+    expect(outcome.results[0]).toMatchObject({
+      status: "failed", terminalProven: false,
+      message: expect.stringContaining("never confirmed a terminal state"),
+    });
+    expect(cancelled).toEqual([101]);
+    expect(Date.now()).toBe(120);
+  });
+
+  it("bounds Retry-After and each request by the original deadline", async () => {
+    const atCancel: number[] = [];
+    const { client } = makeFakeClient({
+      queueResults: { 1: { ok: true, id: 101 } },
+      timelines: { 101: [
+        new AdoHttpError("throttled", 429, 10_000),
+        { status: "completed", result: "canceled" },
+      ] },
+      onCancel: () => { atCancel.push(Date.now()); },
+    });
+    const reads = vi.spyOn(client, "getBuild");
+    const outcome = await runFixtures(client, [req("canary", 1)], options({ timeoutMs: 50 }));
+    expect(atCancel).toEqual([50]);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.allTerminal).toBe(true);
+    expect(reads.mock.calls.map((call) => call[1]?.timeoutMs)).toEqual([50, 100]);
+  });
+
+  it("interrupts Retry-After when another child fails", async () => {
+    const { client, cancelled } = makeFakeClient({
+      queueResults: { 1: { ok: true, id: 101 }, 2: { ok: true, id: 102 } },
+      timelines: {
+        101: [new AdoHttpError("throttled", 429, 900), { status: "completed", result: "canceled" }],
+        102: [{ status: "completed", result: "failed" }],
+      },
+    });
+    const outcome = await runFixtures(client, [req("canary", 1), req("other", 2)], options({ concurrency: 2 }));
+    expect(outcome.ok).toBe(false);
+    expect(outcome.allTerminal).toBe(true);
+    expect(cancelled).toEqual([101]);
+    expect(Date.now()).toBeLessThan(900);
+  });
+
+  it("rejects identity drift after an initially valid observation and transient error", async () => {
+    const { client, cancelled } = makeFakeClient({
+      queueResults: { 1: { ok: true, id: 101 } },
+      timelines: { 101: [
+        { status: "inProgress" }, socketError(),
+        { status: "completed", result: "succeeded", sourceVersion: "different-sha" },
+      ] },
+    });
+    const outcome = await runFixtures(client, [req("canary", 1)], options());
+    expect(outcome.ok).toBe(false);
+    expect(outcome.results[0]).toMatchObject({
+      status: "failed", terminalProven: true,
+      message: expect.stringContaining("different-sha"),
+    });
+    expect(cancelled).toEqual([101]);
+  });
+});
 
 describe("runFixtures", () => {
   it("allows only explicitly expected failed builds through to boundary verification", async () => {
@@ -307,7 +468,7 @@ describe("runFixtures", () => {
     expect(canary.message).toMatch(/never confirmed a terminal state/);
   });
 
-  it("recovers from a transient getBuild error: once a later call confirms completion, terminalProven is true", async () => {
+  it("cancels an unclassified getBuild error, but still accepts later terminal proof", async () => {
     let calls = 0;
     const client: FixtureBuildClient = {
       async queueBuild(definitionId) {
