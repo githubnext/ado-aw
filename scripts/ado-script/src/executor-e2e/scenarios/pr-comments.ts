@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import type { Scenario, ScenarioContext } from "../scenario.js";
 import { runExecute } from "../execute-cli.js";
 import { setupPr, teardownPr, type PrState } from "./pr.js";
@@ -6,6 +7,10 @@ import { defaultBranchShortName, Teardown } from "./common.js";
 
 const original = "An owned automated report with `code` and preserved history.";
 const replacement = "The updated automated report with `Vec<T>` preserved.";
+
+function updatedOwnedContent(content: string): string {
+  return `${content}\n\n<!-- ado-aw-content-sha256:${createHash("sha256").update(content).digest("hex")} -->`;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -67,7 +72,7 @@ const update: Scenario<OwnedState> = {
   }),
   assert: async (ctx, state) => {
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
-    if (thread.comments?.find((comment) => comment.id === state.commentId)?.content !== replacement) {
+    if (thread.comments?.find((comment) => comment.id === state.commentId)?.content !== updatedOwnedContent(replacement)) {
       throw new Error("Owned comment content was not updated faithfully");
     }
     if (String(thread.status).toLowerCase() !== "active" && thread.status !== 1) {

@@ -66,7 +66,7 @@ struct Iterations {
 
 #[derive(Deserialize)]
 struct Item {
-    path: String,
+    path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -177,11 +177,11 @@ pub(crate) async fn prepare(
             .iter()
             .filter(|change| {
                 let path = if comment.side == PrCommentSide::Left {
-                    change.original.as_deref().unwrap_or(&change.item.path)
+                    change.original.as_deref().or(change.item.path.as_deref())
                 } else {
-                    &change.item.path
+                    change.item.path.as_deref().or(change.original.as_deref())
                 };
-                path == requested
+                path == Some(requested.as_str())
             })
             .collect::<Vec<_>>();
         ensure!(
@@ -204,10 +204,14 @@ pub(crate) async fn prepare(
             !(comment.side == PrCommentSide::Right && has_kind("delete")),
             "Deleted files have no right-side content"
         );
+        let canonical_path = change
+            .item
+            .path
+            .as_deref()
+            .or(change.original.as_deref())
+            .context("Diff entry has no path")?;
         RelativeSafePath::parse(
-            change
-                .item
-                .path
+            canonical_path
                 .strip_prefix('/')
                 .context("Invalid diff path")?,
         )?;
@@ -243,7 +247,7 @@ pub(crate) async fn prepare(
             .context("Inline ending line is outside the selected revision")?;
         let offset =
             i32::try_from(text.encode_utf16().count() + 1).context("Inline line is too long")?;
-        let mut thread = json!({"filePath":change.item.path});
+        let mut thread = json!({"filePath":canonical_path});
         let (start_key, end_key) = match comment.side {
             PrCommentSide::Left => ("leftFileStart", "leftFileEnd"),
             PrCommentSide::Right => ("rightFileStart", "rightFileEnd"),
@@ -390,7 +394,7 @@ mod tests {
             ))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(json!({"changeEntries":[{
-                    "changeTrackingId":7,"changeType":"delete","item":{"path":"/deleted.rs"}
+                    "changeTrackingId":7,"changeType":"delete","originalPath":"/deleted.rs","item":{"path":null}
                 }]})),
             )
             .mount(&server)

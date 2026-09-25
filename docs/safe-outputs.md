@@ -1340,12 +1340,14 @@ Configuration supports the shared target/filter policy, `comment-key` (default
 `default`), and normal budget/approval/staged controls. This edits a comment,
 not the PR description.
 
-Stage 3 checks pipeline identity, server author, the stored content hash and a
-fresh conversation snapshot. Missing ownership or external edits fail before
-writing. Content and ownership metadata are separate ADO writes; partial or
-uncertain results are retained in execution artifacts. ADO supplies no atomic
-conversation lock here, so concurrent changes discovered during/after writes are
-reported rather than silently overwritten or rolled back.
+Stage 3 checks immutable pipeline ownership properties, server author, content
+hash and a fresh conversation snapshot. Missing ownership or external edits
+fail before writing. ADO does not permit updating thread properties: subsequent
+edits carry content and its hash trailer together in one comment-content write.
+The trailer alone never establishes ownership. Supersession's thread-status
+change is a separate write; partial or uncertain outcomes remain in artifacts.
+ADO supplies no atomic conversation lock, so concurrent changes discovered
+during/after writes are reported rather than silently overwritten or rolled back.
 
 ### reply-to-pull-request-comment
 Replies to an existing review comment thread on a pull request.

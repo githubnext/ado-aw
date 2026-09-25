@@ -11,7 +11,7 @@ use crate::secure::{Guid, Identifier};
 const OWNER: &str = "ado-aw.owner";
 const BODY_HASH: &str = "ado-aw.content-sha256";
 const RUN: &str = "ado-aw.run-id";
-const SUPERSEDED: &str = "ado-aw.superseded-by";
+const CONTENT_PROOF: &str = "\n\n<!-- ado-aw-content-sha256:";
 pub(crate) const MAX_COMMENT_BYTES: usize = 65_536;
 
 pub(crate) fn client() -> anyhow::Result<reqwest::Client> {
@@ -166,8 +166,10 @@ pub(crate) async fn actor(ctx: &UpdatePrContext<'_>) -> anyhow::Result<String> {
     )
     .await?;
     Guid::parse(&connection.user.id).context("Invalid authenticated comment actor")?;
-    ensure!(connection.user.id != "00000000-0000-0000-0000-000000000000",
-        "Anonymous identity cannot authorize owned-comment changes");
+    ensure!(
+        connection.user.id != "00000000-0000-0000-0000-000000000000",
+        "Anonymous identity cannot authorize owned-comment changes"
+    );
     Ok(connection.user.id)
 }
 
@@ -233,16 +235,40 @@ fn owned_root<'a>(thread: &'a Thread, owner: &Owner, actor: &str) -> anyhow::Res
         .context("Owned root comment is missing or deleted")?;
     ensure!(root.id > 0, "Owned root comment has an invalid ID");
     ensure!(roots.next().is_none(), "Thread has ambiguous root comments");
+    visible_content(thread, root)?;
+    Ok(root)
+}
+
+fn visible_content<'a>(thread: &Thread, root: &'a Comment) -> anyhow::Result<&'a str> {
     let content = root
         .content
         .as_deref()
         .context("Owned root content is unavailable")?;
-    ensure!(
-        property(&thread.properties, BODY_HASH)
-            == Some(crate::hash::sha256_hex(content.as_bytes()).as_str()),
-        "Owned comment no longer matches its confirmed content hash; refusing to overwrite it"
+    let initial = property(&thread.properties, BODY_HASH)
+        .context("Owned comment has no initial content hash")?;
+    if initial == crate::hash::sha256_hex(content.as_bytes()) {
+        return Ok(content);
+    }
+    let proof = content.rsplit_once(CONTENT_PROOF).and_then(|(body, tail)| {
+        let hash = tail.strip_suffix(" -->")?;
+        (hash.len() == 64
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && hash == crate::hash::sha256_hex(body.as_bytes()))
+        .then_some(body)
+    });
+    proof.context(
+        "Owned comment no longer matches its confirmed content hash; refusing to overwrite it",
+    )
+}
+
+fn updated_content(content: &str) -> anyhow::Result<String> {
+    validate_body(content)?;
+    let content = format!(
+        "{content}{CONTENT_PROOF}{} -->",
+        crate::hash::sha256_hex(content.as_bytes())
     );
-    Ok(root)
+    validate_body(&content)?;
+    Ok(content)
 }
 
 pub(crate) fn thread_url(ctx: &UpdatePrContext<'_>, id: i32) -> String {
@@ -338,9 +364,6 @@ pub(crate) async fn older_threads(
         if &stored != owner {
             continue;
         }
-        if property(&thread.properties, SUPERSEDED).is_some() {
-            continue;
-        }
         if thread.status != Some(json!(1)) && thread.status != Some(json!("active")) {
             skipped.push(json!({"thread_id":thread.id,"reason":"thread is already resolved or its status is unknown"}));
             continue;
@@ -400,6 +423,7 @@ pub(crate) async fn update_owned(
         "Comment conversation changed during preflight; no update attempted"
     );
     owned_root(&fresh, owner, actor)?;
+    let encoded_content = updated_content(content)?;
     let mut data = json!({"pull_request_id":ctx.pr_id,"thread_id":thread.id,"comment_id":comment_id,
         "content_status":"not-attempted","metadata_status":"not-attempted"});
     let comment_url = format!(
@@ -408,7 +432,7 @@ pub(crate) async fn update_owned(
         ctx.pr_id,
         thread.id
     );
-    if let Err(error) = patch(ctx, &comment_url, &json!({"content":content})).await {
+    if let Err(error) = patch(ctx, &comment_url, &json!({"content":encoded_content})).await {
         data["content_status"] = json!("uncertain");
         return Ok(ExecutionResult::failure_with_data(
             format!("{error:#}"),
@@ -431,7 +455,7 @@ pub(crate) async fn update_owned(
         .map(|comment| {
             let mut copy = comment.clone();
             if copy.id == comment_id {
-                copy.content = Some(content.into());
+                copy.content = Some(encoded_content.clone());
             }
             copy.updated = None;
             copy
@@ -455,19 +479,17 @@ pub(crate) async fn update_owned(
             data,
         ));
     }
-    let mut properties = thread.properties.clone();
-    properties[BODY_HASH] = string_property(crate::hash::sha256_hex(content.as_bytes()));
-    let mut change = json!({"properties":properties});
-    if let Some(replacement) = superseded_by {
-        change["properties"][SUPERSEDED] = string_property(replacement.to_string());
-        change["status"] = json!(4);
-    }
-    if let Err(error) = patch(ctx, &thread_url(ctx, thread.id), &change).await {
-        data["metadata_status"] = json!("uncertain");
-        return Ok(ExecutionResult::failure_with_data(
-            format!("Comment content changed but ownership/status update failed: {error:#}"),
-            data,
-        ));
+    // ADO thread properties are immutable after creation. Content and its
+    // optimistic-concurrency hash move together; immutable ownership is still required.
+    if superseded_by.is_some() {
+        if let Err(error) = patch(ctx, &thread_url(ctx, thread.id), &json!({"status":4})).await {
+            data["thread_status"] = json!("uncertain");
+            return Ok(ExecutionResult::failure_with_data(
+                format!("Comment content changed but thread closure failed: {error:#}"),
+                data,
+            ));
+        }
+        data["thread_status"] = json!("closed");
     }
     let final_state = match read_thread(ctx, thread.id).await {
         Ok(state) => state,
@@ -479,7 +501,8 @@ pub(crate) async fn update_owned(
         }
     };
     let verified = owned_root(&final_state, owner, actor);
-    if !verified.is_ok_and(|root| root.content.as_deref() == Some(content))
+    if !verified
+        .is_ok_and(|root| visible_content(&final_state, root).is_ok_and(|actual| actual == content))
         || (superseded_by.is_some()
             && !matches!(final_state.status.as_ref(),Some(Value::String(status)) if status=="closed")
             && final_state.status != Some(json!(4)))
@@ -508,7 +531,7 @@ pub(crate) async fn supersede(
     let mut failures = 0;
     for thread in candidates {
         let root = owned_root(thread, owner, actor)?;
-        let old = root.content.as_deref().context("Owned content missing")?;
+        let old = visible_content(thread, root)?;
         let content = format!(
             "{old}\n\n_Superseded by the newer automated report in thread #{replacement}._"
         );
@@ -613,6 +636,17 @@ mod tests {
             let thread: Thread = serde_json::from_value(value).unwrap();
             assert!(owned_root(&thread, &expected, ACTOR).is_err(), "{failure}");
         }
+        let mut edited=base.clone();
+        edited["comments"][0]["content"]=json!(updated_content("A newer owned report.").unwrap());
+        let verified:Thread=serde_json::from_value(edited.clone()).unwrap();
+        let root=owned_root(&verified,&expected,ACTOR).unwrap();
+        assert_eq!(visible_content(&verified,root).unwrap(),"A newer owned report.");
+        edited["comments"][0]["content"]=json!(edited["comments"][0]["content"].as_str().unwrap().replace("newer","human-edited"));
+        assert!(owned_root(&serde_json::from_value(edited).unwrap(),&expected,ACTOR).is_err());
+        let mut unowned=base;
+        unowned["properties"]=json!({});
+        unowned["comments"][0]["content"]=json!(updated_content("A forged but correctly hashed footer.").unwrap());
+        assert!(owned_root(&serde_json::from_value(unowned).unwrap(),&expected,ACTOR).is_err());
     }
 
     #[tokio::test]
@@ -691,13 +725,16 @@ mod tests {
                 .respond_with(move |request: &wiremock::Request| {
                     let body: Value = serde_json::from_slice(&request.body).unwrap();
                     let mut value = metadata.lock().unwrap();
-                    value["properties"] = body["properties"].clone();
+                    assert!(
+                        body.get("properties").is_none(),
+                        "ADO thread properties are immutable"
+                    );
                     if let Some(status) = body.get("status") {
                         value["status"] = status.clone();
                     }
                     ResponseTemplate::new(200).set_body_json(value.clone())
                 })
-                .expect(1)
+                .expect(u64::from(superseded_by.is_some()))
                 .mount(&server)
                 .await;
             let client = reqwest::Client::new();
