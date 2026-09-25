@@ -100,6 +100,14 @@ scenario code or the relevant Rust schemas, validators, or executor change.
 
 ### Live coverage
 
+The `pr-api-draft-publication`, `pr-api-owned-comments`,
+`pr-api-label-replacement` and `pr-api-push-concurrency` scenarios probe ADO
+platform prerequisites directly on harness-owned disposable PRs. They use a
+`noop` executor record and are **not** evidence that a corresponding safe-output
+executor has been implemented. Their assertions require persisted read-back,
+round-tripped thread ownership/iteration context, and rejection of an exact
+stale source-head push without changing the branch.
+
 The PR matrix also registers Unicode boundary/composed-body rejection cases
 and optional cross-organization variants of content editing, reviewers, labels,
 review submission, auto-complete and abandonment. These require the existing

@@ -13,17 +13,18 @@ import type { Scenario, ScenarioContext } from "../scenario.js";
 import { defaultBranchShortName, detBody, Teardown } from "./common.js";
 import { resolveExecutorE2eReviewer } from "./create-pull-request.js";
 
-interface PrState {
+export interface PrState {
   repo: string;
   prId: number;
   branch: string;
   threadId?: number;
 }
 
-async function setupPr(
+export async function setupPr(
   ctx: ScenarioContext,
   tool: string,
   withThread: boolean,
+  draft?: boolean,
 ): Promise<PrState> {
   const repo = ctx.adoRepo;
   const baseBranch = await defaultBranchShortName(ctx, repo);
@@ -51,6 +52,7 @@ async function setupPr(
       baseBranch,
       `${ctx.prefix(tool)} (do not merge)`,
       detBody(ctx, tool),
+      draft,
     );
   } catch (err) {
     await ctx.rest.deleteRef(repo, `refs/heads/${branch}`).catch(() => {});
@@ -72,7 +74,7 @@ async function setupPr(
   return state;
 }
 
-async function teardownPr(ctx: ScenarioContext, state: PrState): Promise<void> {
+export async function teardownPr(ctx: ScenarioContext, state: PrState): Promise<void> {
   // Attempt both cleanups independently: if abandoning the PR throws (e.g. a
   // transient network error), the source branch must still be deleted so it is
   // not left orphaned for the janitor backstop to reap.
