@@ -12,6 +12,27 @@ const rejection = [
 ];
 
 describe("PR pipeline boundary proof", () => {
+  it.each(["", "stage."])("accepts an explicitly skipped Phase without an allocated Job (%s)", (prefix) => {
+    const records = rejection.map((record) => ({
+      ...record,
+      type: record.identifier === "SafeOutputs_Reviewed" ? "Phase" : "Job",
+      identifier: `${prefix}${record.identifier}`,
+    }));
+    expect(() => verifyPrBoundary("rejected", 42, "original", "original", records)).not.toThrow();
+    expect(() => verifyPrBoundary("rejected", 42, "original", "changed", records)).toThrow("changed");
+    expect(() => verifyPrBoundary("rejected", 42, "original", "original",
+      records.filter((record) => record.type !== "Phase"))).toThrow("not skipped");
+    for (const result of ["succeeded", "failed", "canceled", undefined]) {
+      expect(() => verifyPrBoundary("rejected", 42, "original", "original",
+        records.map((record) => record.type === "Phase" ? { ...record, result } : record)))
+        .toThrow("not skipped");
+    }
+    expect(() => verifyPrBoundary("rejected", 42, "original", "original", [
+      ...records,
+      { type: "Job", identifier: `${prefix}SafeOutputs_Reviewed.__default`, result: "succeeded" },
+    ])).toThrow("not skipped");
+  });
+
   it.each(["", "stage."])("recognizes real ADO job identifiers with prefix '%s'", (prefix) => {
     const records = rejection.map((record) => ({
       ...record, identifier: `${prefix}${record.identifier}.__default`,

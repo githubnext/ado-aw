@@ -428,6 +428,9 @@ export async function main(): Promise<number> {
         for (const name of [`agent_outputs_${result.buildId}`, `analyzed_outputs_${result.buildId}`, "safe_outputs"]) {
           if (!artifacts.includes(name)) throw new Error(`Boundary build did not publish ${name}`);
         }
+        if (entry.prBoundary === "rejected" && artifacts.includes("safe_outputs_reviewed")) {
+          throw new Error("Rejected boundary unexpectedly published reviewed executor artifacts");
+        }
         verifyPrBoundary(entry.prBoundary, result.buildId, resource.description, pr.description, records);
       } catch (error) {
         result.status = "failed";

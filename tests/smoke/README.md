@@ -150,6 +150,9 @@ existing mirror. The actual trusted Setup resolver discovers that PR. The
 automatic case requires an exact description update; the rejection case
 requires successful Setup/Agent/Detection and automatic execution, a failed
 ManualReview gate, skipped reviewed execution and an unchanged description.
+For jobs skipped before agent allocation, ADO reports a skipped `Phase` rather
+than creating a `Job` record. The observer requires that explicit skipped
+record (absence alone is not proof) and rejects reviewed executor artifacts.
 Expected failure alone is not enough. Build tags and published artifact
 families are also verified before cleanup.
 
