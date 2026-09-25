@@ -72,9 +72,7 @@ use super::common::{
     HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
     image_ref,
 };
-use super::container_invocation::{
-    DockerMount, DockerRun, DockerTmpfs, ShellWord,
-};
+use super::container_invocation::{DockerMount, DockerRun, DockerTmpfs, ShellWord};
 use super::custom_tools::{CustomToolDefinition, collect_custom_tool_definitions};
 use super::extensions::ado_script as paths;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
@@ -1519,7 +1517,7 @@ fn agent_job_variables_hoist(
     use crate::compile::ir::output::OutputRef;
 
     if !front_matter.is_synthetic_pr() {
-        return Ok(Vec::new());
+        return triggering_pr_variables(front_matter);
     }
     let synth = StepId::new("synthPr")?;
     let mut out: Vec<JobVariable> = Vec::new();
@@ -1538,6 +1536,52 @@ fn agent_job_variables_hoist(
         });
     }
     Ok(out)
+}
+
+const NATIVE_TRIGGER_VARIABLES: &[(&str, &str)] = &[
+    ("ADO_AW_TRIGGER_COLLECTION_URI", "System.CollectionUri"),
+    ("ADO_AW_TRIGGER_REPOSITORY_URI", "Build.Repository.Uri"),
+    ("ADO_AW_TRIGGER_REPOSITORY_ID", "Build.Repository.ID"),
+    (
+        "ADO_AW_TRIGGER_REPOSITORY_PROVIDER",
+        "Build.Repository.Provider",
+    ),
+    ("ADO_AW_TRIGGER_BUILD_REASON", "Build.Reason"),
+    ("ADO_AW_TRIGGER_PR_ID", "System.PullRequest.PullRequestId"),
+];
+
+fn triggering_pr_variables(front_matter: &FrontMatter) -> Result<Vec<JobVariable>> {
+    if front_matter.is_synthetic_pr() {
+        return Ok(vec![JobVariable {
+            name: "AW_PR_TRIGGERING_IDENTITY".into(),
+            value: EnvValue::coalesce(vec![EnvValue::step_output(OutputRef::new(
+                StepId::new("synthPr")?,
+                "AW_PR_TRIGGERING_IDENTITY",
+            ))]),
+        }]);
+    }
+    Ok(NATIVE_TRIGGER_VARIABLES
+        .iter()
+        .map(|(name, native)| JobVariable {
+            name: (*name).into(),
+            value: EnvValue::coalesce(vec![EnvValue::pipeline_var(*native)]),
+        })
+        .collect())
+}
+
+fn project_triggering_pr_env(mut step: BashStep, front_matter: &FrontMatter) -> BashStep {
+    if front_matter.is_synthetic_pr() {
+        step = step.with_env(
+            "ADO_AW_TRIGGERING_PR_IDENTITY",
+            EnvValue::pipeline_var("AW_PR_TRIGGERING_IDENTITY"),
+        );
+    } else {
+        step = step.with_env("ADO_AW_TRIGGERING_PR_CAPTURED", EnvValue::literal("true"));
+        for (name, _) in NATIVE_TRIGGER_VARIABLES {
+            step = step.with_env(*name, EnvValue::pipeline_var(*name));
+        }
+    }
+    step
 }
 
 /// The Agent-job condition fold lives inline in [`build_agent_job`].
@@ -2329,9 +2373,7 @@ fn prepare_custom_agent_output_step(config_path: &str, output_path: &str) -> Bas
 fn agent_temp_filename(path: &str) -> String {
     let prefix = "$(Agent.TempDirectory)/";
     path.strip_prefix(prefix)
-        .unwrap_or_else(|| panic!(
-            "custom-tools config path {path:?} must start with {prefix:?}"
-        ))
+        .unwrap_or_else(|| panic!("custom-tools config path {path:?} must start with {prefix:?}"))
         .to_string()
 }
 
@@ -2655,14 +2697,17 @@ fn build_safeoutputs_job(
         resolved_config_path,
     )?));
     // Execute safe outputs (Stage 3) — typed BashStep with typed env block
-    steps.push(Step::Bash(execute_safe_outputs_step(
-        &layout.source_path,
-        resolved_config_path,
-        &layout.self_repository_directory,
-        &cfg.self_repository_name,
-        &executor_ado_env,
-        &variant.filter_args,
-    )?));
+    steps.push(Step::Bash(project_triggering_pr_env(
+        execute_safe_outputs_step(
+            &layout.source_path,
+            resolved_config_path,
+            &layout.self_repository_directory,
+            &cfg.self_repository_name,
+            &executor_ado_env,
+            &variant.filter_args,
+        )?,
+        front_matter,
+    )));
     if let Some(app) = github_app
         && !app.skip_token_revocation
     {
@@ -2689,6 +2734,7 @@ fn build_safeoutputs_job(
         cfg.pools.safe_outputs.clone()
     };
     let mut job = Job::new(prefix.id(variant.base)?, variant.display, safeoutputs_pool);
+    job.variables = triggering_pr_variables(front_matter)?;
     job.steps = steps;
     // **Marquee**: condition uses typed Expr::StepOutput on Detection's
     // threatAnalysis.SafeToProcess output. Lowering picks the cross-job
@@ -3234,20 +3280,15 @@ fn build_conclusion_job(
     // defaults (type: Task, no area/iteration path). The global
     // report-failure-as-work-item toggle controls whether it files at all.
     for tool_key in &["noop", "missing-tool", "missing-data"] {
-        conclusion_step =
-            apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
+        conclusion_step = apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
     }
 
     // Pass upstream job results via job-level variables hoist.
     // ADO only evaluates $[...] runtime expressions inside `variables:` and
     // `condition:` — NOT in step env blocks. We hoist to job variables and
     // reference them as $(name) macros in the step env.
-    let (conclusion_variables, conclusion_step) = hoist_conclusion_job_results(
-        conclusion_step,
-        prefix,
-        custom_defs,
-        has_reviewed_job,
-    )?;
+    let (conclusion_variables, conclusion_step) =
+        hoist_conclusion_job_results(conclusion_step, prefix, custom_defs, has_reviewed_job)?;
 
     steps.push(Step::Bash(conclusion_step));
 
@@ -3405,6 +3446,17 @@ fn wire_explicit_dependencies(
                 deps.push(teardown_id.clone());
             }
             j.depends_on = deps;
+        }
+        if has_setup
+            && (j.id == safeoutputs_id || j.id == reviewed_id)
+            && j.variables
+                .iter()
+                .any(|variable| variable.name == "AW_PR_TRIGGERING_IDENTITY")
+            && !j.depends_on.contains(&setup_id)
+        {
+            // ADO's dependencies context exposes only direct dependencies.
+            // These jobs consume Setup's trusted identity, not an Agent relay.
+            j.depends_on.push(setup_id.clone());
         }
     }
     Ok(())
@@ -3964,8 +4016,7 @@ fn prepare_mcpg_config_step(
          {mcpg_sentinel}"
     );
     let custom_tools_fragment = if let Some(custom_tools_json) = custom_tools_json {
-        let sentinel =
-            super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
+        let sentinel = super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
         format!(
             "# Write compiler-generated dynamic SafeOutputs tool definitions\n\
              cat > \"$AGENT_TEMP/staging/custom-tools.json\" << '{sentinel}'\n\
@@ -4743,10 +4794,7 @@ fn execute_safe_outputs_step(
         // no part of it needs separate lowering.
         EnvValue::literal(self_repository_directory),
     );
-    script = script.with_env(
-        "ADO_AW_SELF_REPOSITORY_NAME",
-        self_repository_name.clone(),
-    );
+    script = script.with_env("ADO_AW_SELF_REPOSITORY_NAME", self_repository_name.clone());
     Ok(script)
 }
 
@@ -4836,36 +4884,89 @@ fn safe_outputs_summary_step(front_matter: &FrontMatter, reviewed: &[String]) ->
     use super::ir::env::EnvValue;
     let approval_summary_path = super::extensions::ado_script::APPROVAL_SUMMARY_PATH;
     let repository_policies = approval_summary_repository_policies(front_matter)?;
+    let pr_policies = approval_summary_pr_policies(front_matter)?;
     let github_api_url = front_matter
         .github_safe_outputs_auth()?
         .map(|auth| auth.api_url().to_string())
         .unwrap_or_default();
-    Ok(ShellScript::new(&SAFE_OUTPUTS_SUMMARY)
-        .bind_text("APPROVAL_SUMMARY_PATH", approval_summary_path)
-        .into_step("Render safe-outputs summary")
-        .with_env(
-            "AW_SAFE_OUTPUTS_NDJSON",
-            EnvValue::literal("$(Agent.TempDirectory)/staging/safe_outputs.ndjson"),
-        )
-        .with_env(
-            "AW_APPROVAL_SUMMARY_OUT",
-            EnvValue::literal("$(Agent.TempDirectory)/ado-aw-safe-outputs.md"),
-        )
-        .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join("\n")))
-        .with_env(
-            "AW_GITHUB_REPOSITORY_POLICIES",
-            EnvValue::literal(repository_policies),
-        )
-        .with_env(
-            "AW_CURRENT_REPOSITORY",
-            EnvValue::ado_macro("Build.Repository.Name")?,
-        )
-        .with_env(
-            "AW_CURRENT_REPOSITORY_PROVIDER",
-            EnvValue::ado_macro("Build.Repository.Provider")?,
-        )
-        .with_env("AW_GITHUB_API_URL", EnvValue::literal(github_api_url))
-        .with_condition(Condition::Always))
+    Ok(project_triggering_pr_env(
+        ShellScript::new(&SAFE_OUTPUTS_SUMMARY)
+            .bind_text("APPROVAL_SUMMARY_PATH", approval_summary_path)
+            .into_step("Render safe-outputs summary")
+            .with_env(
+                "AW_SAFE_OUTPUTS_NDJSON",
+                EnvValue::literal("$(Agent.TempDirectory)/staging/safe_outputs.ndjson"),
+            )
+            .with_env(
+                "AW_APPROVAL_SUMMARY_OUT",
+                EnvValue::literal("$(Agent.TempDirectory)/ado-aw-safe-outputs.md"),
+            )
+            .with_env("AW_REVIEWED_TOOLS", EnvValue::literal(reviewed.join("\n")))
+            .with_env(
+                "AW_PR_POLICIES",
+                EnvValue::literal(serde_json::to_string(&pr_policies)?),
+            )
+            .with_env(
+                "AW_GITHUB_REPOSITORY_POLICIES",
+                EnvValue::literal(repository_policies),
+            )
+            .with_env(
+                "AW_CURRENT_REPOSITORY",
+                EnvValue::ado_macro("Build.Repository.Name")?,
+            )
+            .with_env(
+                "AW_CURRENT_REPOSITORY_PROVIDER",
+                EnvValue::ado_macro("Build.Repository.Provider")?,
+            )
+            .with_env("AW_GITHUB_API_URL", EnvValue::literal(github_api_url))
+            .with_condition(Condition::Always),
+        front_matter,
+    ))
+}
+
+fn approval_summary_pr_policies(
+    front_matter: &FrontMatter,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    use crate::safe_outputs::pr_common::PrMutationPolicy;
+    let mut policies = serde_json::Map::new();
+    for tool in front_matter.safe_outputs.keys() {
+        let mut policy = match tool.as_str() {
+            "update-pull-request" => {
+                let config = front_matter
+                    .update_pull_request_config()?
+                    .unwrap_or_default();
+                serde_json::json!({"target": config.target_policy()?, "operation": config.operation, "target-repo": config.target_repo})
+            }
+            "abandon-pull-request" => {
+                let config = front_matter
+                    .abandon_pull_request_config()?
+                    .unwrap_or_default();
+                serde_json::json!({"target": config.target_policy()?, "target-repo": config.target_repo})
+            }
+            "add-pull-request-reviewers"
+            | "add-pull-request-labels"
+            | "remove-pull-request-labels"
+            | "replace-pull-request-label"
+            | "mark-pull-request-as-ready-for-review"
+            | "update-pull-request-comment"
+            | "set-pull-request-auto-complete"
+            | "submit-pull-request-review"
+            | "add-pull-request-comment"
+            | "reply-to-pull-request-comment"
+            | "resolve-pull-request-thread" => {
+                let config = PrMutationPolicy::parse(&front_matter.safe_outputs[tool])?;
+                serde_json::json!({"target": config.target_policy()?, "target-repo": config.target_repo})
+            }
+            _ => continue,
+        };
+        if matches!(tool.as_str(), "add-pull-request-comment" | "update-pull-request-comment" | "submit-pull-request-review") {
+            let raw = &front_matter.safe_outputs[tool];
+            policy["supersede-older-comments"] = serde_json::json!(raw.get("supersede-older-comments").and_then(serde_json::Value::as_bool).unwrap_or(false));
+            policy["comment-key"] = serde_json::json!(raw.get("comment-key").and_then(serde_json::Value::as_str).unwrap_or("default"));
+        }
+        policies.insert(tool.clone(), policy);
+    }
+    Ok(policies)
 }
 
 shell_script! {
@@ -5183,10 +5284,7 @@ fn start_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Result<Vec<Step>
             .bind_text("REFRESH_BUNDLE", paths::AZURE_WIF_REFRESH_PATH)
             .bind_text("CLIENT_VARIABLE", client_variable.as_str())
             .bind_text("TENANT_VARIABLE", tenant_variable.as_str())
-            .fragment(
-                "run_container",
-                azure_wif_refresh_container_invocation()?,
-            )
+            .fragment("run_container", azure_wif_refresh_container_invocation()?)
             .render();
         let task = AzureCliV3::new(
             AzureCliV3Connection::AzureRm(auth.service_connection.as_str().to_string()),
@@ -5321,23 +5419,14 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
             Binding::text(ado_proxy_container_entrypoint_flattened()),
         )
         .fragment("resolve_org", common::resolve_ado_organization_bash())
-        .fragment(
-            "setup_workdir",
-            phase_body(&START_ADO_PROXY_SETUP_WORKDIR),
-        )
+        .fragment("setup_workdir", phase_body(&START_ADO_PROXY_SETUP_WORKDIR))
         .fragment("write_policy", phase_body(&START_ADO_PROXY_WRITE_POLICY))
-        .fragment(
-            "mint_material",
-            phase_body(&START_ADO_PROXY_MINT_MATERIAL),
-        )
+        .fragment("mint_material", phase_body(&START_ADO_PROXY_MINT_MATERIAL))
         .fragment(
             "build_material",
             phase_body(&START_ADO_PROXY_BUILD_MATERIAL),
         )
-        .fragment(
-            "run_container",
-            ado_proxy_run_container_phase(),
-        )
+        .fragment("run_container", ado_proxy_run_container_phase())
         .fragment(
             "handover_material",
             phase_body(&START_ADO_PROXY_HANDOVER_MATERIAL),
@@ -5379,8 +5468,7 @@ fn ado_proxy_run_container_phase() -> String {
 
 fn ado_proxy_container_invocation() -> DockerRun {
     DockerRun::new(
-        ShellWord::variable("PROXY_IMAGE")
-            .expect("compiler-owned shell variable must be valid"),
+        ShellWord::variable("PROXY_IMAGE").expect("compiler-owned shell variable must be valid"),
     )
     .detached()
     .name(
@@ -5388,8 +5476,7 @@ fn ado_proxy_container_invocation() -> DockerRun {
             .expect("compiler-owned shell variable must be valid"),
     )
     .network(
-        ShellWord::variable("PROXY_NETWORK")
-            .expect("compiler-owned shell variable must be valid"),
+        ShellWord::variable("PROXY_NETWORK").expect("compiler-owned shell variable must be valid"),
     )
     .entrypoint(ShellWord::literal("sh").expect("static entrypoint must be valid"))
     .mount(
@@ -5420,8 +5507,7 @@ fn ado_proxy_container_invocation() -> DockerRun {
     )
     .mount(
         DockerMount::read_write(
-            ShellWord::literal("/tmp/gh-aw/ado-proxy-logs")
-                .expect("static log path must be valid"),
+            ShellWord::literal("/tmp/gh-aw/ado-proxy-logs").expect("static log path must be valid"),
             "/var/log/ado-proxy",
         )
         .expect("static ado-proxy log mount must be valid"),
@@ -6681,7 +6767,10 @@ fn verify_mcp_backends_step() -> BashStep {
     ShellScript::new(&VERIFY_MCP_BACKENDS)
         .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
         .into_step("Verify MCP backends")
-        .with_env("MCPG_API_KEY", EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"))
+        .with_env(
+            "MCPG_API_KEY",
+            EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
+        )
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -6967,6 +7056,185 @@ mod tests {
 
     fn test_front_matter(yaml: &str) -> FrontMatter {
         serde_yaml::from_str(yaml).expect("front matter should parse")
+    }
+
+    #[test]
+    fn preview_target_policy_normalizes_fixed_numeric_and_quoted_u64() {
+        for tool in ["update-pull-request", "abandon-pull-request"] {
+            for id in ["42", "18446744073709551615"] {
+                let policies: Vec<_> = [id.to_string(), format!("\"{id}\"")].into_iter().map(|target| {
+                    let fm = test_front_matter(&format!(
+                        "name: trigger-contract\ndescription: Test\nsafe-outputs:\n  {tool}:\n    target: {target}\n"
+                    ));
+                    approval_summary_pr_policies(&fm).unwrap()
+                }).collect();
+                assert_eq!(policies[0], policies[1]);
+                assert_eq!(
+                    policies[0][tool]["target"],
+                    serde_json::json!({"kind":"fixed","id":id})
+                );
+            }
+        }
+        let fm = test_front_matter(
+            "name: trigger-contract\ndescription: Test\nsafe-outputs:\n  update-pull-request:\n  add-pull-request-labels:\n",
+        );
+        let policies = approval_summary_pr_policies(&fm).unwrap();
+        assert_eq!(
+            policies["update-pull-request"]["target"]["kind"],
+            "triggering"
+        );
+        assert_eq!(
+            policies["add-pull-request-labels"]["target"]["kind"],
+            "triggering"
+        );
+    }
+
+    #[test]
+    fn trigger_identity_reaches_preview_and_both_executor_variants_for_all_targets() {
+        use crate::compile::extensions::{CompileContext, collect_extensions};
+        fn jobs(value: &serde_yaml::Value, out: &mut Vec<serde_yaml::Value>) {
+            match value {
+                serde_yaml::Value::Mapping(map) => {
+                    if map.get("job").and_then(serde_yaml::Value::as_str).is_some()
+                        && (map.contains_key("steps") || map.contains_key("templateContext"))
+                    {
+                        out.push(value.clone());
+                    }
+                    for value in map.values() {
+                        jobs(value, out);
+                    }
+                }
+                serde_yaml::Value::Sequence(values) => {
+                    for value in values {
+                        jobs(value, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn has_setup_dependency(value: &serde_yaml::Value) -> bool {
+            match value {
+                serde_yaml::Value::Mapping(map) => {
+                    map.get("dependsOn").is_some_and(|depends| {
+                        serde_yaml::to_string(depends).unwrap().contains("Setup")
+                    }) || map.values().any(has_setup_dependency)
+                }
+                serde_yaml::Value::Sequence(values) => values.iter().any(has_setup_dependency),
+                _ => false,
+            }
+        }
+        for target in ["standalone", "1es", "job", "stage"] {
+            for mode in ["policy", "synthetic"] {
+                let fm = test_front_matter(&format!(
+                    "name: trigger-contract\ndescription: Test\ntarget: {target}\non:\n  pr:\n    mode: {mode}\nsafe-outputs:\n  update-pull-request:\n  abandon-pull-request:\n    require-approval: true\n"
+                ));
+                let extensions = collect_extensions(&fm);
+                let ctx = CompileContext::for_test(&fm);
+                let input = Path::new("trigger-contract.md");
+                let output = Path::new("trigger-contract.lock.yml");
+                let pipeline = match target {
+                    "standalone" => super::super::standalone_ir::build_standalone_pipeline(
+                        &fm,
+                        &extensions,
+                        &ctx,
+                        input,
+                        output,
+                        "Review the PR",
+                        true,
+                        false,
+                    ),
+                    "1es" => super::super::onees_ir::build_onees_pipeline(
+                        &fm,
+                        &extensions,
+                        &ctx,
+                        input,
+                        output,
+                        "Review the PR",
+                        true,
+                        false,
+                    ),
+                    "job" => super::super::job_ir::build_job_pipeline(
+                        &fm,
+                        &extensions,
+                        &ctx,
+                        input,
+                        output,
+                        "Review the PR",
+                        true,
+                        false,
+                    ),
+                    _ => super::super::stage_ir::build_stage_pipeline(
+                        &fm,
+                        &extensions,
+                        &ctx,
+                        input,
+                        output,
+                        "Review the PR",
+                        true,
+                        false,
+                    ),
+                }
+                .unwrap();
+                let emitted = super::super::ir::emit::emit(&pipeline).unwrap();
+                let yaml: serde_yaml::Value = serde_yaml::from_str(&emitted).unwrap();
+                let mut found = Vec::new();
+                jobs(&yaml, &mut found);
+                for suffix in ["Agent", "SafeOutputs", "SafeOutputs_Reviewed"] {
+                    let job = found
+                        .iter()
+                        .find(|job| job["job"].as_str().unwrap().ends_with(suffix))
+                        .unwrap();
+                    let display = if suffix == "Agent" {
+                        "Render safe-outputs summary"
+                    } else {
+                        "Execute safe outputs (Stage 3)"
+                    };
+                    let steps = job["steps"]
+                        .as_sequence()
+                        .or_else(|| job["templateContext"]["steps"].as_sequence())
+                        .unwrap();
+                    let step = steps
+                        .iter()
+                        .find(|step| step["displayName"].as_str() == Some(display))
+                        .unwrap();
+                    if mode == "synthetic" {
+                        assert_eq!(
+                            step["env"]["ADO_AW_TRIGGERING_PR_IDENTITY"].as_str(),
+                            Some("$(AW_PR_TRIGGERING_IDENTITY)"),
+                            "{target} {suffix}"
+                        );
+                        let variables = serde_yaml::to_string(&job["variables"]).unwrap();
+                        assert!(
+                            variables.contains(
+                                "dependencies.Setup.outputs['synthPr.AW_PR_TRIGGERING_IDENTITY']"
+                            ),
+                            "{target} {suffix}: {variables}"
+                        );
+                        assert!(
+                            has_setup_dependency(job),
+                            "{target} {suffix} missing direct Setup dependency"
+                        );
+                    } else {
+                        assert_eq!(
+                            step["env"]["ADO_AW_TRIGGERING_PR_CAPTURED"].as_str(),
+                            Some("true")
+                        );
+                        for (name, native) in NATIVE_TRIGGER_VARIABLES {
+                            assert_eq!(
+                                step["env"][*name].as_str(),
+                                Some(format!("$({name})").as_str())
+                            );
+                            let variables = serde_yaml::to_string(&job["variables"]).unwrap();
+                            assert!(
+                                variables.contains(native),
+                                "{target} {mode} {suffix} {native}: {variables}"
+                            );
+                        }
+                        assert!(!emitted.contains("synthPr"));
+                    }
+                }
+            }
+        }
     }
 
     fn test_ctx() -> StandaloneCtx {
@@ -7755,7 +8023,11 @@ safe-outputs:
             assert_eq!(keys, vec![client.as_str(), tenant.as_str()]);
         }
         let plain = test_front_matter("name: t\ndescription: d\n");
-        assert!(awf_exclude_keys(&plain, true, &plain.engine).unwrap().is_empty());
+        assert!(
+            awf_exclude_keys(&plain, true, &plain.engine)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -7767,12 +8039,20 @@ safe-outputs:
         let keys = awf_exclude_keys(&fm, true, &provider.engine).unwrap();
         assert_eq!(keys.len(), 3);
         assert!(keys.contains(&"COPILOT_PROVIDER_API_KEY".to_string()));
-        assert!(keys.contains(
-            &super::super::mcpg::azure_auth_client_variable("kusto").unwrap().into_inner()
-        ));
-        assert!(keys.contains(
-            &super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap().into_inner()
-        ));
+        assert!(
+            keys.contains(
+                &super::super::mcpg::azure_auth_client_variable("kusto")
+                    .unwrap()
+                    .into_inner()
+            )
+        );
+        assert!(
+            keys.contains(
+                &super::super::mcpg::azure_auth_tenant_variable("kusto")
+                    .unwrap()
+                    .into_inner()
+            )
+        );
     }
 
     #[test]
@@ -7896,9 +8176,9 @@ safe-outputs:
             step.script
         );
         assert!(
-            step.script.contains(
-                "printf '%s' \"$PROXY_MATERIAL\" | docker exec -i \"$PROXY_CONTAINER\""
-            ) && step.script.contains("cat > /tmp/ado-proxy-material"),
+            step.script
+                .contains("printf '%s' \"$PROXY_MATERIAL\" | docker exec -i \"$PROXY_CONTAINER\"")
+                && step.script.contains("cat > /tmp/ado-proxy-material"),
             "material must stream through the container-private FIFO: {}",
             step.script
         );
@@ -7957,8 +8237,7 @@ safe-outputs:
         let copy = copy_logs_step("/tmp/copilot", false);
         assert!(copy.script.contains("/tmp/gh-aw/ado-proxy-logs"));
         assert!(
-            copy.script
-                .contains("AGENT_TEMP='$(Agent.TempDirectory)'")
+            copy.script.contains("AGENT_TEMP='$(Agent.TempDirectory)'")
                 && copy
                     .script
                     .contains(r#""$AGENT_TEMP/staging/logs/ado-proxy""#),
@@ -7995,9 +8274,8 @@ safe-outputs:
         );
         assert!(
             script.contains(&format!("CA_HOST_PATH='{ADO_PROXY_PUBLIC_CA_HOST_PATH}'"))
-                && script.contains(
-                    "##vso[task.setvariable variable=ADO_PROXY_CA_FILE]$CA_HOST_PATH"
-                ),
+                && script
+                    .contains("##vso[task.setvariable variable=ADO_PROXY_CA_FILE]$CA_HOST_PATH"),
             "clients need the published certificate's path: {script}"
         );
         assert!(
@@ -8050,10 +8328,8 @@ safe-outputs:
             "docker run must reuse the bound $PROXY_IMAGE: {script}"
         );
         assert!(
-            script.contains(&format!(
-                "PROXY_SCRIPT_PATH='{}'",
-                paths::ADO_PROXY_PATH
-            )) && script.contains("\"${PROXY_SCRIPT_PATH}:/app/ado-proxy.js:ro\""),
+            script.contains(&format!("PROXY_SCRIPT_PATH='{}'", paths::ADO_PROXY_PATH))
+                && script.contains("\"${PROXY_SCRIPT_PATH}:/app/ado-proxy.js:ro\""),
             "docker run must mount the bound ado-proxy bundle: {script}"
         );
     }
@@ -8316,7 +8592,7 @@ safe-outputs:
             "safe-outputs:\n",
             "  require-approval: true\n",
             "  create-pull-request: {}\n",
-            "  add-pr-comment:\n",
+            "  add-pull-request-comment:\n",
             "    require-approval: false\n",
         );
         let enabled = format!("---\n{common}  threat-detection: true\n---\nbody\n");

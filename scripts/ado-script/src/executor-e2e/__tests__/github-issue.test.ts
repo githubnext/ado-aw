@@ -16,10 +16,10 @@ function result(partial: Partial<ScenarioResult> & { tool: string }): ScenarioRe
 describe("buildIssueTitle", () => {
   it("keys the title on the sorted failing tool set", () => {
     const title = buildIssueTitle([
-      result({ tool: "update-pr", ok: false }),
-      result({ tool: "add-pr-comment", ok: false }),
+      result({ tool: "update-pull-request", ok: false }),
+      result({ tool: "add-pull-request-comment", ok: false }),
     ]);
-    expect(title).toBe(`${ISSUE_TITLE_PREFIX}add-pr-comment, update-pr`);
+    expect(title).toBe(`${ISSUE_TITLE_PREFIX}add-pull-request-comment, update-pull-request`);
   });
 
   it("dedupes repeated tools", () => {
@@ -35,7 +35,7 @@ describe("renderIssueBody", () => {
   it("includes a failure table, run stats, and skipped section", () => {
     const results: ScenarioResult[] = [
       result({ tool: "create-work-item" }),
-      result({ tool: "add-pr-comment", ok: false, phase: "assert", message: "no thread" }),
+      result({ tool: "add-pull-request-comment", ok: false, phase: "assert", message: "no thread" }),
       result({ tool: "queue-build", ok: true, skipped: true, message: "no pipeline id" }),
     ];
     const body = renderIssueBody(results, {
@@ -45,7 +45,7 @@ describe("renderIssueBody", () => {
       buildId: "42",
       buildUrl: "https://example/build/42",
     });
-    expect(body).toContain("| `add-pr-comment` | assert | no thread |");
+    expect(body).toContain("| `add-pull-request-comment` | assert | no thread |");
     expect(body).toContain("Passed: 1 | Failed: 1 | Skipped: 1");
     expect(body).toContain("`queue-build`: no pipeline id");
     expect(body).toContain("https://example/build/42");

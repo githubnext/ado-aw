@@ -212,9 +212,12 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── hash.rs           # SHA-256 utilities for safe-output file integrity
 │   ├── safe_outputs/     # Safe-output MCP tool implementations (Stage 1 → NDJSON → Stage 3)
 │   │   ├── mod.rs
+│   │   ├── abandon_pull_request.rs
 │   │   ├── add_build_tag.rs
 │   │   ├── add_github_issue_labels.rs
 │   │   ├── add_pr_comment.rs
+│   │   ├── add_pr_labels.rs
+│   │   ├── add_pr_reviewers.rs
 │   │   ├── assign_github_issue_milestone.rs
 │   │   ├── assign_github_issue_to_user.rs
 │   │   ├── assign_work_item.rs
@@ -235,6 +238,8 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── missing_data.rs
 │   │   ├── missing_tool.rs
 │   │   ├── noop.rs
+│   │   ├── pr_common.rs # Shared PR references and target/policy resolution
+│   │   ├── pr_mutations.rs # Shared PR mutations and legacy configuration validation
 │   │   ├── queue_build.rs
 │   │   ├── remove_github_issue_labels.rs
 │   │   ├── reply_to_pr_comment.rs
@@ -243,10 +248,12 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── result.rs
 │   │   ├── set_github_issue_field.rs
 │   │   ├── set_github_issue_type.rs
+│   │   ├── set_pr_auto_complete.rs
 │   │   ├── submit_pr_review.rs
 │   │   ├── unassign_github_issue_from_user.rs
 │   │   ├── update_github_issue.rs
-│   │   ├── update_pr.rs
+│   │   ├── update_pr.rs # Legacy configuration types used by migration (not a tool)
+│   │   ├── update_pull_request.rs
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs
 │   │   ├── upload_build_attachment.rs

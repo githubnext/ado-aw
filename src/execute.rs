@@ -16,7 +16,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::ndjson::{self, EXECUTED_NDJSON_FILENAME, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagResult, AddGithubIssueLabelsResult, AddPrCommentResult,
+    AbandonPullRequestResult, AddBuildTagResult, AddGithubIssueLabelsResult, AddPrCommentResult,
     AssignGithubIssueMilestoneResult, AssignGithubIssueToUserResult, AssignWorkItemResult,
     CloseGithubIssueResult, CommentOnGithubIssueResult, CommentOnWorkItemResult,
     CreateBranchResult, CreateGitTagResult, CreateGithubIssueResult, CreatePrResult,
@@ -25,10 +25,13 @@ use crate::safe_outputs::{
     MissingToolResult, NoopResult, QueueBuildResult, RemoveGithubIssueLabelsResult,
     ReplyToPrCommentResult, ReportIncompleteResult, ResolvePrThreadResult,
     SetGithubIssueFieldResult, SetGithubIssueTypeResult, SubmitPrReviewResult, ToolResult,
-    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePrResult,
+    UnassignGithubIssueFromUserResult, UpdateGithubIssueResult, UpdatePullRequestResult,
     UpdateWikiPageResult, UpdateWorkItemResult, UploadBuildAttachmentResult,
     UploadPipelineArtifactResult, UploadWorkitemAttachmentResult,
 };
+use crate::safe_outputs::{AddPrLabelsResult, AddPrReviewersResult, SetPrAutoCompleteResult};
+use crate::safe_outputs::{RemovePullRequestLabelsResult, ReplacePullRequestLabelResult, MarkPullRequestReadyResult};
+use crate::safe_outputs::UpdatePullRequestCommentResult;
 use crate::sanitize::neutralize_pipeline_commands;
 
 // Re-export memory types for use by main.rs
@@ -204,6 +207,7 @@ pub async fn execute_safe_outputs(
     ctx: &ExecutionContext,
     filter: &ToolFilter,
 ) -> Result<Vec<ExecutionResult>> {
+    crate::compile::pr_migration::validate_execution_budget_groups(ctx)?;
     let safe_output_path = safe_output_dir.join(SAFE_OUTPUT_FILENAME);
 
     log_execution_context(safe_output_dir, ctx);
@@ -245,7 +249,14 @@ pub async fn execute_safe_outputs(
         CreateGitTagResult,
         AddBuildTagResult,
         CreateBranchResult,
-        UpdatePrResult,
+        AddPrReviewersResult,
+        AddPrLabelsResult,
+        RemovePullRequestLabelsResult,
+        ReplacePullRequestLabelResult,
+        MarkPullRequestReadyResult,
+        UpdatePullRequestCommentResult,
+        SetPrAutoCompleteResult,
+        AbandonPullRequestResult,
         UploadBuildAttachmentResult,
         UploadPipelineArtifactResult,
         UploadWorkitemAttachmentResult,
@@ -259,6 +270,7 @@ pub async fn execute_safe_outputs(
         AddGithubIssueLabelsResult,
         RemoveGithubIssueLabelsResult,
         CloseGithubIssueResult,
+        UpdatePullRequestResult,
         UpdateGithubIssueResult,
         SetGithubIssueFieldResult,
         AssignGithubIssueMilestoneResult,
@@ -267,6 +279,7 @@ pub async fn execute_safe_outputs(
         LinkGithubSubIssueResult,
     );
 
+    let mut group_counts = HashMap::<String, usize>::new();
     let mut results = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(result) = process_one_entry(
@@ -274,6 +287,7 @@ pub async fn execute_safe_outputs(
             entries.len(),
             entry,
             &mut budgets,
+            &mut group_counts,
             filter,
             ctx,
             safe_output_dir,
@@ -332,6 +346,7 @@ async fn process_one_entry(
     total: usize,
     entry: &Value,
     budgets: &mut HashMap<&'static str, (usize, usize)>,
+    group_counts: &mut HashMap<String, usize>,
     filter: &ToolFilter,
     ctx: &ExecutionContext,
     safe_output_dir: &Path,
@@ -360,7 +375,19 @@ async fn process_one_entry(
     // Generic budget enforcement: skip excess entries rather than aborting the whole batch.
     // Budget is consumed before execution so that failed attempts (target policy rejection,
     // network errors) still count — this prevents unbounded retries against a failing endpoint.
-    if let Some(result) = enforce_budget(entry, budgets, total, i) {
+    let group_failure = ctx.budget_groups.iter().find_map(|(name, group)| {
+        if group.tools.iter().any(|tool| tool == proposal_tool_name)
+            && group_counts.get(name).copied().unwrap_or(0) >= group.max
+        {
+            Some(ExecutionResult::budget_exhausted(format!(
+                "Skipped: shared budget group '{name}' limit ({}) already reached",
+                group.max
+            )))
+        } else {
+            None
+        }
+    });
+    if let Some(result) = group_failure.or_else(|| enforce_budget(entry, budgets, total, i)) {
         append_execution_record(
             safe_output_dir,
             proposal_tool_name,
@@ -369,6 +396,11 @@ async fn process_one_entry(
         )
         .await;
         return Some(result);
+    }
+    for (name, group) in &ctx.budget_groups {
+        if group.tools.iter().any(|tool| tool == proposal_tool_name) {
+            *group_counts.entry(name.clone()).or_default() += 1;
+        }
     }
 
     let result = match execute_safe_output(entry, ctx).await {
@@ -562,11 +594,7 @@ async fn append_execution_record_impl(
         name: tool_name.replace('-', "_"),
         status,
         context: proposal_context.map(str::to_owned),
-        result: if matches!(status, "succeeded" | "warning") {
-            result.data.clone()
-        } else {
-            None
-        },
+        result: result.data.clone(),
         error: if status == "succeeded" {
             None
         } else {
@@ -622,10 +650,18 @@ async fn dispatch_tool<T>(
     ctx: &ExecutionContext,
 ) -> Result<ExecutionResult>
 where
-    T: DeserializeOwned + Executor,
+    T: DeserializeOwned + Executor + ToolResult,
 {
     debug!("Parsing {} payload", tool_name);
-    let mut output: T = serde_json::from_value(entry.clone())
+    let mut payload = entry.clone();
+    // Write proposals carry execution context in the envelope; diagnostics own
+    // their context field as tool input and must retain it.
+    if T::REQUIRES_WRITE
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.remove("context");
+    }
+    let mut output: T = serde_json::from_value(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", tool_name, e))?;
     output.execute_sanitized(ctx).await
 }
@@ -737,11 +773,19 @@ async fn dispatch_pr_tools(
 ) -> Result<Option<ExecutionResult>> {
     dispatch_executor_tools!(tool_name, entry, ctx, {
         "create-pull-request" => CreatePrResult,
-        "add-pr-comment" => AddPrCommentResult,
-        "update-pr" => UpdatePrResult,
-        "submit-pr-review" => SubmitPrReviewResult,
-        "reply-to-pr-comment" => ReplyToPrCommentResult,
-        "resolve-pr-thread" => ResolvePrThreadResult,
+        "add-pull-request-comment" => AddPrCommentResult,
+        "add-pull-request-reviewers" => AddPrReviewersResult,
+        "add-pull-request-labels" => AddPrLabelsResult,
+        "remove-pull-request-labels" => RemovePullRequestLabelsResult,
+        "replace-pull-request-label" => ReplacePullRequestLabelResult,
+        "mark-pull-request-as-ready-for-review" => MarkPullRequestReadyResult,
+        "update-pull-request-comment" => UpdatePullRequestCommentResult,
+        "set-pull-request-auto-complete" => SetPrAutoCompleteResult,
+        "abandon-pull-request" => AbandonPullRequestResult,
+        "update-pull-request" => UpdatePullRequestResult,
+        "submit-pull-request-review" => SubmitPrReviewResult,
+        "reply-to-pull-request-comment" => ReplyToPrCommentResult,
+        "resolve-pull-request-thread" => ResolvePrThreadResult,
     })
 }
 
@@ -803,6 +847,9 @@ fn resolve_max(ctx: &ExecutionContext, tool_name: &str, default_max: u32) -> usi
 fn extract_entry_context(entry: &Value) -> String {
     if let Some(issue) = entry.get("issue_number") {
         return format!(" (GitHub issue {})", safe_json_identifier(issue));
+    }
+    if let Some(pr) = entry.get("pull_request_id") {
+        return format!(" (pull request {})", safe_json_identifier(pr));
     }
     if let (Some(parent), Some(sub_issue)) = (
         entry.get("parent_issue_number"),
@@ -904,6 +951,798 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
+    #[tokio::test]
+    async fn pr_closed_payloads_preserve_execution_context_envelopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = serde_json::json!({
+            "name": "submit-pull-request-review",
+            "pull_request_id": 7,
+            "event": "comment",
+            "body": "A review body.",
+            "context": "proposal-context",
+        });
+        std::fs::write(
+            temp.path().join(SAFE_OUTPUT_FILENAME),
+            format!("{entry}\n"),
+        ).unwrap();
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(temp.path(), &ctx, &ToolFilter::default())
+            .await.unwrap();
+        assert!(results[0].success);
+        let records = ndjson::read_ndjson_file(&temp.path().join(EXECUTED_NDJSON_FILENAME))
+            .await.unwrap();
+        assert_eq!(records[0]["context"], "proposal-context");
+
+        let mut invalid = entry;
+        invalid["force"] = serde_json::json!(true);
+        let error = execute_safe_output(&invalid, &ctx).await.unwrap_err();
+        assert!(error.to_string().contains("unknown field `force`"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn pr_envelope_handling_does_not_strip_diagnostic_context() {
+        let (_, result) = execute_safe_output(
+            &serde_json::json!({"name": "noop", "context": "nothing needs changing"}),
+            &ExecutionContext::default(),
+        ).await.unwrap();
+        assert_eq!(result.message, "No operation needed: nothing needs changing");
+    }
+
+    #[tokio::test]
+    async fn abandonment_failures_never_post_a_comment() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for (get_status, patch_status, body) in [
+            (401, 200, "{}"),
+            (403, 200, "{}"),
+            (404, 200, "{}"),
+            (500, 200, "{}"),
+            (200, 200, "not json"),
+            (200, 200, "{}"),
+            (200, 200, "{\"status\":\"unexpected\"}"),
+            (200, 403, "{\"status\":\"active\"}"),
+            (200, 500, "{\"status\":\"active\"}"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/7"))
+                .respond_with(ResponseTemplate::new(get_status).set_body_string(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let patch_count = usize::from(body == "{\"status\":\"active\"}");
+            Mock::given(method("PATCH"))
+                .respond_with(ResponseTemplate::new(patch_status))
+                .expect(patch_count as u64)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "abandon-pull-request".into(),
+                    serde_json::json!({"target":"*"}),
+                )]),
+                ..Default::default()
+            };
+            let result = execute_safe_output(
+                &serde_json::json!({
+                    "name":"abandon-pull-request","pull_request_id":7,"body":"A closing comment."
+                }),
+                &ctx,
+            )
+            .await;
+            assert!(
+                result.is_err() || !result.as_ref().unwrap().1.success,
+                "{get_status}/{patch_status}/{body}"
+            );
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                1 + patch_count
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn autocomplete_failures_do_not_report_success_or_write_without_identity() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        for (lookup_status, patch_status, body) in [
+            (401, 200, "{}"),
+            (403, 200, "{}"),
+            (500, 200, "{}"),
+            (200, 200, "invalid"),
+            (200, 200, "{}"),
+            (200, 403, "{\"authenticatedUser\":{\"id\":\"actor\"}}"),
+            (200, 500, "{\"authenticatedUser\":{\"id\":\"actor\"}}"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(lookup_status).set_body_string(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let writes = u64::from(body.contains("actor"));
+            Mock::given(method("PATCH"))
+                .respond_with(ResponseTemplate::new(patch_status))
+                .expect(writes)
+                .mount(&server)
+                .await;
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "set-pull-request-auto-complete".into(),
+                    serde_json::json!({"target":"*"}),
+                )]),
+                ..Default::default()
+            };
+            let result = execute_safe_output(
+                &serde_json::json!({
+                    "name":"set-pull-request-auto-complete","pull_request_id":7
+                }),
+                &ctx,
+            )
+            .await;
+            assert!(
+                result.is_err() || !result.as_ref().unwrap().1.success,
+                "{lookup_status}/{patch_status}/{body}"
+            );
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                1 + writes as usize
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn label_batches_report_mixed_and_total_write_failures() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method},
+        };
+        for first_status in [200, 403] {
+            let server = MockServer::start().await;
+            for (label, status) in [("one", first_status), ("two", 500)] {
+                Mock::given(method("POST"))
+                    .and(body_json(serde_json::json!({"name":label})))
+                    .respond_with(ResponseTemplate::new(status))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "add-pull-request-labels".into(),
+                    serde_json::json!({"target":"*"}),
+                )]),
+                ..Default::default()
+            };
+            let (_, result) = execute_safe_output(
+                &serde_json::json!({
+                    "name":"add-pull-request-labels","pull_request_id":7,"labels":["one","two"]
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.success, first_status == 200);
+            if first_status == 200 {
+                let data = result.data.unwrap();
+                assert_eq!(data["added"], serde_json::json!(["one"]));
+                assert!(data["failed"][0].as_str().unwrap().contains("two"));
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_budget_counts_failed_attempts_and_respects_different_tool_caps() {
+        use crate::compile::pr_migration::BudgetGroup;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        for failure in ["parse", "policy", "http", "transport"] {
+            let server = MockServer::start().await;
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let unavailable = format!("http://{}", closed.local_addr().unwrap());
+            drop(closed);
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(if failure == "http" { 1 } else { 0 })
+                .mount(&server)
+                .await;
+            let first = match failure {
+                "parse" => {
+                    serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":"invalid"})
+                }
+                "policy" => {
+                    serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":["one"],"repository":"unlisted"})
+                }
+                _ => {
+                    serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":["one"]})
+                }
+            };
+            let dir = tempfile::tempdir().unwrap();
+            tokio::fs::write(dir.path().join(SAFE_OUTPUT_FILENAME), format!("{first}\n{}\n",
+                serde_json::json!({"name":"update-pull-request","pull_request_id":7,"title":"Must not write"}))).await.unwrap();
+            let ctx = ExecutionContext {
+                ado_org_url: Some(if failure == "transport" {
+                    unavailable
+                } else {
+                    server.uri()
+                }),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([
+                    (
+                        "add-pull-request-labels".into(),
+                        serde_json::json!({"target":"*","max":3}),
+                    ),
+                    (
+                        "update-pull-request".into(),
+                        serde_json::json!({"max":3,"target":"*"}),
+                    ),
+                ]),
+                budget_groups: std::collections::BTreeMap::from([(
+                    "shared".into(),
+                    BudgetGroup {
+                        max: 1,
+                        tools: vec![
+                            "add-pull-request-labels".into(),
+                            "update-pull-request".into(),
+                        ],
+                    },
+                )]),
+                ..Default::default()
+            };
+            let results = execute_safe_outputs(dir.path(), &ctx, &ToolFilter::default())
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 2);
+            assert!(
+                !results[0].success && !results[0].is_budget_exhausted(),
+                "{failure}"
+            );
+            assert!(results[1].is_budget_exhausted(), "{failure}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                usize::from(failure == "http")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn per_tool_exhaustion_does_not_consume_another_shared_attempt() {
+        use crate::compile::pr_migration::BudgetGroup;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let label = serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":["label"]});
+        let update =
+            serde_json::json!({"name":"update-pull-request","pull_request_id":7,"title":"attempt"});
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(SAFE_OUTPUT_FILENAME),
+            format!("{label}\n{label}\n{update}\n{update}\n"),
+        )
+        .await
+        .unwrap();
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("token".into()),
+            tool_configs: HashMap::from([
+                (
+                    "add-pull-request-labels".into(),
+                    serde_json::json!({"target":"*","max":1}),
+                ),
+                (
+                    "update-pull-request".into(),
+                    serde_json::json!({"max":3,"target":"*"}),
+                ),
+            ]),
+            budget_groups: std::collections::BTreeMap::from([(
+                "shared".into(),
+                BudgetGroup {
+                    max: 2,
+                    tools: vec![
+                        "add-pull-request-labels".into(),
+                        "update-pull-request".into(),
+                    ],
+                },
+            )]),
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.is_budget_exhausted())
+                .collect::<Vec<_>>(),
+            vec![false, true, false, true]
+        );
+        assert!(results.iter().all(|result| !result.success));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        let records = read_executed_manifest(&dir).await;
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record["status"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["failed", "budget_exhausted", "failed", "budget_exhausted"]
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_loss_on_autocomplete_write_is_not_reported_successfully() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut lookup, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let read = lookup.read(&mut buffer).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&buffer[..read]).starts_with("GET /_apis/connectiondata")
+            );
+            let body = r#"{"authenticatedUser":{"id":"actor"}}"#;
+            lookup.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            drop(lookup);
+            let (mut write, _) = listener.accept().await.unwrap();
+            let read = write.read(&mut buffer).await.unwrap();
+            assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("PATCH "));
+        });
+        let ctx = ExecutionContext {
+            ado_org_url: Some(url),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("token".into()),
+            tool_configs: HashMap::from([(
+                "set-pull-request-auto-complete".into(),
+                serde_json::json!({"target":"*"}),
+            )]),
+            ..Default::default()
+        };
+        let result = execute_safe_output(
+            &serde_json::json!({"name":"set-pull-request-auto-complete","pull_request_id":7}),
+            &ctx,
+        )
+        .await;
+        assert!(result.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandonment_connection_loss_never_posts_a_followup_comment() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for fail_patch in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut lookup, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                let read = lookup.read(&mut buffer).await.unwrap();
+                assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("GET "));
+                if fail_patch {
+                    let body = r#"{"status":"active"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    lookup.write_all(response.as_bytes()).await.unwrap();
+                    drop(lookup);
+                    let (mut write, _) = listener.accept().await.unwrap();
+                    let read = write.read(&mut buffer).await.unwrap();
+                    assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("PATCH "));
+                }
+            });
+            let ctx = ExecutionContext {
+                ado_org_url: Some(url),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "abandon-pull-request".into(),
+                    serde_json::json!({"target":"*","include-stats":false}),
+                )]),
+                ..Default::default()
+            };
+            let entry = serde_json::json!({
+                "name":"abandon-pull-request","pull_request_id":7,"body":"Must not be posted."
+            });
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                execute_safe_output(&entry, &ctx),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.to_string().contains(if fail_patch {
+                "Failed to abandon"
+            } else {
+                "Failed to fetch"
+            }));
+            tokio::time::timeout(std::time::Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn required_pr_labels_use_the_authoritative_list_and_fail_closed() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for tool in ["update-pull-request", "abandon-pull-request"] {
+            for (status, response, allowed) in [
+                (200, r#"{"value":[{"name":"REQUIRED"}]}"#, true),
+                (200, r#"{"value":[]}"#, false),
+                (200, r#"{"count":0}"#, false),
+                (200, r#"{"value":[{}]}"#, false),
+                (200, "{", false),
+                (401, "denied", false),
+                (403, "denied", false),
+                (500, "unavailable", false),
+            ] {
+                let server = MockServer::start().await;
+                let pr_path = "/P/_apis/git/repositories/repo/pullRequests/7";
+                Mock::given(method("GET"))
+                    .and(path(pr_path))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "pullRequestId":7, "status":"active", "title":"Example", "description":"Original",
+                        "labels":[{"name":"required"}]
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path(format!("{pr_path}/labels")))
+                    .respond_with(ResponseTemplate::new(status).set_body_string(response))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("PATCH"))
+                    .and(path(pr_path))
+                    .respond_with(ResponseTemplate::new(200))
+                    .expect(u64::from(allowed))
+                    .mount(&server)
+                    .await;
+                let ctx = ExecutionContext {
+                    ado_org_url: Some(server.uri()),
+                    ado_organization: Some("org".into()),
+                    ado_project: Some("P".into()),
+                    repository_name: Some("repo".into()),
+                    access_token: Some("token".into()),
+                    tool_configs: HashMap::from([(
+                        tool.into(),
+                        serde_json::json!({
+                            "target":"*","required-labels":["required"],"include-stats":false
+                        }),
+                    )]),
+                    ..Default::default()
+                };
+                let mut entry = serde_json::json!({"name":tool,"pull_request_id":7});
+                if tool == "update-pull-request" {
+                    entry["body"] = "Updated".into();
+                }
+                let (_, result) = execute_safe_output(&entry, &ctx).await.unwrap();
+                assert_eq!(result.success, allowed, "{tool}: {}", result.message);
+                if !allowed {
+                    assert!(result.message.contains("label"), "{}", result.message);
+                }
+                assert_eq!(
+                    server.received_requests().await.unwrap().len(),
+                    if allowed { 3 } else { 2 }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn review_posts_rationale_before_vote_and_records_partial_failures() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        for (vote_status, comment_status) in [(403, 200), (500, 200), (200, 500)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/_apis/connectiondata"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "authenticatedUser":{"id":"actor"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/7/reviewers/actor"))
+                .and(body_json(serde_json::json!({"vote": -5})))
+                .respond_with(ResponseTemplate::new(vote_status))
+                .expect(u64::from(comment_status == 200))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/7/threads"))
+                .respond_with(ResponseTemplate::new(comment_status).set_body_json(serde_json::json!({"id": 12})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_organization: Some("org".into()),
+                ado_project: Some("P".into()),
+                repository_name: Some("repo".into()),
+                access_token: Some("token".into()),
+                tool_configs: HashMap::from([(
+                    "submit-pull-request-review".into(),
+                    serde_json::json!({"allowed-events":["request-changes"],"target":"*"}),
+                )]),
+                ..Default::default()
+            };
+            let (_, result) = execute_safe_output(
+                &serde_json::json!({
+                    "name":"submit-pull-request-review","pull_request_id":7,"event":"request-changes",
+                    "body":"A review rationale."
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert!(!result.success);
+            assert!(result.message.contains(if vote_status == 200 {
+                "comment"
+            } else {
+                "vote"
+            }));
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), if comment_status == 200 { 3 } else { 2 });
+            assert_eq!(requests[0].method.as_str(), "GET");
+            assert_eq!(requests[1].method.as_str(), "POST");
+            let data = result.data.as_ref().unwrap();
+            if comment_status == 200 {
+                assert_eq!(requests[2].method.as_str(), "PUT");
+                assert_eq!(data["thread_id"],12);
+                assert_eq!(data["comment_status"],"posted");
+                assert_eq!(data["vote_status"],"failed");
+            } else {
+                assert_eq!(data["comment_status"],"failed");
+                assert_eq!(data["vote_status"],"not-attempted");
+            }
+            let directory = tempfile::tempdir().unwrap();
+            append_execution_record(directory.path(),"submit-pull-request-review",&result,Some("review")).await;
+            let record = read_executed_manifest(&directory).await;
+            assert_eq!(record[0]["status"],"failed");
+            assert_eq!(record[0]["result"], *data);
+        }
+    }
+
+    #[tokio::test]
+    async fn label_batch_connection_loss_retains_the_successful_first_write() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 8192];
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("POST "));
+                if index == 0 {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let ctx = ExecutionContext {
+            ado_org_url: Some(uri),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("token".into()),
+            tool_configs: HashMap::from([(
+                "add-pull-request-labels".into(),
+                serde_json::json!({"target":"*"}),
+            )]),
+            ..Default::default()
+        };
+        let (_, result) = execute_safe_output(
+            &serde_json::json!({
+                "name":"add-pull-request-labels","pull_request_id":7,"labels":["first","second"]
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(result.success);
+        assert!(result.message.contains("1 failed"));
+        let data = result.data.unwrap();
+        assert_eq!(data["added"], serde_json::json!(["first"]));
+        assert!(
+            data["failed"][0]
+                .as_str()
+                .unwrap()
+                .contains("second (request error)")
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_review_metadata_cannot_reset_a_vote() {
+        let server = wiremock::MockServer::start().await;
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("org".into()),
+            ado_project: Some("project".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("test-token".into()),
+            tool_configs: HashMap::from([("submit-pull-request-review".into(), serde_json::json!({
+                "allowed-events": ["comment"],
+                "legacy-update-pr": {"allowed-operations": ["vote"], "allowed-votes": ["comment"]}
+            }))]),
+            ..Default::default()
+        };
+        let error = execute_safe_output(&serde_json::json!({
+            "name": "submit-pull-request-review",
+            "pull_request_id": 42,
+            "event": "comment",
+            "body": "Informational review body."
+        }), &ctx).await.expect_err("trusted invalid legacy policy must fail before requests");
+        assert!(format!("{error:#}").contains("unsupported legacy vote"), "{error:#}");
+        let error = execute_safe_output(&serde_json::json!({
+            "name": "submit-pull-request-review",
+            "pull_request_id": 42,
+            "event": "comment",
+            "legacy-update-pr": {"allowed-votes": ["reset"]}
+        }), &ctx).await.expect_err("agent-authored legacy policy is not a proposal field");
+        assert!(format!("{error:#}").contains("unknown field `legacy-update-pr`"), "{error:#}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_pull_request_names_have_no_stage_three_aliases() {
+        let ctx = ExecutionContext {
+            dry_run: true,
+            ..Default::default()
+        };
+        for name in crate::compile::pr_migration::PR_TOOL_RENAMES
+            .iter()
+            .map(|(old, _)| *old)
+            .chain(["update-pr"])
+        {
+            let error = execute_safe_output(&serde_json::json!({"name": name}), &ctx)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Unknown tool type"), "{name}: {error}");
+        }
+    }
+    #[tokio::test]
+    async fn migrated_pr_tools_share_original_budget() {
+        for max in [0, 1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let entries = [
+                serde_json::json!({"name":"add-pull-request-labels","pull_request_id":7,"labels":["first"]}),
+                serde_json::json!({"name":"update-pull-request","pull_request_id":7,"body":"migrated description"}),
+                serde_json::json!({"name":"update-pull-request","pull_request_id":7,"body":"canonical description"}),
+            ];
+            let text = entries
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            tokio::fs::write(dir.path().join(SAFE_OUTPUT_FILENAME), text)
+                .await
+                .unwrap();
+            let source = format!(
+                "---\nname: migrated\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-operations: [add-labels, update-description]\n    max: {max}\n---\nbody\n"
+            );
+            let fm = crate::compile::parse_markdown_detailed(&source)
+                .unwrap()
+                .front_matter;
+            let ctx = ExecutionContext {
+                dry_run: true,
+                budget_groups: crate::compile::pr_migration::budget_groups(&fm).unwrap(),
+                tool_configs: fm.safe_outputs,
+                ..ExecutionContext::default()
+            };
+            let results = execute_safe_outputs(dir.path(), &ctx, &ToolFilter::default())
+                .await
+                .unwrap();
+            assert_eq!(results.iter().filter(|result| result.success).count(), max);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|result| result.is_budget_exhausted())
+                    .count(),
+                3 - max
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn migrated_pr_filters_use_canonical_review_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join(SAFE_OUTPUT_FILENAME),
+            "{\"name\":\"update-pull-request\",\"pull_request_id\":7,\"body\":\"migrated description\"}\n"
+        ).await.unwrap();
+        let fm = crate::compile::parse_markdown_detailed(
+            "---\nname: migrated\ndescription: test\nsafe-outputs:\n  update-pr:\n    allowed-operations: [update-description]\n    require-approval: true\n---\nbody\n"
+        ).unwrap().front_matter;
+        let ctx = ExecutionContext {
+            dry_run: true,
+            budget_groups: crate::compile::pr_migration::budget_groups(&fm).unwrap(),
+            tool_configs: fm.safe_outputs,
+            ..ExecutionContext::default()
+        };
+        let automatic = ToolFilter {
+            exclude: vec!["update-pull-request".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            execute_safe_outputs(dir.path(), &ctx, &automatic)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let reviewed = ToolFilter {
+            only: vec!["update-pull-request".to_string()],
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(dir.path(), &ctx, &reviewed)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
+    }
+
     async fn append_and_read_execution_record(result: ExecutionResult) -> Value {
         let dir = tempfile::tempdir().expect("create temp dir");
         append_execution_record_impl(dir.path(), "update-pull-request", &result, Some("pr-42"))
@@ -945,15 +1784,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_manifest_failure_preserves_error_without_result() {
+    async fn execution_manifest_failure_preserves_error_and_partial_result() {
         let record = append_and_read_execution_record(ExecutionResult::failure_with_data(
             "permission denied",
-            serde_json::json!({"ignored": true}),
+            serde_json::json!({"thread_id": 12, "vote_status": "failed"}),
         ))
         .await;
 
         assert_eq!(record["status"], "failed");
-        assert!(record["result"].is_null());
+        assert_eq!(record["result"], serde_json::json!({"thread_id": 12, "vote_status": "failed"}));
         assert_eq!(record["error"], "permission denied");
     }
 
@@ -1002,7 +1841,7 @@ mod tests {
         // Empty filter allows everything.
         let f = ToolFilter::default();
         assert!(f.allows("create-pull-request"));
-        assert!(f.allows("add-pr-comment"));
+        assert!(f.allows("add-pull-request-comment"));
 
         // `only` restricts to the listed tools.
         let f = ToolFilter {
@@ -1010,7 +1849,7 @@ mod tests {
             exclude: vec![],
         };
         assert!(f.allows("create-pull-request"));
-        assert!(!f.allows("add-pr-comment"));
+        assert!(!f.allows("add-pull-request-comment"));
 
         // `exclude` removes the listed tools.
         let f = ToolFilter {
@@ -1018,7 +1857,7 @@ mod tests {
             exclude: vec!["create-pull-request".into()],
         };
         assert!(!f.allows("create-pull-request"));
-        assert!(f.allows("add-pr-comment"));
+        assert!(f.allows("add-pull-request-comment"));
     }
 
     async fn write_custom_tool_test_config(dir: &Path) -> PathBuf {
@@ -1499,10 +2338,9 @@ mod tests {
             "patch_sha256": patch_sha256
         });
         let update = serde_json::json!({
-            "name": "update-pr",
+            "name": "update-pull-request",
             "pull_request_id": "#aw_pr123",
-            "operation": "update-description",
-            "description": "Updated through the temporary reference."
+            "body": "Updated through the temporary reference."
         });
         let ndjson = format!(
             "{}\n{}\n",
@@ -1518,7 +2356,13 @@ mod tests {
             "create-pull-request".to_string(),
             serde_json::json!({"max": 1, "include-stats": false}),
         );
-        tool_configs.insert("update-pr".to_string(), serde_json::json!({"max": 1}));
+        tool_configs.insert(
+            "update-pull-request".to_string(),
+            serde_json::json!({
+                "max": 1, "target": "*", "title": false, "body": true, "include-stats": false,
+                "legacy-update-pr": {"allowed-operations": ["update-description"], "max": 1}
+            }),
+        );
         let ctx = ExecutionContext {
             ado_org_url: Some(server.uri()),
             ado_organization: Some("target-org".to_string()),
@@ -2317,6 +3161,32 @@ mod tests {
             1,
             "Expected 1 budget_exhausted record"
         );
+    }
+
+    #[tokio::test]
+    async fn test_budget_enforcement_abandon_pull_request_max() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_output_path = temp_dir.path().join(SAFE_OUTPUT_FILENAME);
+        let ndjson = r#"{"name":"abandon-pull-request","pull_request_id":7}
+{"name":"abandon-pull-request","pull_request_id":8}
+"#;
+        tokio::fs::write(&safe_output_path, ndjson).await.unwrap();
+
+        let ctx = ExecutionContext {
+            dry_run: true,
+            tool_configs: HashMap::from([(
+                "abandon-pull-request".to_string(),
+                serde_json::json!({"target": "*", "max": 1}),
+            )]),
+            ..Default::default()
+        };
+        let results = execute_safe_outputs(temp_dir.path(), &ctx, &ToolFilter::default())
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].success);
+        assert!(results[1].is_budget_exhausted());
     }
 
     #[tokio::test]

@@ -1,10 +1,13 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { runScenario } from "../runner.js";
+import { updatePullRequestOversized } from "../scenarios/pr.js";
+import { AdoRest } from "../ado-rest.js";
 import { SkipError } from "../scenario.js";
 import type { ExecutedRecord, Scenario, ScenarioContext } from "../scenario.js";
 
@@ -83,6 +86,126 @@ describe("runScenario precondition handling", () => {
 });
 
 describe("runScenario expected executor failures", () => {
+  it("the oversized PR scenario checks unchanged state through assertFailure", async () => {
+    const base = fakeCtx();
+    const rest = new AdoRest({ orgUrl: base.orgUrl, project: base.project, token: "" });
+    const ctx: ScenarioContext = { ...base, rest };
+    const state = { repo: "repo", prId: 42, branch: "test" };
+    const records: ExecutedRecord[] = [{
+      name: "update_pull_request", status: "failed", error: "4000-unit limit",
+    }];
+    const normal = "preserved original body";
+    const body = await import("../scenarios/common.js");
+    const expected = body.detBody(ctx, "update-pull-request-oversized");
+    const getPr = vi.spyOn(rest, "getPullRequest").mockResolvedValue({
+      pullRequestId: 42, status: "active", title: "title", description: expected,
+    });
+    expect(updatePullRequestOversized.assertFailure).toBeDefined();
+    await updatePullRequestOversized.assertFailure!(ctx, state, records[0]!, records);
+    getPr.mockResolvedValue({
+      pullRequestId: 42, status: "active", title: "title", description: normal,
+    });
+    await expect(updatePullRequestOversized.assertFailure!(ctx, state, records[0]!, records))
+      .rejects.toThrow("changed the live description");
+  });
+
+  async function outcomeBinary(
+    dir: string,
+    status: string | null,
+    error: string,
+    mutate = false,
+  ): Promise<string> {
+    const bin = join(dir, "outcome.js");
+    const records = status === null ? [] : [{ name: "update_pull_request", status, error }];
+    await writeFile(bin, `
+const fs = require("node:fs");
+const path = require("node:path");
+const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
+if (${mutate}) fs.writeFileSync(path.join(out, "unexpected-write"), "changed");
+fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), ${JSON.stringify(records.map((record) => JSON.stringify(record)).join("\n") + "\n")});
+`, "utf8");
+    return bin;
+  }
+
+  it.each([false, true])("fails on cleanup errors without losing an earlier assertion failure (%s)", async (assertionFails) => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-cleanup-outcome-"));
+    try {
+      const bin = await outcomeBinary(dir, "succeeded", "");
+      const scenario: Scenario<unknown> = {
+        tool: "update-pull-request", config: () => ({}),
+        setup: async () => ({}), ndjson: async () => ({}),
+        assert: async () => { if (assertionFails) throw new Error("wrong PR state"); },
+        cleanup: async () => { throw new Error("owned ref remains"); },
+      };
+      const result = await runScenario({ ...fakeCtx(), adoAwBin: bin, workDir: dir }, scenario);
+      expect(result).toMatchObject({
+        ok: false, skipped: false, cleanupError: "owned ref remains",
+        phase: assertionFails ? "assert" : "cleanup",
+        message: `${assertionFails ? "wrong PR state; " : ""}cleanup failed: owned ref remains`,
+      });
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it.each([false, true])("checks postconditions after expected failure (mutated=%s)", async (mutated) => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-negative-assert-"));
+    try {
+      const bin = await outcomeBinary(dir, "failed", "body too long", mutated);
+      const flags = { failure: false, success: false, post: false, cleanup: false };
+      const scenario: Scenario<unknown> = {
+        id: "negative-case", tool: "update-pull-request",
+        config: () => ({}), setup: async () => ({}), ndjson: async () => ({}),
+        expectedFailure: { error: /too long/ },
+        assertFailure: async (_ctx, _state, record, records) => {
+          flags.failure = true;
+          expect(record.status).toBe("failed");
+          expect(records).toHaveLength(1);
+          if (existsSync(join(dir, "negative-case", "out", "unexpected-write"))) {
+            throw new Error("unexpected mutation");
+          }
+        },
+        assert: async () => { flags.success = true; },
+        postExecute: async () => { flags.post = true; },
+        cleanup: async () => { flags.cleanup = true; },
+      };
+      const result = await runScenario({ ...fakeCtx(), adoAwBin: bin, workDir: dir }, scenario);
+      expect(result.ok).toBe(!mutated);
+      if (mutated) expect(result).toMatchObject({ phase: "assert", message: "unexpected mutation" });
+      expect(flags).toEqual({ failure: true, success: false, post: false, cleanup: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { status: "succeeded", error: "" },
+    { status: "failed", error: "different error" },
+    { status: "warning", error: "body too long" },
+    { status: null, error: "" },
+  ])("rejects an unmatched outcome $status/$error", async ({ status, error }) => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-negative-outcome-"));
+    try {
+      const bin = await outcomeBinary(dir, status, error);
+      const flags = { asserted: false, cleaned: false };
+      const scenario: Scenario<unknown> = {
+        tool: "update-pull-request", config: () => ({}),
+        setup: async () => ({}), ndjson: async () => ({}),
+        expectedFailure: { error: /too long/ },
+        assertFailure: async () => { flags.asserted = true; },
+        assert: async () => { flags.asserted = true; },
+        cleanup: async () => { flags.cleaned = true; },
+      };
+      const result = await runScenario({ ...fakeCtx(), adoAwBin: bin, workDir: dir }, scenario);
+      expect(result).toMatchObject({ ok: false, phase: "execute" });
+      expect(result.message).toContain(status === null
+        ? "no executed record"
+        : "expected rejection was not observed");
+      expect(result.message).not.toMatch(/EACCES|ENOENT|spawn/);
+      expect(flags).toEqual({ asserted: false, cleaned: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("passes an expected executor rejection without running assertions", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ado-aw-runner-test-"));
     try {
@@ -141,7 +264,11 @@ describe("runScenario prior entries", () => {
    * Fake `ado-aw` that turns every staged input line into an executed record,
    * preserving order. `statuses` overrides the status for a given tool.
    */
-  async function writeEchoBin(dir: string, statuses: Record<string, string> = {}): Promise<string> {
+  async function writeEchoBin(
+    dir: string,
+    statuses: Record<string, string> = {},
+    statusesByIndex: Record<number, string> = {},
+  ): Promise<string> {
     const bin = join(dir, "echo-ado-aw.js");
     await writeFile(
       bin,
@@ -150,14 +277,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
 const statuses = ${JSON.stringify(statuses)};
+const statusesByIndex = ${JSON.stringify(statusesByIndex)};
 const lines = fs.readFileSync(path.join(out, "safe_outputs.ndjson"), "utf8")
   .split(/\\r?\\n/).filter((l) => l.trim());
 const records = lines.map((l, i) => {
   const parsed = JSON.parse(l);
   return {
     name: parsed.name.replaceAll("-", "_"),
-    status: statuses[parsed.name] ?? "succeeded",
-    error: statuses[parsed.name] ? "synthetic prior failure" : null,
+    status: statusesByIndex[i] ?? statuses[parsed.name] ?? "succeeded",
+    error: statusesByIndex[i] || statuses[parsed.name] ? "synthetic prior failure" : null,
     result: { order: i, tool: parsed.name },
   };
 });
@@ -170,6 +298,61 @@ fs.writeFileSync(
     );
     return bin;
   }
+
+  it.each(["succeeded", "failed"])("selects the second same-tool entry when its status is %s", async (status) => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-same-tool-"));
+    try {
+      const bin = await writeEchoBin(dir, {}, { 1: status });
+      let asserted = false;
+      let cleaned = false;
+      const scenario: Scenario<unknown> = {
+        tool: "update-pull-request", config: () => ({ max: 2 }),
+        setup: async () => ({}), ndjson: async () => ({ body: "second" }),
+        priorEntries: async () => [{ tool: "update-pull-request", config: { max: 2 }, entry: { body: "first" } }],
+        assert: async (_ctx, _state, record) => {
+          asserted = true;
+          expect(record.result?.order).toBe(1);
+        },
+        cleanup: async () => { cleaned = true; },
+      };
+      const result = await runScenario({ ...fakeCtx(), adoAwBin: bin, workDir: dir }, scenario);
+      expect(result.ok).toBe(status === "succeeded");
+      expect(asserted).toBe(status === "succeeded");
+      expect(cleaned).toBe(true);
+      if (status === "failed") expect(result.phase).toBe("execute");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not substitute a successful prior record for a missing same-tool primary", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-aw-missing-primary-"));
+    try {
+      const bin = join(dir, "only-prior.js");
+      await writeFile(bin, `
+const fs = require("node:fs");
+const path = require("node:path");
+const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
+fs.writeFileSync(path.join(out, "safe-outputs-executed.ndjson"), JSON.stringify({
+  name: "update_pull_request", status: "succeeded", result: {order: 0}
+}) + "\\n");
+`, "utf8");
+      let cleaned = false;
+      const scenario: Scenario<unknown> = {
+        tool: "update-pull-request", config: () => ({ max: 2 }),
+        setup: async () => ({}), ndjson: async () => ({ body: "second" }),
+        priorEntries: async () => [{ tool: "update-pull-request", config: { max: 2 }, entry: { body: "first" } }],
+        assert: async () => { throw new Error("primary record is absent"); },
+        cleanup: async () => { cleaned = true; },
+      };
+      const result = await runScenario({ ...fakeCtx(), adoAwBin: bin, workDir: dir }, scenario);
+      expect(result).toMatchObject({ ok: false, phase: "execute" });
+      expect(result.message).toContain("no executed record");
+      expect(cleaned).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   function handoffScenario(
     onAssert: (records: ExecutedRecord[]) => void,

@@ -39,10 +39,63 @@ export interface ArtifactInfo {
   resource?: { downloadUrl?: string; type?: string };
 }
 
+export interface BoundaryPr {
+  pullRequestId: number;
+  status: string;
+  description?: string;
+}
+
+export interface BoundaryTimelineRecord {
+  type?: string;
+  name?: string;
+  identifier?: string;
+  result?: string;
+}
+
 const DEFAULT_ARTIFACT_RETRIES = 5;
 const DEFAULT_ARTIFACT_RETRY_DELAY_MS = 5_000;
 const DEFAULT_TAG_RETRIES = 5;
 const DEFAULT_TAG_RETRY_DELAY_MS = 2_000;
+
+export class AdoHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = "AdoHttpError";
+  }
+}
+
+/** Undefined means permanent/unknown; zero means transient without a server delay. */
+export function transientReadRetryAfter(error: unknown): number | undefined {
+  if (error instanceof AdoHttpError) {
+    return [408, 429, 500, 502, 503, 504].includes(error.status)
+      ? error.retryAfterMs ?? 0
+      : undefined;
+  }
+  for (let cause: unknown = error, depth = 0; depth < 5; depth++) {
+    if (typeof cause !== "object" || cause === null) break;
+    if (cause instanceof Error && ["TimeoutError", "AbortError"].includes(cause.name)) return 0;
+    if ("code" in cause && typeof cause.code === "string" && [
+      "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "ETIMEDOUT", "EPIPE",
+      "EAI_AGAIN", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
+    ].includes(cause.code)) return 0;
+    cause = "cause" in cause ? cause.cause : undefined;
+  }
+  return undefined;
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value?.trim()) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds)
+    ? seconds >= 0 ? seconds * 1_000 : NaN
+    : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : undefined;
+}
 
 export class AdoRest {
   private readonly base: string;
@@ -73,7 +126,7 @@ export class AdoRest {
 
   private async request<T>(
     path: string,
-    opts: { method?: string; body?: unknown; allow404?: boolean } = {},
+    opts: { method?: string; body?: unknown; allow404?: boolean; timeoutMs?: number } = {},
   ): Promise<T | undefined> {
     const headers: Record<string, string> = {
       Authorization: this.authHeader,
@@ -88,12 +141,16 @@ export class AdoRest {
       method: opts.method ?? "GET",
       headers,
       body,
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(Math.max(1, Math.min(this.timeoutMs, opts.timeoutMs ?? this.timeoutMs))),
     });
     if (res.status === 404 && opts.allow404) return undefined;
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
-      throw new Error(`ADO ${opts.method ?? "GET"} ${path} -> HTTP ${res.status}: ${text}`);
+      throw new AdoHttpError(
+        `ADO ${opts.method ?? "GET"} ${path} -> HTTP ${res.status}: ${text}`,
+        res.status,
+        parseRetryAfter(res.headers.get("retry-after")),
+      );
     }
     if (res.status === 204) return undefined;
     const text = await res.text();
@@ -148,11 +205,71 @@ export class AdoRest {
     );
   }
 
-  async getBuild(buildId: number): Promise<BuildSummary> {
+  async getBuild(buildId: number, opts: { timeoutMs?: number } = {}): Promise<BuildSummary> {
     const path = this.projPath(`_apis/build/builds/${buildId}?api-version=7.1`);
-    const res = await this.request<BuildSummary>(path);
+    const res = await this.request<BuildSummary>(path, opts);
     if (!res) throw new Error(`getBuild(${buildId}) returned no body`);
+    if (typeof res !== "object" || res.id !== buildId || typeof res.status !== "string"
+      || !["none", "notStarted", "postponed", "inProgress", "cancelling", "completed"].includes(res.status)) {
+      throw new Error(`getBuild(${buildId}) returned an invalid build summary`);
+    }
     return res;
+  }
+
+  async createBoundaryTarget(repo: string, ref: string, sha: string): Promise<void> {
+    if (!ref.startsWith("refs/heads/ado-aw-smoke-candidate/") || !ref.endsWith("-target")) {
+      throw new Error("Boundary target must be a disposable candidate ref");
+    }
+    const response = await this.request<{value?: {success?: boolean}[]}>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/refs?api-version=7.1`),
+      { method: "POST", body: [{ name: ref, oldObjectId: "0".repeat(40), newObjectId: sha }] },
+    );
+    if (response?.value?.length !== 1 || response.value[0]?.success !== true) {
+      throw new Error("Failed to create disposable PR boundary target");
+    }
+  }
+
+  async createBoundaryPr(repo: string, source: string, target: string, marker: string): Promise<BoundaryPr> {
+    const response = await this.request<BoundaryPr>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullrequests?api-version=7.1`),
+      { method: "POST", body: {
+        sourceRefName: source, targetRefName: target, title: marker, description: marker,
+      } },
+    );
+    if (!response?.pullRequestId) throw new Error("PR boundary setup returned no PR ID");
+    return response;
+  }
+
+  async boundaryPr(repo: string, id: number): Promise<BoundaryPr> {
+    const response = await this.request<BoundaryPr>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${id}?api-version=7.1`),
+    );
+    if (!response) throw new Error("Boundary PR readback returned no object");
+    return response;
+  }
+
+  async abandonBoundaryPr(repo: string, id: number): Promise<void> {
+    const pr = await this.boundaryPr(repo, id);
+    if (pr.status === "active") {
+      await this.request(this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${id}?api-version=7.1`),
+        {method: "PATCH", body: {status: "abandoned"}});
+    }
+  }
+
+  async boundaryTimeline(buildId: number): Promise<BoundaryTimelineRecord[]> {
+    const response = await this.request<{records?: BoundaryTimelineRecord[]}>(
+      this.projPath(`_apis/build/builds/${buildId}/timeline?api-version=7.1`),
+    );
+    if (!Array.isArray(response?.records)) throw new Error("Build timeline response is missing records");
+    return response.records;
+  }
+
+  async boundaryArtifacts(buildId: number): Promise<string[]> {
+    const response = await this.request<{value?: ArtifactInfo[]}>(
+      this.projPath(`_apis/build/builds/${buildId}/artifacts?api-version=7.1`),
+    );
+    if (!Array.isArray(response?.value)) throw new Error("Build artifacts response is missing value");
+    return response.value.map((artifact) => artifact.name);
   }
 
   /** Read the observable tags on a completed child build. */

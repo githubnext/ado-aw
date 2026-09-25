@@ -271,6 +271,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
       "noop-target",
       "custom-safe-output",
       "multi-repo",
+      "pr-tools-preview",
     ]);
     expect(queuedCaseIds).not.toContain("janitor");
     expect(compiledCasePaths).toEqual([
@@ -279,6 +280,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
       "tests/safe-outputs/noop-target.md",
       "tests/smoke/custom-safe-output.md",
       "tests/smoke/multi-repo.md",
+      "tests/safe-outputs/pr-tools-preview.md",
     ]);
 
     // Cleanup ordering: remote refs deleted BEFORE the local worktree is removed.
@@ -297,9 +299,10 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
+      "refs/heads/ado-aw-smoke-candidate/630001/pr-tools-preview",
     ]);
     // Every case is staged to the SAME path — the ref is what distinguishes them.
-    expect(stagedWrites.length).toBe(5);
+    expect(stagedWrites.length).toBe(6);
     for (const write of stagedWrites) {
       expect(write.to).toBe(join(WORKTREE, "candidate", ".smoke", "pipeline.yml"));
       // The compiler emits no trigger keys once `on:` is stripped, and a
@@ -329,7 +332,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
 
     const gitModule = await import("../git.js");
     const resets = vi.mocked(gitModule.resetWorktree).mock.calls;
-    expect(resets.length).toBe(5);
+    expect(resets.length).toBe(6);
     for (const call of resets) {
       expect(call[0]).toMatchObject({ commitish: "basecommit" });
     }
@@ -456,6 +459,7 @@ describe("smoke-e2e index.main (per-case ref retention)", () => {
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
+      "refs/heads/ado-aw-smoke-candidate/630001/pr-tools-preview",
     ]);
     expect(deletedRefs).not.toContain("refs/heads/ado-aw-smoke-candidate/630001/ado-proxy");
   });

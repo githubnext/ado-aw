@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagParams, AddBuildTagResult, AddGithubIssueLabelsParams, AddGithubIssueLabelsResult,
-    AddPrCommentParams, AddPrCommentResult, AssignGithubIssueMilestoneParams,
-    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserParams, AssignGithubIssueToUserResult,
-    AssignWorkItemParams, AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
+    AbandonPullRequestParams, AbandonPullRequestResult, AddBuildTagParams, AddBuildTagResult,
+    AddGithubIssueLabelsParams, AddGithubIssueLabelsResult, AddPrCommentParams, AddPrCommentResult,
+    AssignGithubIssueMilestoneParams, AssignGithubIssueMilestoneResult,
+    AssignGithubIssueToUserParams, AssignGithubIssueToUserResult, AssignWorkItemParams,
+    AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
     CommentOnGithubIssueParams, CommentOnGithubIssueResult, CommentOnWorkItemParams,
     CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult, CreateGitTagParams,
     CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
@@ -29,11 +30,19 @@ use crate::safe_outputs::{
     ResolvePrThreadResult, SetGithubIssueFieldParams, SetGithubIssueFieldResult,
     SetGithubIssueTypeParams, SetGithubIssueTypeResult, SubmitPrReviewParams, SubmitPrReviewResult,
     ToolResult, UnassignGithubIssueFromUserParams, UnassignGithubIssueFromUserResult,
-    UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePrParams, UpdatePrResult,
-    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadBuildAttachmentParams, UploadBuildAttachmentResult, UploadPipelineArtifactParams,
-    UploadPipelineArtifactResult, UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
-    Validate, anyhow_to_mcp_error,
+    UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePullRequestParams,
+    UpdatePullRequestResult, UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams,
+    UpdateWorkItemResult, UploadBuildAttachmentParams, UploadBuildAttachmentResult,
+    UploadPipelineArtifactParams, UploadPipelineArtifactResult, UploadWorkitemAttachmentParams,
+    UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
+};
+use crate::safe_outputs::{
+    AddPrLabelsParams, AddPrLabelsResult, AddPrReviewersParams, AddPrReviewersResult,
+    SetPrAutoCompleteParams, SetPrAutoCompleteResult,
+    RemovePullRequestLabelsParams, RemovePullRequestLabelsResult,
+    ReplacePullRequestLabelParams, ReplacePullRequestLabelResult,
+    MarkPullRequestReadyParams, MarkPullRequestReadyResult,
+    UpdatePullRequestCommentParams, UpdatePullRequestCommentResult,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::{PullRequestTemporaryId, WorkItemTemporaryId};
@@ -431,6 +440,9 @@ fn apply_tool_filter(tool_router: &mut ToolRouter<SafeOutputs>, enabled_tools: O
     if let Some(enabled) = enabled_tools {
         for name in enabled {
             if !all_tools.iter().any(|t| t == name) {
+                if crate::compile::pr_migration::is_deprecated_pr_tool(name) {
+                    warn!("{}", crate::compile::pr_migration::PR_PROMPT_GUIDANCE);
+                }
                 warn!(
                     "Enabled-tools entry '{}' has no matching route (ignored)",
                     name
@@ -948,6 +960,18 @@ issue_number may be a positive number or a temporary_id from create-github-issue
     }
 
     #[tool(
+        name = "abandon-pull-request",
+        description = "Abandon a configured Azure DevOps pull request without merging, optionally with a comment."
+    )]
+    async fn abandon_pull_request(
+        &self,
+        params: Parameters<AbandonPullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AbandonPullRequestResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
         name = "update-github-issue",
         description = "Update operator-enabled fields on a configured GitHub issue or pull request."
     )]
@@ -956,6 +980,18 @@ issue_number may be a positive number or a temporary_id from create-github-issue
         params: Parameters<UpdateGithubIssueParams>,
     ) -> Result<CallToolResult, McpError> {
         let result: UpdateGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "update-pull-request",
+        description = "Update an Azure DevOps pull request title or description. Uses gh-aw-style title/body/operation inputs."
+    )]
+    async fn update_pull_request(
+        &self,
+        params: Parameters<UpdatePullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: UpdatePullRequestResult = params.0.try_into()?;
         self.queue_sanitized_output(result).await
     }
 
@@ -1081,7 +1117,7 @@ and only the fields you want to update."
         description = "Create a new pull request to propose code changes. This tool captures all \
 changes in the repository (both committed and uncommitted) and creates a PR from them. \
 Use 'self' for the pipeline's own repository, or a repository alias from the checkout list. \
-Returns a generated temporary_id that can be passed as pull_request_id to later update-pr calls."
+Returns a generated temporary_id for configured PR content, reviewer, label, review or auto-complete follow-up tools."
     )]
     async fn create_pr(
         &self,
@@ -1179,7 +1215,7 @@ Returns a generated temporary_id that can be passed as pull_request_id to later 
 
         let canonical = temporary_id.canonical();
         let mut response = CallToolResult::success(vec![Content::text(format!(
-            "PR request saved for repository '{}'. Patch file: {}. Use temporary ID {} as pull_request_id in later update-pr calls.",
+            "PR request saved for repository '{}'. Patch file: {}. Use temporary ID {} as pull_request_id in configured focused PR follow-up tools.",
             repository, result.patch_file, canonical
         ))]);
         response.structured_content = Some(serde_json::json!({
@@ -1262,30 +1298,30 @@ structured output that should be visible in the project wiki."
     }
 
     #[tool(
-        name = "add-pr-comment",
-        description = "Add a comment thread to an Azure DevOps pull request. Supports both \
-general comments and file-specific inline comments with optional line positioning. \
-The comment will be posted during safe output processing."
+        name = "add-pull-request-comment",
+        description = "Propose an independent ad hoc comment thread on an Azure DevOps PR. \
+Supports general and inline feedback. It is never buffered into a later review; use \
+submit-pull-request-review for a complete review. Writes happen only during safe output processing."
     )]
     async fn add_pr_comment(
         &self,
         params: Parameters<AddPrCommentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: add-pr-comment - PR #{}",
-            params.0.pull_request_id
+            "Tool called: add-pull-request-comment - {}",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref())
         );
         debug!("Content length: {} chars", params.0.content.len());
         let mut sanitized = params.0;
-        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.content = sanitize_markdown(&sanitized.content);
         let result: AddPrCommentResult = sanitized.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
-        info!("PR comment queued for PR #{}", result.pull_request_id);
+        info!("PR comment queued for {}", crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref()));
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Comment queued for PR #{}. The comment will be posted during safe output processing.",
-            result.pull_request_id
+            "Comment queued for {}. The comment will be posted during safe output processing.",
+            crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
     }
 
@@ -1408,29 +1444,66 @@ pull request. The branch will be created during safe output processing."
     }
 
     #[tool(
-        name = "update-pr",
-        description = "Update pull request metadata in Azure DevOps. Supports operations: \
-add-reviewers, add-labels, set-auto-complete, vote, update-description. \
-Changes will be applied during safe output processing."
+        name = "add-pull-request-reviewers",
+        description = "Add policy-permitted reviewers to an Azure DevOps PR. Accepts a numeric or same-run temporary PR ID."
     )]
-    async fn update_pr(
+    async fn add_pr_reviewers(
         &self,
-        params: Parameters<UpdatePrParams>,
+        params: Parameters<AddPrReviewersParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!(
-            "Tool called: update-pr - PR #{} operation '{}'",
-            params.0.pull_request_id, params.0.operation
-        );
-        let mut sanitized = params.0;
-        sanitized.description = sanitized.description.map(|d| sanitize_text(&d));
-        let result: UpdatePrResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
-        })?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "PR #{} '{}' operation queued. Changes will be applied during safe output processing.",
-            result.pull_request_id, result.operation
-        ))]))
+        let result: AddPrReviewersResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "add-pull-request-labels",
+        description = "Add labels to an Azure DevOps PR without replacing existing labels. Accepts a numeric or same-run temporary PR ID."
+    )]
+    async fn add_pr_labels(
+        &self,
+        params: Parameters<AddPrLabelsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AddPrLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "remove-pull-request-labels",
+        description = "Propose removal of policy-permitted labels from an Azure DevOps PR. Missing labels are no-ops. Does not remove other labels; writes happen in safe output processing."
+    )]
+    async fn remove_pr_labels(&self, params: Parameters<RemovePullRequestLabelsParams>) -> Result<CallToolResult, McpError> {
+        let result: RemovePullRequestLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "replace-pull-request-label",
+        description = "Propose one permitted PR label transition from one label to another. Adds and verifies the new label before removing the old label. This is not an atomic ADO operation; partial outcomes are reported."
+    )]
+    async fn replace_pr_label(&self, params: Parameters<ReplacePullRequestLabelParams>) -> Result<CallToolResult, McpError> {
+        let result: ReplacePullRequestLabelResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "mark-pull-request-as-ready-for-review",
+        description = "Propose publishing an existing active draft PR for review. Does not approve, merge or enable auto-complete. Already-ready PRs are no-ops; persisted publication is verified in Stage 3."
+    )]
+    async fn mark_pr_ready(&self, params: Parameters<MarkPullRequestReadyParams>) -> Result<CallToolResult, McpError> {
+        let result: MarkPullRequestReadyResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "set-pull-request-auto-complete",
+        description = "Enable Azure DevOps PR auto-complete using configured completion options. Does not merge immediately or bypass branch policies."
+    )]
+    async fn set_pr_auto_complete(
+        &self,
+        params: Parameters<SetPrAutoCompleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: SetPrAutoCompleteResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
@@ -1726,33 +1799,44 @@ restrictions may apply per the workflow's safe-outputs config."
     }
 
     #[tool(
-        name = "submit-pr-review",
-        description = "Submit a pull request review with a decision (approve, request-changes, \
-or comment-only) and an optional body explaining the rationale. The review will be \
-submitted during safe output processing. Requires 'allowed-events' to be configured."
+        name = "submit-pull-request-review",
+        description = "Propose a complete pull request review. The comment event posts \
+non-voting feedback and preserves any existing vote; reset explicitly clears your vote. \
+Other allowed events cast their documented ADO vote. Standalone comments are independent, \
+never buffered into this review. Requires 'allowed-events'; writes happen only during safe output processing."
     )]
     async fn submit_pr_review(
         &self,
         params: Parameters<SubmitPrReviewParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: submit-pr-review - PR #{} event '{}'",
-            params.0.pull_request_id, params.0.event
+            "Tool called: submit-pull-request-review - {} event '{}'",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.event
         );
         let mut sanitized = params.0;
-        sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
+        sanitized.body = sanitized.body.map(|b| sanitize_markdown(&b));
+        for comment in &mut sanitized.comments { comment.content = sanitize_markdown(&comment.content); }
         let result: SubmitPrReviewResult = sanitized.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "PR review '{}' queued for PR #{}. The review will be submitted during safe output processing.",
-            result.event, result.pull_request_id
+            "PR review '{}' queued for {}. The review will be submitted during safe output processing.",
+            result.event, crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
     }
 
     #[tool(
-        name = "reply-to-pr-comment",
+        name = "update-pull-request-comment",
+        description = "Propose editing a verified root comment owned by this pipeline and actor, with no replies. Requires existing thread_id and comment_id. Refuses conversations, externally edited comments and unowned history. This edits a comment, not the PR description."
+    )]
+    async fn update_pr_comment(&self, params: Parameters<UpdatePullRequestCommentParams>) -> Result<CallToolResult, McpError> {
+        let result: UpdatePullRequestCommentResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "reply-to-pull-request-comment",
         description = "Reply to an existing review comment thread on an Azure DevOps pull request. \
 Provide the PR ID, thread ID, and reply content. The reply will be posted during safe output processing."
     )]
@@ -1761,23 +1845,23 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
         params: Parameters<ReplyToPrCommentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: reply-to-pr-comment - PR #{} thread #{}",
-            params.0.pull_request_id, params.0.thread_id
+            "Tool called: reply-to-pull-request-comment - {} thread #{}",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.thread_id
         );
         let mut sanitized = params.0;
-        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.content = sanitize_markdown(&sanitized.content);
         let result: ReplyToPrCommentResult = sanitized.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Reply queued for thread #{} on PR #{}. The reply will be posted during safe output processing.",
-            result.thread_id, result.pull_request_id
+            "Reply queued for thread #{} on {}. The reply will be posted during safe output processing.",
+            result.thread_id, crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
     }
 
     #[tool(
-        name = "resolve-pr-thread",
+        name = "resolve-pull-request-thread",
         description = "Resolve or change the status of a review thread on an Azure DevOps pull request. \
 Valid statuses: fixed, wont-fix, closed, by-design, active. \
 The status change will be applied during safe output processing."
@@ -1787,16 +1871,16 @@ The status change will be applied during safe output processing."
         params: Parameters<ResolvePrThreadParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: resolve-pr-thread - PR #{} thread #{} → '{}'",
-            params.0.pull_request_id, params.0.thread_id, params.0.status
+            "Tool called: resolve-pull-request-thread - {} thread #{} → '{}'",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.thread_id, params.0.status
         );
         let result: ResolvePrThreadResult = params.0.try_into()?;
         self.write_safe_output_file(&result).await.map_err(|e| {
             anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
         })?;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Thread #{} status change to '{}' queued for PR #{}. The change will be applied during safe output processing.",
-            result.thread_id, result.status, result.pull_request_id
+            "Thread #{} status change to '{}' queued for {}. The change will be applied during safe output processing.",
+            result.thread_id, result.status, crate::safe_outputs::pr_common::describe_pr_reference(result.pull_request_id.as_ref())
         ))]))
     }
 
@@ -2619,7 +2703,7 @@ safe-outputs:
 
     #[tokio::test]
     async fn test_all_configured_only_tools_are_routes() {
-        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 14);
+        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 23);
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled: Vec<String> = CONFIGURED_ONLY_TOOLS
             .iter()
@@ -2629,6 +2713,10 @@ safe-outputs:
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
+        assert!(
+            !tools.iter().any(|tool| tool.name.as_ref() == "update-pr"),
+            "historical update-pr must never be an advertised MCP route"
+        );
         for configured_tool in CONFIGURED_ONLY_TOOLS {
             let route = tools
                 .iter()
@@ -2639,6 +2727,22 @@ safe-outputs:
                 "{configured_tool} must expose an MCP input schema"
             );
         }
+    }
+
+    #[test]
+    fn public_pull_request_names_have_no_abbreviated_runtime_aliases() {
+        let tools = SafeOutputs::tool_router().list_all();
+        for (old, new) in crate::compile::pr_migration::PR_TOOL_RENAMES {
+            assert!(
+                tools.iter().any(|tool| tool.name.as_ref() == *new),
+                "missing {new}"
+            );
+            assert!(
+                !tools.iter().any(|tool| tool.name.as_ref() == *old),
+                "deprecated route {old}"
+            );
+        }
+        assert!(!tools.iter().any(|tool| tool.name.as_ref() == "update-pr"));
     }
 
     #[tokio::test]

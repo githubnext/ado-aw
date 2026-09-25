@@ -4,6 +4,7 @@ import {
   adoOrganizationFromCollectionUri,
   isCurrentAdoOrganization,
   parseAdoRepoUrl,
+  nativeTriggeringPrIdentity,
 } from "../ado-remote.js";
 
 describe("parseAdoRepoUrl", () => {
@@ -52,6 +53,20 @@ describe("parseAdoRepoUrl", () => {
 });
 
 describe("ADO collection matching", () => {
+  it("captures equivalent native URL spellings but rejects malformed collection paths", () => {
+    const env = {
+      BUILD_REASON:"PullRequest", BUILD_REPOSITORY_PROVIDER:"TfsGit",
+      BUILD_REPOSITORY_URI:"https://DEV.AZURE.COM/org/Other/_git/target/",
+      BUILD_REPOSITORY_ID:"11111111-1111-1111-1111-111111111111",
+      SYSTEM_PULLREQUEST_PULLREQUESTID:"18446744073709551615",
+      SYSTEM_COLLECTIONURI:"https://org.visualstudio.com/DefaultCollection/",
+    };
+    expect(nativeTriggeringPrIdentity(env)?.id).toBe("18446744073709551615");
+    for (const uri of ["https://dev.azure.com/org/extra","https://org.visualstudio.com/OtherCollection/"]) {
+      expect(nativeTriggeringPrIdentity({...env,SYSTEM_COLLECTIONURI:uri})).toBeUndefined();
+    }
+    expect(nativeTriggeringPrIdentity({...env,BUILD_REPOSITORY_URI:"https://dev.azure.com/org//Other/_git/target"})).toBeUndefined();
+  });
   it("extracts organizations from both service URL forms", () => {
     expect(adoOrganizationFromCollectionUri("https://dev.azure.com/MyOrg/")).toBe(
       "myorg",

@@ -13,6 +13,7 @@
  * (markdown-escaped, single line) or `sanitizeBlock` (fenced, neutralised)
  * before they reach the output.
  */
+import { positivePrId, type TriggeringPullRequest } from "../shared/ado-remote.js";
 
 /** A parsed safe-output proposal record (one NDJSON line). */
 export interface Proposal {
@@ -53,6 +54,21 @@ export interface TrustedRepositoryContext {
   currentRepository?: string;
   currentProvider?: string;
   githubApiUrl?: string;
+  prPolicies?: ReadonlyMap<string, PrPolicy>;
+  triggeringPr?: TriggeringPullRequest;
+}
+
+export type PrTargetPolicy =
+  | { kind: "triggering" }
+  | { kind: "explicit" }
+  | { kind: "fixed"; id: string };
+
+export interface PrPolicy {
+  target: PrTargetPolicy;
+  operation?: string;
+  "target-repo"?: string;
+  "supersede-older-comments"?: boolean;
+  "comment-key"?: string;
 }
 
 interface RepositoryResolution {
@@ -77,6 +93,71 @@ const INLINE_MAX_CHARS = 300;
  * serialization (the `tool_result!` macro emits field names verbatim).
  */
 const TOOL_SPECS: Record<string, ToolSpec> = {
+  "update-pull-request": {
+    title: "Update pull request content",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Title", key: "title" },
+      { label: "Body operation", key: "operation" },
+      { label: "Repository selector", key: "repository" },
+    ],
+    body: "body",
+  },
+  "abandon-pull-request": {
+    title: "Abandon pull request",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Repository selector", key: "repository" },
+    ],
+    body: "body",
+  },
+  "add-pull-request-reviewers": {
+    title: "Add pull request reviewers",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Reviewers", key: "reviewers" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "add-pull-request-labels": {
+    title: "Add pull request labels",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Labels", key: "labels" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "set-pull-request-auto-complete": {
+    title: "Enable pull request auto-complete",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "mark-pull-request-as-ready-for-review": {
+    title: "Publish draft pull request for review",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "remove-pull-request-labels": {
+    title: "Remove pull request labels",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Labels to remove", key: "labels" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
+  "replace-pull-request-label": {
+    title: "Replace pull request label (non-atomic)",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Remove after addition", key: "from" },
+      { label: "Add first", key: "to" },
+      { label: "Repository selector", key: "repository" },
+    ],
+  },
   "create-pull-request": {
     title: "Create pull request",
     fields: [
@@ -86,26 +167,18 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     ],
     body: "description",
   },
-  "update-pr": {
-    title: "Update pull request",
-    fields: [
-      { label: "PR", key: "pull_request_id" },
-      { label: "Operation", key: "operation" },
-      { label: "Repository", key: "repository" },
-      { label: "Vote", key: "vote" },
-    ],
-    body: "description",
-  },
-  "add-pr-comment": {
+  "add-pull-request-comment": {
     title: "Comment on pull request",
     fields: [
       { label: "PR", key: "pull_request_id" },
       { label: "File", key: "file_path" },
       { label: "Line", key: "line" },
+      { label: "Side", key: "side" },
+      { label: "Reviewed head", key: "expected_head_sha" },
     ],
     body: "content",
   },
-  "reply-to-pr-comment": {
+  "reply-to-pull-request-comment": {
     title: "Reply to PR comment",
     fields: [
       { label: "PR", key: "pull_request_id" },
@@ -113,15 +186,26 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
     ],
     body: "content",
   },
-  "submit-pr-review": {
+  "update-pull-request-comment": {
+    title: "Update verified owned PR comment",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Thread", key: "thread_id" },
+      { label: "Comment", key: "comment_id" },
+    ],
+    body: "content",
+  },
+  "submit-pull-request-review": {
     title: "Submit PR review",
     fields: [
       { label: "PR", key: "pull_request_id" },
       { label: "Event", key: "event" },
+      { label: "Reviewed head", key: "expected_head_sha" },
+      { label: "Repository selector", key: "repository" },
     ],
     body: "body",
   },
-  "resolve-pr-thread": {
+  "resolve-pull-request-thread": {
     title: "Resolve PR thread",
     fields: [
       { label: "PR", key: "pull_request_id" },
@@ -898,6 +982,30 @@ function renderProposal(
       }
     }
   }
+  if (["add-pull-request-comment", "submit-pull-request-review", "update-pull-request-comment"].includes(p.name)) {
+    lines.push("", `Owned-comment policy: ${sanitizeInline(p.record._trusted_comment_policy)}.`);
+  }
+  if (p.name === "submit-pull-request-review") {
+    lines.push("", p.record.event === "comment" ? "Vote effect: none; existing votes are preserved."
+      : p.record.event === "reset" ? "Vote effect: explicitly clear the authenticated actor's vote."
+        : "Vote effect: the requested allowed ADO vote, only after all review comments succeed.");
+    const comments = p.record.comments;
+    if (comments !== undefined && comments !== null && !Array.isArray(comments)) {
+      lines.push("", "Invalid inline-comments array; execution will reject it.");
+    } else if (Array.isArray(comments) && comments.length > 0) {
+      lines.push("", `Inline findings: ${comments.length}. One proposal, multiple non-atomic ADO writes.`);
+      for (const [index, value] of comments.slice(0, 100).entries()) {
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          lines.push(`Finding ${index + 1}: invalid object.`);
+          continue;
+        }
+        const comment = value as Record<string, unknown>;
+        lines.push("", `Finding ${index + 1}: ${sanitizeInline(comment.file_path)}; side ${sanitizeInline(comment.side ?? "right")}; lines ${sanitizeInline(comment.start_line ?? comment.line)}-${sanitizeInline(comment.line)}`,
+          "```text", sanitizeBlock(comment.content), "```");
+      }
+      if (comments.length > 100) lines.push("Additional findings omitted; execution rejects more than 100.");
+    }
+  }
   return lines.join("\n");
 }
 
@@ -934,6 +1042,22 @@ export function renderSummary(
   repositoryContext?: TrustedRepositoryContext,
 ): string {
   if (proposals.length === 0) return "";
+  const producers = new Map<string, Proposal>();
+  proposals = proposals.map((proposal) => {
+    const record = { ...proposal.record };
+    if (["add-pull-request-comment", "submit-pull-request-review", "update-pull-request-comment"].includes(proposal.name)) {
+      const trusted = repositoryContext?.prPolicies?.get(proposal.name);
+      record._trusted_comment_policy = trusted
+        ? `key '${trusted["comment-key"] ?? "default"}'; supersede older comments: ${trusted["supersede-older-comments"] === true ? "yes, verified reply-free threads only" : "no"}`
+        : "<unresolved: trusted comment policy unavailable>";
+    }
+    if (proposal.name === "create-pull-request" && typeof record.temporary_id === "string") {
+      producers.set(record.temporary_id.replace(/^#/, ""), proposal);
+    }
+    const policy = repositoryContext?.prPolicies?.get(proposal.name);
+    if (policy) renderPrTarget(proposal.name, record, policy, repositoryContext?.triggeringPr, producers);
+    return { ...proposal, record };
+  });
 
   const lines: string[] = ["# Proposed safe outputs", ""];
   const repositoryResolutions = buildRepositoryResolutions(
@@ -976,6 +1100,106 @@ export function renderSummary(
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 
+function renderPrTarget(
+    tool: string,
+    record: Record<string, unknown>,
+    policy: PrPolicy,
+    triggering: TriggeringPullRequest | undefined,
+    producers: ReadonlyMap<string, Proposal>,
+  ): void {
+    record.operation ??= policy.operation;
+    const keys = tool === "update-pull-request"
+      ? ["pull_request_id", "pullRequestId", "pull_request_number", "pullRequestNumber", "pr_number", "prNumber", "pr", "id"]
+      : tool === "abandon-pull-request" ? ["pull_request_id", "pull_request_number"] : ["pull_request_id"];
+    const refs = keys
+      .map((key) => record[key]).filter((value) => value !== undefined && value !== null);
+    const normalized = refs.map((value) => {
+      if (typeof value === "string") {
+        const text = value.trim();
+        if (/^#?aw_[A-Za-z0-9_-]+$/.test(text)) return `#${text.replace(/^#/, "")}`;
+        return positivePrId(text.replace(/^#/, "")) ?? "<invalid PR reference>";
+      }
+      return positivePrId(value) ?? "<invalid PR reference>";
+    });
+    const reference = normalized[0];
+    const selector = record.repository ?? policy["target-repo"];
+    const explicitSelector = selector !== undefined && selector !== null;
+    record.repository = explicitSelector ? selector : "self";
+    if (normalized.some((value) => value !== reference)) {
+      record.pull_request_id = "<conflict: PR ID aliases disagree>";
+      return;
+    }
+    if (reference === "<invalid PR reference>") {
+      record.pull_request_id = reference;
+      return;
+    }
+    if (explicitSelector && (typeof selector !== "string" || selector.trim().length === 0)) {
+      record.pull_request_id = `${reference ?? "<omitted>"} (unresolved: invalid explicit repository selector)`;
+      return;
+    }
+    const configured = policy.target.kind === "fixed" ? policy.target.id
+      : policy.target.kind === "triggering" ? triggering?.id : undefined;
+    if (policy.target.kind === "triggering") {
+      if (!triggering) {
+        record.pull_request_id = `${reference ?? "<omitted>"} (unresolved: complete triggering PR identity unavailable)`;
+        record.repository = explicitSelector ? selector : "<unresolved: triggering destination unavailable>";
+        return;
+      }
+      const destination = `${triggering.collection_uri.replace(/\/$/, "")}/${triggering.project}/${triggering.repository_name} (repository ID ${triggering.repository_id})`;
+      record.repository = explicitSelector
+        ? `${destination}; explicit selector '${String(selector)}' must identify this destination (verified at execution)`
+        : `${destination}; checkout/write authorization verified at execution`;
+    }
+    if (reference?.startsWith("#aw_")) {
+      const producer = producers.get(reference.slice(1));
+      record.pull_request_id = producer
+        ? `${reference} (from earlier create proposal ${producer.index + 1}; real ID unknown until successful execution)`
+        : `${reference} (unresolved: no earlier create proposal)`;
+      if (configured) record.pull_request_id += `; must equal configured PR ${configured}`;
+      if (policy.target.kind !== "triggering" && producer) {
+        const producerSelector = producer.record.repository ?? "self";
+        if (!explicitSelector) {
+          record.repository = `${String(producerSelector)} (producer's proposed selector; validated at execution)`;
+        } else if (selector !== producerSelector) {
+          record.repository = `${String(selector)} (possible conflict: producer requested '${String(producerSelector)}'; verified at execution)`;
+        }
+      }
+      return;
+    }
+    if (reference && configured && reference !== configured) {
+      record.pull_request_id = `${reference} (conflict: configured target is PR ${configured})`;
+      return;
+    }
+    record.pull_request_id = reference ?? configured ?? "<unresolved: explicit PR ID required>";
+  }
+
+  /** Preserve full-u64 integer tokens before JSON.parse can round proposal identifiers. */
+  function preserveLargeIntegers(json: string): string {
+    let out = "";
+    let index = 0;
+    while (index < json.length) {
+      if (json[index] === '"') {
+        const start = index++;
+        while (index < json.length) {
+          const char = json[index++];
+          if (char === "\\") index++;
+          else if (char === '"') break;
+        }
+        out += json.slice(start, index);
+      } else {
+        const number = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(json.slice(index));
+        if (number) {
+          const raw = number[0];
+          out += !/^-?\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) ? JSON.stringify(raw) : raw;
+          index += raw.length;
+        } else {
+          out += json[index++];
+        }
+      }
+    }
+    return out;
+  }
+
 /**
  * Parse NDJSON text into proposals, skipping blank lines and records that
  * fail to parse or lack a string `name`. Index is the proposal position so
@@ -989,7 +1213,7 @@ export function parseProposals(ndjson: string): Proposal[] {
     if (line.length === 0) continue;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(line);
+      parsed = JSON.parse(preserveLargeIntegers(line));
     } catch {
       continue;
     }

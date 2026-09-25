@@ -129,7 +129,7 @@ export class AdoRest {
   }
 
   /**
-   * Resolve an identity using the same exact-match fields as update-pr's
+   * Resolve an identity using the same exact-match fields as add-pull-request-reviewers'
    * production add-reviewers implementation. Canonical GUIDs are verified
    * through the identityIds query; names and emails use exact field matching.
    */
@@ -390,6 +390,22 @@ export class AdoRest {
     return commitId;
   }
 
+  async pushDeleteFileBranch(repo: string, branch: string, parent: string, filePath: string): Promise<string> {
+    const response = await this.request<{ commits?: { commitId?: string }[] }>(this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pushes?api-version=7.1`,
+    ), {
+      method: "POST",
+      body: {
+        refUpdates: [{ name: `refs/heads/${branch}`, oldObjectId: "0".repeat(40) }],
+        commits: [{ parents: [parent], comment: "Disposable inline-comment deletion fixture",
+          changes: [{ changeType: "delete", item: { path: filePath } }] }],
+      },
+    });
+    const commit = response?.commits?.[0]?.commitId;
+    if (typeof commit !== "string" || !/^[a-f0-9]{40}$/i.test(commit)) throw new Error("Deletion fixture push returned no valid commit");
+    return commit;
+  }
+
   /**
    * Create a NEW branch and a single commit adding one OR MORE files in one
    * push. Returns the new commit id.
@@ -470,7 +486,10 @@ export class AdoRest {
   async getPullRequest(
     repo: string,
     prId: number,
-  ): Promise<{ pullRequestId: number; status: string; title: string; description?: string }> {
+  ): Promise<{
+    pullRequestId: number; status: string; title: string; description?: string; isDraft?: boolean;
+    labels?: { name: string }[]; autoCompleteSetBy?: { id?: string };
+  }> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}?api-version=7.1`,
     );
@@ -479,6 +498,9 @@ export class AdoRest {
       status: string;
       title: string;
       description?: string;
+      isDraft?: boolean;
+      labels?: { name: string }[];
+      autoCompleteSetBy?: { id?: string };
     }>(path);
     if (!res) throw new Error(`getPullRequest(${prId}) returned no body`);
     return res;
@@ -527,7 +549,8 @@ export class AdoRest {
     const res = await this.request<{ value?: { id: number; comments?: { content?: string }[] }[] }>(
       path,
     );
-    return res?.value ?? [];
+    if (!Array.isArray(res?.value)) throw new Error(`listThreads(${prId}) response missing value array`);
+    return res.value;
   }
 
   async listReviewers(
@@ -543,11 +566,33 @@ export class AdoRest {
     return res?.value ?? [];
   }
 
+  async listPullRequestLabels(repo: string, prId: number): Promise<{ name: string }[]> {
+    const path = this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/labels?api-version=7.1`,
+    );
+    const res = await this.request<{ value?: unknown }>(path);
+    if (!Array.isArray(res?.value)) {
+      throw new Error(`listPullRequestLabels(${prId}) response missing value array`);
+    }
+    return res.value.map((label: unknown) => {
+      if (label === null || typeof label !== "object" || !("name" in label)
+        || typeof label.name !== "string") {
+        throw new Error(`listPullRequestLabels(${prId}) returned an invalid label`);
+      }
+      return { name: label.name };
+    });
+  }
+
   /** Abandon a PR (status=abandoned). Best-effort cleanup. */
   async abandonPullRequest(repo: string, prId: number): Promise<void> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}?api-version=7.1`,
     );
+    const pr = await this.request<{ status: string }>(path, { allow404: true });
+    if (!pr || pr.status === "abandoned") return;
+    if (pr.status !== "active") {
+      throw new Error(`Cannot clean up PR ${prId}: unexpected status '${pr.status}'`);
+    }
     await this.request(path, { method: "PATCH", body: { status: "abandoned" }, allow404: true });
   }
 

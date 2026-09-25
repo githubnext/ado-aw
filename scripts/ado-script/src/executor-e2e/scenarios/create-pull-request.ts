@@ -420,14 +420,14 @@ async function cleanupTemporaryPrHandoff(
 }
 
 /**
- * Runs create-pull-request and update-pr in one executor process. This is the
+ * Runs create-pull-request and content editing in one executor process. This is the
  * production handoff shape: the create result registers the real PR under a
  * temporary ID, then the following update resolves that ID without the model
  * ever knowing Azure DevOps' numeric PR ID.
  */
 export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
   id: "create-pull-request-temporary-id-handoff",
-  tool: "update-pr",
+  tool: "update-pull-request",
   targetsAdoRepo: true,
   setup: (ctx) =>
     setupCreatePullRequest(ctx, {
@@ -437,7 +437,8 @@ export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
       changedFileSuffix: "-temporary-id-handoff",
     }),
   config: (_ctx, state) => ({
-    "allowed-operations": ["update-description"],
+    target: "*",
+    "include-stats": false,
     "allowed-repositories": [state.repo],
     max: 1,
   }),
@@ -470,8 +471,7 @@ export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
   }),
   ndjson: async (ctx) => ({
     pull_request_id: HANDOFF_TEMPORARY_ID,
-    operation: "update-description",
-    description: `${detBody(ctx, "create-pull-request-temporary-id-handoff")} Updated through temporary ID.`,
+    body: `${detBody(ctx, "create-pull-request-temporary-id-handoff")} Updated through temporary ID.`,
   }),
   assert: async (ctx, state, record, records) => {
     const created = executedRecordForTool(records, "create-pull-request");
@@ -511,7 +511,7 @@ function createPullRequestAddReviewersScenario(
 
   return {
     id: options.id,
-    tool: "update-pr",
+    tool: "add-pull-request-reviewers",
     targetsAdoRepo: true,
     setup: async (ctx) => {
       const reviewer = resolveExecutorE2eReviewer();
@@ -540,7 +540,7 @@ function createPullRequestAddReviewersScenario(
       return { ...state, reviewer, reviewerId };
     },
     config: (_ctx, state) => ({
-      "allowed-operations": ["add-reviewers"],
+      target: "*",
       "allowed-repositories": [state.repo],
       "allowed-reviewers": [submittedReviewer(state)],
       "max-reviewers": 1,
@@ -577,7 +577,6 @@ function createPullRequestAddReviewersScenario(
     }),
     ndjson: async (_ctx, state) => ({
       pull_request_id: options.temporaryId,
-      operation: "add-reviewers",
       reviewers: [submittedReviewer(state)],
     }),
     assert: async (_ctx, state, record, records) => {
@@ -597,7 +596,7 @@ function createPullRequestAddReviewersScenario(
         );
       }
       if (strResult(record, "operation") !== "add-reviewers") {
-        throw new Error("update-pr reported an unexpected operation");
+        throw new Error("add-pull-request-reviewers reported an unexpected operation");
       }
       const failed = stringArrayResult(record, "failed");
       if (failed.length !== 0) {

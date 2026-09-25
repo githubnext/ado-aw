@@ -300,6 +300,7 @@ tool_result! {
     write = true,
     params = CreatePrResultFields,
     /// Result of creating a pull request - stored as safe output
+    #[serde(deny_unknown_fields)]
     pub struct CreatePrResult {
         /// Title for the pull request
         title: String,
@@ -399,7 +400,11 @@ pub enum ProtectedFiles {
 ///       - "agent-created"
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePrConfig {
+    /// Optional restriction within the compiler-authorized checkout destinations.
+    #[serde(default, rename = "allowed-repositories")]
+    pub allowed_repositories: Vec<String>,
     /// Target branch to merge into (default: "main"). This is the literal
     /// fallback applied to every repo unless overridden by `target_branches`
     /// or `infer_target_from_checkout_ref`. It is always a plain branch name —
@@ -487,6 +492,9 @@ pub struct CreatePrConfig {
     /// Whether to include agent execution stats in the PR description (default: true).
     #[serde(default = "default_true", rename = "include-stats")]
     pub include_stats: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
 }
 
 fn default_target_branch() -> String {
@@ -567,6 +575,7 @@ fn repository_api_base(target: &crate::safe_outputs::result::AdoRepositoryTarget
 impl Default for CreatePrConfig {
     fn default() -> Self {
         Self {
+            allowed_repositories: Vec::new(),
             target_branch: default_target_branch(),
             target_branches: std::collections::HashMap::new(),
             infer_target_from_checkout_ref: false,
@@ -585,6 +594,7 @@ impl Default for CreatePrConfig {
             work_items: Vec::new(),
             fallback_record_branch: true,
             include_stats: true,
+            max: None,
         }
     }
 }
@@ -700,6 +710,11 @@ impl Executor for CreatePrResult {
             Err(failure) => return Ok(failure),
         };
         debug!("Resolved repository ID: {}", target.repository_locator());
+        if let Err(failure) = super::pr_common::validate_pr_repository_policy(
+            &target, &config.allowed_repositories, ctx,
+        ) {
+            return Ok(failure);
+        }
         if ctx.has_resolved_pull_request(&self.temporary_id)? {
             return Ok(ExecutionResult::failure(format!(
                 "temporary_id '{}' was already used in this run",
@@ -3529,6 +3544,7 @@ index 0000000..abcdefg
             ado_organization: Some("test".to_string()),
             ado_project: Some("TestProject".to_string()),
             ado_project_id: None,
+            pipeline_collection_uri: None,
             access_token: Some("fake-token".to_string()),
             github_token: None,
             github_actor_login: None,
@@ -3565,6 +3581,8 @@ index 0000000..abcdefg
             resolved_pull_requests: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            budget_groups: Default::default(),
+            triggering_pr: Default::default(),
             triggered_by_build_id: None,
             triggered_by_definition_name: None,
             triggered_by_build_number: None,

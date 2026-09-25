@@ -20,8 +20,9 @@ This suite removes the LLM from the loop. For every ADO-write safe output it:
 4. asserts the effect via the ADO REST API,
 5. cleans up every object it created,
 
-and, on any failure, files a GitHub issue on the configured issue repository
-and fails the build. AgentPlayground currently uses
+and fails the build on any failure. When issue filing is enabled (the scheduled
+run default), it also files a GitHub issue on the configured repository.
+AgentPlayground currently uses
 `jamesadevine/ado-aw-issues` because a canonical-repository credential is not
 available.
 
@@ -42,6 +43,38 @@ gitignored, non-root path) and is **deliberately excluded** from the released
 `src/__tests__/bundle-coverage.test.ts`).
 
 ## Coverage
+
+### Focused diagnostic runs
+
+Queue the existing pipeline with `scenarios` set to comma-separated exact IDs
+(for example `add-pull-request-labels`), `requireSelected: true`, and
+`fileFailureIssue: false`. Unknown selections fail rather than running a
+different suite. Required reviewer/cross-org inputs are checked before scenario
+resources are created; a required scenario that skips is not a pass.
+
+The harness environment equivalents are `EXECUTOR_E2E_SCENARIOS`,
+`EXECUTOR_E2E_REQUIRE_SELECTED`, and `EXECUTOR_E2E_FILE_FAILURE_ISSUE`.
+`EXECUTOR_E2E_RESULTS_PATH` writes a structured report with the candidate commit,
+selected IDs, outcomes and cleanup failures. The pipeline publishes it as
+`executor-e2e-results` even when scenarios fail. Normal scheduled runs retain
+their existing failure-issue behavior unless explicitly disabled.
+
+Negative scenarios may provide `assertFailure` to verify postconditions after
+the expected status/error matches (for example, that a rejected description
+left the PR unchanged). A matching error alone does not bypass that hook.
+Ordinary `assert` and `postExecute` remain success-only, and cleanup still runs
+after a failed assertion. An unexpected success is a scenario failure.
+When `priorEntries` repeat the primary tool, the harness selects the primary
+record after those occurrences rather than reusing the first matching record.
+
+The PR family includes focused content updates (including the exact
+4,000-character description boundary), abandonment with comment verification,
+and create-then-follow-up reviewer/content scenarios. Reviewer handoffs use
+`add-pull-request-reviewers`; content handoffs use `update-pull-request`. Old
+configuration names are covered by compiler migration tests, not runtime aliases.
+The compiled `pr-tools-preview` smoke exercises focused MCP discovery and
+staged proposal schemas without writing to an existing PR; live executor
+scenarios are responsible for checking actual service mutations.
 
 ### Offline PR payload contract
 
@@ -67,6 +100,39 @@ scenario code or the relevant Rust schemas, validators, or executor change.
 
 ### Live coverage
 
+Owned-comment scenarios seed through the real executor with controlled
+previous-run metadata, then exercise update, non-destructive supersession,
+manual-edit refusal and reply preservation. Same-actor replies are deliberately
+protected too: a PAT identity cannot distinguish a human reply from automation.
+These are real-service lifecycle checks with synthetic prior-run provenance,
+not evidence that build `1` actually created the seed.
+
+Inline cases cover current right-side content, a deleted left-side file on
+disposable source/target branches, and stale-head rejection. Review-batch cases
+verify distinct inline/summary threads, non-voting behavior, and zero comment
+writes when the last finding is invalid or nested-comment authority is absent.
+
+The `pr-api-draft-publication`, `pr-api-owned-comments`,
+`pr-api-label-replacement` and `pr-api-push-concurrency` scenarios probe ADO
+platform prerequisites directly on harness-owned disposable PRs. They use a
+`noop` executor record and are **not** evidence that a corresponding safe-output
+executor has been implemented. Their assertions require persisted read-back,
+round-tripped thread ownership/iteration context, and rejection of an exact
+stale source-head push without changing the branch.
+
+The PR matrix also registers Unicode boundary/composed-body rejection cases
+and optional cross-organization variants of content editing, reviewers, labels,
+review submission, auto-complete and abandonment. These require the existing
+cross-org variables below; selecting them with `requireSelected: true` fails
+preflight rather than counting missing infrastructure as a pass.
+Auto-complete scenarios use only disposable target branches.
+
+Label preservation is read through the dedicated PR labels-list API. General
+PR metadata responses can omit labels and are not used as an empty-set oracle.
+`update-pull-request-required-labels` and `abandon-pull-request-required-labels`
+seed and independently verify a required label before exercising the production
+policy check and the final mutation. They do not depend on embedded PR labels.
+
 All deterministically-assertable ADO-write safe outputs plus the flagship
 `create-pull-request`, and the four signal-only tools:
 
@@ -81,8 +147,8 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
   two rendering-fidelity scenarios (see [Rendering
   fidelity](#rendering-fidelity) below)
 - **Wiki:** `create-wiki-page`, `update-wiki-page`
-- **PR:** `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`,
-  `submit-pr-review`, `update-pr`
+- **PR:** `add-pull-request-comment`, `reply-to-pull-request-comment`, `resolve-pull-request-thread`,
+  `submit-pull-request-review`, `update-pull-request`
 - **Git:** `create-branch`, `create-git-tag`
 - **Cross-org Git (optional infrastructure):** `create-branch-cross-org`,
   `create-git-tag-cross-org`, and `create-pull-request-cross-org`

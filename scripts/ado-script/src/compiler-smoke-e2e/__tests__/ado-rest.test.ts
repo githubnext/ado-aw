@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { AdoRest, redactToken } from "../ado-rest.js";
+import { AdoHttpError, AdoRest, redactToken, transientReadRetryAfter } from "../ado-rest.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -74,6 +74,63 @@ describe("AdoRest.getArtifact", () => {
     });
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
     await rest.getArtifact(100, "a");
+  });
+});
+
+describe("build status read failures", () => {
+  it.each([408, 429, 500, 502, 503, 504])("preserves transient HTTP %i and Retry-After without retrying the request", async (status) => {
+    const fetchImpl = vi.fn(async () => new Response("try later", {
+      status, headers: { "retry-after": "2" },
+    }));
+    const error = await makeRest(fetchImpl).getBuild(1).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(AdoHttpError);
+    expect(error).toMatchObject({ status, retryAfterMs: 2_000 });
+    expect(transientReadRetryAfter(error)).toBe(2_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([400, 401, 403, 404, 409, 422])("never retries permanent HTTP %i", async (status) => {
+    const error = await makeRest(vi.fn(async () => new Response("rejected", {
+      status, headers: { "retry-after": "2" },
+    }))).getBuild(1).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(AdoHttpError);
+    expect(transientReadRetryAfter(error)).toBeUndefined();
+  });
+
+  it("distinguishes socket errors from programming and malformed-response errors", () => {
+    for (const error of [
+      new TypeError("fetch failed", { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) }),
+      new DOMException("request timed out", "TimeoutError"),
+    ]) expect(transientReadRetryAfter(error)).toBe(0);
+    for (const error of [
+      new TypeError("fetch failed"),
+      new TypeError("bad URL", { cause: Object.assign(new Error("bad URL"), { code: "ERR_INVALID_URL" }) }),
+      new SyntaxError("truncated JSON"),
+      new Error("transient network error"),
+    ]) expect(transientReadRetryAfter(error)).toBeUndefined();
+  });
+
+  it.each([{}, [], "invalid", { id: 2, status: "completed" }, { id: 1 }, { id: 1, status: "unknown" }])("rejects malformed build summaries %j", async (body) => {
+    const error = await makeRest(vi.fn(async () => jsonResponse(200, body)))
+      .getBuild(1).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(Error);
+    expect(transientReadRetryAfter(error)).toBeUndefined();
+  });
+
+  it("leaves malformed JSON non-retryable", async () => {
+    const fetchImpl = vi.fn(async () => new Response('{"id":1,', { status: 200 }));
+    const error = await makeRest(fetchImpl).getBuild(1).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(SyntaxError);
+    expect(transientReadRetryAfter(error)).toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a mutating request even when its HTTP error is transient", async () => {
+    const fetchImpl = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    await expect(makeRest(fetchImpl).queueBuild(1, {
+      sourceBranch: "refs/heads/x", sourceVersion: "sha",
+    })).rejects.toThrow(AdoHttpError);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 

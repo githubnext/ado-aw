@@ -14,6 +14,10 @@
 # files so their trigger blocks cannot leak into one another.
 
 trigger: none
+parameters:
+  - name: caseIds
+    type: string
+    default: ""
 
 pr:
   branches:
@@ -42,6 +46,8 @@ pool:
 
 variables:
   - template: orchestrator-variables.yml
+  - name: SMOKE_CASE_IDS
+    value: ${{ parameters.caseIds }}
 
 jobs:
   - job: CandidateSmoke

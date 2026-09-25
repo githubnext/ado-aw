@@ -806,6 +806,8 @@ struct ResolvedExecutionConfig {
     #[serde(default)]
     tool_configs: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
+    budget_groups: compile::pr_migration::BudgetGroups,
+    #[serde(default)]
     repositories: Vec<ResolvedExecutionRepository>,
     #[serde(default)]
     checkout: Vec<String>,
@@ -890,6 +892,7 @@ async fn build_execution_context_from_resolved(
     }
     ctx.working_directory = safe_output_dir.to_path_buf();
     ctx.tool_configs = config.tool_configs.clone();
+    ctx.budget_groups = config.budget_groups.clone();
     crate::safe_outputs::configure_repository_write_context(
         &mut ctx,
         &config.checkout,
@@ -984,27 +987,10 @@ async fn run_execute(options: RunExecuteOptions) -> Result<()> {
     }
 
     let source = source.context("--source or --resolved-config is required for execution")?;
-    // Read and parse source markdown to get tool configs.
-    // Use parse_markdown_detailed so Stage 3 benefits from in-memory
-    // codemod fixes when a source has deprecated shapes. Stage 3 must
-    // NOT rewrite the source file (the executor's working tree is not
-    // the source-of-truth tree), so we just emit a log warning.
-    let content = tokio::fs::read_to_string(&source)
+    // Match compile's effective imported policy without rewriting source/cache files.
+    let mut front_matter = compile::prepare_source_front_matter(&source)
         .await
-        .with_context(|| format!("Failed to read source file: {}", source.display()))?;
-
-    let parsed = compile::parse_markdown_detailed(&content)
-        .with_context(|| format!("Failed to parse source file: {}", source.display()))?;
-
-    if parsed.codemods.changed() {
-        log::warn!(
-            "front matter at {} contains deprecated shapes; running with in-memory codemod fixes applied. Run `ado-aw compile {}` to update the source.",
-            source.display(),
-            source.display(),
-        );
-    }
-
-    let mut front_matter = parsed.front_matter;
+        .with_context(|| format!("Failed to prepare source file: {}", source.display()))?;
 
     // Sanitize before lowering repos, mirroring compile_pipeline_inner
     // and check_pipeline so unsanitized fields never flow into the
@@ -1033,7 +1019,7 @@ async fn run_execute(options: RunExecuteOptions) -> Result<()> {
         ado_project,
         dry_run,
     )
-    .await;
+    .await?;
 
     let results = execute::execute_safe_outputs(&safe_output_dir, &ctx, &filter).await?;
 
@@ -1063,8 +1049,11 @@ async fn build_execution_context(
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
-) -> crate::safe_outputs::ExecutionContext {
-    let mut ctx = crate::safe_outputs::ExecutionContext::default();
+) -> Result<crate::safe_outputs::ExecutionContext> {
+    let mut ctx = crate::safe_outputs::ExecutionContext {
+        budget_groups: compile::pr_migration::budget_groups(&front_matter)?,
+        ..Default::default()
+    };
     // Only override env-derived values when CLI args are explicitly provided;
     // otherwise keep the defaults from SYSTEM_TEAMFOUNDATIONCOLLECTIONURI /
     // SYSTEM_TEAMPROJECT that ExecutionContext::default() already resolved.
@@ -1155,7 +1144,7 @@ async fn build_execution_context(
         log::debug!("No OTel stats file found at {}", otel_path.display());
     }
 
-    ctx
+    Ok(ctx)
 }
 
 async fn process_cache_memory(

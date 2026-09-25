@@ -2,22 +2,24 @@
 
 use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
-use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::PATH_SEGMENT;
+use super::pr_common::{PullRequestReference, describe_pr_reference, repository_api_base, resolve_configured_pr_target, validate_reference};
+use super::{ToolResult, authenticate_ado_request};
 use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate};
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
+use crate::sanitize::{SanitizeContent, sanitize_markdown, sanitize_config};
 use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use anyhow::{Context, ensure};
 
 /// Parameters for replying to an existing review comment thread on a pull request
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReplyToPrCommentParams {
     /// The pull request ID containing the thread
-    pub pull_request_id: i32,
+    #[serde(default)]
+    pub pull_request_id: Option<PullRequestReference>,
 
     /// The thread ID to reply to
     pub thread_id: i32,
@@ -27,22 +29,21 @@ pub struct ReplyToPrCommentParams {
 
     /// Repository alias: "self" for pipeline repo, or an alias from the checkout list.
     /// Defaults to "self" if omitted.
-    #[serde(default = "default_repository")]
+    #[serde(default)]
     pub repository: Option<String>,
-}
-
-fn default_repository() -> Option<String> {
-    Some("self".to_string())
 }
 
 impl Validate for ReplyToPrCommentParams {
     fn validate(&self) -> anyhow::Result<()> {
-        ensure!(self.pull_request_id > 0, "pull_request_id must be positive");
+        if let Some(reference) = &self.pull_request_id {
+            validate_reference(reference)?;
+        }
         ensure!(self.thread_id > 0, "thread_id must be positive");
         ensure!(
             self.content.len() >= 10,
             "content must be at least 10 characters"
         );
+        super::pr_comments::validate_body(&self.content)?;
         if let Some(repository) = &self.repository {
             reject_pipeline_injection(repository, "repository")?;
         }
@@ -51,12 +52,14 @@ impl Validate for ReplyToPrCommentParams {
 }
 
 tool_result! {
-    name = "reply-to-pr-comment",
+    name = "reply-to-pull-request-comment",
     write = true,
     params = ReplyToPrCommentParams,
     /// Result of replying to a review comment thread on a pull request
+    #[serde(deny_unknown_fields)]
     pub struct ReplyToPrCommentResult {
-        pull_request_id: i32,
+        #[serde(default)]
+        pull_request_id: Option<PullRequestReference>,
         thread_id: i32,
         content: String,
         repository: Option<String>,
@@ -65,24 +68,37 @@ tool_result! {
 
 impl SanitizeContent for ReplyToPrCommentResult {
     fn sanitize_content_fields(&mut self) {
-        self.content = sanitize_text(&self.content);
+        self.content = sanitize_markdown(&self.content);
         self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
 
-/// Configuration for the reply-to-pr-comment tool (specified in front matter)
+/// Configuration for the reply-to-pull-request-comment tool (specified in front matter)
 ///
 /// Example front matter:
 /// ```yaml
 /// safe-outputs:
-///   reply-to-pr-comment:
+///   reply-to-pull-request-comment:
 ///     comment-prefix: "[Agent] "
 ///     allowed-repositories:
 ///       - self
 ///       - other-repo
 /// ```
 #[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplyToPrCommentConfig {
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "target-repo")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
+    #[serde(default, rename = "allow-temporary-ids")]
+    #[sanitize_config(skip)]
+    pub allow_temporary_ids: bool,
     /// Prefix prepended to all replies (e.g., `"[Agent] "`)
     #[serde(default, rename = "comment-prefix")]
     pub comment_prefix: Option<String>,
@@ -91,94 +107,60 @@ pub struct ReplyToPrCommentConfig {
     /// If empty, all repositories in the checkout list (plus "self") are allowed.
     #[serde(default, rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
 }
 
 #[async_trait::async_trait]
 impl Executor for ReplyToPrCommentResult {
     fn dry_run_summary(&self) -> String {
         format!(
-            "reply to thread #{} on PR #{}",
-            self.thread_id, self.pull_request_id
+            "reply to thread #{} on {}",
+            self.thread_id, describe_pr_reference(self.pull_request_id.as_ref())
         )
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
-        info!(
-            "Replying to PR #{} thread #{}: {} chars",
-            self.pull_request_id,
-            self.thread_id,
-            self.content.len()
-        );
-        debug!(
-            "reply-to-pr-comment: pr_id={}, thread_id={}",
-            self.pull_request_id, self.thread_id
-        );
-
-        let org_url = ctx
-            .ado_org_url
-            .as_ref()
-            .context("AZURE_DEVOPS_ORG_URL not set")?;
-        let project = ctx
-            .ado_project
-            .as_ref()
-            .context("SYSTEM_TEAMPROJECT not set")?;
+        if let Err(error) = (ReplyToPrCommentParams {
+            pull_request_id: self.pull_request_id.clone(),
+            thread_id: self.thread_id,
+            content: self.content.clone(),
+            repository: self.repository.clone(),
+        }).validate() {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         let token = ctx
             .access_token
             .as_ref()
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
-        debug!("ADO org: {}, project: {}", org_url, project);
 
-        let config: ReplyToPrCommentConfig = ctx.get_tool_config("reply-to-pr-comment")?;
+        let config: ReplyToPrCommentConfig =
+            ctx.get_tool_config("reply-to-pull-request-comment")?;
         debug!("Config: {:?}", config);
 
-        let repository = self.repository.as_deref().unwrap_or("self");
-
-        // Validate repository against allowed-repositories config
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&repository.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                repository
-            )));
-        }
-
-        // Determine the repository name for the API call
-        let repo_name = if repository == "self" || repository.is_empty() {
-            ctx.repository_name
-                .as_ref()
-                .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
-                .clone()
-        } else {
-            match crate::safe_outputs::lookup_allowed_repository(
-                repository,
-                &ctx.allowed_repositories,
-            ) {
-                Some(name) => name.clone(),
-                None => {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Repository alias '{}' not found in allowed repositories",
-                        repository
-                    )));
-                }
-            }
+        super::pr_common::validate_temporary_opt_in(self.pull_request_id.as_ref(), config.allow_temporary_ids)?;
+        let (pull_request_id, target) = match resolve_configured_pr_target(
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+        ).await? {
+            Ok(target) => target,
+            Err(failure) => return Ok(failure),
         };
+        let repo_name = target.qualified_repository();
+        let project = &target.project;
 
         // Build comment content with optional prefix
         let comment_body = match &config.comment_prefix {
             Some(prefix) => format!("{}{}", prefix, self.content),
             None => self.content.clone(),
         };
+        super::pr_comments::validate_body(&comment_body)?;
 
         // Build the API URL for adding a comment to an existing thread
         let url = format!(
-            "{}/{}/_apis/git/repositories/{}/pullRequests/{}/threads/{}/comments?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            utf8_percent_encode(&repo_name, PATH_SEGMENT),
-            self.pull_request_id,
+            "{}/pullRequests/{}/threads/{}/comments?api-version=7.1",
+            repository_api_base(&target),
+            pull_request_id,
             self.thread_id,
         );
         debug!("API URL: {}", url);
@@ -195,12 +177,10 @@ impl Executor for ReplyToPrCommentResult {
 
         info!(
             "Sending reply to PR #{} thread #{}",
-            self.pull_request_id, self.thread_id
+            pull_request_id, self.thread_id
         );
-        let response = client
-            .post(&url)
+        let response = authenticate_ado_request(client.post(&url), token, ctx.write_connection_type)
             .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
             .json(&request_body)
             .send()
             .await
@@ -212,21 +192,22 @@ impl Executor for ReplyToPrCommentResult {
                 .await
                 .context("Failed to parse response JSON")?;
 
-            let comment_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let comment_id = body.get("id").and_then(|v| v.as_i64()).filter(|id| *id > 0)
+                .context("Reply response missing a positive comment ID")?;
 
             info!(
                 "Reply added to PR #{} thread #{}: comment #{}",
-                self.pull_request_id, self.thread_id, comment_id
+                pull_request_id, self.thread_id, comment_id
             );
 
             Ok(ExecutionResult::success_with_data(
                 format!(
                     "Added reply #{} to PR #{} thread #{}",
-                    comment_id, self.pull_request_id, self.thread_id
+                    comment_id, pull_request_id, self.thread_id
                 ),
                 serde_json::json!({
                     "comment_id": comment_id,
-                    "pull_request_id": self.pull_request_id,
+                    "pull_request_id": pull_request_id,
                     "thread_id": self.thread_id,
                     "repository": repo_name,
                     "project": project,
@@ -241,7 +222,7 @@ impl Executor for ReplyToPrCommentResult {
 
             Ok(ExecutionResult::failure(format!(
                 "Failed to reply to PR #{} thread #{} (HTTP {}): {}",
-                self.pull_request_id, self.thread_id, status, error_body
+                pull_request_id, self.thread_id, status, error_body
             )))
         }
     }
@@ -255,23 +236,23 @@ mod tests {
     fn test_params_deserializes() {
         let json = r#"{"pull_request_id": 42, "thread_id": 7, "content": "This is a reply to the review comment."}"#;
         let params: ReplyToPrCommentParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.pull_request_id, 42);
+        assert_eq!(params.pull_request_id, Some(PullRequestReference::Number(42)));
         assert_eq!(params.thread_id, 7);
         assert_eq!(params.content, "This is a reply to the review comment.");
-        assert_eq!(params.repository, Some("self".to_string()));
+        assert_eq!(params.repository, None);
     }
 
     #[test]
     fn test_params_converts_to_result() {
         let params = ReplyToPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             content: "This is a test reply with enough characters.".to_string(),
             repository: Some("self".to_string()),
         };
         let result: ReplyToPrCommentResult = params.try_into().unwrap();
-        assert_eq!(result.name, "reply-to-pr-comment");
-        assert_eq!(result.pull_request_id, 42);
+        assert_eq!(result.name, "reply-to-pull-request-comment");
+        assert_eq!(result.pull_request_id, Some(PullRequestReference::Number(42)));
         assert_eq!(result.thread_id, 7);
         assert_eq!(
             result.content,
@@ -282,7 +263,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_zero_pr_id() {
         let params = ReplyToPrCommentParams {
-            pull_request_id: 0,
+            pull_request_id: Some(PullRequestReference::Number(0)),
             thread_id: 7,
             content: "This is a valid reply body text.".to_string(),
             repository: Some("self".to_string()),
@@ -290,7 +271,7 @@ mod tests {
         let result: Result<ReplyToPrCommentResult, _> = params.try_into();
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("pull_request_id must be positive"),
+            err.to_string().contains("pull_request_id must be a positive integer"),
             "unexpected error: {err}"
         );
     }
@@ -298,7 +279,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_zero_thread_id() {
         let params = ReplyToPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 0,
             content: "This is a valid reply body text.".to_string(),
             repository: Some("self".to_string()),
@@ -314,7 +295,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_short_content() {
         let params = ReplyToPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             content: "Too short".to_string(),
             repository: Some("self".to_string()),
@@ -331,7 +312,7 @@ mod tests {
     #[test]
     fn test_validation_rejects_repository_pipeline_command() {
         let params = ReplyToPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             content: "This is a valid reply body text.".to_string(),
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),
@@ -351,7 +332,7 @@ mod tests {
     #[test]
     fn test_result_serializes_correctly() {
         let params = ReplyToPrCommentParams {
-            pull_request_id: 42,
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             content: "A reply body that is definitely longer than ten characters.".to_string(),
             repository: Some("self".to_string()),
@@ -359,7 +340,7 @@ mod tests {
         let result: ReplyToPrCommentResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
 
-        assert!(json.contains(r#""name":"reply-to-pr-comment""#));
+        assert!(json.contains(r#""name":"reply-to-pull-request-comment""#));
         assert!(json.contains(r#""pull_request_id":42"#));
         assert!(json.contains(r#""thread_id":7"#));
     }
@@ -387,8 +368,8 @@ allowed-repositories:
     #[test]
     fn test_sanitize_content_neutralizes_repository_pipeline_command() {
         let mut result = ReplyToPrCommentResult {
-            name: "reply-to-pr-comment".to_string(),
-            pull_request_id: 42,
+            name: "reply-to-pull-request-comment".to_string(),
+            pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             content: "This is a valid reply body text.".to_string(),
             repository: Some("##vso[task.setvariable variable=x]y".to_string()),

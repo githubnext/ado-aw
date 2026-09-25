@@ -74,6 +74,40 @@
       "source": "tests/smoke/multi-repo.md"
     },
     {
+      "id": "pr-tools-preview",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/safe-outputs/pr-tools-preview.md"
+    },
+    {
+      "id": "pr-synthetic-auto",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/safe-outputs/pr-pipeline-boundary.md",
+      "prBoundary": "automatic",
+      "assertions": {"requiredBuildTags": ["ado-aw-pr-boundary-{buildId}"]}
+    },
+    {
+      "id": "pr-synthetic-rejected",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/safe-outputs/pr-pipeline-boundary.md",
+      "prBoundary": "rejected",
+      "assertions": {"requiredBuildTags": ["ado-aw-pr-boundary-{buildId}"]}
+    },
+    {
+      "id": "pr-synthetic-approved",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/safe-outputs/pr-pipeline-boundary.md",
+      "prBoundary": "approved",
+      "assertions": {"requiredBuildTags": ["ado-aw-pr-boundary-{buildId}"]}
+    },
+    {
       "id": "janitor",
       "lane": "agentic",
       "kind": "compiled",

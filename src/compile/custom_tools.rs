@@ -321,6 +321,7 @@ pub fn resolved_execution_config_json(
     serde_json::to_string_pretty(&json!({
         "name": front_matter.name,
         "toolConfigs": tool_configs,
+        "budgetGroups": super::pr_migration::budget_groups(front_matter)?,
         "customTools": custom_tools,
         "repositories": repositories,
         "checkout": front_matter.checkout,

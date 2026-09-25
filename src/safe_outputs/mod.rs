@@ -35,6 +35,7 @@ pub const NON_MCP_SAFE_OUTPUT_KEYS: &[&str] = &[];
 /// deliberately absent from [`ALL_KNOWN_SAFE_OUTPUTS`] (they have no tool type)
 /// and must be explicitly allowed in `validate_safe_outputs_keys`.
 pub const SAFE_OUTPUT_CONFIG_KEYS: &[&str] = &[
+    "budget-groups",
     "report-failure-as-work-item",
     "github-token",
     "github-api-url",
@@ -46,6 +47,15 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 
 /// Public tools exposed only when explicitly configured in `safe-outputs:`.
 pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
+    AddPrReviewersResult,
+    AddPrLabelsResult,
+    RemovePullRequestLabelsResult,
+    ReplacePullRequestLabelResult,
+    MarkPullRequestReadyResult,
+    UpdatePullRequestCommentResult,
+    SetPrAutoCompleteResult,
+    UpdatePullRequestResult,
+    AbandonPullRequestResult,
     AssignWorkItemResult,
     CreateGithubIssueResult,
     SetGithubIssueTypeResult,
@@ -84,7 +94,15 @@ pub const ALL_KNOWN_SAFE_OUTPUTS: &[&str] = all_safe_output_names![
     CreateGitTagResult,
     AddBuildTagResult,
     CreateBranchResult,
-    UpdatePrResult,
+    AddPrReviewersResult,
+    AddPrLabelsResult,
+    RemovePullRequestLabelsResult,
+    ReplacePullRequestLabelResult,
+    MarkPullRequestReadyResult,
+    UpdatePullRequestCommentResult,
+    SetPrAutoCompleteResult,
+    AbandonPullRequestResult,
+    UpdatePullRequestResult,
     UploadBuildAttachmentResult,
     UploadPipelineArtifactResult,
     UploadWorkitemAttachmentResult,
@@ -214,6 +232,7 @@ pub(crate) async fn resolve_wiki_branch(
 /// Azure DevOps repository names are case-insensitive, so the name-based
 /// fallbacks match case-insensitively. Returns the resolved alias key only when
 /// the match is unique; ambiguous names are rejected.
+#[cfg(test)]
 pub(crate) fn lookup_allowed_repository_alias<'a>(
     input: &str,
     allowed_repositories: &'a std::collections::HashMap<String, String>,
@@ -264,6 +283,7 @@ pub(crate) fn lookup_allowed_repository_alias<'a>(
 /// Azure DevOps repository names are case-insensitive, so the trailing-name fallback
 /// matches case-insensitively. Returns the resolved ADO repo name (the map value) on
 /// success, or `None` if no entry matches.
+#[cfg(test)]
 pub(crate) fn lookup_allowed_repository<'a>(
     input: &str,
     allowed_repositories: &'a std::collections::HashMap<String, String>,
@@ -302,7 +322,7 @@ pub(crate) fn input_refers_to_self(input: &str, ctx: &ExecutionContext) -> bool 
 ///
 /// **Idempotent**: passing an already-canonical alias returns it unchanged
 /// (`"self"` short-circuits on [`input_refers_to_self`]; an alias key hits the
-/// exact-key arm of [`lookup_allowed_repository_alias`]), so callers may
+/// exact-key lookup), so callers may
 /// canonicalize defensively without changing the result.
 ///
 /// **Precedence**: literal `"self"`/empty selects self; an exact checkout alias
@@ -558,7 +578,7 @@ pub(crate) fn resolve_repository_write_target(
 ///
 /// `repository` may be **either** a raw agent-supplied selector or an alias
 /// already canonicalized by [`canonical_repository_alias`]; both are supported
-/// because that helper is idempotent. `add-pr-comment` passes the raw value
+/// because that helper is idempotent. `add-pull-request-comment` passes the raw value
 /// straight from the agent, while `create-pull-request` canonicalizes first so
 /// it can reuse the alias for target-branch resolution. Callers must not build
 /// the path themselves — routing every selector through here is what keeps
@@ -587,6 +607,7 @@ pub(crate) fn resolve_repository_checkout_dir(
 /// against the trailing repo-name part of either `ctx.repository_name` or any
 /// configured allowed repository. See [`lookup_allowed_repository`] for the
 /// matching rules used against `ctx.allowed_repositories`.
+#[cfg(test)]
 pub(crate) fn resolve_repo_name(
     repo_alias: Option<&str>,
     ctx: &ExecutionContext,
@@ -763,9 +784,19 @@ macro_rules! impl_temporary_reference_deserialize {
     };
 }
 
+mod abandon_pull_request;
 mod add_build_tag;
 mod add_github_issue_labels;
 mod add_pr_comment;
+mod add_pr_labels;
+mod pr_labels;
+pub(crate) mod pr_comments;
+pub(crate) mod pr_inline;
+mod remove_pull_request_labels;
+mod replace_pull_request_label;
+mod mark_pull_request_as_ready_for_review;
+mod update_pull_request_comment;
+mod add_pr_reviewers;
 mod assign_github_issue_milestone;
 mod assign_github_issue_to_user;
 mod assign_work_item;
@@ -786,6 +817,8 @@ mod link_work_items;
 mod missing_data;
 mod missing_tool;
 mod noop;
+pub(crate) mod pr_common;
+pub(crate) mod pr_mutations;
 mod queue_build;
 mod remove_github_issue_labels;
 mod reply_to_pr_comment;
@@ -794,19 +827,28 @@ mod resolve_pr_thread;
 mod result;
 mod set_github_issue_field;
 mod set_github_issue_type;
+mod set_pr_auto_complete;
 mod submit_pr_review;
 mod unassign_github_issue_from_user;
 mod update_github_issue;
 mod update_pr;
+mod update_pull_request;
 mod update_wiki_page;
 mod update_work_item;
 mod upload_build_attachment;
 mod upload_pipeline_artifact;
 mod upload_workitem_attachment;
 
+pub use abandon_pull_request::*;
 pub use add_build_tag::*;
 pub use add_github_issue_labels::*;
 pub use add_pr_comment::*;
+pub use add_pr_labels::*;
+pub use remove_pull_request_labels::*;
+pub use replace_pull_request_label::*;
+pub use mark_pull_request_as_ready_for_review::*;
+pub use update_pull_request_comment::*;
+pub use add_pr_reviewers::*;
 pub use assign_github_issue_milestone::*;
 pub use assign_github_issue_to_user::*;
 pub use assign_work_item::*;
@@ -838,10 +880,13 @@ pub use result::{
 };
 pub use set_github_issue_field::*;
 pub use set_github_issue_type::*;
+pub use set_pr_auto_complete::*;
 pub use submit_pr_review::*;
 pub use unassign_github_issue_from_user::*;
 pub use update_github_issue::*;
+#[cfg(test)]
 pub use update_pr::*;
+pub use update_pull_request::*;
 pub use update_wiki_page::*;
 pub use update_work_item::*;
 pub use upload_build_attachment::*;
@@ -901,6 +946,9 @@ mod tests {
             assert!(CreatePrResult::REQUIRES_WRITE);
         }
         const {
+            assert!(AbandonPullRequestResult::REQUIRES_WRITE);
+        }
+        const {
             assert!(CreateWikiPageResult::REQUIRES_WRITE);
         }
         const {
@@ -926,6 +974,9 @@ mod tests {
         }
         const {
             assert!(UpdatePrResult::REQUIRES_WRITE);
+        }
+        const {
+            assert!(UpdatePullRequestResult::REQUIRES_WRITE);
         }
         const {
             assert!(UploadBuildAttachmentResult::REQUIRES_WRITE);

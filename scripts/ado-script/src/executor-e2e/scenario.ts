@@ -19,7 +19,7 @@ export interface ExecutedRecord {
   /** "succeeded" | "failed" | "warning" | "budget_exhausted". */
   status: string;
   context?: string | null;
-  /** Present only on success; carries the tool's result data. */
+  /** Tool result data, including partial/uncertain mutations on failure. */
   result?: Record<string, unknown> | null;
   /** Present only on non-success; the failure message. */
   error?: string | null;
@@ -191,6 +191,13 @@ export interface Scenario<State = unknown> {
     readonly status?: string;
     readonly error: RegExp;
   };
+  /** Verify postconditions after a matching expected failure, such as no mutation. */
+  assertFailure?(
+    ctx: ScenarioContext,
+    state: State,
+    record: ExecutedRecord,
+    records: ExecutedRecord[],
+  ): Promise<void>;
   /**
    * Assert the ADO side-effect actually happened. Throw on failure.
    *
@@ -231,6 +238,7 @@ export interface ScenarioResult {
   durationMs: number;
   /** True when the scenario was skipped for a missing precondition (not a failure). */
   skipped?: boolean;
+  cleanupError?: string;
 }
 
 /**

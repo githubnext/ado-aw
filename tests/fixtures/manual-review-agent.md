@@ -6,7 +6,7 @@ on:
 safe-outputs:
   require-approval: true
   create-pull-request: {}
-  add-pr-comment:
+  add-pull-request-comment:
     require-approval: false
 ---
 

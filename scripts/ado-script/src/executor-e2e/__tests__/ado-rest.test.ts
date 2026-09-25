@@ -14,6 +14,64 @@ function stubFetch(responder: (url: string) => Response): ReturnType<typeof vi.f
   return fetchMock;
 }
 
+describe("AdoRest.listPullRequestLabels", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uses authoritative labels endpoint and preserves every returned label", async () => {
+    const fetch = stubFetch((url) => url.includes("/labels?")
+      ? Response.json({ count: 2, value: [{name: "existing-label"}, {name: "new-label"}] })
+      : Response.json({ pullRequestId: 42, title: "PR without labels property" }));
+    const labels = await new AdoRest(options).listPullRequestLabels("repo name", 42);
+    expect(labels.map((label) => label.name)).toEqual(["existing-label", "new-label"]);
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "https://dev.azure.com/org/My%20Project/_apis/git/repositories/repo%20name/pullRequests/42/labels?api-version=7.1",
+    );
+  });
+
+  describe("AdoRest.abandonPullRequest cleanup", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it.each(["active", "abandoned", "missing"])("cleans up a %s PR without repeating abandonment", async (status) => {
+      const fetch = stubFetch(() => status === "missing"
+        ? new Response("", { status: 404 })
+        : Response.json({ status }));
+      await new AdoRest(options).abandonPullRequest("repo", 42);
+      expect(fetch).toHaveBeenCalledTimes(status === "active" ? 2 : 1);
+      if (status === "active") {
+        expect(fetch.mock.calls[1]?.[1]).toMatchObject({
+          method: "PATCH", body: JSON.stringify({ status: "abandoned" }),
+        });
+      }
+    });
+
+    it.each([{}, { status: "completed" }, { status: "unknown" }])(
+      "does not silently accept an unexpected PR state %j", async (state) => {
+        const fetch = stubFetch(() => Response.json(state));
+        await expect(new AdoRest(options).abandonPullRequest("repo", 42)).rejects.toThrow("unexpected status");
+        expect(fetch).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("retains cleanup read errors without attempting another mutation", async () => {
+      const fetch = stubFetch(() => new Response("forbidden", { status: 403 }));
+      await expect(new AdoRest(options).abandonPullRequest("repo", 42)).rejects.toThrow("403");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each([{}, { value: null }, { value: [null] }, { value: [{name: 1}] }])(
+    "does not report malformed %j as no labels", async (response) => {
+      stubFetch(() => Response.json(response));
+      await expect(new AdoRest(options).listPullRequestLabels("repo", 42)).rejects.toThrow(/missing value|invalid label/);
+    },
+  );
+
+  it("surfaces API failures instead of reporting missing labels", async () => {
+    stubFetch(() => new Response("forbidden", { status: 403 }));
+    await expect(new AdoRest(options).listPullRequestLabels("repo", 42)).rejects.toThrow("403");
+  });
+});
+
 describe("AdoRest.workItemTypeExists", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
