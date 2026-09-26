@@ -22,7 +22,7 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
-| `model` | string | *(none)* | AI model to use (e.g., `gpt-5-mini`). When omitted, the compiler does not emit `--model` and the Copilot CLI chooses its own default. When set, the compiler passes the value directly to the Copilot CLI `--model` flag — any model identifier the Copilot CLI accepts is valid. |
+| `model` | string | *(none)* | AI model to use (e.g., `gpt-5-mini`). When set, the compiler passes the value directly to the Copilot CLI `--model` flag. When omitted, runtime model controls can select a model; if no runtime control is set, the compiler omits `--model` and the Copilot CLI chooses its own default. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 | `version` | string | *(none)* | Engine CLI version to install (e.g., `"1.0.70"`, `"latest"`). Overrides the pinned `COPILOT_CLI_VERSION`. Set to `"latest"` to use the newest available version. |
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
@@ -33,6 +33,34 @@ engine:
 | `command` | string | *(none)* | Custom engine executable path (skips the default engine binary installation — NuGet for `target: 1es`, GitHub Releases for all other targets). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
 | `github-app-token` | map | *(none)* | GitHub App-backed Copilot engine authentication. When set, the compiler mints (and, by default, revokes) a GitHub App installation token in the Agent and Detection jobs and sources `GITHUB_TOKEN` from it (for Copilot only). See [GitHub App-backed Copilot engine auth](#github-app-backed-copilot-engine-auth). |
 
+
+### Runtime model controls
+
+For the Copilot engine, operators can switch models at Azure DevOps pipeline
+runtime without editing workflow markdown or recompiling lock files. Configure
+these as pipeline variables or variable-group entries:
+
+| Variable | Applies to |
+|----------|------------|
+| `ADO_AW_MODEL_AGENT_COPILOT` | Agent job only |
+| `ADO_AW_MODEL_DETECTION_COPILOT` | Detection job only |
+| `ADO_AW_DEFAULT_MODEL_COPILOT` | Fallback for both jobs |
+
+Precedence is:
+
+1. Explicit `engine.model` for the effective engine config.
+2. Role-specific runtime variable (`ADO_AW_MODEL_AGENT_COPILOT` or
+   `ADO_AW_MODEL_DETECTION_COPILOT`).
+3. Shared runtime variable (`ADO_AW_DEFAULT_MODEL_COPILOT`).
+4. Existing default behavior (no `--model`; the Copilot CLI chooses).
+
+Detection uses its effective engine config after applying
+`safe-outputs.threat-detection.engine`, so an inherited or nested explicit model
+still wins over runtime variables. Runtime values are passed through typed step
+environment mappings, validated for model-identifier characters at runtime, and
+then supplied to Copilot as a quoted `--model` argument. The emitted
+`aw_info.json` run metadata records the effective runtime-selected model when a
+runtime variable is used.
 
 ### `timeout-minutes`
 
@@ -246,7 +274,8 @@ runtime (raw `engine.env` cross-job macros like `$(Setup.FOUNDRY_TOKEN)` do
 | `token` | optional | `COPILOT_PROVIDER_API_KEY` | Compiler-minted credential via Azure CLI (see below). Mutually exclusive with `api-key`. |
 | `api-key` | optional | `COPILOT_PROVIDER_API_KEY` | Static API key, typically a `$(VAR)` secret pipeline variable. Mutually exclusive with `token`. |
 
-The model itself is set via `engine.model` (or a `COPILOT_MODEL` env var).
+The model itself is set via `engine.model` or the
+[`ADO_AW_MODEL_*`](#runtime-model-controls) runtime controls.
 
 #### Compiler-owned token acquisition (`provider.token`)
 

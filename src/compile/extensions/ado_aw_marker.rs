@@ -24,6 +24,7 @@
 
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::condition::Condition;
+use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::shell::{Binding, ShellScript};
 use crate::shell_script;
@@ -57,15 +58,86 @@ shell_script! {
     EMIT_AW_INFO {
         interpreter: Bash,
         bindings: [AGENT_TEMP],
-        externals: [],
+        externals: [ADO_AW_MODEL_AGENT_COPILOT, ADO_AW_MODEL_DETECTION_COPILOT, ADO_AW_DEFAULT_MODEL_COPILOT],
         fragments: [aw_info_json],
         body: r#"
 set -eo pipefail
+
+ado_aw_runtime_model() {
+  local specific_var="$1"
+  local specific_value="$2"
+  local candidate
+  for candidate in "$specific_value" "${ADO_AW_DEFAULT_MODEL_COPILOT:-}"; do
+    # Azure DevOps leaves an undefined macro as the literal $(VAR); treat that as unset.
+    if [ -z "$candidate" ] \
+      || [ "$candidate" = "\$($specific_var)" ] \
+      || [ "$candidate" = "\$(ADO_AW_DEFAULT_MODEL_COPILOT)" ]; then
+      continue
+    fi
+    case "$candidate" in
+      # Keep this character set in sync with engine::validate_model_name and runtime_model_preamble.
+      *[!A-Za-z0-9._:-]*)
+        echo "ERROR: runtime Copilot model from $specific_var/ADO_AW_DEFAULT_MODEL_COPILOT contains invalid characters. Only ASCII alphanumerics, ., _, :, and - are allowed." >&2
+        exit 1
+        ;;
+    esac
+    printf '%s' "$candidate"
+    return 0
+  done
+  return 0
+}
+
+ado_aw_append_model_field() {
+  local field="$1"
+  local value="$2"
+  local file="$3"
+  if [ -z "$value" ] || grep -q "\"$field\"" "$file"; then
+    return 0
+  fi
+  local json
+  local tmp
+  local separator=","
+  json="$(cat "$file")"
+  if [ "$json" = "{}" ]; then
+    separator=""
+  else
+    case "$json" in
+      \{*\}) ;;
+      *)
+        echo "ERROR: aw_info.json is not a single-line JSON object" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  tmp="$(mktemp)"
+  printf '%s%s"%s":"%s"}' "${json%?}" "$separator" "$field" "$value" > "$tmp"
+  mv "$tmp" "$file"
+}
 
 mkdir -p "$AGENT_TEMP/staging"
 cat >"$AGENT_TEMP/staging/aw_info.json" <<'AW_INFO_EOF'
 # ado-aw:fragment aw_info_json
 AW_INFO_EOF
+
+ADO_AW_INFO_JSON="$AGENT_TEMP/staging/aw_info.json"
+if ! grep -q '"model"' "$ADO_AW_INFO_JSON"; then
+  ADO_AW_AGENT_RUNTIME_MODEL="$(ado_aw_runtime_model \
+    ADO_AW_MODEL_AGENT_COPILOT \
+    "$ADO_AW_MODEL_AGENT_COPILOT")"
+  ado_aw_append_model_field \
+    "model" \
+    "$ADO_AW_AGENT_RUNTIME_MODEL" \
+    "$ADO_AW_INFO_JSON"
+fi
+if ! grep -q '"detection_model"' "$ADO_AW_INFO_JSON"; then
+  ADO_AW_DETECTION_RUNTIME_MODEL="$(ado_aw_runtime_model \
+    ADO_AW_MODEL_DETECTION_COPILOT \
+    "$ADO_AW_MODEL_DETECTION_COPILOT")"
+  ado_aw_append_model_field \
+    "detection_model" \
+    "$ADO_AW_DETECTION_RUNTIME_MODEL" \
+    "$ADO_AW_INFO_JSON"
+fi
 "#,
     }
 }
@@ -211,6 +283,18 @@ fn aw_info_bash_step(metadata: &CompileMetadata) -> BashStep {
         .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
         .fragment("aw_info_json", metadata.aw_info_json())
         .into_step("Emit aw_info.json")
+        .with_env(
+            crate::engine::ADO_AW_MODEL_AGENT_COPILOT,
+            EnvValue::pipeline_var(crate::engine::ADO_AW_MODEL_AGENT_COPILOT),
+        )
+        .with_env(
+            crate::engine::ADO_AW_MODEL_DETECTION_COPILOT,
+            EnvValue::pipeline_var(crate::engine::ADO_AW_MODEL_DETECTION_COPILOT),
+        )
+        .with_env(
+            crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT,
+            EnvValue::pipeline_var(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT),
+        )
         .with_condition(Condition::Always)
 }
 
@@ -330,7 +414,10 @@ impl CompileMetadata {
             );
         }
         if let Some(model) = &self.model {
-            object.insert("model".to_string(), serde_json::Value::String(model.clone()));
+            object.insert(
+                "model".to_string(),
+                serde_json::Value::String(model.clone()),
+            );
         }
         if let Some(model) = &self.detection_model {
             object.insert(
@@ -457,8 +544,10 @@ fn bash_single_quote_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::compile::extensions::CompileContext;
+    use crate::compile::shell::ShellScript;
     use crate::compile::types::FrontMatter;
     use std::path::Path;
+    use std::process::{Command, Output};
 
     fn parse_fm(yaml: &str) -> FrontMatter {
         serde_yaml::from_str(yaml).expect("front matter parses")
@@ -476,6 +565,26 @@ mod tests {
             Step::Bash(b) => b,
             other => panic!("expected Step::Bash, got {other:?}"),
         }
+    }
+
+    fn run_aw_info_script(envs: &[(&str, &str)], aw_info_json: &str) -> (Output, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script = ShellScript::new(&EMIT_AW_INFO)
+            .bind_text("AGENT_TEMP", temp.path().display().to_string())
+            .fragment("aw_info_json", aw_info_json.to_string())
+            .render();
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(script).env_clear();
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        (command.output().expect("bash should run"), temp)
+    }
+
+    fn read_aw_info_json(temp: &tempfile::TempDir) -> serde_json::Value {
+        let path = temp.path().join("staging/aw_info.json");
+        let contents = std::fs::read_to_string(path).expect("aw_info.json should be written");
+        serde_json::from_str(&contents).expect("aw_info.json should parse")
     }
 
     #[test]
@@ -591,7 +700,7 @@ mod tests {
             step.script
         );
         assert!(
-            !step.script.contains("\"model\""),
+            !step.script.contains("\"model\":\""),
             "step should omit model when no model is configured:\n{}",
             step.script
         );
@@ -623,14 +732,78 @@ mod tests {
             "step missing build_definition_id macro:\n{}",
             step.script
         );
-        assert!(!step.script.contains("detection_model"));
-        assert!(!step.script.contains("threat_detection_enabled"));
+        assert!(!step.script.contains("\"threat_detection_enabled\""));
+        assert!(
+            step.env
+                .contains_key(crate::engine::ADO_AW_MODEL_AGENT_COPILOT)
+        );
+        assert!(
+            step.env
+                .contains_key(crate::engine::ADO_AW_MODEL_DETECTION_COPILOT)
+        );
+        assert!(
+            step.env
+                .contains_key(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT)
+        );
+    }
+
+    #[test]
+    fn aw_info_runtime_models_prefer_role_specific_over_default() {
+        let (output, temp) = run_aw_info_script(
+            &[
+                (crate::engine::ADO_AW_MODEL_AGENT_COPILOT, "agent-model"),
+                (
+                    crate::engine::ADO_AW_MODEL_DETECTION_COPILOT,
+                    "detector-model",
+                ),
+                (crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
+            ],
+            r#"{"schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        let value = read_aw_info_json(&temp);
+        assert_eq!(value["model"], "agent-model");
+        assert_eq!(value["detection_model"], "detector-model");
+    }
+
+    #[test]
+    fn aw_info_runtime_models_use_default_when_specific_missing_or_unexpanded() {
+        let (output, temp) = run_aw_info_script(
+            &[
+                (
+                    crate::engine::ADO_AW_MODEL_AGENT_COPILOT,
+                    "$(ADO_AW_MODEL_AGENT_COPILOT)",
+                ),
+                (crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
+            ],
+            r#"{"schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        let value = read_aw_info_json(&temp);
+        assert_eq!(value["model"], "default-model");
+        assert_eq!(value["detection_model"], "default-model");
+    }
+
+    #[test]
+    fn aw_info_runtime_model_rejects_invalid_value() {
+        let (output, _temp) = run_aw_info_script(
+            &[(
+                crate::engine::ADO_AW_MODEL_AGENT_COPILOT,
+                "gpt-5 && curl evil.example",
+            )],
+            r#"{"schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("invalid characters"), "{stderr}");
     }
 
     #[test]
     fn explicit_model_emits_aw_info_model_metadata() {
-        let fm =
-            parse_fm("name: t\ndescription: x\nengine:\n  id: copilot\n  model: some-model\n");
+        let fm = parse_fm("name: t\ndescription: x\nengine:\n  id: copilot\n  model: some-model\n");
         let input_path = Path::new("agents/foo.md");
         let ctx = CompileContext {
             agent_name: &fm.name,
@@ -670,8 +843,7 @@ mod tests {
         let steps = agent_prepare_steps(&ctx);
         let step = bash_step(&steps[1]);
         assert!(
-            step.script
-                .contains("\"threat_detection_enabled\":false"),
+            step.script.contains("\"threat_detection_enabled\":false"),
             "{}",
             step.script
         );
@@ -690,9 +862,7 @@ mod tests {
 
     #[test]
     fn explicit_default_threat_detection_emits_enabled_state_only() {
-        let fm = parse_fm(
-            "name: t\ndescription: x\nsafe-outputs:\n  threat-detection: true\n",
-        );
+        let fm = parse_fm("name: t\ndescription: x\nsafe-outputs:\n  threat-detection: true\n");
         let input_path = Path::new("agents/foo.md");
         let ctx = CompileContext {
             agent_name: &fm.name,
@@ -711,7 +881,7 @@ mod tests {
             step.script
         );
         assert!(!step.script.contains("\"detection_engine\""));
-        assert!(!step.script.contains("\"detection_model\""));
+        assert!(step.script.contains("ADO_AW_MODEL_DETECTION_COPILOT"));
     }
 
     #[test]
