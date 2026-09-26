@@ -118,3 +118,5 @@
 {"id":"findings_in_diff","question":"Does the agent output show that every posted comment targets a line that appears in the pull request diff rather than unchanged code?","answer":"UNKNOWN","model":"evals","timestamp":"2026-09-24T13:03:50.789Z","runid":"36001892739"}
 {"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"evals","timestamp":"2026-09-24T17:40:34.535Z","runid":"36034317378"}
 {"id":"findings_in_diff","question":"Does the agent output show that every posted comment targets a line that appears in the pull request diff rather than unchanged code?","answer":"UNKNOWN","model":"evals","timestamp":"2026-09-24T17:40:34.535Z","runid":"36034317378"}
+{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"evals","timestamp":"2026-09-26T02:07:29.471Z","runid":"36209762987"}
+{"id":"findings_in_diff","question":"Does the agent output show that every posted comment targets a line that appears in the pull request diff rather than unchanged code?","answer":"UNKNOWN","model":"evals","timestamp":"2026-09-26T02:07:29.471Z","runid":"36209762987"}
