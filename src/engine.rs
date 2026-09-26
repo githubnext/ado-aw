@@ -460,23 +460,6 @@ impl Engine {
         )
     }
 
-    /// Generate an invocation using an explicit engine configuration.
-    ///
-    /// Retained for callers that need a plain invocation with no role-specific
-    /// runtime model controls.
-    #[allow(dead_code)]
-    pub fn invocation_with_config(
-        &self,
-        engine_config: &EngineConfig,
-        front_matter: &FrontMatter,
-        extension_declarations: &[Declarations],
-        prompt_path: &str,
-        mcp_config_path: Option<&str>,
-    ) -> Result<String> {
-        let args = self.args_with_config(engine_config, front_matter, extension_declarations)?;
-        self.invocation_with_args(engine_config, prompt_path, mcp_config_path, &args, None)
-    }
-
     /// Generate a Detection-job invocation using an explicit engine configuration.
     pub fn detection_invocation_with_config(
         &self,
@@ -782,7 +765,8 @@ fn copilot_args(
 fn validate_model_name(model: &str) -> Result<()> {
     // Validate model name to prevent shell injection — copilot_params are embedded
     // inside a single-quoted bash string in the AWF command, and runtime-selected
-    // models are later passed as quoted arguments.
+    // models are later passed as quoted arguments. Keep this character set in
+    // sync with runtime_model_preamble and ado_aw_marker::EMIT_AW_INFO.
     if model.is_empty()
         || !model
             .chars()
@@ -1476,6 +1460,7 @@ for ADO_AW_CANDIDATE_MODEL in "${{{specific}:-}}" "${{{ADO_AW_DEFAULT_MODEL_COPI
     continue
   fi
   case "$ADO_AW_CANDIDATE_MODEL" in
+    # Keep this character set in sync with validate_model_name and EMIT_AW_INFO.
     *[!A-Za-z0-9._:-]*)
       echo "ERROR: runtime Copilot model from {specific}/{ADO_AW_DEFAULT_MODEL_COPILOT} contains invalid characters. Only ASCII alphanumerics, ., _, :, and - are allowed." >&2
       exit 1
@@ -1491,15 +1476,16 @@ done"#
 mod tests {
     use super::{
         ADO_AW_DEFAULT_MODEL_COPILOT, ADO_AW_MODEL_AGENT_COPILOT, ADO_AW_MODEL_DETECTION_COPILOT,
-        Engine, GITHUB_APP_TOKEN_VAR, copilot_byom_active, copilot_byom_credential_keys,
-        copilot_detection_env, copilot_provider_env, get_engine,
+        Engine, GITHUB_APP_TOKEN_VAR, RuntimeModelRole, copilot_byom_active,
+        copilot_byom_credential_keys, copilot_detection_env, copilot_provider_env, get_engine,
         github_app_token_secrecy_advisory, github_token_source_var, normalize_version_tag,
-        validate_engine_feature_support,
+        runtime_model_preamble, validate_engine_feature_support,
     };
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
         parse_markdown,
     };
+    use std::process::Command;
 
     fn declarations_for(fm: &crate::compile::types::FrontMatter) -> Vec<Declarations> {
         let extensions = collect_extensions(fm);
@@ -1508,6 +1494,22 @@ mod tests {
             .iter()
             .map(|ext| ext.declarations(&ctx).unwrap())
             .collect()
+    }
+
+    fn run_runtime_model_preamble(
+        role: RuntimeModelRole,
+        envs: &[(&str, &str)],
+    ) -> std::process::Output {
+        let script = format!(
+            "{}\nprintf '%s' \"$ADO_AW_EFFECTIVE_MODEL\"",
+            runtime_model_preamble(role)
+        );
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(script).env_clear();
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command.output().expect("bash should run")
     }
 
     #[test]
@@ -1599,6 +1601,57 @@ mod tests {
     }
 
     #[test]
+    fn runtime_model_preamble_uses_role_specific_before_default() {
+        let output = run_runtime_model_preamble(
+            RuntimeModelRole::Agent,
+            &[
+                (ADO_AW_MODEL_AGENT_COPILOT, "agent-model"),
+                (ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
+            ],
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "agent-model");
+    }
+
+    #[test]
+    fn runtime_model_preamble_uses_default_when_role_specific_missing() {
+        let output = run_runtime_model_preamble(
+            RuntimeModelRole::Detection,
+            &[(ADO_AW_DEFAULT_MODEL_COPILOT, "default-model")],
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "default-model");
+    }
+
+    #[test]
+    fn runtime_model_preamble_treats_unexpanded_ado_macro_as_missing() {
+        let output = run_runtime_model_preamble(
+            RuntimeModelRole::Agent,
+            &[
+                (ADO_AW_MODEL_AGENT_COPILOT, "$(ADO_AW_MODEL_AGENT_COPILOT)"),
+                (ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
+            ],
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "default-model");
+    }
+
+    #[test]
+    fn runtime_model_preamble_rejects_invalid_runtime_model() {
+        let output = run_runtime_model_preamble(
+            RuntimeModelRole::Detection,
+            &[(ADO_AW_MODEL_DETECTION_COPILOT, "gpt-5 && curl evil.example")],
+        );
+
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("invalid characters"), "{stderr}");
+    }
+
+    #[test]
     fn copilot_engine_rejects_invalid_explicit_model() {
         let (front_matter, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  model: \"gpt-5 && curl evil.example\"\n---\n",
@@ -1665,6 +1718,20 @@ mod tests {
             format!("$({ADO_AW_DEFAULT_MODEL_COPILOT})")
         )));
         assert!(!env.iter().any(|(key, _)| key == ADO_AW_MODEL_AGENT_COPILOT));
+    }
+
+    #[test]
+    fn copilot_detection_env_omits_runtime_model_vars_for_explicit_model() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  threat-detection:\n    engine:\n      model: detector-model\n---\n",
+        )
+        .unwrap();
+        let threat_detection = front_matter.threat_detection_config().unwrap();
+        let detection_engine = front_matter.effective_detection_engine(&threat_detection);
+        let env = copilot_detection_env(&detection_engine).unwrap();
+
+        assert!(!env.iter().any(|(key, _)| key == ADO_AW_MODEL_DETECTION_COPILOT));
+        assert!(!env.iter().any(|(key, _)| key == ADO_AW_DEFAULT_MODEL_COPILOT));
     }
 
     #[test]

