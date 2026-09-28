@@ -783,6 +783,10 @@ Generated artefacts are excluded from the pre-fetched diff (`*.lock.yml`,
 exclusion lists in `shared/pr-diff-data-fetch.md` and `pr-data-prefetch.yml` in
 sync.
 
+Large PRs can exceed GitHub's 20,000-line diff API limit. Both prefetch paths
+fall back only for that specific error to a bare Git object fetch at pinned
+base/head SHAs, using identical exclusions and never checking out PR code.
+
 ### PR Sous Chef
 
 `pr-sous-chef.md` runs every 15 minutes (and on `/souschef`) and keeps open
