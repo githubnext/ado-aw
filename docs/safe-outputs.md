@@ -1570,6 +1570,61 @@ reads the PR back and succeeds only when publication is persisted. Lost
 responses and failed read-back are reported without blind retries.
 Publishing does not vote, merge or enable auto-complete.
 
+### push-to-pull-request-branch
+
+Applies the agent's code delta to an **existing active PR's source branch**.
+The destination ref comes from authoritative PR metadata, never an agent-supplied
+branch name. Forks, the PR target branch and the repository default branch are
+refused. There is no force-push, branch recreation, fallback PR or policy bypass.
+
+```yaml
+safe-outputs:
+  push-to-pull-request-branch:
+    target: triggering
+    allowed-repositories: [self]
+    allowed-branches: ["agent/*"] # REQUIRED, short source-branch patterns; "*" matches any characters
+    protected-files: blocked
+    excluded-files: ["dist/**"]
+    max-files: 100
+    if-no-changes: warn          # warn, error, ignore
+    max: 1
+```
+
+**Agent parameters:** `repository` is the required checkout alias (`self` or a
+configured alias); `expected_head_sha` is the original 40-character PR source
+commit, not an agent-created commit or native PR merge commit.
+`pull_request_id` is required only for `target: "*"`. Temporary PR IDs are not
+accepted.
+
+For triggering/fixed targets, a trusted pre-agent step selects the exact source
+snapshot before user steps and writes public metadata to
+`/tmp/ado-aw/pr-source-snapshot.json`. It uses the configured read token (or build
+token), never injects that token into the agent, and refuses a dirty checkout.
+Wildcard targets require an explicitly prepared checkout of the selected PR:
+no arbitrary branch or implicit `origin/main` fallback is fetched.
+
+The MCP tool captures committed and uncommitted changes through a temporary
+index without changing the original HEAD, index or working tree. Synthetic
+merge history and sparse checkouts are rejected. Stage 3 verifies the patch
+hash, paths, protected/excluded files and limits, applies it in an isolated
+worktree at the expected source commit, rechecks the PR, then uses ADO's
+`oldObjectId` concurrency guard. A changed source head fails rather than
+rebasing, replaying or overwriting another contributor's work.
+
+Patches and individual changed files are limited to 5 MB; expanded binary
+data and the resulting request are bounded to 10 MB. `max-files` defaults to
+100 (maximum 1,000). Ordinary text/binary edits, additions and deletions are
+supported; renames are represented as delete/add. Symlinks, submodules,
+file-mode changes and LFS/custom-filtered changes are rejected explicitly.
+Authenticated fetches require an exact approved ADO origin and do not persist
+credentials or follow redirects.
+
+Failed/unconfirmed pushes prevent later same-PR publication, review and
+auto-complete proposals from implying a successful repair. These follow-up
+tools must share the push tool's approval/staged lane; diagnostic outputs and
+independent targets remain separate. Lost responses are not blindly replayed,
+and results distinguish an accepted-but-unconfirmed push from a verified head.
+
 ### Migrating PR tool names
 
 All public Azure DevOps safe-output tool names use `pull-request`, not `pr`.

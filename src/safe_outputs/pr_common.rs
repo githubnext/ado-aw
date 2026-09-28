@@ -22,6 +22,7 @@ pub(crate) const PR_MUTATION_TOOLS: &[&str] = &[
     "remove-pull-request-labels", "replace-pull-request-label",
     "mark-pull-request-as-ready-for-review",
     "update-pull-request-comment",
+    "push-to-pull-request-branch",
     "add-pull-request-comment", "reply-to-pull-request-comment", "resolve-pull-request-thread",
 ];
 
@@ -748,6 +749,8 @@ pub(crate) mod tests {
         check::<MarkPullRequestReadyResult>();
         check::<UpdatePullRequestCommentParams>();
         check::<UpdatePullRequestCommentResult>();
+        check::<PushToPullRequestBranchParams>();
+        check::<PushToPullRequestBranchResult>();
         check::<SetPrAutoCompleteParams>();
         check::<SetPrAutoCompleteResult>();
         check::<UpdatePullRequestParams>();
@@ -768,6 +771,7 @@ pub(crate) mod tests {
             "replace-pull-request-label" => serde_json::json!({"from":"old","to":"new"}),
             "mark-pull-request-as-ready-for-review" => serde_json::json!({}),
             "update-pull-request-comment" => serde_json::json!({"thread_id":1,"comment_id":1,"content":"Replacement owned content."}),
+            "push-to-pull-request-branch" => serde_json::json!({"repository":"target","expected_head_sha":"a".repeat(40),"patch_file":"patch.diff","patch_sha256":"hash"}),
             "set-pull-request-auto-complete" => serde_json::json!({}),
             "submit-pull-request-review" => serde_json::json!({"event":"comment","body":"Informational feedback."}),
             "add-pull-request-comment" => serde_json::json!({"content":"Informational feedback.","status":"active","repository":null}),
@@ -792,6 +796,9 @@ pub(crate) mod tests {
             }
             if *tool == "resolve-pull-request-thread" {
                 ctx.tool_configs.get_mut(*tool).unwrap()["allowed-statuses"] = serde_json::json!(["fixed"]);
+            }
+            if *tool == "push-to-pull-request-branch" {
+                ctx.tool_configs.get_mut(*tool).unwrap()["allowed-branches"] = serde_json::json!(["agent/*"]);
             }
             let route = format!("/Other/_apis/git/repositories/{TRIGGER_REPO_ID}/pullRequests/42");
             Mock::given(method("GET")).and(path(&route))

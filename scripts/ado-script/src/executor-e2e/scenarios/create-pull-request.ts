@@ -149,7 +149,7 @@ function runGit(
   });
 }
 
-async function git(
+export async function git(
   ctx: ScenarioContext,
   args: string[],
   cwd: string,

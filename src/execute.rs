@@ -32,6 +32,7 @@ use crate::safe_outputs::{
 use crate::safe_outputs::{AddPrLabelsResult, AddPrReviewersResult, SetPrAutoCompleteResult};
 use crate::safe_outputs::{RemovePullRequestLabelsResult, ReplacePullRequestLabelResult, MarkPullRequestReadyResult};
 use crate::safe_outputs::UpdatePullRequestCommentResult;
+use crate::safe_outputs::PushToPullRequestBranchResult;
 use crate::sanitize::neutralize_pipeline_commands;
 
 // Re-export memory types for use by main.rs
@@ -255,6 +256,7 @@ pub async fn execute_safe_outputs(
         ReplacePullRequestLabelResult,
         MarkPullRequestReadyResult,
         UpdatePullRequestCommentResult,
+        PushToPullRequestBranchResult,
         SetPrAutoCompleteResult,
         AbandonPullRequestResult,
         UploadBuildAttachmentResult,
@@ -281,7 +283,19 @@ pub async fn execute_safe_outputs(
 
     let mut group_counts = HashMap::<String, usize>::new();
     let mut results = Vec::new();
+    let mut failed_pr_pushes = std::collections::HashSet::new();
     for (i, entry) in entries.iter().enumerate() {
+        let tool=entry.get("name").and_then(Value::as_str).unwrap_or("");
+        let key=pr_push_target_key(entry,ctx);
+        if filter.allows(tool)
+            && matches!(tool,"mark-pull-request-as-ready-for-review"|"submit-pull-request-review"|"set-pull-request-auto-complete")
+            && (failed_pr_pushes.contains("*") || key.as_ref().is_some_and(|key|failed_pr_pushes.contains(key)))
+        {
+            let failure=ExecutionResult::failure("Skipped: an earlier code push for this PR failed or was unconfirmed");
+            append_execution_record(safe_output_dir,tool,&failure,entry.get("context").and_then(Value::as_str)).await;
+            results.push(failure);
+            continue;
+        }
         if let Some(result) = process_one_entry(
             i,
             entries.len(),
@@ -294,8 +308,25 @@ pub async fn execute_safe_outputs(
         )
         .await
         {
+            if tool=="push-to-pull-request-branch" && !result.success {
+                failed_pr_pushes.insert(key.unwrap_or_else(||"*".into()));
+            }
             results.push(result);
         }
+    }
+
+    fn pr_push_target_key(entry:&Value,ctx:&ExecutionContext)->Option<String>{
+        let tool=entry.get("name")?.as_str()?;
+        let policy=crate::safe_outputs::pr_common::PrMutationPolicy::parse(ctx.tool_configs.get(tool)?).ok()?;
+        let reference=entry.get("pull_request_id").filter(|value|!value.is_null())
+            .map(|value|serde_json::from_value::<crate::safe_outputs::pr_common::PullRequestReference>(value.clone()))
+            .transpose().ok()?;
+        let repository=entry.get("repository").and_then(Value::as_str).or(policy.target_repo.as_deref());
+        let (id,target)=crate::safe_outputs::pr_common::resolve_pr_policy_target(
+            &policy.target_policy().ok()?,reference.as_ref(),repository,&policy.allowed_repositories,ctx,
+        ).ok()?.ok()?;
+        Some(format!("{}|{}|{}|{id}",target.organization_url.trim_end_matches('/').to_ascii_lowercase(),
+            target.project.to_ascii_lowercase(),target.repository.to_ascii_lowercase()))
     }
 
     // Log final summary
@@ -780,6 +811,7 @@ async fn dispatch_pr_tools(
         "replace-pull-request-label" => ReplacePullRequestLabelResult,
         "mark-pull-request-as-ready-for-review" => MarkPullRequestReadyResult,
         "update-pull-request-comment" => UpdatePullRequestCommentResult,
+        "push-to-pull-request-branch" => PushToPullRequestBranchResult,
         "set-pull-request-auto-complete" => SetPrAutoCompleteResult,
         "abandon-pull-request" => AbandonPullRequestResult,
         "update-pull-request" => UpdatePullRequestResult,

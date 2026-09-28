@@ -432,6 +432,13 @@ export async function main(): Promise<number> {
           throw new Error("Rejected boundary unexpectedly published reviewed executor artifacts");
         }
         verifyPrBoundary(entry.prBoundary, result.buildId, resource.description, pr.description, records);
+        if (entry.assertions?.pushedFile) {
+          const source = staged.get(entry.id);
+          if (!source) throw new Error("Push proof is missing the staged source identity");
+          await rest.verifyBoundaryPush(config.mirrorRepo, source.ref, source.sha,
+            entry.assertions.pushedFile.path,
+            entry.assertions.pushedFile.content.replaceAll("{buildId}", String(result.buildId)));
+        }
       } catch (error) {
         result.status = "failed";
         result.message = errMessage(error);

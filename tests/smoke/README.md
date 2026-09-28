@@ -140,6 +140,11 @@ GitHub.
 
 ### Opt-in live PR boundaries
 
+`pr-synthetic-push` additionally runs real source preparation and MCP patch
+capture, then verifies a direct-child source commit and exact proof-file content.
+It only modifies the orchestrator-owned candidate PR branch. Select it with
+`canary`; it is excluded from default unattended cases like the other PR boundaries.
+
 Queue the existing candidate orchestrator with `caseIds` containing `canary`
 and one or more of `pr-synthetic-auto`, `pr-synthetic-rejected`, or
 `pr-synthetic-approved`. These cases are not in default unattended selections.

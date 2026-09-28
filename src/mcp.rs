@@ -43,6 +43,7 @@ use crate::safe_outputs::{
     ReplacePullRequestLabelParams, ReplacePullRequestLabelResult,
     MarkPullRequestReadyParams, MarkPullRequestReadyResult,
     UpdatePullRequestCommentParams, UpdatePullRequestCommentResult,
+    PushToPullRequestBranchParams, PushToPullRequestBranchResult,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::{PullRequestTemporaryId, WorkItemTemporaryId};
@@ -1123,6 +1124,7 @@ Returns a generated temporary_id for configured PR content, reviewer, label, rev
         &self,
         params: Parameters<CreatePrParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = self.create_pr_proposal_lock.lock().await;
         info!("Tool called: create-pull-request - '{}'", params.0.title);
         // Sanitize untrusted agent-provided text fields (IS-01)
         let mut sanitized = params.0;
@@ -1171,7 +1173,6 @@ Returns a generated temporary_id for configured PR content, reviewer, label, rev
         };
 
         const MAX_ID_ATTEMPTS: usize = 16;
-        let _guard = self.create_pr_proposal_lock.lock().await;
         let existing = self
             .read_safe_output_file()
             .await
@@ -1222,6 +1223,29 @@ Returns a generated temporary_id for configured PR content, reviewer, label, rev
             "temporary_id": canonical,
         }));
         Ok(response)
+    }
+
+    #[tool(
+        name = "push-to-pull-request-branch",
+        description = "Propose code changes to an existing ADO PR source branch, never an arbitrary branch. Supply its original expected_head_sha from /tmp/ado-aw/pr-source-snapshot.json or an explicitly prepared matching checkout. Captures committed and uncommitted changes without altering HEAD/index. Refuses merge-checkout history, stale heads, forks, protected files and unauthorized branches. Stage 3 never force-pushes."
+    )]
+    async fn push_pr_branch(&self, params: Parameters<PushToPullRequestBranchParams>) -> Result<CallToolResult, McpError> {
+        params.0.validate().map_err(anyhow_to_mcp_error)?;
+        let _guard = self.create_pr_proposal_lock.lock().await;
+        let dir = resolve_git_dir_for_patch(&self.bounding_directory,&self.self_repository_directory,Some(params.0.repository.as_str()))?;
+        let bytes = crate::safe_outputs::push_to_pull_request_branch::capture_patch(&dir,&params.0.expected_head_sha)
+            .await.map_err(anyhow_to_mcp_error)?;
+        let filename = format!("{}-{}", generate_short_id(), self.generate_patch_filename(params.0.repository.as_str()));
+        tokio::fs::write(self.output_directory.join(&filename),&bytes).await
+            .map_err(|error|anyhow_to_mcp_error(anyhow::anyhow!("Failed to stage PR patch: {error}")))?;
+        let result = PushToPullRequestBranchResult {
+            name: PushToPullRequestBranchResult::NAME.into(),
+            pull_request_id: params.0.pull_request_id, repository: params.0.repository,
+            expected_head_sha: params.0.expected_head_sha,
+            patch_file: crate::secure::StrictRelativePath::parse(filename).map_err(anyhow_to_mcp_error)?,
+            patch_sha256: crate::hash::sha256_hex(&bytes),
+        };
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
@@ -2703,7 +2727,7 @@ safe-outputs:
 
     #[tokio::test]
     async fn test_all_configured_only_tools_are_routes() {
-        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 23);
+        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 24);
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled: Vec<String> = CONFIGURED_ONLY_TOOLS
             .iter()

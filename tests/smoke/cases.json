@@ -99,6 +99,18 @@
       "assertions": {"requiredBuildTags": ["ado-aw-pr-boundary-{buildId}"]}
     },
     {
+      "id": "pr-synthetic-push",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/safe-outputs/pr-branch-push.md",
+      "prBoundary": "automatic",
+      "assertions": {
+        "requiredBuildTags": ["ado-aw-pr-boundary-{buildId}"],
+        "pushedFile": {"path": "smoke-pr-push-proof.txt", "content": "ado-aw-pr-push-{buildId}\n"}
+      }
+    },
+    {
       "id": "pr-synthetic-approved",
       "lane": "agentic",
       "kind": "compiled",

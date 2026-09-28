@@ -272,6 +272,27 @@ export class AdoRest {
     return response.value.map((artifact) => artifact.name);
   }
 
+  async verifyBoundaryPush(repo: string, sourceRef: string, originalHead: string, path: string, content: string): Promise<void> {
+    if (!sourceRef.startsWith("refs/heads/ado-aw-smoke-candidate/")) throw new Error("Push proof must use an owned candidate ref");
+    const root = this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}`);
+    const refs = await this.request<{ value?: { name?: string; objectId?: string }[] }>(
+      `${root}/refs?filter=${encodeURIComponent(sourceRef.replace(/^refs\//, ""))}&api-version=7.1`,
+    );
+    const matches = refs?.value?.filter((entry) => entry.name === sourceRef) ?? [];
+    const head = matches[0]?.objectId;
+    if (matches.length !== 1 || typeof head !== "string" || !/^[a-f0-9]{40}$/i.test(head) || head === originalHead) {
+      throw new Error("PR push proof did not advance the exact owned source ref");
+    }
+    const commit = await this.request<{ parents?: string[] }>(`${root}/commits/${head}?api-version=7.1`);
+    if (commit?.parents?.length !== 1 || commit.parents[0] !== originalHead) {
+      throw new Error("PR push proof was not a direct child of the prepared source head");
+    }
+    const item = await this.request<{ content?: string }>(
+      `${root}/items?path=${encodeURIComponent(`/${path}`)}&versionDescriptor.versionType=commit&versionDescriptor.version=${head}&includeContent=true&%24format=json&api-version=7.1`,
+    );
+    if (item?.content !== content) throw new Error("PR push proof file did not contain the exact expected content");
+  }
+
   /** Read the observable tags on a completed child build. */
   async getBuildTags(
     buildId: number,

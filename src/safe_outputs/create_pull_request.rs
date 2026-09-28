@@ -2237,7 +2237,7 @@ fn sanitize_path_for_markdown(path: &str) -> String {
 
 /// Read a file and produce an ADO push change entry.
 /// Handles both text (rawtext) and binary (base64encoded) content.
-async fn read_file_change(
+pub(crate) async fn read_file_change(
     change_type: &str,
     file_path: &str,
     full_path: &std::path::Path,
@@ -2281,7 +2281,7 @@ async fn read_file_change(
 /// - No absolute paths
 /// - No null bytes
 /// - No symlink entries (mode 120000)
-fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
     let mut in_diff = false;
     for line in patch_content.lines() {
         // Only validate paths within diff blocks, not commit message bodies.
@@ -2371,7 +2371,7 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
 /// Patterns without `/` are treated as basename matches (e.g., `*.lock` matches
 /// `subdir/Cargo.lock`). Patterns with `**/` prefix match at any depth.
 /// Uses the `glob-match` crate for correct glob semantics (`*` does not cross `/`).
-fn glob_match_simple(pattern: &str, path: &str) -> bool {
+pub(crate) fn glob_match_simple(pattern: &str, path: &str) -> bool {
     if !pattern.contains('/') {
         // Basename-only pattern: auto-prefix with **/ for any-depth matching
         let full_pattern = format!("**/{}", pattern);
@@ -2393,7 +2393,7 @@ fn validate_single_path(path: &str) -> anyhow::Result<()> {
 /// Returns deduplicated list of file paths referenced in the patch (both source and destination).
 /// Uses `--- a/` and `+++ b/` lines for robust parsing (handles quoted paths
 /// with spaces that break `diff --git` header parsing via split_whitespace).
-fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
+pub(crate) fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let mut in_diff = false;
     for line in patch_content.lines() {
@@ -2441,7 +2441,7 @@ fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
 /// Count the number of distinct files changed in a patch.
 /// Reuses `extract_paths_from_patch` which correctly handles quoted paths,
 /// renames, copies, and multi-commit deduplication.
-fn count_patch_files(patch_content: &str) -> usize {
+pub(crate) fn count_patch_files(patch_content: &str) -> usize {
     extract_paths_from_patch(patch_content).len()
 }
 
@@ -2454,7 +2454,7 @@ fn count_patch_files(patch_content: &str) -> usize {
 /// - Access control files (CODEOWNERS)
 ///
 /// Returns a list of protected file paths found, or empty vec if none.
-fn find_protected_files(paths: &[String]) -> Vec<String> {
+pub(crate) fn find_protected_files(paths: &[String]) -> Vec<String> {
     let mut protected = Vec::new();
     for path in paths {
         let lower_path = path.to_lowercase();

@@ -141,6 +141,16 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "Repository selector", key: "repository" },
     ],
   },
+  "push-to-pull-request-branch": {
+    title: "Push code to the guarded PR source branch",
+    fields: [
+      { label: "PR", key: "pull_request_id" },
+      { label: "Repository selector", key: "repository" },
+      { label: "Expected source head", key: "expected_head_sha" },
+      { label: "Patch", key: "patch_file" },
+      { label: "Patch SHA-256", key: "patch_sha256" },
+    ],
+  },
   "remove-pull-request-labels": {
     title: "Remove pull request labels",
     fields: [

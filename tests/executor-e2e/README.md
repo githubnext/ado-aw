@@ -112,6 +112,11 @@ disposable source/target branches, and stale-head rejection. Review-batch cases
 verify distinct inline/summary threads, non-voting behavior, and zero comment
 writes when the last finding is invalid or nested-comment authority is absent.
 
+`pr-push-success` checks the exact source-ref head, direct parent, applied file
+and preservation of the PR's pre-existing changes. Stale-head, forbidden-branch,
+protected-file and bad-hash cases require unchanged remote heads; the empty
+case is a configured no-op. Every target is a harness-owned disposable PR/ref.
+
 The `pr-api-draft-publication`, `pr-api-owned-comments`,
 `pr-api-label-replacement` and `pr-api-push-concurrency` scenarios probe ADO
 platform prerequisites directly on harness-owned disposable PRs. They use a

@@ -260,6 +260,14 @@ enum Commands {
     },
     /// Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
     McpAuthor {},
+    /// Trusted pre-agent source snapshot preparation; never performs remote writes.
+    #[command(hide = true)]
+    PreparePrPush {
+        #[arg(long)]
+        resolved_config: PathBuf,
+        #[arg(long)]
+        snapshot_path: PathBuf,
+    },
     /// Execute safe outputs from Stage 1 (Stage 3 of the pipeline)
     Execute {
         /// Path to the source markdown file (used by built-in safe-output execution)
@@ -669,6 +677,7 @@ impl Commands {
             Commands::Mcp { .. } => "mcp",
             Commands::McpAuthor {} => "mcp-author",
             Commands::Execute { .. } => "execute",
+            Commands::PreparePrPush { .. } => "prepare-pr-push",
             Commands::Init { .. } => "init",
             Commands::Configure { .. } => "configure",
             Commands::Secrets { .. } => "secrets",
@@ -1678,7 +1687,7 @@ async fn main() -> Result<()> {
     // Also skipped in CI environments to avoid unnecessary outbound calls.
     let is_pipeline_internal = matches!(
         command,
-        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpAuthor { .. }
+        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpAuthor { .. } | Commands::PreparePrPush { .. }
     );
     let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
         Some(tokio::spawn(update_check::check_for_update()))
@@ -1735,6 +1744,15 @@ async fn main() -> Result<()> {
         }
         Commands::McpAuthor {} => {
             mcp_author::run_stdio().await?;
+        }
+        Commands::PreparePrPush { resolved_config, snapshot_path } => {
+            let config: ResolvedExecutionConfig = serde_json::from_slice(
+                &tokio::fs::read(&resolved_config).await.context("Failed to read PR source preparation config")?
+            ).context("Invalid PR source preparation config")?;
+            let ctx = build_execution_context_from_resolved(
+                &config, &std::env::current_dir()?, None, None, false,
+            ).await;
+            safe_outputs::push_to_pull_request_branch::prepare_agent(&ctx,&snapshot_path).await?;
         }
         Commands::Execute {
             source,

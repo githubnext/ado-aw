@@ -1183,6 +1183,20 @@ fn build_setup_job(
     Ok(Some(job))
 }
 
+shell_script! {
+    /// Select and publish a non-secret PR source snapshot before user/agent code runs.
+    PREPARE_PR_PUSH_SOURCE {
+        interpreter: Bash,
+        bindings: [SNAPSHOT_PATH],
+        externals: [ADO_AW_PR_PUSH_CONFIG],
+        fragments: [],
+        body: r#"
+set -euo pipefail
+ado-aw prepare-pr-push --resolved-config "$ADO_AW_PR_PUSH_CONFIG" --snapshot-path "$SNAPSHOT_PATH"
+"#,
+    }
+}
+
 fn build_agent_job(
     front_matter: &FrontMatter,
     extensions: &[Extension],
@@ -1271,6 +1285,29 @@ fn build_agent_job(
     steps.extend(prepull_images_step(true, front_matter.supply_chain()));
 
     // 13. Extension prepare steps (typed) + user steps (RawYaml)
+    if front_matter.safe_outputs.contains_key("push-to-pull-request-branch") {
+        let resolved: serde_json::Value = serde_json::from_str(&cfg.resolved_execution_config_json)?;
+        let minimal = serde_json::json!({
+            "name": resolved["name"],
+            "toolConfigs": {"push-to-pull-request-branch": resolved["toolConfigs"]["push-to-pull-request-branch"]},
+            "repositories": resolved["repositories"], "checkout": resolved["checkout"],
+            "repoRefs": resolved["repoRefs"], "writePermissions": resolved["writePermissions"],
+        });
+        let config_path = "$(Agent.TempDirectory)/ado-aw-pr-push-config.json";
+        steps.push(Step::Bash(write_custom_runtime_config_step(&serde_json::to_string(&minimal)?, config_path)?));
+        let step = ShellScript::new(&PREPARE_PR_PUSH_SOURCE)
+            .bind_text("SNAPSHOT_PATH", "/tmp/ado-aw/pr-source-snapshot.json")
+            .into_step("Prepare exact PR source snapshot")
+            .with_env("ADO_AW_PR_PUSH_CONFIG", EnvValue::literal(config_path))
+            .with_env("ADO_AW_SELF_REPOSITORY_DIRECTORY", EnvValue::literal(&cfg.trigger_repo_directory))
+            .with_env("ADO_AW_SELF_REPOSITORY_NAME", cfg.self_repository_name.clone())
+            .with_env("SYSTEM_ACCESSTOKEN", EnvValue::secret(
+                if front_matter.permissions.as_ref().and_then(|permissions|permissions.read.as_ref()).is_some() {
+                    "SC_READ_TOKEN"
+                } else { "System.AccessToken" }
+            ));
+        steps.push(Step::Bash(project_triggering_pr_env(step, front_matter)));
+    }
     steps.extend(ext_agent_prepare.iter().cloned());
     for user_step_val in &front_matter.steps {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
@@ -4949,6 +4986,7 @@ fn approval_summary_pr_policies(
             | "replace-pull-request-label"
             | "mark-pull-request-as-ready-for-review"
             | "update-pull-request-comment"
+            | "push-to-pull-request-branch"
             | "set-pull-request-auto-complete"
             | "submit-pull-request-review"
             | "add-pull-request-comment"
@@ -7087,6 +7125,34 @@ mod tests {
             policies["add-pull-request-labels"]["target"]["kind"],
             "triggering"
         );
+    }
+
+    #[test]
+    fn pr_push_preparation_uses_only_read_credentials_and_precedes_user_steps() {
+        use crate::compile::extensions::{CompileContext,collect_extensions};
+        for target in ["standalone","1es","job","stage"] {
+            let fm=test_front_matter(&format!(
+                "name: push-contract\ndescription: Test\ntarget: {target}\npermissions:\n  read: read-sc\n  write: write-sc\nsafe-outputs:\n  push-to-pull-request-branch:\n    allowed-branches: ['agent/*']\nsteps:\n  - bash: echo user-step-after-source-preparation\n"
+            ));
+            let extensions=collect_extensions(&fm);
+            let ctx=CompileContext::for_test(&fm);
+            let input=Path::new("push.md");
+            let output=Path::new("push.lock.yml");
+            let pipeline=match target {
+                "standalone"=>super::super::standalone_ir::build_standalone_pipeline(&fm,&extensions,&ctx,input,output,"Push the PR",true,false),
+                "1es"=>super::super::onees_ir::build_onees_pipeline(&fm,&extensions,&ctx,input,output,"Push the PR",true,false),
+                "job"=>super::super::job_ir::build_job_pipeline(&fm,&extensions,&ctx,input,output,"Push the PR",true,false),
+                _=>super::super::stage_ir::build_stage_pipeline(&fm,&extensions,&ctx,input,output,"Push the PR",true,false),
+            }.unwrap();
+            let emitted=super::super::ir::emit::emit(&pipeline).unwrap();
+            let prepare=emitted.find("displayName: Prepare exact PR source snapshot").unwrap();
+            let user=emitted.find("echo user-step-after-source-preparation").unwrap();
+            assert!(prepare<user,"{target}");
+            let step=&emitted[prepare..user];
+            assert!(step.contains("SC_READ_TOKEN"),"{target}");
+            assert!(!step.contains("SC_WRITE_TOKEN"),"{target}");
+            assert!(step.contains("ADO_AW_SELF_REPOSITORY_DIRECTORY"),"{target}");
+        }
     }
 
     #[test]

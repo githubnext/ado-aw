@@ -3147,6 +3147,17 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
     front_matter.typed_safe_output_config::<crate::safe_outputs::MarkPullRequestReadyConfig>(
         "mark-pull-request-as-ready-for-review",
     )?;
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::PushToPullRequestBranchConfig>(
+        "push-to-pull-request-branch",
+    )? {
+        crate::safe_outputs::validate_push_config(&config)?;
+        for dependent in ["mark-pull-request-as-ready-for-review","submit-pull-request-review","set-pull-request-auto-complete"] {
+            if front_matter.safe_outputs.contains_key(dependent) {
+                require_same_approval_lane(front_matter,"push-to-pull-request-branch",dependent)?;
+                require_same_staged_lane(front_matter,"push-to-pull-request-branch",dependent)?;
+            }
+        }
+    }
     if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::UpdatePullRequestCommentConfig>(
         "update-pull-request-comment",
     )? {
