@@ -1192,7 +1192,7 @@ shell_script! {
         fragments: [],
         body: r#"
 set -euo pipefail
-ado-aw prepare-pr-push --resolved-config "$ADO_AW_PR_PUSH_CONFIG" --snapshot-path "$SNAPSHOT_PATH"
+/tmp/awf-tools/ado-aw prepare-pr-push --resolved-config "$ADO_AW_PR_PUSH_CONFIG" --snapshot-path "$SNAPSHOT_PATH"
 "#,
     }
 }
@@ -7147,6 +7147,9 @@ mod tests {
             let emitted=super::super::ir::emit::emit(&pipeline).unwrap();
             let prepare=emitted.find("displayName: Prepare exact PR source snapshot").unwrap();
             let user=emitted.find("echo user-step-after-source-preparation").unwrap();
+            let tooling=emitted.find("displayName: Prepare tooling").unwrap();
+            assert!(tooling<prepare,"{target}");
+            assert!(emitted.contains("/tmp/awf-tools/ado-aw prepare-pr-push"),"{target}");
             assert!(prepare<user,"{target}");
             let step=&emitted[prepare..user];
             assert!(step.contains("SC_READ_TOKEN"),"{target}");
