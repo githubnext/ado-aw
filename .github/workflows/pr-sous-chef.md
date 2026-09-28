@@ -269,7 +269,9 @@ a manual invocation is an acknowledgement, not a licence to clean up reviews.
    - the rest by most recent `updatedAt`.
    Break ties by lower PR number, so reruns behave deterministically.
 6. Use the `pr-processor` sub-agent for each PR, passing only the PR number and
-   its compact entry.
+   its compact entry. Do not specify a model or model alias when launching the
+   sub-agent. Omit the model parameter so it inherits the parent/runtime model
+   selection.
 7. If `pr-processor` returns non-JSON or errors, record
    `{pr_number: N, skip_reason: "sub_agent_error"}` in the report and move on.
    Do not retry.
@@ -368,7 +370,6 @@ recommendations visible; wrap verbose detail in
 ## agent: `pr-processor`
 ---
 description: Decides skip/nudge actions for a single pull request using a minimal number of API calls
-model: small
 ---
 You are given one PR number and its compact metadata. Decide what should happen
 to it, using as few tool calls as possible.

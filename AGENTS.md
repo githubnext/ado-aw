@@ -765,6 +765,10 @@ design, **all ado-aw-specific review logic belongs in
 `review-compiler-contract.md`**. Put a new domain invariant there, not in the
 language reviewers.
 
+Inline subagents omit `model:` and launch-time model overrides, inheriting the
+parent/runtime model selection. Do not pin a model alias such as `small` in
+reviewers or PR Sous Chef: that can select a model unavailable to the workflow.
+
 ### Shared review components
 
 - `shared/pr-review-base.md` — tools, network allowlist and the common review
