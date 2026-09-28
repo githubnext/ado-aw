@@ -1441,6 +1441,14 @@ Each PR intent has one agent-facing tool:
 | Enable auto-complete | `set-pull-request-auto-complete` |
 | Abandon | `abandon-pull-request` |
 
+**Comments versus reviews:** use standalone comment tools for ad hoc feedback or
+conversation replies; use one `submit-pull-request-review` for a complete review.
+Both enqueue proposals, but standalone comments execute independently in Stage 3.
+They are never buffered, absorbed or reposted by a subsequent review. Do not emit
+the same finding through both routes. `update-pull-request` edits the PR's
+description; `update-pull-request-comment` edits a verified owned root comment.
+`resolve-pull-request-thread` changes conversation status, not a vote.
+
 All PR mutation tools support `target`, `target-repo`, `allowed-repositories`,
 `required-labels` and `required-title-prefix`. New configurations default to
 `target: triggering`: the complete trusted triggering identity is required,

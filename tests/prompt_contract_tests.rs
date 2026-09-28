@@ -142,3 +142,25 @@ fn authoring_prompts_keep_expected_output_contracts() {
         );
     }
 }
+
+#[test]
+fn authoring_prompts_separate_pr_conversations_reviews_and_votes() {
+    for rel in [
+        "prompts/create-ado-agentic-workflow.md",
+        "prompts/update-ado-agentic-workflow.md",
+    ] {
+        let content = read(rel);
+        for required in [
+            "`add-pull-request-comment`",
+            "`submit-pull-request-review`",
+            "`comment` is non-voting",
+            "`reset` explicitly clears",
+            "never buffered",
+            "`max-comments`",
+            "`expected_head_sha`",
+            "`update-pull-request-comment`",
+        ] {
+            assert!(content.contains(required), "{rel} is missing PR intent contract {required}");
+        }
+    }
+}
