@@ -117,6 +117,11 @@ The subsequent `pull_request_tool_names` codemod expands abbreviated tool keys
 such as `add-pr-comment` to `add-pull-request-comment`, preserving configuration
 and updating shared-budget members. Old/new key collisions fail atomically.
 Only source configuration is migrated; old tool spellings are not runtime aliases.
+Legacy enabled shorthand such as `add-pr-comment: true` or
+`reply-to-pr-comment: true` is normalized like a bare/null declaration before
+the explicit PR target policy is preserved. This applies at the root and in
+imports; imported component bytes stay unchanged. It does not make boolean
+values valid in canonical runtime policy objects or enable a `false` declaration.
 
 `explicit_pr_policy` pins the target of each PR mutation. New configurations
 use `triggering`; root declarations with a pre-0.53.0 compiled source version

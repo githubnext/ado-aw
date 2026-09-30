@@ -50,7 +50,7 @@ pub(crate) fn rename_declarations(
                 !renamed.contains_key(*new),
                 "manual migration required: both {old} and {new} are configured"
             );
-            if value.is_null() {
+            if value.is_null() || value == Value::Bool(true) {
                 value = Value::Mapping(Mapping::new());
             }
             if let Some(config) = value.as_mapping_mut() {

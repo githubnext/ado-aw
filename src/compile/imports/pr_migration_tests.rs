@@ -31,6 +31,62 @@ async fn compile_source(path: &Path) -> Result<bool> {
 }
 
 #[tokio::test]
+async fn legacy_comment_shorthand_migrates_at_root_and_in_imports() {
+    for (old, canonical) in [
+        ("add-pr-comment", "add-pull-request-comment"),
+        ("reply-to-pr-comment", "reply-to-pull-request-comment"),
+    ] {
+        for shorthand in ["true", "null", "{}"] {
+            for imported in [false, true] {
+                let repo = temp_repo();
+                let outputs = format!("  {old}: {shorthand}\n");
+                let component = format!("---\nsafe-outputs:\n{outputs}---\nComponent body.\n");
+                let source = if imported {
+                    local_workflow(repo.path(), &component, "  noop:\n")
+                } else {
+                    let source = repo.path().join("agent.md");
+                    write(&source, &workflow("", &outputs));
+                    source
+                };
+                let original = fs::read_to_string(&source).unwrap();
+                let (before, _) = compile::build_pipeline_ir(&source).await.unwrap();
+                assert_eq!(before.safe_outputs[canonical]["target"], "*");
+                assert!(!before.safe_outputs.contains_key(old));
+                assert_eq!(fs::read_to_string(&source).unwrap(), original);
+                assert_eq!(compile_source(&source).await.unwrap(), !imported);
+                let rewritten = fs::read_to_string(&source).unwrap();
+                assert!(!compile_source(&source).await.unwrap());
+                let (after, _) = compile::build_pipeline_ir(&source).await.unwrap();
+                assert_eq!(before.safe_outputs, after.safe_outputs);
+                assert_eq!(fs::read_to_string(&source).unwrap(), rewritten);
+                compile::check_pipeline(&source.with_extension("lock.yml").to_string_lossy())
+                    .await
+                    .unwrap();
+                if imported {
+                    assert_eq!(rewritten, original);
+                    assert_eq!(
+                        fs::read_to_string(repo.path().join("component.md")).unwrap(),
+                        component
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_legacy_comment_shorthand_is_not_rewritten_or_enabled() {
+    for value in ["false", "\"true\""] {
+        let repo = temp_repo();
+        let source = repo.path().join("agent.md");
+        let original = workflow("", &format!("  add-pr-comment: {value}\n"));
+        write(&source, &original);
+        assert!(compile_source(&source).await.is_err());
+        assert_eq!(fs::read_to_string(source).unwrap(), original);
+    }
+}
+
+#[tokio::test]
 async fn imported_old_comment_and_update_pr_match_root_capabilities_without_rewrites() {
     let repo = temp_repo();
     let outputs = "  add-pr-comment:\n    max: 2\n  update-pr:\n    max: 3\n    allowed-operations: [add-labels, add-reviewers]\n";
