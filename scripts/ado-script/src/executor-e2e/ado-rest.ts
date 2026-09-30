@@ -583,17 +583,45 @@ export class AdoRest {
     });
   }
 
-  /** Abandon a PR (status=abandoned). Best-effort cleanup. */
-  async abandonPullRequest(repo: string, prId: number): Promise<void> {
+  /** Completion is acceptable only for a scenario explicitly testing auto-completion. */
+  async abandonPullRequest(
+    repo: string,
+    prId: number,
+    opts: { allowCompleted?: boolean } = {},
+  ): Promise<void> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}?api-version=7.1`,
     );
-    const pr = await this.request<{ status: string }>(path, { allow404: true });
-    if (!pr || pr.status === "abandoned") return;
-    if (pr.status !== "active") {
-      throw new Error(`Cannot clean up PR ${prId}: unexpected status '${pr.status}'`);
+    const read = () => this.request<{ status: string }>(path, { allow404: true });
+    const terminal = (pr: { status: string } | undefined) =>
+      !pr || pr.status === "abandoned" || (opts.allowCompleted === true && pr.status === "completed");
+    const pr = await read();
+    if (terminal(pr)) return;
+    if (pr?.status !== "active") {
+      throw new Error(`Cannot clean up PR ${prId}: unexpected status '${pr?.status}'`);
     }
-    await this.request(path, { method: "PATCH", body: { status: "abandoned" }, allow404: true });
+    let failure: unknown;
+    try {
+      await this.request(path, { method: "PATCH", body: { status: "abandoned" }, allow404: true });
+    } catch (error) {
+      if (!opts.allowCompleted) throw error;
+      failure = error;
+    }
+    if (opts.allowCompleted) {
+      let confirmed: { status: string } | undefined;
+      try {
+        confirmed = await read();
+      } catch (error) {
+        throw new Error(`Cannot confirm cleanup of auto-complete PR ${prId}: ${String(error)}`, {
+          cause: failure ?? error,
+        });
+      }
+      if (!terminal(confirmed)) {
+        throw new Error(`Cannot confirm cleanup of auto-complete PR ${prId}: status '${confirmed?.status}'`, {
+          cause: failure,
+        });
+      }
+    }
   }
 
   /**

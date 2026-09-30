@@ -464,10 +464,8 @@ export const setPrAutoComplete: Scenario<AutoCompleteState> = {
   },
   cleanup: async (ctx, state) => {
     await new Teardown()
-      .add("abandon active PR", async () => {
-        const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
-        if (pr.status === "active") await ctx.rest.abandonPullRequest(state.repo, state.prId);
-      })
+      .add("abandon active PR", () =>
+        ctx.rest.abandonPullRequest(state.repo, state.prId, { allowCompleted: true }))
       .add("delete source", () => ctx.rest.deleteRef(state.repo, `refs/heads/${state.branch}`))
       .add("delete isolated target", () => ctx.rest.deleteRef(state.repo, `refs/heads/${state.targetBranch}`))
       .run();

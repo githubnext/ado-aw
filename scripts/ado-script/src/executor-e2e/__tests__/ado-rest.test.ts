@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AdoRest } from "../ado-rest.js";
+import { setPrAutoComplete } from "../scenarios/pr.js";
+import type { ScenarioContext } from "../scenario.js";
 
 const options = {
   orgUrl: "https://dev.azure.com/org/",
@@ -13,6 +15,80 @@ function stubFetch(responder: (url: string) => Response): ReturnType<typeof vi.f
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
+
+describe("auto-complete scenario cleanup", () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  function cleanup() {
+    const rest = new AdoRest(options);
+    const deleteRef = vi.spyOn(rest, "deleteRef").mockResolvedValue(undefined);
+    const ctx: ScenarioContext = {
+      orgUrl: options.orgUrl, project: options.project, token: options.token, rest,
+      adoRepo: "repo", buildId: "42", adoAwBin: "unused", workDir: "unused",
+      log: () => {}, prefix: (tool) => `ado-aw-det-42-${tool}`,
+    };
+    return {
+      deleteRef,
+      run: () => setPrAutoComplete.cleanup(ctx, {
+        repo: "repo", prId: 42, branch: "ado-aw-det-42-src", targetBranch: "ado-aw-det-42-target",
+      }),
+    };
+  }
+
+  it.each(["completed", "abandoned", "missing"])("accepts an already %s auto-complete PR", async (status) => {
+    const fetch = stubFetch(() => status === "missing"
+      ? new Response("", { status: 404 })
+      : Response.json({ status }));
+    const test = cleanup();
+    await expect(test.run()).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(test.deleteRef).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["between-reads", "during-patch", "lost-response"])(
+    "accepts confirmed legitimate completion %s without retrying writes", async (race) => {
+      let reads = 0;
+      let writes = 0;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+        if (init?.method === "PATCH") {
+          writes += 1;
+          if (race === "lost-response") throw new Error("lost abandonment response");
+          return race === "during-patch"
+            ? new Response("already completed", { status: 409 })
+            : Response.json({ status: "completed" });
+        }
+        reads += 1;
+        const completed = race === "between-reads" ? reads > 1 : writes > 0;
+        return Response.json({ status: completed ? "completed" : "active" });
+      }));
+      const test = cleanup();
+      await expect(test.run()).resolves.toBeUndefined();
+      expect(writes).toBeLessThanOrEqual(1);
+      expect(test.deleteRef.mock.calls).toEqual([
+        ["repo", "refs/heads/ado-aw-det-42-src"],
+        ["repo", "refs/heads/ado-aw-det-42-target"],
+      ]);
+    },
+  );
+
+  it.each(["unknown", "unconfirmed-write", "failed-readback"])(
+    "surfaces %s while independently attempting both branch deletions", async (failure) => {
+      let writes = 0;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+        if (init?.method === "PATCH") {
+          writes += 1;
+          throw new Error("lost abandonment response");
+        }
+        if (writes > 0 && failure === "failed-readback") return new Response("forbidden", { status: 403 });
+        return Response.json({ status: failure === "unknown" ? "unknown" : "active" });
+      }));
+      const test = cleanup();
+      await expect(test.run()).rejects.toThrow();
+      expect(writes).toBeLessThanOrEqual(1);
+      expect(test.deleteRef).toHaveBeenCalledTimes(2);
+    },
+  );
+});
 
 describe("AdoRest.listPullRequestLabels", () => {
   afterEach(() => vi.unstubAllGlobals());

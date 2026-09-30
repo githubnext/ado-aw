@@ -8,6 +8,7 @@ import { fileFailureIssue } from "../github-issue.js";
 import { allScenarios } from "../scenarios/index.js";
 import { SkipError } from "../scenario.js";
 import type { ScenarioResult } from "../scenario.js";
+import { AdoRest } from "../ado-rest.js";
 
 vi.mock("../github-issue.js", () => ({
   loadIssueEnv: () => ({ repo: "test/repo" }),
@@ -102,6 +103,51 @@ name:"noop",status:"failed",error:"synthetic diagnostic failure"})+"\\n");
         tool: "noop", ok: false, skipped: false, phase: "required-coverage",
         message: "Required scenario skipped: prerequisite disappeared",
       })]);
+      expect(fileFailureIssue).not.toHaveBeenCalled();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    { ids: "add-pull-request-reviewers", unavailable: "local", scopes: ["local"] },
+    { ids: "add-pull-request-reviewers-cross-org", unavailable: "cross", scopes: ["cross"] },
+    { ids: "update-pull-request,add-pull-request-reviewers,add-pull-request-reviewers-cross-org", unavailable: "local", scopes: ["local"] },
+    { ids: "update-pull-request,add-pull-request-reviewers-cross-org,add-pull-request-reviewers", unavailable: "cross", scopes: ["local", "cross"] },
+    { ids: "add-pull-request-reviewers,add-pull-request-reviewers-cross-org", unavailable: "", scopes: ["local", "cross"] },
+  ])("preflights every selected reviewer scope ($unavailable unavailable)", async ({ ids, unavailable, scopes }) => {
+    const dir = await mkdtemp(join(tmpdir(), "ado-reviewer-preflight-"));
+    try {
+      for (const [key, value] of Object.entries({
+        SYSTEM_COLLECTIONURI: "https://dev.azure.com/local/", SYSTEM_TEAMPROJECT: "test",
+        SYSTEM_ACCESSTOKEN: "not-a-real-token", EXECUTOR_E2E_ADO_AW_BIN: "must-not-run",
+        EXECUTOR_E2E_SCENARIOS: ids, EXECUTOR_E2E_REQUIRE_SELECTED: "true",
+        EXECUTOR_E2E_REVIEWER: "reviewer@example.test",
+        EXECUTOR_E2E_CROSS_ORG_ORGANIZATION: "cross", EXECUTOR_E2E_CROSS_ORG_PROJECT: "test",
+        EXECUTOR_E2E_CROSS_ORG_REPOSITORY: "repo", EXECUTOR_E2E_CROSS_ORG_ENDPOINT: "existing",
+        EXECUTOR_E2E_CROSS_ORG_TOKEN: "not-a-cross-token",
+        EXECUTOR_E2E_FILE_FAILURE_ISSUE: "false",
+        EXECUTOR_E2E_RESULTS_PATH: join(dir, "results.json"),
+      })) vi.stubEnv(key, value);
+      const visited: string[] = [];
+      vi.spyOn(AdoRest.prototype, "resolveIdentityId").mockImplementation(async function (this: AdoRest) {
+        const scope = this.orgBase.endsWith("/local") ? "local" : "cross";
+        visited.push(scope);
+        return scope === unavailable ? undefined : "11111111-1111-1111-1111-111111111111";
+      });
+      const setups = selectScenarios(allScenarios, ids).map((scenario) =>
+        vi.spyOn(scenario, "setup").mockRejectedValue(new SkipError("stop after preflight")));
+      expect(await main()).toBe(1);
+      expect(visited).toEqual(scopes);
+      const report = JSON.parse(await readFile(join(dir, "results.json"), "utf8"));
+      if (unavailable) {
+        for (const setup of setups) expect(setup).not.toHaveBeenCalled();
+        expect(report.results).toEqual([expect.objectContaining({
+          tool: "required-preflight", phase: "preflight", ok: false,
+          message: expect.stringContaining(unavailable),
+        })]);
+      } else {
+        for (const setup of setups) expect(setup).toHaveBeenCalledTimes(1);
+        expect(report.results.every((result: ScenarioResult) => result.phase === "required-coverage")).toBe(true);
+      }
       expect(fileFailureIssue).not.toHaveBeenCalled();
     } finally { await rm(dir, { recursive: true, force: true }); }
   });

@@ -51,6 +51,9 @@ Queue the existing pipeline with `scenarios` set to comma-separated exact IDs
 `fileFailureIssue: false`. Unknown selections fail rather than running a
 different suite. Required reviewer/cross-org inputs are checked before scenario
 resources are created; a required scenario that skips is not a pass.
+Mixed local/cross-organization reviewer selections resolve the reviewer
+independently in each selected organization before **any** scenario setup runs.
+An identity found only in the other organization does not satisfy that check.
 
 The harness environment equivalents are `EXECUTOR_E2E_SCENARIOS`,
 `EXECUTOR_E2E_REQUIRE_SELECTED`, and `EXECUTOR_E2E_FILE_FAILURE_ISSUE`.
@@ -131,6 +134,12 @@ review submission, auto-complete and abandonment. These require the existing
 cross-org variables below; selecting them with `requireSelected: true` fails
 preflight rather than counting missing infrastructure as a pass.
 Auto-complete scenarios use only disposable target branches.
+Their cleanup accepts confirmed completion, including completion racing an
+abandonment request. A failed or lost abandonment response gets one bounded
+read-back, not another write; an active/unknown state or failed read-back remains
+a cleanup failure. Other scenarios retain strict abandonment semantics.
+Both disposable branch deletions are attempted independently, and any failure
+is retained in the teardown result.
 
 Label preservation is read through the dedicated PR labels-list API. General
 PR metadata responses can omit labels and are not used as an empty-set oracle.
