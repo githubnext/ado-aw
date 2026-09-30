@@ -12,6 +12,8 @@
  */
 import { redact } from "./process.js";
 import { sleep as defaultSleep } from "./process.js";
+import { boundaryMarker, boundaryTargetRef } from "./config.js";
+import { parseBoundaryTargetRef, parseCandidateRef } from "./git.js";
 
 export interface AdoRestOptions {
   orgUrl: string;
@@ -43,6 +45,17 @@ export interface BoundaryPr {
   pullRequestId: number;
   status: string;
   description?: string;
+  title?: string;
+  sourceRefName?: string;
+  targetRefName?: string;
+  repository?: { id?: string; name?: string; project?: { id?: string; name?: string } };
+  forkSource?: unknown;
+}
+
+export interface OwnedBoundaryPr extends BoundaryPr {
+  title: string;
+  sourceRefName: string;
+  targetRefName: string;
 }
 
 export interface BoundaryTimelineRecord {
@@ -126,7 +139,7 @@ export class AdoRest {
 
   private async request<T>(
     path: string,
-    opts: { method?: string; body?: unknown; allow404?: boolean; timeoutMs?: number } = {},
+    opts: { method?: string; body?: unknown; allow404?: boolean; timeoutMs?: number; complete?: boolean } = {},
   ): Promise<T | undefined> {
     const headers: Record<string, string> = {
       Authorization: this.authHeader,
@@ -151,6 +164,9 @@ export class AdoRest {
         res.status,
         parseRetryAfter(res.headers.get("retry-after")),
       );
+    }
+    if (opts.complete && res.headers.get("x-ms-continuationtoken")?.trim()) {
+      throw new Error("Incomplete ADO metadata cannot authorize smoke resource cleanup");
     }
     if (res.status === 204) return undefined;
     const text = await res.text();
@@ -217,7 +233,7 @@ export class AdoRest {
   }
 
   async createBoundaryTarget(repo: string, ref: string, sha: string): Promise<void> {
-    if (!ref.startsWith("refs/heads/ado-aw-smoke-candidate/") || !ref.endsWith("-target")) {
+    if (!parseBoundaryTargetRef(ref)) {
       throw new Error("Boundary target must be a disposable candidate ref");
     }
     const response = await this.request<{value?: {success?: boolean}[]}>(
@@ -230,6 +246,11 @@ export class AdoRest {
   }
 
   async createBoundaryPr(repo: string, source: string, target: string, marker: string): Promise<BoundaryPr> {
+    const identity = parseCandidateRef(source);
+    if (!identity || target !== boundaryTargetRef(identity.buildId, identity.caseId)
+      || marker !== boundaryMarker(identity.buildId, identity.caseId)) {
+      throw new Error("Boundary PR must use the exact owned source, target and marker");
+    }
     const response = await this.request<BoundaryPr>(
       this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullrequests?api-version=7.1`),
       { method: "POST", body: {
@@ -248,11 +269,63 @@ export class AdoRest {
     return response;
   }
 
-  async abandonBoundaryPr(repo: string, id: number): Promise<void> {
+  private validateBoundaryPr(repo: string, source: string, pr: BoundaryPr): asserts pr is OwnedBoundaryPr {
+    if (!pr || typeof pr !== "object") throw new Error("Boundary PR metadata must be an object");
+    const identity = parseCandidateRef(source);
+    const repository = pr.repository;
+    if (!identity || !Number.isSafeInteger(pr.pullRequestId) || pr.pullRequestId <= 0
+      || pr.sourceRefName !== source
+      || ![boundaryTargetRef(identity.buildId, identity.caseId), `${source}-target`].includes(pr.targetRefName ?? "")
+      || pr.title !== boundaryMarker(identity.buildId, identity.caseId)
+      || !["active", "abandoned", "completed"].includes(pr.status)
+      || pr.forkSource != null
+      || ![repository?.id, repository?.name].some((value) => typeof value === "string" && value.toLowerCase() === repo.toLowerCase())
+      || ![repository?.project?.id, repository?.project?.name].some((value) => typeof value === "string" && value.toLowerCase() === this.project.toLowerCase())) {
+      throw new Error(`Cannot establish boundary PR ownership for ${source}`);
+    }
+  }
+
+  async findBoundaryPr(repo: string, source: string): Promise<OwnedBoundaryPr | undefined> {
+    if (!parseCandidateRef(source)) throw new Error("Boundary PR discovery requires an owned source ref");
+    const query = new URLSearchParams({
+      "searchCriteria.sourceRefName": source, "searchCriteria.status": "all", "$top": "2", "api-version": "7.1",
+    });
+    const response = await this.request<{ value?: BoundaryPr[] }>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullrequests?${query}`), { complete: true },
+    );
+    if (!Array.isArray(response?.value) || response.value.length > 1) {
+      throw new Error(`Boundary PR discovery is incomplete or ambiguous for ${source}`);
+    }
+    const pr = response.value[0];
+    if (pr !== undefined) this.validateBoundaryPr(repo, source, pr);
+    return pr;
+  }
+
+  async abandonBoundaryPr(repo: string, expected: OwnedBoundaryPr): Promise<void> {
+    const id = expected.pullRequestId;
+    const verify = (pr: BoundaryPr) => {
+      this.validateBoundaryPr(repo, expected.sourceRefName, pr);
+      if (pr.pullRequestId !== id || pr.targetRefName !== expected.targetRefName) {
+        throw new Error("Boundary PR identity changed during cleanup");
+      }
+    };
     const pr = await this.boundaryPr(repo, id);
+    verify(pr);
     if (pr.status === "active") {
-      await this.request(this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${id}?api-version=7.1`),
-        {method: "PATCH", body: {status: "abandoned"}});
+      let failure: unknown;
+      try {
+        await this.request(this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${id}?api-version=7.1`),
+          {method: "PATCH", body: {status: "abandoned"}});
+      } catch (error) {
+        failure = error;
+      }
+      const confirmed = await this.boundaryPr(repo, id);
+      verify(confirmed);
+      if (confirmed.status !== "abandoned") {
+        throw new Error(`Boundary PR #${id} abandonment is unconfirmed: ${confirmed.status}`, { cause: failure });
+      }
+    } else if (pr.status !== "abandoned") {
+      throw new Error(`Boundary PR #${id} unexpectedly ${pr.status}; retaining refs`);
     }
   }
 
@@ -400,24 +473,19 @@ export class AdoRest {
     return res;
   }
 
-  /**
-   * List every build of `definitionId` on the exact `branch` (a full ref,
-   * e.g. `refs/heads/ado-aw-smoke-candidate/123`), regardless of status.
-   *
-   * Deliberately queries a single definition + exact branch and inspects
-   * each build's own `status` client-side, rather than asking ADO's
-   * `statusFilter` for a comma-separated set of "still running" states —
-   * whether that filter reliably matches every non-terminal status across
-   * ADO Build REST versions is not something this harness can assume.
-   * Used by the stale-ref scanner to prove NO fixture child build is still
-   * active on a candidate branch before it is deleted.
-   */
-  async listBuildsForDefinitionBranch(definitionId: number, branch: string): Promise<BuildSummary[]> {
-    const path = this.projPath(
-      `_apis/build/builds?definitions=${definitionId}&branchName=${AdoRest.seg(branch)}&api-version=7.1&$top=50`,
-    );
-    const res = await this.request<{ value?: BuildSummary[] }>(path);
-    return res?.value ?? [];
+  /** Include every definition: today's selected lanes cannot describe an older run. */
+  async listBuildsForBranch(branch: string): Promise<BuildSummary[]> {
+    const query = new URLSearchParams({ branchName: branch, "api-version": "7.1", "$top": "50" });
+    const path = this.projPath(`_apis/build/builds?${query}`);
+    const res = await this.request<{ value?: BuildSummary[] }>(path, { complete: true });
+    if (!Array.isArray(res?.value) || res.value.length >= 50
+      || res.value.some((build) => !build || !Number.isSafeInteger(build.definition?.id)
+        || (build.definition?.id ?? 0) <= 0
+        || build.sourceBranch !== branch || !Number.isSafeInteger(build.id) || build.id <= 0
+        || !["none", "notStarted", "postponed", "inProgress", "cancelling", "completed"].includes(build.status ?? ""))) {
+      throw new Error("Child build discovery is incomplete or contains mismatched build identities");
+    }
+    return res.value;
   }
 }
 

@@ -121,6 +121,30 @@ missing builds, malformed responses and identity mismatches cancel immediately.
 Only reads are retried: queueing and other mutations are not automatically
 replayed. Cancellation still requires observed terminal state before ref cleanup.
 
+### Paired boundary-resource cleanup
+
+Boundary tests retain the normal source ref
+`refs/heads/ado-aw-smoke-candidate/<buildId>/<caseId>`, but their disposable
+targets use `refs/heads/ado-aw-smoke-boundary-target/<buildId>/<caseId>`.
+The separate prefix prevents confusion with case names ending in `-target`.
+This is test-harness naming only, not a production safe-output policy.
+
+The source, target and boundary PR are cleaned as one group. The source's child
+builds must be terminal across all definitions, not merely the currently
+selected lanes, and the owned PR must be confirmed abandoned before
+either branch is deleted. An active/unknown child, failed PR lookup/abandonment,
+incomplete discovery or conflicting ownership retains the group. Legacy
+`<source>-target` branches require corroborating repository, PR source/target,
+test-marker and orchestrator identity; ambiguous leftovers are reported, not
+guessed at. Recovery also handles setup whose PR-creation response was lost.
+
+Each deletion is conditional on the ref's observed SHA. A failed lease is not
+retried unconditionally; read-back reports retained and confirmed-absent refs.
+The PR and multiple ref operations are not an atomic ADO transaction, so partial
+cleanup remains an explicit failure. Startup stale recovery logs warnings and
+continues; cleanup failure for the current run fails that run. An unexpectedly
+completed boundary PR is retained for investigation, not treated as abandoned.
+
 ### `ado-aw-mirror` is not a mirror
 
 Nothing syncs GitHub into it, and `main` does not exist there. It holds exactly

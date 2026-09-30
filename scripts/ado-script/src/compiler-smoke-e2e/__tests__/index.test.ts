@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import type { FixtureBuildResult } from "../runner.js";
+import type { RemoteRef } from "../git.js";
+import type { OwnedBoundaryPr } from "../ado-rest.js";
 
 const mockCalls: string[] = [];
 const compiledCasePaths: string[] = [];
@@ -10,6 +12,10 @@ const stagedWrites: { to: string; contents: string }[] = [];
 let queuedCaseIds: string[] = [];
 let queuedRequests: { caseId: string; lane: string; definitionId: number; sourceBranch: string }[] = [];
 let deletedRefs: string[] = [];
+const remoteRefs = new Map<string, string>();
+const boundaryPrs = new Map<string, OwnedBoundaryPr>();
+let failBoundaryCleanup = false;
+let lateChild = false;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..", "..", "..", "..", "..");
@@ -98,6 +104,9 @@ vi.mock("../ado-rest.js", () => {
           return { name: "ado-aw-candidate" };
         }),
         getBuild: vi.fn(async () => ({ status: "completed", result: "succeeded" })),
+        listBuildsForBranch: vi.fn(async (sourceBranch: string) => lateChild
+          ? [{ id: 2, definition: { id: 3999 }, status: "notStarted", sourceBranch }]
+          : []),
         // The real manifest has two cases with runtime tag proofs. Returning
         // both here keeps the generic build-id-only ADO mock independent of
         // which case is currently being verified.
@@ -109,6 +118,21 @@ vi.mock("../ado-rest.js", () => {
         cancelBuild: vi.fn(async () => {}),
         addBuildTags: vi.fn(async () => {}),
         buildUrl: (id: number) => `https://example/${id}`,
+        findBoundaryPr: vi.fn(async (_repo: string, source: string) => boundaryPrs.get(source)),
+        createBoundaryTarget: vi.fn(async (_repo: string, ref: string) => {
+          remoteRefs.set(ref, "b".repeat(40));
+        }),
+        createBoundaryPr: vi.fn(async (_repo: string, source: string, target: string, marker: string) => {
+          const pr: OwnedBoundaryPr = {
+            pullRequestId: 7, status: "active", sourceRefName: source, targetRefName: target, title: marker,
+          };
+          boundaryPrs.set(source, pr);
+          return pr;
+        }),
+        abandonBoundaryPr: vi.fn(async () => {
+          mockCalls.push("abandonBoundaryPr");
+          if (failBoundaryCleanup) throw new Error("PR abandonment unconfirmed");
+        }),
       };
     }),
     redactToken: (text: string) => text,
@@ -142,19 +166,23 @@ vi.mock("../git.js", async (importOriginal) => {
       mockCalls.push("commitAll");
       return "candidate-sha";
     }),
-    pushCandidate: vi.fn(async () => {
+    pushCandidate: vi.fn(async (opts: { ref: string }) => {
       mockCalls.push("pushCandidate");
+      remoteRefs.set(opts.ref, "a".repeat(40));
     }),
     verifyRemoteRef: vi.fn(async () => {
       mockCalls.push("verifyRemoteRef");
     }),
-    deleteRemoteRefs: vi.fn(async (opts: { refs: readonly string[] }) => {
+    deleteRemoteRefs: vi.fn(async (opts: { refs: readonly RemoteRef[] }) => {
       mockCalls.push("deleteRemoteRefs");
-      deletedRefs.push(...opts.refs);
+      for (const { ref } of opts.refs) {
+        deletedRefs.push(ref);
+        remoteRefs.delete(ref);
+      }
     }),
     listCandidateRefs: vi.fn(async () => {
       mockCalls.push("listCandidateRefs");
-      return [];
+      return [...remoteRefs].map(([ref, sha]) => ({ ref, sha }));
     }),
   };
 });
@@ -238,6 +266,10 @@ beforeEach(() => {
   queuedCaseIds = [];
   queuedRequests = [];
   deletedRefs = [];
+  remoteRefs.clear();
+  boundaryPrs.clear();
+  failBoundaryCleanup = false;
+  lateChild = false;
   vi.clearAllMocks();
 });
 
@@ -425,6 +457,40 @@ describe("smoke-e2e index.main (PR base-ref regression)", () => {
 });
 
 describe("smoke-e2e index.main (per-case ref retention)", () => {
+  it.each(["unproven-child", "failed-abandonment", "late-child", "confirmed-cleanup"])(
+    "keeps source/target cleanup paired (%s)", async (outcome) => {
+      const runnerModule = await import("../runner.js");
+      vi.mocked(runnerModule.runFixtures).mockImplementationOnce(async (_client, requests) => ({
+        ok: false, allTerminal: outcome !== "unproven-child",
+        results: requests.map((request) => ({
+          ...request, buildId: 1, status: "failed", result: "failed", durationMs: 1,
+          terminalProven: outcome !== "unproven-child",
+        })),
+      }));
+      failBoundaryCleanup = outcome === "failed-abandonment";
+      lateChild = outcome === "late-child";
+      const previous = process.env;
+      process.env = { ...process.env, ...baseEnv, SMOKE_CASE_IDS: "pr-synthetic-auto", VITEST: "true" };
+      try {
+        const { main } = await import("../index.js");
+        expect(await main()).toBe(1);
+        const source = "refs/heads/ado-aw-smoke-candidate/630001/pr-synthetic-auto";
+        const target = "refs/heads/ado-aw-smoke-boundary-target/630001/pr-synthetic-auto";
+        expect(boundaryPrs.get(source)?.targetRefName).toBe(target);
+        if (outcome === "confirmed-cleanup") {
+          expect(deletedRefs).toEqual([source, target]);
+          expect(mockCalls.indexOf("abandonBoundaryPr")).toBeLessThan(mockCalls.indexOf("deleteRemoteRefs"));
+        } else {
+          expect(deletedRefs).toEqual([]);
+          expect(remoteRefs.has(source) && remoteRefs.has(target)).toBe(true);
+          if (outcome === "unproven-child" || outcome === "late-child") {
+            expect(mockCalls).not.toContain("abandonBoundaryPr");
+          }
+        }
+      } finally { process.env = previous; }
+    },
+  );
+
   it("retains only the unproven case's ref and still deletes the proven ones", async () => {
     const runnerModule = await import("../runner.js");
     vi.mocked(runnerModule.runFixtures).mockImplementationOnce(
