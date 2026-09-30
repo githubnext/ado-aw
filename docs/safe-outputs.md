@@ -1425,6 +1425,13 @@ inherit the review's target, filter, approval and staged policy and cannot selec
 another PR or repository. Comment supersession uses the same ownership/hash
 checks as standalone comments and runs only after the replacement review succeeds.
 
+Inline preparation fetches each distinct immutable `(commit, path)` once per
+proposal, scans its requested lines together and processes one full file at a
+time. Left/right comments can require separate reads of the same filename.
+The existing 4 MiB file-content bound and 100-finding hard limit remain;
+there is no additional aggregate unique-file content cap. All anchors must
+validate before the first write, and later source-head checks still apply.
+
 ### Focused PR tools
 
 Each PR intent has one agent-facing tool:
@@ -1455,6 +1462,14 @@ All PR mutation tools support `target`, `target-repo`, `allowed-repositories`,
 and an optional supplied PR ID must agree. Use a fixed ID or `target: "*"` for
 another PR. With `"*"`, `pull_request_id` is required. Repository routing and
 filters are enforced in Stage 3, including comment/reply/thread operations.
+
+All Azure DevOps PR operations, including creation and shared policy reads, use
+a **30-second per-request HTTP deadline** and an **8 MiB consumed-response
+bound**, including streamed bodies without a content length. These are per
+request, not a deadline for the whole review. Oversized, malformed or incomplete
+policy metadata blocks mutation. A timeout or unreadable response after a write
+may mean ADO already applied it: delivery is uncertain, not proof of rollback,
+and the executor does not blindly replay the mutation.
 
 Reviewer, label, auto-complete and review tools accept `pull_request_id` and
 accept an optional `repository`. Reviewer and label tools additionally require

@@ -166,18 +166,19 @@ impl Executor for ReplacePullRequestLabelResult {
                     ),
             "Label transition is not in allowed-transitions"
         );
+        let client = super::pr_http::client()?;
         let (pr_id, target) = match resolve_configured_pr_target(
             Self::NAME,
             self.pull_request_id.as_ref(),
             self.repository.as_deref(),
             ctx,
+            &client,
         )
         .await?
         {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
-        let client = reqwest::Client::new();
         let operation = UpdatePrContext {
             client: &client,
             target,

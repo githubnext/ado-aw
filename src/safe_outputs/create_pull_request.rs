@@ -1,5 +1,6 @@
 //! Create pull request safe output tool
 
+use super::pr_http::BoundedPrResponse;
 use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
@@ -205,7 +206,7 @@ async fn resolve_reviewer_identity(
         return None;
     }
 
-    match resp.json::<serde_json::Value>().await {
+    match resp.bounded_json::<serde_json::Value>().await {
         Ok(data) => {
             let result = find_identity_in_response(&data, reviewer);
             if result.is_none() {
@@ -1070,7 +1071,7 @@ impl Executor for CreatePrResult {
         }
 
         // Use ADO REST API to create branch and push changes
-        let client = reqwest::Client::new();
+        let client = super::pr_http::client()?;
 
         // Get the target branch ref to find the base commit
         debug!("Getting target branch ref from ADO");
@@ -1108,7 +1109,7 @@ impl Executor for CreatePrResult {
 
             if !refs_response.status().is_success() {
                 let status = refs_response.status();
-                let body = refs_response.text().await.unwrap_or_default();
+                let body = refs_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
                 warn!("Failed to get target branch ref: {} - {}", status, body);
                 return Ok(ExecutionResult::failure(format!(
                     "Failed to get target branch ref: {} - {}",
@@ -1116,7 +1117,7 @@ impl Executor for CreatePrResult {
                 )));
             }
 
-            let refs_data: serde_json::Value = refs_response.json().await?;
+            let refs_data: serde_json::Value = refs_response.bounded_json().await?;
             let resolved = refs_data["value"][0]["objectId"]
                 .as_str()
                 .context("Could not find target branch commit")?;
@@ -1152,7 +1153,7 @@ impl Executor for CreatePrResult {
             .context("Failed to check source branch existence")?;
 
             if check_ref_response.status().is_success() {
-                let check_data: serde_json::Value = check_ref_response.json().await?;
+                let check_data: serde_json::Value = check_ref_response.bounded_json().await?;
                 let refs = check_data["value"].as_array();
                 if refs.is_some_and(|r| !r.is_empty()) {
                     warn!(
@@ -1248,11 +1249,11 @@ impl Executor for CreatePrResult {
         .json(&pr_body)
         .send()
         .await
-        .context("Failed to create pull request")?;
+        .context("Failed to create pull request; delivery is uncertain and must not be replayed blindly")?;
 
         if !pr_response.status().is_success() {
             let status = pr_response.status();
-            let body = pr_response.text().await.unwrap_or_default();
+            let body = pr_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             warn!("Failed to create pull request: {} - {}", status, body);
 
             // Record branch info for manual recovery if enabled
@@ -1301,7 +1302,8 @@ impl Executor for CreatePrResult {
             )));
         }
 
-        let pr_data: serde_json::Value = pr_response.json().await?;
+        let pr_data: serde_json::Value = pr_response.bounded_json().await
+            .context("PR creation response is unavailable or invalid; the branch was pushed and PR delivery is uncertain")?;
         let pr_id = pr_data["pullRequestId"].as_u64().unwrap_or(0);
         let pr_web_url = pr_data["url"].as_str().unwrap_or("");
         info!("Pull request created: #{} - {}", pr_id, pr_web_url);
@@ -1606,7 +1608,7 @@ async fn push_new_branch(
     }
 
     let status = push_response.status();
-    let body = push_response.text().await.unwrap_or_default();
+    let body = push_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
 
     // Handle TOCTOU branch collision: retry once with a new random suffix
     if status.as_u16() == 409 || (status.as_u16() == 400 && body.contains("already exists")) {
@@ -1631,7 +1633,7 @@ async fn push_new_branch(
 
         if !retry_response.status().is_success() {
             let retry_status = retry_response.status();
-            let retry_body_text = retry_response.text().await.unwrap_or_default();
+            let retry_body_text = retry_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             warn!(
                 "Retry push also failed: {} - {}",
                 retry_status, retry_body_text

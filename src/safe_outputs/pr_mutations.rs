@@ -1,5 +1,6 @@
 //! Shared Azure DevOps PR mutations and legacy configuration validation.
 
+use super::pr_http::BoundedPrResponse;
 #[cfg(test)]
 use super::pr_common::PullRequestReference;
 use super::pr_common::repository_api_base;
@@ -402,9 +403,9 @@ pub(crate) async fn execute_set_auto_complete(
     if !conn_response.status().is_success() {
         let status = conn_response.status();
         let error_body = conn_response
-            .text()
+            .bounded_text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+            .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
         return Ok(ExecutionResult::failure(format!(
             "Failed to fetch connection data (HTTP {}): {}",
             status, error_body
@@ -412,7 +413,7 @@ pub(crate) async fn execute_set_auto_complete(
     }
 
     let conn_body: serde_json::Value = conn_response
-        .json()
+        .bounded_json()
         .await
         .context("Failed to parse connection data response")?;
 
@@ -463,9 +464,9 @@ pub(crate) async fn execute_set_auto_complete(
     } else {
         let status = response.status();
         let error_body = response
-            .text()
+            .bounded_text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+            .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
         Ok(ExecutionResult::failure(format!(
             "Failed to set auto-complete on PR #{} (HTTP {}): {}",
             operation_ctx.pr_id, status, error_body
@@ -569,9 +570,9 @@ pub(crate) async fn execute_add_labels(
             Ok(resp) => {
                 let status = resp.status();
                 let error_body = resp
-                    .text()
+                    .bounded_text()
                     .await
-                    .unwrap_or_else(|_| "Unknown error".to_string());
+                    .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
                 warn!(
                     "Failed to add label '{}' to PR #{} (HTTP {}): {}",
                     label, operation_ctx.pr_id, status, error_body
@@ -583,7 +584,7 @@ pub(crate) async fn execute_add_labels(
                     "Request failed for label '{}' on PR #{}: {}",
                     label, operation_ctx.pr_id, e
                 );
-                failed.push(format!("{} (request error)", label));
+                failed.push(format!("{} (delivery uncertain)", label));
             }
         }
     }
@@ -665,9 +666,9 @@ pub(crate) async fn execute_update_description(
     } else {
         let status = response.status();
         let error_body = response
-            .text()
+            .bounded_text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+            .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
         Ok(ExecutionResult::failure(format!(
             "Failed to update description on PR #{} (HTTP {}): {}",
             operation_ctx.pr_id, status, error_body
@@ -702,7 +703,7 @@ async fn lookup_reviewer_id(
         .await
         {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
+                match resp.bounded_json::<serde_json::Value>().await {
                     Ok(body) => {
                         let Some(identities) =
                             body.get("value").and_then(serde_json::Value::as_array)
@@ -767,7 +768,13 @@ async fn lookup_reviewer_id(
     .await
     {
         Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let body: serde_json::Value = match resp.bounded_json().await {
+                Ok(body) => body,
+                Err(error) => {
+                    warn!("Identity lookup for '{}' returned invalid metadata: {error}", reviewer);
+                    return None;
+                }
+            };
             let matching_ids = body
                 .get("value")
                 .and_then(|v| v.as_array())
@@ -856,9 +863,9 @@ async fn add_reviewer_to_pr(
         Ok(resp) => {
             let status = resp.status();
             let error_body = resp
-                .text()
+                .bounded_text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             warn!(
                 "Failed to add reviewer '{}' to PR #{} (HTTP {}): {}",
                 reviewer, pr_id, status, error_body
@@ -870,7 +877,7 @@ async fn add_reviewer_to_pr(
                 "Request failed for reviewer '{}' on PR #{}: {}",
                 reviewer, pr_id, e
             );
-            ReviewerAddResult::Failed("request error".to_string())
+            ReviewerAddResult::Failed("delivery uncertain".to_string())
         }
     }
 }

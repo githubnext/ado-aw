@@ -1,5 +1,6 @@
 //! Resolve PR review thread safe output tool
 
+use super::pr_http::BoundedPrResponse;
 use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
 use schemars::JsonSchema;
@@ -200,8 +201,10 @@ impl Executor for ResolvePrThreadResult {
         };
 
         super::pr_common::validate_temporary_opt_in(self.pull_request_id.as_ref(), config.allow_temporary_ids)?;
+        let client = super::pr_http::client()?;
         let (pull_request_id, target) = match resolve_configured_pr_target(
-            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(),             ctx,
+            &client,
         ).await? {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
@@ -223,7 +226,6 @@ impl Executor for ResolvePrThreadResult {
             "status": status_int
         });
 
-        let client = reqwest::Client::new();
 
         info!(
             "Updating thread #{} on PR #{} to status '{}'",
@@ -234,13 +236,13 @@ impl Executor for ResolvePrThreadResult {
             .json(&body)
             .send()
             .await
-            .context("Failed to send request to Azure DevOps")?;
+            .context("Failed to change PR thread status; delivery is uncertain")?;
 
         if response.status().is_success() {
             let resp_body: serde_json::Value = response
-                .json()
+                .bounded_json()
                 .await
-                .context("Failed to parse response JSON")?;
+                .context("Failed to parse PR thread response JSON; delivery is uncertain")?;
 
             let returned_id = resp_body.get("id").and_then(|v| v.as_i64())
                 .filter(|id| *id == i64::from(self.thread_id))
@@ -267,9 +269,9 @@ impl Executor for ResolvePrThreadResult {
         } else {
             let status = response.status();
             let error_body = response
-                .text()
+                .bounded_text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
 
             Ok(ExecutionResult::failure(format!(
                 "Failed to update thread #{} on PR #{} (HTTP {}): {}",

@@ -1,4 +1,5 @@
 //! Publish an existing active draft PR without changing its vote or merge policy.
+use super::pr_http::BoundedPrResponse;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 use schemars::JsonSchema;
@@ -100,7 +101,7 @@ async fn read_pr(
         response.status()
     );
     let state: PrState = response
-        .json()
+        .bounded_json()
         .await
         .context("Malformed PR publication state")?;
     ensure!(
@@ -125,11 +126,13 @@ impl Executor for MarkPullRequestReadyResult {
         }
         .validate()?;
         let _: MarkPullRequestReadyConfig = ctx.get_tool_config(Self::NAME)?;
+        let client = super::pr_http::client()?;
         let (id, target) = match resolve_configured_pr_target(
             Self::NAME,
             self.pull_request_id.as_ref(),
             self.repository.as_deref(),
             ctx,
+            &client,
         )
         .await?
         {
@@ -144,7 +147,6 @@ impl Executor for MarkPullRequestReadyResult {
             "{}/pullRequests/{id}?api-version=7.1",
             repository_api_base(&target)
         );
-        let client = reqwest::Client::new();
         let before = read_pr(&client, &url, token, ctx, id).await?;
         ensure!(
             before.status.eq_ignore_ascii_case("active"),

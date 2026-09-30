@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::result::AdoRepositoryTarget;
+use super::pr_http::BoundedPrResponse;
 use super::update_pr::UpdatePrConfig;
 use super::{
     ExecutionContext, ExecutionResult, PATH_SEGMENT, canonical_repository_alias,
@@ -88,6 +89,7 @@ pub(crate) async fn resolve_configured_pr_target(
     reference: Option<&PullRequestReference>,
     repository: Option<&str>,
     ctx: &ExecutionContext,
+    client: &reqwest::Client,
 ) -> anyhow::Result<Result<(u64, AdoRepositoryTarget), ExecutionResult>> {
     let raw = ctx.tool_configs.get(tool).with_context(|| format!("{tool} is not configured"))?;
     let policy = PrMutationPolicy::parse(raw)?;
@@ -101,10 +103,9 @@ pub(crate) async fn resolve_configured_pr_target(
     let (id, target) = &resolved;
     if !policy.required_labels.is_empty() || policy.required_title_prefix.is_some() {
         let token = ctx.access_token.as_deref().context("No access token available")?;
-        let client = reqwest::Client::new();
         let base = repository_api_base(target);
         if !policy.required_labels.is_empty() {
-            let labels = match fetch_pr_labels(&client, &base, *id, token, ctx).await? {
+            let labels = match fetch_pr_labels(client, &base, *id, token, ctx).await? {
                 Ok(labels) => labels,
                 Err(failure) => return Ok(Err(failure)),
             };
@@ -125,7 +126,7 @@ pub(crate) async fn resolve_configured_pr_target(
             }
             #[derive(Deserialize)]
             struct Metadata { title: String }
-            let metadata: Metadata = response.json().await.context("Invalid PR title policy metadata")?;
+            let metadata: Metadata = response.bounded_json().await.context("Invalid PR title policy metadata")?;
             if !metadata.title.starts_with(prefix) {
                 return Ok(Err(ExecutionResult::failure(format!("PR #{id} does not match required-title-prefix"))));
             }
@@ -147,6 +148,7 @@ pub(crate) async fn fetch_pr_labels(
     }
     #[derive(Deserialize)]
     struct Labels {
+        count: Option<usize>,
         value: Vec<Label>,
     }
 
@@ -166,8 +168,10 @@ pub(crate) async fn fetch_pr_labels(
             response.status()
         ))));
     }
-    match response.json::<Labels>().await {
-        Ok(labels) => Ok(Ok(labels.value.into_iter().map(|label| label.name).collect())),
+    match response.bounded_json::<Labels>().await {
+        Ok(labels) if labels.count.is_none_or(|count| count == labels.value.len()) =>
+            Ok(Ok(labels.value.into_iter().map(|label| label.name).collect())),
+        Ok(_) => Ok(Err(ExecutionResult::failure("Incomplete PR label policy metadata"))),
         Err(error) => Ok(Err(ExecutionResult::failure(format!(
             "Failed to parse PR #{pr_id} labels: {error}"
         )))),
@@ -1019,6 +1023,55 @@ pub(crate) mod tests {
             .insert("trigger".into(), "Other/target".into());
         ctx.tool_configs.insert(tool.into(), serde_json::json!({}));
         ctx
+    }
+
+    #[tokio::test]
+    async fn review_regression_policy_reads_block_mutation_before_label_addition() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+        for case in ["oversized-labels", "oversized-title", "continued-labels", "incomplete-label-count", "malformed-labels"] {
+            let server = MockServer::start().await;
+            let tool = "add-pull-request-labels";
+            let mut ctx = triggering_context(&server, tool, false);
+            let title = case == "oversized-title";
+            ctx.tool_configs.insert(tool.into(), if title {
+                serde_json::json!({"required-title-prefix":"allowed"})
+            } else {
+                serde_json::json!({"required-labels":["allowed"]})
+            });
+            let base = format!("/Other/_apis/git/repositories/{TRIGGER_REPO_ID}/pullRequests/42");
+            let mut body = if title {
+                serde_json::json!({"title":"allowed title"})
+            } else {
+                serde_json::json!({"value":[{"name":"allowed"}]})
+            };
+            if case.starts_with("oversized") {
+                body["padding"] = serde_json::json!("x".repeat(8 * 1024 * 1024));
+            }
+            if case == "malformed-labels" {
+                body = serde_json::json!({});
+            }
+            if case == "incomplete-label-count" {
+                body["count"] = serde_json::json!(2);
+            }
+            let mut response = ResponseTemplate::new(200).set_body_json(body);
+            if case == "continued-labels" {
+                response = response.insert_header("x-ms-continuationtoken", "more");
+            }
+            Mock::given(method("GET"))
+                .and(path(if title { base.clone() } else { format!("{base}/labels") }))
+                .respond_with(response)
+                .mount(&server).await;
+            Mock::given(method("POST"))
+                .and(path(format!("{base}/labels")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name":"new"})))
+                .mount(&server).await;
+            let mut proposal: crate::safe_outputs::AddPrLabelsResult =
+                serde_json::from_value(serde_json::json!({"name":tool,"labels":["new"]})).unwrap();
+            let result = proposal.execute_sanitized(&ctx).await;
+            assert!(!result.as_ref().is_ok_and(|result| result.success), "{case}: {result:?}");
+            assert!(server.received_requests().await.unwrap().iter()
+                .all(|request| request.method.as_str() == "GET"), "{case}");
+        }
     }
 
     #[tokio::test]

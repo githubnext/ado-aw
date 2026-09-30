@@ -126,11 +126,13 @@ impl Executor for UpdatePullRequestCommentResult {
             config.comment_key.len() <= 100,
             "comment-key must fit 100 bytes"
         );
+        let client = super::pr_http::client()?;
         let (pr_id, target) = match resolve_configured_pr_target(
             Self::NAME,
             self.pull_request_id.as_ref(),
             self.repository.as_deref(),
             ctx,
+            &client,
         )
         .await?
         {
@@ -139,7 +141,6 @@ impl Executor for UpdatePullRequestCommentResult {
         };
         super::pr_comments::owner(ctx, "comment", &config.comment_key)?
             .context("Owned updates require a complete trusted pipeline identity")?;
-        let client = super::pr_comments::client()?;
         let operation = UpdatePrContext {
             client: &client,
             target,

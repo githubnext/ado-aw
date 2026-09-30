@@ -140,8 +140,9 @@ impl Executor for SetPrAutoCompleteResult {
             merge_strategy: config.merge_strategy,
             ..Default::default()
         };
+        let client = super::pr_http::client()?;
         let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
-            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx,
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx, &client,
         ).await? {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
@@ -154,7 +155,6 @@ impl Executor for SetPrAutoCompleteResult {
         {
             return Ok(failure);
         }
-        let client = reqwest::Client::new();
         execute_set_auto_complete(
             &UpdatePrContext {
                 client: &client,

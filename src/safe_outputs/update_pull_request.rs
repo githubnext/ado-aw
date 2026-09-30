@@ -1,5 +1,6 @@
 //! `update-pull-request` Azure DevOps safe output.
 
+use super::pr_http::BoundedPrResponse;
 use anyhow::{Context, ensure};
 use log::{debug, info};
 use schemars::JsonSchema;
@@ -454,14 +455,14 @@ impl UpdatePullRequestResult {
         if !response.status().is_success() {
             let status = response.status();
             let body = response
-                .text()
+                .bounded_text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             return Ok(Err(ExecutionResult::failure(format!(
                 "Failed to fetch PR #{pr_id} (HTTP {status}): {body}"
             ))));
         }
-        match response.json::<RawPullRequest>().await {
+        match response.bounded_json::<RawPullRequest>().await {
             Ok(pr) => Ok(Ok(pr)),
             Err(error) => Ok(Err(ExecutionResult::failure(format!(
                 "Failed to parse PR #{pr_id}: {error}"
@@ -587,7 +588,7 @@ impl Executor for UpdatePullRequestResult {
         {
             return Ok(failure);
         }
-        let client = reqwest::Client::new();
+        let client = super::pr_http::client()?;
         let base_url = repository_api_base(&target);
         let body = self.body.as_deref().map(|body| {
             if legacy.is_some() {
@@ -671,13 +672,13 @@ impl Executor for UpdatePullRequestResult {
         )
         .send()
         .await
-        .context("Failed to update Azure DevOps pull request")?;
+        .context("Failed to update Azure DevOps pull request; delivery is uncertain")?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response
-                .text()
+                .bounded_text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             return Ok(ExecutionResult::failure(format!(
                 "Failed to update PR #{pr_id} (HTTP {status}): {body}"
             )));

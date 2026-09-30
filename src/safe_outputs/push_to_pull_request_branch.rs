@@ -1,4 +1,5 @@
 //! Exact-head guarded code changes to an existing, authorized ADO PR source ref.
+use super::pr_http::BoundedPrResponse;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 use schemars::JsonSchema;
@@ -193,7 +194,7 @@ async fn source_state(
 ) -> anyhow::Result<(PullRequest, Repository, CommitSha)> {
     let base = op.repository_api_base();
     let repository: Repository =
-        super::pr_comments::get_json(op, &format!("{base}?api-version=7.1")).await?;
+        super::pr_http::get_json(op, &format!("{base}?api-version=7.1")).await?;
     crate::secure::Guid::parse(&repository.id)
         .context("Invalid repository ID in source metadata")?;
     crate::secure::Guid::parse(&repository.project.id)
@@ -210,7 +211,7 @@ async fn source_state(
                 || op.target.repository.eq_ignore_ascii_case(&repository.name)),
         "Source metadata does not match the authorized repository target"
     );
-    let pr: PullRequest = super::pr_comments::get_json(
+    let pr: PullRequest = super::pr_http::get_json(
         op,
         &format!("{base}/pullRequests/{}?api-version=7.1", op.pr_id),
     )
@@ -265,7 +266,7 @@ async fn source_state(
                 .context("Invalid source ref")?,
         )
         .append_pair("api-version", "7.1");
-    let refs: Refs = super::pr_comments::get_json(op, url.as_str()).await?;
+    let refs: Refs = super::pr_http::get_json(op, url.as_str()).await?;
     let matches = refs
         .value
         .into_iter()
@@ -807,18 +808,19 @@ impl Executor for PushToPullRequestBranchResult {
         .validate()?;
         let config: PushToPullRequestBranchConfig = ctx.get_tool_config(Self::NAME)?;
         validate_push_config(&config)?;
+        let client = super::pr_http::client()?;
         let (pr_id, target) = match resolve_configured_pr_target(
             Self::NAME,
             self.pull_request_id.as_ref(),
             Some(self.repository.as_str()),
             ctx,
+            &client,
         )
         .await?
         {
             Ok(target) => target,
             Err(failure) => return Ok(failure),
         };
-        let client = super::pr_comments::client()?;
         let op = UpdatePrContext {
             client: &client,
             target,
@@ -918,7 +920,7 @@ impl Executor for PushToPullRequestBranchResult {
                 ));
             }
         };
-        let pushed: Value = match response.json().await {
+        let pushed: Value = match response.bounded_json().await {
             Ok(value) => value,
             Err(error) => {
                 return Ok(ExecutionResult::failure_with_data(
@@ -998,11 +1000,11 @@ pub(crate) async fn prepare_agent(
         );
         return Ok(());
     }
+    let client = super::pr_http::client()?;
     let (pr_id, target) =
-        resolve_configured_pr_target(PushToPullRequestBranchResult::NAME, None, None, ctx)
+        resolve_configured_pr_target(PushToPullRequestBranchResult::NAME, None, None, ctx, &client)
             .await?
             .map_err(|failure| anyhow::anyhow!(failure.message))?;
-    let client = super::pr_comments::client()?;
     let op = UpdatePrContext {
         client: &client,
         target,

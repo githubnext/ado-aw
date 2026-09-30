@@ -1,5 +1,6 @@
 //! Add PR comment safe output tool
 
+use super::pr_http::BoundedPrResponse;
 use log::{debug, info};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -469,11 +470,13 @@ impl Executor for AddPrCommentResult {
             self.pull_request_id.as_ref(),
             config.allow_temporary_ids,
         )?;
+        let client = super::pr_http::client()?;
         let (pull_request_id, target) = match resolve_configured_pr_target(
             Self::NAME,
             self.pull_request_id.as_ref(),
             self.repository.as_deref(),
             ctx,
+            &client,
         )
         .await?
         {
@@ -495,7 +498,6 @@ impl Executor for AddPrCommentResult {
         );
         debug!("API URL: {}", url);
 
-        let client = super::pr_comments::client()?;
         let operation = UpdatePrContext {
             client: &client,
             target: target.clone(),
@@ -549,19 +551,19 @@ impl Executor for AddPrCommentResult {
                 .json(&thread_body)
                 .send()
                 .await
-                .context("Failed to send request to Azure DevOps")?;
+                .context("Failed to send PR comment; delivery is uncertain")?;
 
         if response.status().is_success() {
             let body: serde_json::Value = response
-                .json()
+                .bounded_json()
                 .await
-                .context("Failed to parse response JSON")?;
+                .context("Failed to parse PR comment response JSON; delivery is uncertain")?;
 
             let thread_id = body
                 .get("id")
                 .and_then(|v| v.as_i64())
                 .filter(|id| *id > 0)
-                .context("Comment response missing a positive thread ID")?;
+                .context("Comment response missing a positive thread ID; delivery is uncertain")?;
 
             info!(
                 "Comment thread added to PR #{}: thread #{}",
@@ -615,9 +617,9 @@ impl Executor for AddPrCommentResult {
         } else {
             let status = response.status();
             let error_body = response
-                .text()
+                .bounded_text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
 
             Ok(ExecutionResult::failure(format!(
                 "Failed to add comment to PR #{} (HTTP {}): {}",

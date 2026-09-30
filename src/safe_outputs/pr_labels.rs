@@ -1,4 +1,5 @@
 //! Authoritative label identity reads and bounded, non-replayed removals.
+use super::pr_http::BoundedPrResponse;
 use anyhow::{Context, ensure};
 use serde::Deserialize;
 
@@ -42,7 +43,7 @@ pub(crate) async fn read_labels(ctx: &UpdatePrContext<'_>) -> anyhow::Result<Vec
         );
     }
     let labels: Labels = response
-        .json()
+        .bounded_json()
         .await
         .context("Malformed PR label identity list")?;
     ensure!(

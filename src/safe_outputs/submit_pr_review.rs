@@ -1,5 +1,6 @@
 //! Submit PR review safe output tool
 
+use super::pr_http::BoundedPrResponse;
 use ado_aw_derive::SanitizeConfig;
 use log::{debug, info};
 use percent_encoding::utf8_percent_encode;
@@ -275,9 +276,9 @@ async fn fetch_authenticated_user_id(
     if !response.status().is_success() {
         let status = response.status();
         let error_body = response
-            .text()
+            .bounded_text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+            .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
         return Ok(Err(ExecutionResult::failure(format!(
             "Failed to fetch connection data (HTTP {}): {}",
             status, error_body
@@ -285,7 +286,7 @@ async fn fetch_authenticated_user_id(
     }
 
     let body: serde_json::Value = response
-        .json()
+        .bounded_json()
         .await
         .context("Failed to parse connection data response")?;
 
@@ -329,9 +330,9 @@ async fn check_self_approval(
     if !pr_response.status().is_success() {
         let status = pr_response.status();
         let error_body = pr_response
-            .text()
+            .bounded_text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+            .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
         return Ok(Some(ExecutionResult::failure(format!(
             "Failed to fetch PR #{} for self-approval check (HTTP {}): {}",
             ctx.pr_id, status, error_body
@@ -339,7 +340,7 @@ async fn check_self_approval(
     }
 
     let pr_body: serde_json::Value = pr_response
-        .json()
+        .bounded_json()
         .await
         .context("Failed to parse PR response")?;
 
@@ -390,9 +391,9 @@ async fn submit_vote(
     if !response.status().is_success() {
         let status = response.status();
         let error_body = response
-            .text()
+            .bounded_text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+            .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
         return Ok(Some(ExecutionResult::failure(format!(
             "Failed to submit vote on PR #{} (HTTP {}): {}",
             ctx.pr_id, status, error_body
@@ -442,9 +443,9 @@ async fn post_review_comment_thread(
     if !response.status().is_success() {
         let status = response.status();
         let error_body = response
-            .text()
+            .bounded_text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+            .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
         return Ok(Err(ExecutionResult::failure(format!(
             "Failed to post review comment on PR #{} (HTTP {}): {}",
             pull_request_id, status, error_body
@@ -452,7 +453,7 @@ async fn post_review_comment_thread(
     }
 
     let thread_resp: serde_json::Value = response
-        .json()
+        .bounded_json()
         .await
         .context("Failed to parse comment thread response")?;
 
@@ -580,11 +581,13 @@ impl Executor for SubmitPrReviewResult {
             )));
         }
 
+        let client = super::pr_http::client()?;
         let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
             Self::NAME,
             self.pull_request_id.as_ref(),
             self.repository.as_deref(),
             ctx,
+            &client,
         )
         .await?
         {
@@ -604,7 +607,6 @@ impl Executor for SubmitPrReviewResult {
 
         let vote_value = event_to_vote(&self.event);
 
-        let client = super::pr_comments::client()?;
         let vote_ctx = PrVoteCtx {
             client: &client,
             target,

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::pr_common::collection_identity;
+use super::pr_http::get_json;
 use super::pr_mutations::UpdatePrContext;
 use super::{ExecutionContext, ExecutionResult, authenticate_ado_request};
 use crate::secure::{Guid, Identifier};
@@ -13,13 +14,6 @@ const BODY_HASH: &str = "ado-aw.content-sha256";
 const RUN: &str = "ado-aw.run-id";
 const CONTENT_PROOF: &str = "\n\n<!-- ado-aw-content-sha256:";
 pub(crate) const MAX_COMMENT_BYTES: usize = 65_536;
-
-pub(crate) fn client() -> anyhow::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("Failed to create PR comment client")
-}
 
 pub(crate) fn default_comment_key() -> Identifier {
     Identifier::parse("default").expect("constant comment key is valid")
@@ -103,48 +97,6 @@ pub(crate) fn validate_body(body: &str) -> anyhow::Result<()> {
         "Comment content exceeds 65536 bytes"
     );
     Ok(())
-}
-
-pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(
-    ctx: &UpdatePrContext<'_>,
-    url: &str,
-) -> anyhow::Result<T> {
-    let mut response =
-        authenticate_ado_request(ctx.client.get(url), ctx.token, ctx.connection_type)
-            .send()
-            .await
-            .context("PR comment metadata read failed")?;
-    ensure!(
-        response.status().is_success(),
-        "PR comment metadata read failed (HTTP {})",
-        response.status()
-    );
-    if let Some(token) = response.headers().get("x-ms-continuationtoken") {
-        ensure!(
-            token.to_str()?.trim().is_empty(),
-            "Incomplete comment metadata cannot authorize mutation"
-        );
-    }
-    const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-    ensure!(
-        response
-            .content_length()
-            .is_none_or(|length| length <= MAX_RESPONSE_BYTES as u64),
-        "PR comment metadata exceeds the 8 MB response bound"
-    );
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .context("PR comment metadata stream failed")?
-    {
-        ensure!(
-            chunk.len() <= MAX_RESPONSE_BYTES.saturating_sub(bytes.len()),
-            "PR comment metadata exceeds the 8 MB response bound"
-        );
-        bytes.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&bytes).context("Malformed PR comment metadata")
 }
 
 pub(crate) async fn actor(ctx: &UpdatePrContext<'_>) -> anyhow::Result<String> {

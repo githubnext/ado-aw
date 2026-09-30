@@ -1,5 +1,6 @@
 //! `abandon-pull-request` Azure DevOps safe output.
 
+use super::pr_http::BoundedPrResponse;
 use anyhow::ensure;
 use log::{debug, info, warn};
 use schemars::JsonSchema;
@@ -298,13 +299,13 @@ async fn fetch_pr(
     .map_err(|error| anyhow::anyhow!("Failed to fetch Azure DevOps pull request: {error}"))?;
 
     if response.status().is_success() {
-        return Ok(Ok(response.json().await.map_err(|error| {
+        return Ok(Ok(response.bounded_json().await.map_err(|error| {
             anyhow::anyhow!("Failed to parse pull request response: {error}")
         })?));
     }
 
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
     Ok(Err(ExecutionResult::failure(format!(
         "Failed to fetch pull request (HTTP {}): {}",
         status, body
@@ -352,7 +353,7 @@ async fn post_comment(
         return Ok(Ok(true));
     }
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
     Ok(Err(ExecutionResult::failure(format!(
         "Failed to add abandonment comment to PR #{} (HTTP {}): {}",
         pull_request_id, status, body
@@ -382,7 +383,7 @@ async fn abandon_pr(
         return Ok(Ok(()));
     }
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
     Ok(Err(ExecutionResult::failure(format!(
         "Failed to abandon PR #{} (HTTP {}): {}",
         pull_request_id, status, body
@@ -435,7 +436,7 @@ impl Executor for AbandonPullRequestResult {
             Err(result) => return Ok(result),
         };
         let repo_name = target.qualified_repository();
-        let client = reqwest::Client::new();
+        let client = super::pr_http::client()?;
         let base_url = repository_api_base(&target);
         let pr_url = format!(
             "{}/pullRequests/{}?api-version=7.1",

@@ -4,7 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::pr_comments::{get_json, validate_body};
+use super::pr_comments::validate_body;
+use super::pr_http::get_json;
 use super::pr_mutations::UpdatePrContext;
 use crate::secure::{CommitSha, RelativeSafePath};
 
@@ -171,7 +172,8 @@ pub(crate) async fn prepare(
         skip = page.next_skip;
     }
     let mut prepared = Vec::new();
-    for comment in comments {
+    let mut groups = std::collections::BTreeMap::<(String, String), Vec<usize>>::new();
+    for (index, comment) in comments.iter().enumerate() {
         let requested = format!("/{}", comment.file_path.as_str().replace('\\', "/"));
         let matches = changes
             .iter()
@@ -220,11 +222,29 @@ pub(crate) async fn prepare(
         } else {
             &iteration.source.id
         };
+        groups.entry((revision.as_str().to_ascii_lowercase(), requested))
+            .or_default().push(index);
+        let mut thread = json!({"filePath":canonical_path});
+        let (start_key, end_key) = match comment.side {
+            PrCommentSide::Left => ("leftFileStart", "leftFileEnd"),
+            PrCommentSide::Right => ("rightFileStart", "rightFileEnd"),
+        };
+        thread[start_key] = json!({"line":comment.start_line.unwrap_or(comment.line),"offset":1});
+        thread[end_key] = json!({"line":comment.line});
+        prepared.push(json!({
+            "threadContext":thread,
+            "pullRequestThreadContext":{
+                "changeTrackingId":change.tracking_id,
+                "iterationContext":{"firstComparingIteration":iteration.id,"secondComparingIteration":iteration.id}
+            }
+        }));
+    }
+    for ((revision, requested), indices) in groups {
         let mut url = reqwest::Url::parse(&format!("{}/items", ctx.repository_api_base()))?;
         url.query_pairs_mut()
             .append_pair("path", &requested)
             .append_pair("versionDescriptor.versionType", "commit")
-            .append_pair("versionDescriptor.version", revision.as_str())
+            .append_pair("versionDescriptor.version", &revision)
             .append_pair("includeContent", "true")
             .append_pair("$format", "json")
             .append_pair("api-version", "7.1");
@@ -239,28 +259,31 @@ pub(crate) async fn prepare(
             !file.binary && file.content.len() <= 4 * 1024 * 1024,
             "Inline content is binary or exceeds the inspection bound"
         );
-        let end = usize::try_from(comment.line - 1)?;
-        let text = file
-            .content
-            .lines()
-            .nth(end)
-            .context("Inline ending line is outside the selected revision")?;
-        let offset =
-            i32::try_from(text.encode_utf16().count() + 1).context("Inline line is too long")?;
-        let mut thread = json!({"filePath":canonical_path});
-        let (start_key, end_key) = match comment.side {
-            PrCommentSide::Left => ("leftFileStart", "leftFileEnd"),
-            PrCommentSide::Right => ("rightFileStart", "rightFileEnd"),
-        };
-        thread[start_key] = json!({"line":comment.start_line.unwrap_or(comment.line),"offset":1});
-        thread[end_key] = json!({"line":comment.line,"offset":offset});
-        prepared.push(json!({
-            "threadContext":thread,
-            "pullRequestThreadContext":{
-                "changeTrackingId":change.tracking_id,
-                "iterationContext":{"firstComparingIteration":iteration.id,"secondComparingIteration":iteration.id}
+        let wanted = indices.iter().map(|index| comments[*index].line)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut offsets = std::collections::BTreeMap::new();
+        for (number, text) in file.content.lines().enumerate() {
+            let line = u32::try_from(number + 1)?;
+            if wanted.contains(&line) {
+                offsets.insert(line, i32::try_from(text.encode_utf16().count() + 1)
+                    .context("Inline line is too long")?);
+                if offsets.len() == wanted.len() {
+                    break;
+                }
             }
-        }));
+        }
+        ensure!(
+            offsets.len() == wanted.len(),
+            "Inline ending line is outside the selected revision"
+        );
+        for index in indices {
+            let comment = &comments[index];
+            let end_key = match comment.side {
+                PrCommentSide::Left => "leftFileEnd",
+                PrCommentSide::Right => "rightFileEnd",
+            };
+            prepared[index]["threadContext"][end_key]["offset"] = json!(offsets[&comment.line]);
+        }
     }
     Ok(prepared)
 }
@@ -306,6 +329,157 @@ mod tests {
             }]})))
             .mount(server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn review_regression_inline_batch_fetches_each_immutable_file_only_once() {
+        let server = MockServer::start().await;
+        iterations(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/P/_apis/git/repositories/repo/pullRequests/42/iterations/2/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"changeEntries":[{
+                "changeTrackingId":7,"changeType":"edit","item":{"path":"/src.rs"}
+            }]})))
+            .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/P/_apis/git/repositories/repo/items"))
+            .and(query_param("path", "/src.rs"))
+            .and(query_param("versionDescriptor.version", "a".repeat(40)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"content":"first\nab😀\n"})))
+            .mount(&server).await;
+        let ctx = context(&server);
+        let client = reqwest::Client::new();
+        let op = UpdatePrContext {
+            client: &client,
+            target: super::super::resolve_repository_write_target(None, &ctx).unwrap(),
+            pr_id: 42, token: "token", connection_type: None,
+        };
+        let comments = vec![comment("src.rs", PrCommentSide::Right); 100];
+        let prepared = prepare(&op, &CommitSha::parse("a".repeat(40)).unwrap(), &comments).await.unwrap();
+        assert_eq!(prepared.len(), 100);
+        assert!(prepared.iter().all(|item| item["threadContext"]["rightFileEnd"] == json!({"line":2,"offset":5})));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.iter().filter(|request| request.url.path().ends_with("/items")).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn inline_batch_keeps_revision_keys_and_interleaved_proposal_order() {
+        let server = MockServer::start().await;
+        iterations(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/P/_apis/git/repositories/repo/pullRequests/42/iterations/2/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"changeEntries":[
+                {"changeTrackingId":7,"changeType":"edit","item":{"path":"/a.rs"}},
+                {"changeTrackingId":8,"changeType":"edit","item":{"path":"/b.rs"}}
+            ]})))
+            .mount(&server).await;
+        for (file, revision, content) in [
+            ("a.rs", "a".repeat(40), "top\r\nR\r\n"),
+            ("a.rs", "b".repeat(40), "top\n😀\n"),
+            ("b.rs", "b".repeat(40), "top\nlonger\n"),
+        ] {
+            Mock::given(method("GET"))
+                .and(path("/P/_apis/git/repositories/repo/items"))
+                .and(query_param("path", format!("/{file}")))
+                .and(query_param("versionDescriptor.version", revision))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"content":content})))
+                .expect(1).mount(&server).await;
+        }
+        let ctx = context(&server);
+        let client = super::super::pr_http::client().unwrap();
+        let op = UpdatePrContext {
+            client: &client, target: super::super::resolve_repository_write_target(None, &ctx).unwrap(),
+            pr_id: 42, token: "token", connection_type: None,
+        };
+        let comments = [
+            comment("a.rs", PrCommentSide::Right), comment("b.rs", PrCommentSide::Left),
+            comment("a.rs", PrCommentSide::Right), comment("a.rs", PrCommentSide::Left),
+        ];
+        let prepared = prepare(&op, &CommitSha::parse("a".repeat(40)).unwrap(), &comments).await.unwrap();
+        for (index, (file, end_key, offset)) in [
+            ("/a.rs", "rightFileEnd", 2), ("/b.rs", "leftFileEnd", 7),
+            ("/a.rs", "rightFileEnd", 2), ("/a.rs", "leftFileEnd", 3),
+        ].into_iter().enumerate() {
+            assert_eq!(prepared[index]["threadContext"]["filePath"], file);
+            assert_eq!(prepared[index]["threadContext"][end_key], json!({"line":2,"offset":offset}));
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_batch_reads_twenty_distinct_files_twenty_times() {
+        let server = MockServer::start().await;
+        iterations(&server).await;
+        let files = (0..20).map(|index| format!("src{index}.rs")).collect::<Vec<_>>();
+        let changes = files.iter().enumerate().map(|(index, file)| json!({
+            "changeTrackingId":index + 1, "changeType":"edit", "item":{"path":format!("/{file}")}
+        })).collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path("/P/_apis/git/repositories/repo/pullRequests/42/iterations/2/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"changeEntries":changes})))
+            .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/P/_apis/git/repositories/repo/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"content":"one\ntwo\n"})))
+            .mount(&server).await;
+        let ctx = context(&server);
+        let client = super::super::pr_http::client().unwrap();
+        let op = UpdatePrContext {
+            client: &client, target: super::super::resolve_repository_write_target(None, &ctx).unwrap(),
+            pr_id: 42, token: "token", connection_type: None,
+        };
+        let comments = files.iter().map(|file| comment(file, PrCommentSide::Right)).collect::<Vec<_>>();
+        let prepared = prepare(&op, &CommitSha::parse("a".repeat(40)).unwrap(), &comments).await.unwrap();
+        for (index, file) in files.iter().enumerate() {
+            assert_eq!(prepared[index]["threadContext"]["filePath"], format!("/{file}"));
+        }
+        let requests = server.received_requests().await.unwrap();
+        let item_paths = requests.iter().filter(|request| request.url.path().ends_with("/items"))
+            .map(|request| request.url.query_pairs().find(|(key, _)| key == "path").unwrap().1.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(item_paths.len(), 20);
+        assert_eq!(item_paths.iter().collect::<std::collections::BTreeSet<_>>().len(), 20);
+    }
+
+    #[tokio::test]
+    async fn inline_batch_preserves_content_bounds_and_rejects_an_invalid_final_line() {
+        for case in ["at-limit", "oversized", "binary", "missing-line", "empty-content"] {
+            let server = MockServer::start().await;
+            iterations(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/42/iterations/2/changes"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"changeEntries":[{
+                    "changeTrackingId":7,"changeType":"edit","item":{"path":"/src.rs"}
+                }]}))).mount(&server).await;
+            let size = match case {
+                "at-limit" => 4 * 1024 * 1024,
+                "oversized" => 4 * 1024 * 1024 + 1,
+                "empty-content" => 0,
+                _ => 10,
+            };
+            Mock::given(method("GET"))
+                .and(path("/P/_apis/git/repositories/repo/items"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "content":"x".repeat(size), "isBinary":case == "binary"
+                }))).expect(1).mount(&server).await;
+            let ctx = context(&server);
+            let client = super::super::pr_http::client().unwrap();
+            let op = UpdatePrContext {
+                client: &client, target: super::super::resolve_repository_write_target(None, &ctx).unwrap(),
+                pr_id: 42, token: "token", connection_type: None,
+            };
+            let mut valid = comment("src.rs", PrCommentSide::Right);
+            valid.line = 1;
+            valid.start_line = None;
+            let mut comments = vec![valid.clone()];
+            if case == "missing-line" {
+                valid.line = 2;
+                comments.push(valid);
+            }
+            let result = prepare(&op, &CommitSha::parse("a".repeat(40)).unwrap(), &comments).await;
+            assert_eq!(result.is_ok(), case == "at-limit", "{case}");
+            assert!(server.received_requests().await.unwrap().iter()
+                .all(|request| request.method.as_str() == "GET"));
+        }
     }
 
     #[tokio::test]
