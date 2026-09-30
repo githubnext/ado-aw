@@ -1657,6 +1657,9 @@ fn build_detection_job(
             steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
         }
         steps.push(Step::Bash(prepare_analyzed_outputs_step()));
+        if cfg.detection_engine_config.model().is_none() {
+            steps.push(Step::Bash(record_detection_runtime_model_step()));
+        }
         steps.push(Step::Bash(evaluate_threat_analysis_step()));
     } else {
         steps.push(Step::Bash(prepare_analyzed_outputs_passthrough_step()));
@@ -6206,14 +6209,30 @@ shell_script! {
     RUN_THREAT_ANALYSIS {
         interpreter: Bash,
         bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, ALLOWED_DOMAINS],
-        externals: [WORKING_DIRECTORY],
-        fragments: [image_flags, exclude_env, engine_run_detection],
+        externals: [
+            WORKING_DIRECTORY,
+            ADO_AW_MODEL_DETECTION_COPILOT,
+            ADO_AW_DEFAULT_MODEL_COPILOT,
+            ADO_AW_EFFECTIVE_MODEL
+        ],
+        fragments: [capture_runtime_model, image_flags, exclude_env, engine_run_detection],
+        fragment_uses: [
+            capture_runtime_model => [
+                ADO_AW_MODEL_DETECTION_COPILOT,
+                ADO_AW_DEFAULT_MODEL_COPILOT,
+                ADO_AW_EFFECTIVE_MODEL,
+            ],
+        ],
         body: r###"
 set -o pipefail
 
 # Run threat analysis with AWF network isolation
 THREAT_OUTPUT_FILE="$AGENT_TEMP/threat-analysis-output.txt"
 AGENT_EXIT_CODE=0
+
+# Capture the model selected from this task's Detection-scoped environment
+# before trusted post-steps can change pipeline variables.
+# ado-aw:fragment capture_runtime_model
 
 # The argument list is assembled into an array so runtime-supplied
 # fragments splice in as ordinary shell statements (`AWF_ARGS+=(...)`)
@@ -6284,6 +6303,17 @@ fn run_threat_analysis_step(
         }
     };
     let engine_run_detection_line = format!("AWF_ARGS+=(-- '{engine_run_detection}')");
+    let runtime_model_enabled = detection_engine_env
+        .iter()
+        .any(|(key, _)| key == crate::engine::ADO_AW_MODEL_DETECTION_COPILOT);
+    let capture_runtime_model = if runtime_model_enabled {
+        format!(
+            "{}\nprintf '%s' \"$ADO_AW_EFFECTIVE_MODEL\" > \"$AGENT_TEMP/detection-runtime-model\"",
+            crate::engine::runtime_model_preamble(crate::engine::RuntimeModelRole::Detection)
+        )
+    } else {
+        ":".to_string()
+    };
 
     let mut step = ShellScript::new(&RUN_THREAT_ANALYSIS)
         .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
@@ -6292,6 +6322,7 @@ fn run_threat_analysis_step(
             Binding::ado_macro("Pipeline.Workspace"),
         )
         .bind_text("ALLOWED_DOMAINS", allowed_domains)
+        .fragment("capture_runtime_model", capture_runtime_model)
         .fragment("image_flags", image_flags_line)
         .fragment("exclude_env", exclude_env_line)
         .fragment("engine_run_detection", engine_run_detection_line)
@@ -6371,6 +6402,48 @@ fn prepare_analyzed_outputs_step() -> BashStep {
         )
         .bind("BUILD_ID", Binding::ado_macro("Build.BuildId"))
         .into_step("Prepare analyzed outputs")
+        .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Detection job: resolve the effective runtime model in Detection's own
+    /// variable scope and enrich the copied Agent metadata.
+    RECORD_DETECTION_RUNTIME_MODEL {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP],
+        externals: [],
+        fragments: [append_aw_info_field],
+        phases: [append_aw_info_field = super::extensions::APPEND_AW_INFO_FIELD],
+        body: r###"
+set -eo pipefail
+
+ADO_AW_INFO_JSON="$AGENT_TEMP/analyzed_outputs/aw_info.json"
+ADO_AW_MODEL_FILE="$AGENT_TEMP/detection-runtime-model"
+if [ ! -f "$ADO_AW_INFO_JSON" ]; then
+  echo "ERROR: Detection could not find copied aw_info.json at $ADO_AW_INFO_JSON" >&2
+  exit 1
+fi
+if [ ! -f "$ADO_AW_MODEL_FILE" ]; then
+  exit 0
+fi
+
+# ado-aw:fragment append_aw_info_field
+ado_aw_append_info_field \
+  "detection_model" \
+  "$(cat "$ADO_AW_MODEL_FILE")" \
+  "$ADO_AW_INFO_JSON"
+"###,
+    }
+}
+
+fn record_detection_runtime_model_step() -> BashStep {
+    ShellScript::new(&RECORD_DETECTION_RUNTIME_MODEL)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .fragment(
+            "append_aw_info_field",
+            phase_body(&super::extensions::APPEND_AW_INFO_FIELD),
+        )
+        .into_step("Record Detection runtime model")
         .with_condition(Condition::Always)
 }
 
@@ -6964,6 +7037,8 @@ const _SUBMODULES_OPT_BIND: Option<SubmodulesOpt> = None;
 mod tests {
     use super::*;
     use crate::compile::mcpg::McpgLaunchEnvironment;
+    #[cfg(unix)]
+    use std::process::{Command, Output};
 
     fn test_front_matter(yaml: &str) -> FrontMatter {
         serde_yaml::from_str(yaml).expect("front matter should parse")
@@ -8217,6 +8292,8 @@ safe-outputs:
         let fm = parse_and_resolve(source);
         let threat_detection = fm.threat_detection_config().unwrap();
         let detection_engine_config = fm.effective_detection_engine(&threat_detection);
+        let detection_engine_env =
+            crate::engine::copilot_detection_env(&detection_engine_config).unwrap();
         let ctx = super::super::extensions::CompileContext::for_test(&fm);
         let extensions = super::super::extensions::collect_extensions(&fm);
         let decls: Vec<_> = extensions
@@ -8284,7 +8361,7 @@ safe-outputs:
             debug_pipeline: false,
             byom_exclude_keys: vec![],
             detection_byom_exclude_keys: vec![],
-            detection_engine_env: vec![],
+            detection_engine_env,
         };
         build_canonical_jobs(
             &fm,
@@ -8300,6 +8377,68 @@ safe-outputs:
 
     fn job_pool_by_id<'a>(jobs: &'a [super::super::ir::job::Job], id: &str) -> Option<&'a Pool> {
         jobs.iter().find(|j| j.id.as_ref() == id).map(|j| &j.pool)
+    }
+
+    fn detection_runtime_model_step(jobs: &[Job]) -> Option<&BashStep> {
+        jobs.iter()
+            .find(|job| job.id.as_ref() == "Detection")
+            .and_then(|job| {
+                job.steps.iter().find_map(|step| match step {
+                    Step::Bash(step) if step.display_name == "Record Detection runtime model" => {
+                        Some(step)
+                    }
+                    _ => None,
+                })
+            })
+    }
+
+    fn detection_run_step(jobs: &[Job]) -> Option<&BashStep> {
+        jobs.iter()
+            .find(|job| job.id.as_ref() == "Detection")
+            .and_then(|job| {
+                job.steps.iter().find_map(|step| match step {
+                    Step::Bash(step)
+                        if step.display_name == "Run threat analysis (AWF network isolated)" =>
+                    {
+                        Some(step)
+                    }
+                    _ => None,
+                })
+            })
+    }
+
+    #[cfg(unix)]
+    fn run_detection_runtime_model_script(model: Option<&str>) -> (Output, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let analyzed_outputs = temp.path().join("analyzed_outputs");
+        std::fs::create_dir_all(&analyzed_outputs).expect("create analyzed outputs");
+        std::fs::write(
+            analyzed_outputs.join("aw_info.json"),
+            r#"{"schema":"ado-aw/aw_info/1"}"#,
+        )
+        .expect("write aw_info.json");
+        if let Some(model) = model {
+            std::fs::write(temp.path().join("detection-runtime-model"), model)
+                .expect("write runtime model");
+        }
+        let script = ShellScript::new(&RECORD_DETECTION_RUNTIME_MODEL)
+            .bind_text("AGENT_TEMP", temp.path().display().to_string())
+            .fragment(
+                "append_aw_info_field",
+                phase_body(&super::super::extensions::APPEND_AW_INFO_FIELD),
+            )
+            .render();
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(script).env_clear();
+        (command.output().expect("bash should run"), temp)
+    }
+
+    #[cfg(unix)]
+    fn read_detection_aw_info(temp: &tempfile::TempDir) -> serde_json::Value {
+        let contents =
+            std::fs::read_to_string(temp.path().join("analyzed_outputs/aw_info.json"))
+                .expect("read aw_info.json");
+        serde_json::from_str(&contents).expect("parse aw_info.json")
     }
 
     #[test]
@@ -8381,6 +8520,7 @@ safe-outputs:
                 assert_eq!(location.job, job("Detection"));
                 assert_eq!(&location.outputs, outputs);
             }
+
         }
 
         let disabled_detection = disabled_jobs
@@ -8416,6 +8556,111 @@ safe-outputs:
             })
             .unwrap();
         assert!(reviewed_index < copy_logs_index);
+    }
+
+    #[test]
+    fn detection_runtime_model_metadata_uses_detection_job_scope_only_when_enabled() {
+        let runtime = build_jobs(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  threat-detection: true\n---\nbody\n",
+        );
+        let disabled = build_jobs(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  threat-detection: false\n---\nbody\n",
+        );
+        let static_model = build_jobs(
+            "---\nname: test\ndescription: test\nengine:\n  model: static-model\nsafe-outputs:\n  threat-detection: true\n---\nbody\n",
+        );
+
+        let step =
+            detection_runtime_model_step(&runtime).expect("runtime Detection emits metadata step");
+        assert!(matches!(step.condition, Some(Condition::Always)));
+        assert!(step.env.is_empty());
+        assert!(!step.script.contains("ADO_AW_MODEL_DETECTION_COPILOT"));
+        assert!(!step.script.contains("ADO_AW_DEFAULT_MODEL_COPILOT"));
+
+        let run_step = detection_run_step(&runtime).expect("enabled Detection runs analysis");
+        assert!(
+            run_step
+                .env
+                .contains_key(crate::engine::ADO_AW_MODEL_DETECTION_COPILOT)
+        );
+        assert!(
+            run_step
+                .env
+                .contains_key(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT)
+        );
+        assert!(matches!(
+            run_step
+                .env
+                .get(crate::engine::ADO_AW_MODEL_DETECTION_COPILOT),
+            Some(EnvValue::PipelineVar(name))
+                if name == crate::engine::ADO_AW_MODEL_DETECTION_COPILOT
+        ));
+        assert!(matches!(
+            run_step
+                .env
+                .get(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT),
+            Some(EnvValue::PipelineVar(name))
+                if name == crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT
+        ));
+        assert!(
+            run_step
+                .script
+                .contains("$AGENT_TEMP/detection-runtime-model")
+        );
+        assert!(
+            run_step
+                .script
+                .find("$AGENT_TEMP/detection-runtime-model")
+                .unwrap()
+                < run_step
+                    .script
+                    .find("\"$PIPELINE_WORKSPACE/awf/awf\"")
+                    .unwrap(),
+            "runtime model must be captured before the Detection engine runs"
+        );
+        assert!(
+            !run_step
+                .script
+                .contains("$(ADO_AW_MODEL_DETECTION_COPILOT)")
+        );
+        assert!(
+            !run_step
+                .script
+                .contains("$(ADO_AW_DEFAULT_MODEL_COPILOT)")
+        );
+
+        assert!(
+            detection_runtime_model_step(&disabled).is_none(),
+            "disabled Detection must not resolve or validate model variables"
+        );
+        assert!(
+            detection_runtime_model_step(&static_model).is_none(),
+            "static Detection models are already present in compile-time metadata"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detection_runtime_metadata_records_captured_model() {
+        let (output, temp) = run_detection_runtime_model_script(Some("detector-model"));
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            read_detection_aw_info(&temp)["detection_model"],
+            "detector-model"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detection_runtime_metadata_omits_missing_model() {
+        let (output, temp) = run_detection_runtime_model_script(None);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            read_detection_aw_info(&temp)
+                .get("detection_model")
+                .is_none()
+        );
     }
 
     #[test]

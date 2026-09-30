@@ -60,7 +60,9 @@ still wins over runtime variables. Runtime values are passed through typed step
 environment mappings, validated for model-identifier characters at runtime, and
 then supplied to Copilot as a quoted `--model` argument. The emitted
 `aw_info.json` run metadata records the effective runtime-selected model when a
-runtime variable is used.
+runtime variable is used. Agent resolves its field in the Agent job; Detection
+enriches the copied metadata in `analyzed_outputs_<BuildId>` from the Detection
+job's own variable scope. `ado-aw audit` merges those job-owned fields.
 
 ### `timeout-minutes`
 

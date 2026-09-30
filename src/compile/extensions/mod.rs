@@ -686,6 +686,7 @@ pub use crate::runtimes::python::PythonExtension;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use ado_aw_marker::AdoAwMarkerExtension;
+pub(crate) use ado_aw_marker::APPEND_AW_INFO_FIELD;
 pub use ado_script::AdoScriptExtension;
 pub use azure_cli::AzureCliExtension;
 pub use exec_context::{

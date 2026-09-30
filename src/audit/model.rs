@@ -153,14 +153,16 @@ pub struct OverviewData {
     /// Local path where build logs or downloaded artifacts were stored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logs_path: Option<String>,
-    /// Runtime-emitted AW metadata from `staging/aw_info.json`.
+    /// Runtime-emitted AW metadata merged from Agent and Detection artifacts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aw_info: Option<AwInfo>,
 }
 
 /// Runtime-emitted agentic workflow metadata.
 ///
-/// This is read from `staging/aw_info.json`, which mirrors the compiled marker metadata plus runtime context.
+/// Agent metadata is read from `staging/aw_info.json`; Detection may enrich the
+/// copied `aw_info.json` in its analyzed-output artifact with Detection-owned
+/// runtime fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AwInfo {
@@ -176,7 +178,7 @@ pub struct AwInfo {
     /// Engine identifier used by the Detection job when explicitly configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detection_engine: Option<String>,
-    /// Model identifier used by the Detection job when explicitly configured.
+    /// Effective model selected by the Detection job, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detection_model: Option<String>,
     /// Agent name emitted by the compiled workflow metadata.

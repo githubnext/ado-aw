@@ -15,7 +15,7 @@ use crate::audit::analyzers::{
 use crate::audit::cache::{RunSummary, load_run_summary, save_run_summary};
 use crate::audit::find_artifact_dir;
 use crate::audit::findings;
-use crate::audit::model::{AuditData, ErrorInfo, FileInfo, OverviewData};
+use crate::audit::model::{AuditData, AwInfo, ErrorInfo, FileInfo, OverviewData};
 use crate::audit::pipeline_graph;
 use crate::audit::render;
 use crate::audit::url::{ParsedBuildRef, parse_build_ref};
@@ -458,6 +458,16 @@ async fn run_analyzers(
             detection::analyze_detection(run_dir).await,
             |a, result| a.detection_analysis = result,
         );
+        match detection::load_aw_info(run_dir).await {
+            Ok(Some(detection_aw_info)) => {
+                merge_detection_aw_info(&mut audit.overview.aw_info, detection_aw_info)
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("{error:#}");
+                crate::audit::push_warning_once(audit, crate::audit::malformed_aw_info_warning());
+            }
+        }
     }
     run_analyzer(
         audit,
@@ -466,6 +476,16 @@ async fn run_analyzers(
         jobs::fetch_timeline(client, ctx, auth, build_id).await,
         |a, timeline| a.jobs = jobs::timeline_to_jobs(&timeline),
     );
+}
+
+fn merge_detection_aw_info(base: &mut Option<AwInfo>, detection: AwInfo) {
+    let Some(base) = base.as_mut() else {
+        *base = Some(detection);
+        return;
+    };
+    if detection.detection_model.is_some() {
+        base.detection_model = detection.detection_model;
+    }
 }
 
 fn artifact_family_selected(filters: Option<&[String]>, family: &str) -> bool {
@@ -1039,7 +1059,67 @@ fn render_audit(audit: &AuditData, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::model::{CustomSafeOutputJobAudit, Finding, JobData, Recommendation};
+    use crate::audit::model::{
+        AwInfo, CustomSafeOutputJobAudit, Finding, JobData, Recommendation,
+    };
+
+    #[test]
+    fn detection_aw_info_overlays_only_detection_owned_fields() {
+        let mut base = Some(AwInfo {
+            engine: Some(String::from("copilot")),
+            model: Some(String::from("agent-model")),
+            detection_model: Some(String::from("old-detector")),
+            source: Some(String::from("agents/test.md")),
+            ..Default::default()
+        });
+        let detection = AwInfo {
+            engine: Some(String::from("must-not-replace")),
+            model: Some(String::from("must-not-replace")),
+            detection_model: Some(String::from("detector-model")),
+            source: Some(String::from("must-not-replace")),
+            ..Default::default()
+        };
+
+        merge_detection_aw_info(&mut base, detection);
+
+        let merged = base.unwrap();
+        assert_eq!(merged.engine.as_deref(), Some("copilot"));
+        assert_eq!(merged.model.as_deref(), Some("agent-model"));
+        assert_eq!(merged.source.as_deref(), Some("agents/test.md"));
+        assert_eq!(
+            merged.detection_model.as_deref(),
+            Some("detector-model")
+        );
+    }
+
+    #[test]
+    fn detection_only_aw_info_populates_overview_metadata() {
+        let mut base = None;
+        let detection = AwInfo {
+            engine: Some(String::from("copilot")),
+            detection_model: Some(String::from("detector-model")),
+            ..Default::default()
+        };
+
+        merge_detection_aw_info(&mut base, detection.clone());
+
+        assert_eq!(base, Some(detection));
+    }
+
+    #[test]
+    fn older_detection_aw_info_does_not_erase_static_model() {
+        let mut base = Some(AwInfo {
+            detection_model: Some(String::from("static-detector")),
+            ..Default::default()
+        });
+
+        merge_detection_aw_info(&mut base, AwInfo::default());
+
+        assert_eq!(
+            base.unwrap().detection_model.as_deref(),
+            Some("static-detector")
+        );
+    }
 
     #[tokio::test]
     async fn agent_output_analyzers_load_proxy_logs_from_canonical_path() {

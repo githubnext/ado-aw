@@ -61,13 +61,17 @@ URL-encoded project segments are decoded before the ADO context is resolved. `t=
 │       ├── mcpg/                     # MCP Gateway logs (includes the SafeOutputs stdio child's stdout/stderr)
 │       └── agent-output.txt          # Filtered agent stdout
 ├── analyzed_outputs[_<BuildId>]/     # Downloaded artifact (Detection stage)
+│   ├── aw_info.json                  # Agent metadata + Detection runtime model
 │   ├── threat-analysis.json          # Aggregate verdict + reasons
 │   └── threat-analysis-output.txt
 └── safe_outputs[_<BuildId>]/         # Downloaded artifact (SafeOutputs stage)
     └── safe-outputs-executed.ndjson  # Per-item execution log
 ```
 
-`aw_info.json`, `otel.jsonl`, and `safe_outputs.ndjson` are searched in `staging/` first and then at the artifact top level so older layouts still audit cleanly.
+Agent `aw_info.json`, `otel.jsonl`, and `safe_outputs.ndjson` are searched in
+`staging/` first and then at the artifact top level so older layouts still
+audit cleanly. When present, the Detection-enriched `aw_info.json` from
+`analyzed_outputs` overlays only Detection-owned runtime fields in the report.
 
 ## Report shape (`AuditData`)
 

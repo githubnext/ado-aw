@@ -85,7 +85,7 @@ pub const ADO_AW_MODEL_DETECTION_COPILOT: &str = "ADO_AW_MODEL_DETECTION_COPILOT
 pub const ADO_AW_DEFAULT_MODEL_COPILOT: &str = "ADO_AW_DEFAULT_MODEL_COPILOT";
 
 #[derive(Debug, Clone, Copy)]
-enum RuntimeModelRole {
+pub(crate) enum RuntimeModelRole {
     Agent,
     Detection,
 }
@@ -1450,13 +1450,16 @@ fn copilot_invocation(
     )
 }
 
-fn runtime_model_preamble(role: RuntimeModelRole) -> String {
+pub(crate) fn runtime_model_preamble(role: RuntimeModelRole) -> String {
     let specific = role.specific_var();
     format!(
         r#"ADO_AW_EFFECTIVE_MODEL=""
+ADO_AW_MACRO_PREFIX='$'
+ADO_AW_UNRESOLVED_SPECIFIC_MODEL="${{ADO_AW_MACRO_PREFIX}}({specific})"
+ADO_AW_UNRESOLVED_DEFAULT_MODEL="${{ADO_AW_MACRO_PREFIX}}({ADO_AW_DEFAULT_MODEL_COPILOT})"
 for ADO_AW_CANDIDATE_MODEL in "${{{specific}:-}}" "${{{ADO_AW_DEFAULT_MODEL_COPILOT}:-}}"; do
   # Azure DevOps leaves an undefined macro as the literal $(VAR); treat that as unset.
-  if [ -z "$ADO_AW_CANDIDATE_MODEL" ] || [ "$ADO_AW_CANDIDATE_MODEL" = "\$({specific})" ] || [ "$ADO_AW_CANDIDATE_MODEL" = "\$({ADO_AW_DEFAULT_MODEL_COPILOT})" ]; then
+  if [ -z "$ADO_AW_CANDIDATE_MODEL" ] || [ "$ADO_AW_CANDIDATE_MODEL" = "$ADO_AW_UNRESOLVED_SPECIFIC_MODEL" ] || [ "$ADO_AW_CANDIDATE_MODEL" = "$ADO_AW_UNRESOLVED_DEFAULT_MODEL" ]; then
     continue
   fi
   case "$ADO_AW_CANDIDATE_MODEL" in
@@ -1476,15 +1479,17 @@ done"#
 mod tests {
     use super::{
         ADO_AW_DEFAULT_MODEL_COPILOT, ADO_AW_MODEL_AGENT_COPILOT, ADO_AW_MODEL_DETECTION_COPILOT,
-        Engine, GITHUB_APP_TOKEN_VAR, RuntimeModelRole, copilot_byom_active,
-        copilot_byom_credential_keys, copilot_detection_env, copilot_provider_env, get_engine,
-        github_app_token_secrecy_advisory, github_token_source_var, normalize_version_tag,
-        runtime_model_preamble, validate_engine_feature_support,
+        Engine, GITHUB_APP_TOKEN_VAR, copilot_byom_active, copilot_byom_credential_keys,
+        copilot_detection_env, copilot_provider_env, get_engine, github_app_token_secrecy_advisory,
+        github_token_source_var, normalize_version_tag, validate_engine_feature_support,
     };
+    #[cfg(unix)]
+    use super::{RuntimeModelRole, runtime_model_preamble};
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
         parse_markdown,
     };
+    #[cfg(unix)]
     use std::process::Command;
 
     fn declarations_for(fm: &crate::compile::types::FrontMatter) -> Vec<Declarations> {
@@ -1496,6 +1501,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     fn run_runtime_model_preamble(
         role: RuntimeModelRole,
         envs: &[(&str, &str)],
@@ -1558,6 +1564,8 @@ mod tests {
         assert!(invocation.contains("ADO_AW_DEFAULT_MODEL_COPILOT"));
         assert!(invocation.contains("--model \"$ADO_AW_EFFECTIVE_MODEL\""));
         assert!(invocation.contains("*[!A-Za-z0-9._:-]*)"));
+        assert!(!invocation.contains("$(ADO_AW_MODEL_AGENT_COPILOT)"));
+        assert!(!invocation.contains("$(ADO_AW_DEFAULT_MODEL_COPILOT)"));
     }
 
     #[test]
@@ -1601,6 +1609,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn runtime_model_preamble_uses_role_specific_before_default() {
         let output = run_runtime_model_preamble(
             RuntimeModelRole::Agent,
@@ -1615,6 +1624,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn runtime_model_preamble_uses_default_when_role_specific_missing() {
         let output = run_runtime_model_preamble(
             RuntimeModelRole::Detection,
@@ -1626,6 +1636,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn runtime_model_preamble_treats_unexpanded_ado_macro_as_missing() {
         let output = run_runtime_model_preamble(
             RuntimeModelRole::Agent,
@@ -1640,6 +1651,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn runtime_model_preamble_rejects_invalid_runtime_model() {
         let output = run_runtime_model_preamble(
             RuntimeModelRole::Detection,
@@ -1853,7 +1865,7 @@ mod tests {
                 Some("/tmp/mcp.json"),
             )
             .unwrap();
-        assert!(result.starts_with("/usr/local/bin/my-copilot "));
+        assert_eq!(result.matches("/usr/local/bin/my-copilot ").count(), 2);
         assert!(!result.contains("/tmp/awf-tools/copilot"));
     }
 
@@ -1868,7 +1880,7 @@ mod tests {
                 Some("/tmp/mcp.json"),
             )
             .unwrap();
-        assert!(result.starts_with("/tmp/awf-tools/copilot "));
+        assert_eq!(result.matches("/tmp/awf-tools/copilot ").count(), 2);
     }
 
     #[test]
