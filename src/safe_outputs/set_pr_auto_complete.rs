@@ -177,6 +177,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canonical_completion_params_round_trip_without_the_retired_operation_envelope() {
+        let params: SetPrAutoCompleteParams = serde_json::from_value(
+            serde_json::json!({"pull_request_id":42}),
+        ).unwrap();
+        let result: SetPrAutoCompleteResult = params.try_into().unwrap();
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["name"], "set-pull-request-auto-complete");
+        assert_eq!(value["pull_request_id"], 42);
+        assert!(value.get("operation").is_none());
+        for value in [
+            serde_json::json!({"pull_request_id":0}),
+            serde_json::json!({"pull_request_id":42,"repository":"##vso[task.setvariable variable=x]y"}),
+            serde_json::json!({"pull_request_id":42,"operation":"set-auto-complete"}),
+        ] {
+            let rejected = match serde_json::from_value::<SetPrAutoCompleteParams>(value) {
+                Err(_) => true,
+                Ok(params) => SetPrAutoCompleteResult::try_from(params).is_err(),
+            };
+            assert!(rejected);
+        }
+    }
+
+    #[test]
     fn typed_config_rejects_unknown_fields_and_invalid_allowlists() {
         for value in [
             serde_json::json!({"merge-immediately": true}),

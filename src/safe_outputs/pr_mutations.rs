@@ -10,36 +10,14 @@ use super::result::AdoRepositoryTarget;
 #[cfg(test)]
 use crate::safe_outputs::ExecutionContext;
 use crate::safe_outputs::ExecutionResult;
-#[cfg(test)]
-use crate::safe_outputs::Validate;
-#[cfg(test)]
-use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::secure::Guid;
 #[cfg(test)]
 use crate::secure::PullRequestTemporaryId;
-#[cfg(test)]
-use crate::tool_result;
 use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 use log::{debug, info, warn};
-#[cfg(test)]
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-/// Valid operation names for update-pr
-#[cfg(test)]
-const VALID_OPERATIONS: &[&str] = &[
-    "add-reviewers",
-    "add-labels",
-    "set-auto-complete",
-    "vote",
-    "update-description",
-];
-
-/// Valid vote values
-#[cfg(test)]
-const VALID_VOTES: &[&str] = crate::compile::pr_migration::LEGACY_PR_VOTES;
 
 /// Valid merge strategy values accepted by ADO's completionOptions.mergeStrategy
 const VALID_MERGE_STRATEGIES: &[&str] = &["squash", "noFastForward", "rebase", "rebaseMerge"];
@@ -53,131 +31,9 @@ pub(crate) fn validate_reviewer_inputs(reviewers: &[String]) -> anyhow::Result<(
         let reviewer = reviewer.trim();
         ensure!(!reviewer.is_empty(), "reviewer must not be empty");
         ensure!(reviewer.len() <= MAX_REVIEWER_LEN, "reviewer must be {MAX_REVIEWER_LEN} characters or fewer");
-        reject_pipeline_injection(reviewer, "update-pr.reviewer")?;
+        reject_pipeline_injection(reviewer, "reviewers")?;
     }
     Ok(())
-}
-
-/// Parameters for updating a pull request
-#[derive(Deserialize, JsonSchema)]
-#[cfg(test)]
-pub struct UpdatePrParams {
-    /// Positive pull request ID or a temporary ID from create-pull-request.
-    pub pull_request_id: PullRequestReference,
-
-    /// Repository alias: "self" for the pipeline repo, or an alias from the checkout list
-    #[serde(default)]
-    pub repository: Option<String>,
-
-    /// Operation to perform: "add-reviewers", "add-labels", "set-auto-complete", "vote", or "update-description"
-    pub operation: String,
-
-    /// Reviewer emails (required for add-reviewers operation)
-    pub reviewers: Option<Vec<String>>,
-
-    /// Label names (required for add-labels operation)
-    pub labels: Option<Vec<String>>,
-
-    /// Vote value: "approve", "approve-with-suggestions", "wait-for-author", "reject", or "reset"
-    pub vote: Option<String>,
-
-    /// New PR description in markdown (required for update-description, must be >= 10 chars)
-    pub description: Option<String>,
-}
-
-#[cfg(test)]
-impl Validate for UpdatePrParams {
-    fn validate(&self) -> anyhow::Result<()> {
-        if let PullRequestReference::Number(id) = self.pull_request_id {
-            ensure!(id > 0, "pull_request_id must be positive");
-        }
-        if let Some(repository) = &self.repository {
-            reject_pipeline_injection(repository, "repository")?;
-        }
-        ensure!(
-            VALID_OPERATIONS.contains(&self.operation.as_str()),
-            "operation must be one of: {}",
-            VALID_OPERATIONS.join(", ")
-        );
-
-        match self.operation.as_str() {
-            "add-reviewers" => {
-                let reviewers = self
-                    .reviewers
-                    .as_ref()
-                    .context("reviewers must be provided for add-reviewers operation")?;
-                validate_reviewer_inputs(reviewers)?;
-            }
-            "add-labels" => {
-                let labels = self
-                    .labels
-                    .as_ref()
-                    .context("labels must be provided for add-labels operation")?;
-                ensure!(
-                    !labels.is_empty(),
-                    "labels list must not be empty for add-labels operation"
-                );
-            }
-            "vote" => {
-                let vote = self
-                    .vote
-                    .as_ref()
-                    .context("vote must be provided for vote operation")?;
-                ensure!(
-                    VALID_VOTES.contains(&vote.as_str()),
-                    "vote must be one of: {}",
-                    VALID_VOTES.join(", ")
-                );
-            }
-            "update-description" => {
-                let desc = self
-                    .description
-                    .as_ref()
-                    .context("description must be provided for update-description operation")?;
-                ensure!(
-                    desc.len() >= 10,
-                    "description must be at least 10 characters"
-                );
-            }
-            _ => {} // set-auto-complete has no extra required fields
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-tool_result! {
-    name = "update-pr",
-    write = true,
-    params = UpdatePrParams,
-    /// Result of updating a pull request
-    pub struct UpdatePrResult {
-        pull_request_id: PullRequestReference,
-        repository: Option<String>,
-        operation: String,
-        reviewers: Option<Vec<String>>,
-        labels: Option<Vec<String>>,
-        vote: Option<String>,
-        description: Option<String>,
-    }
-}
-
-#[cfg(test)]
-impl SanitizeContent for UpdatePrResult {
-    fn sanitize_content_fields(&mut self) {
-        self.repository = self.repository.as_deref().map(sanitize_config);
-        self.operation = sanitize_config(&self.operation);
-        self.reviewers = self
-            .reviewers
-            .as_ref()
-            .map(|rs| rs.iter().map(|r| sanitize_config(r)).collect());
-        self.labels = self
-            .labels
-            .as_ref()
-            .map(|ls| ls.iter().map(|l| sanitize_config(l)).collect());
-        self.vote = self.vote.as_deref().map(sanitize_config);
-        self.description = self.description.as_deref().map(sanitize_text);
-    }
 }
 
 /// Configuration for the update-pr tool (specified in front matter)
@@ -272,21 +128,6 @@ impl UpdatePrContext<'_> {
     pub(crate) fn repository_api_base(&self) -> String {
         repository_api_base(&self.target)
     }
-}
-
-#[cfg(test)]
-fn resolve_update_pr_target(
-    reference: &PullRequestReference,
-    requested_repository: Option<&str>,
-    config: &UpdatePrConfig,
-    ctx: &ExecutionContext,
-) -> anyhow::Result<Result<(u64, AdoRepositoryTarget), ExecutionResult>> {
-    resolve_pr_target(
-        reference,
-        requested_repository,
-        &config.allowed_repositories,
-        ctx,
-    )
 }
 
 /// Outcome of a single reviewer resolution + add attempt.
@@ -915,24 +756,6 @@ async fn resolve_and_add_reviewer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_outputs::ToolResult;
-
-    #[test]
-    fn test_result_has_correct_name() {
-        assert_eq!(UpdatePrResult::NAME, "update-pr");
-    }
-
-    #[test]
-    fn test_params_deserializes() {
-        let json = r#"{
-            "pull_request_id": 42,
-            "operation": "set-auto-complete"
-        }"#;
-        let params: UpdatePrParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.pull_request_id, PullRequestReference::Number(42));
-        assert_eq!(params.operation, "set-auto-complete");
-        assert!(params.repository.is_none());
-    }
 
     #[test]
     fn pull_request_reference_accepts_quoted_numbers_and_temporary_ids() {
@@ -941,177 +764,6 @@ mod tests {
         assert_eq!(quoted, PullRequestReference::Number(42));
         assert!(matches!(temporary, PullRequestReference::Temporary(_)));
         assert!(serde_json::from_str::<PullRequestReference>("\"not-an-id\"").is_err());
-    }
-
-    #[test]
-    fn test_params_converts_to_result() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(42),
-            repository: Some("self".to_string()),
-            operation: "set-auto-complete".to_string(),
-            reviewers: None,
-            labels: None,
-            vote: None,
-            description: None,
-        };
-        let result: UpdatePrResult = params.try_into().unwrap();
-        assert_eq!(result.name, "update-pr");
-        assert_eq!(result.pull_request_id, PullRequestReference::Number(42));
-        assert_eq!(result.operation, "set-auto-complete");
-    }
-
-    #[test]
-    fn test_validation_rejects_zero_pr_id() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(0),
-            repository: None,
-            operation: "set-auto-complete".to_string(),
-            reviewers: None,
-            labels: None,
-            vote: None,
-            description: None,
-        };
-        let result: Result<UpdatePrResult, _> = params.try_into();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_rejects_invalid_operation() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(1),
-            repository: None,
-            operation: "delete-pr".to_string(),
-            reviewers: None,
-            labels: None,
-            vote: None,
-            description: None,
-        };
-        let err: Result<UpdatePrResult, _> = params.try_into();
-        let err = err.unwrap_err().to_string();
-        assert!(err.contains("operation must be one of"), "got: {err}");
-    }
-
-    #[test]
-    fn test_validation_rejects_vote_without_value() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(1),
-            repository: None,
-            operation: "vote".to_string(),
-            reviewers: None,
-            labels: None,
-            vote: None,
-            description: None,
-        };
-        let result: Result<UpdatePrResult, _> = params.try_into();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_rejects_reviewers_without_list() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(1),
-            repository: None,
-            operation: "add-reviewers".to_string(),
-            reviewers: None,
-            labels: None,
-            vote: None,
-            description: None,
-        };
-        let result: Result<UpdatePrResult, _> = params.try_into();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_rejects_more_than_100_reviewers() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(1),
-            repository: None,
-            operation: "add-reviewers".to_string(),
-            reviewers: Some(vec!["reviewer@example.com".to_string(); 101]),
-            labels: None,
-            vote: None,
-            description: None,
-        };
-
-        let error = params.validate().unwrap_err().to_string();
-        assert!(
-            error.contains("reviewers list must contain at most 100 entries"),
-            "got: {error}"
-        );
-    }
-
-    #[test]
-    fn test_validation_rejects_overlong_reviewer() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(1),
-            repository: None,
-            operation: "add-reviewers".to_string(),
-            reviewers: Some(vec!["a".repeat(MAX_REVIEWER_LEN + 1)]),
-            labels: None,
-            vote: None,
-            description: None,
-        };
-
-        let error = params.validate().unwrap_err().to_string();
-        assert!(
-            error.contains("reviewer must be 256 characters or fewer"),
-            "got: {error}"
-        );
-    }
-
-    #[test]
-    fn test_validation_rejects_reviewer_pipeline_command() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(1),
-            repository: None,
-            operation: "add-reviewers".to_string(),
-            reviewers: Some(vec![
-                "##vso[task.setvariable variable=REVIEWER]attacker@example.com".to_string(),
-            ]),
-            labels: None,
-            vote: None,
-            description: None,
-        };
-
-        let error = params.validate().unwrap_err().to_string();
-        assert!(
-            error.contains("update-pr.reviewer") && error.contains("ADO pipeline command"),
-            "got: {error}"
-        );
-    }
-
-    #[test]
-    fn test_validation_rejects_repository_pipeline_command() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(1),
-            repository: Some("##vso[task.setvariable variable=x]y".to_string()),
-            operation: "set-auto-complete".to_string(),
-            reviewers: None,
-            labels: None,
-            vote: None,
-            description: None,
-        };
-        let result: Result<UpdatePrResult, _> = params.try_into();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_result_serializes_correctly() {
-        let params = UpdatePrParams {
-            pull_request_id: PullRequestReference::Number(99),
-            repository: Some("self".to_string()),
-            operation: "vote".to_string(),
-            reviewers: None,
-            labels: None,
-            vote: Some("approve".to_string()),
-            description: None,
-        };
-        let result: UpdatePrResult = params.try_into().unwrap();
-        let json = serde_json::to_string(&result).unwrap();
-
-        assert!(json.contains(r#""name":"update-pr""#));
-        assert!(json.contains(r#""pull_request_id":99"#));
-        assert!(json.contains(r#""operation":"vote""#));
     }
 
     #[test]
@@ -1248,10 +900,10 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = resolve_update_pr_target(
+        let resolved = resolve_pr_target(
             &PullRequestReference::Temporary(temporary_id),
             None,
-            &UpdatePrConfig::default(),
+            &[],
             &ctx,
         )
         .unwrap()
@@ -1262,10 +914,10 @@ mod tests {
     #[test]
     fn temporary_reference_rejects_unresolved_id() {
         let temporary_id = PullRequestTemporaryId::parse("#aw_pr123").unwrap();
-        let result = resolve_update_pr_target(
+        let result = resolve_pr_target(
             &PullRequestReference::Temporary(temporary_id),
             None,
-            &UpdatePrConfig::default(),
+            &[],
             &ExecutionContext::default(),
         )
         .unwrap()
@@ -1302,10 +954,10 @@ mod tests {
         )
         .unwrap();
 
-        let result = resolve_update_pr_target(
+        let result = resolve_pr_target(
             &PullRequestReference::Temporary(temporary_id),
             Some("self"),
-            &UpdatePrConfig::default(),
+            &[],
             &ctx,
         )
         .unwrap()
@@ -1342,13 +994,10 @@ mod tests {
         )
         .unwrap();
 
-        let result = resolve_update_pr_target(
+        let result = resolve_pr_target(
             &PullRequestReference::Temporary(temporary_id),
             None,
-            &UpdatePrConfig {
-                allowed_repositories: vec!["self".to_string()],
-                ..Default::default()
-            },
+            &["self".to_string()],
             &ctx,
         )
         .unwrap()

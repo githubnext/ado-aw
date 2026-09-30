@@ -483,6 +483,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authoritative_diff_paths_cannot_escape_the_repository() {
+        let server = MockServer::start().await;
+        iterations(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/P/_apis/git/repositories/repo/pullRequests/42/iterations/2/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"changeEntries":[{
+                "changeTrackingId":7,"changeType":"rename","originalPath":"/old.rs",
+                "item":{"path":"/../escape.rs"}
+            }]}))).mount(&server).await;
+        let ctx = context(&server);
+        let client = super::super::pr_http::client().unwrap();
+        let op = UpdatePrContext {
+            client: &client, target: super::super::resolve_repository_write_target(None, &ctx).unwrap(),
+            pr_id: 42, token: "token", connection_type: None,
+        };
+        assert!(prepare(&op, &CommitSha::parse("a".repeat(40)).unwrap(),
+            &[comment("old.rs", PrCommentSide::Left)]).await.is_err());
+        assert!(server.received_requests().await.unwrap().iter()
+            .all(|request| request.method.as_str() == "GET" && !request.url.path().ends_with("/items")));
+    }
+
+    #[tokio::test]
     async fn comment_context_uses_exact_revision_and_handles_renamed_left_side() {
         for side in [PrCommentSide::Left, PrCommentSide::Right] {
             let server = MockServer::start().await;

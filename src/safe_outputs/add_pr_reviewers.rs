@@ -239,6 +239,7 @@ mod tests {
             vec!["x".repeat(257)],
             vec!["x".into(); 101],
             vec![" ".into()],
+            vec!["##vso[task.setvariable variable=REVIEWER]attacker@example.com".into()],
         ] {
             assert!(
                 AddPrReviewersParams {
@@ -250,6 +251,14 @@ mod tests {
                 .is_err()
             );
         }
+        assert!(serde_json::from_value::<AddPrReviewersParams>(
+            serde_json::json!({"pull_request_id":1}),
+        ).is_err());
+        assert!(AddPrReviewersParams {
+            pull_request_id: Some(PullRequestReference::Number(1)),
+            repository: None,
+            reviewers: vec!["reviewer@example.com".into(); 100],
+        }.validate().is_ok());
     }
 
     #[tokio::test]

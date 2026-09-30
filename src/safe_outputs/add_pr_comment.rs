@@ -4,8 +4,6 @@ use super::pr_http::BoundedPrResponse;
 use log::{debug, info};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::path::Path;
 
 use super::pr_common::{
     PullRequestReference, describe_pr_reference, repository_api_base, resolve_configured_pr_target,
@@ -301,62 +299,6 @@ fn validate_file_path(path: &str) -> anyhow::Result<()> {
         "file_path must not be absolute"
     );
     Ok(())
-}
-
-#[cfg(test)]
-fn build_inline_thread_context(
-    workspace_root: &Path,
-    repo_root: &Path,
-    file_path: &str,
-    start_line: i32,
-    end_line: i32,
-) -> anyhow::Result<serde_json::Value> {
-    ensure!(start_line > 0, "start_line must be positive");
-    ensure!(end_line > 0, "end_line must be positive");
-    ensure!(
-        start_line <= end_line,
-        "start_line ({start_line}) must be less than or equal to line ({end_line})"
-    );
-
-    let resolved_path = repo_root.join(file_path);
-    let canonical = resolved_path.canonicalize().with_context(|| {
-        format!(
-            "Failed to canonicalize inline comment file '{}' — file may not exist",
-            file_path
-        )
-    })?;
-    let canonical_root = repo_root
-        .canonicalize()
-        .context("Failed to canonicalize repository checkout root")?;
-    ensure!(
-        canonical.starts_with(&canonical_root),
-        "Inline comment file '{}' resolves outside the repository checkout",
-        file_path
-    );
-    let canonical_workspace = workspace_root
-        .canonicalize()
-        .context("Failed to canonicalize build workspace root")?;
-    ensure!(
-        canonical.starts_with(&canonical_workspace),
-        "Inline comment file '{}' resolves outside the build workspace",
-        file_path
-    );
-
-    let contents = std::fs::read_to_string(&canonical)
-        .with_context(|| format!("Failed to read inline comment file '{}'", file_path))?;
-    let target_line = contents
-        .lines()
-        .nth((end_line - 1) as usize)
-        .with_context(|| format!("Inline comment line {} is out of range", end_line))?;
-    // Azure DevOps threadContext offsets are 1-based, so the end offset must point
-    // one UTF-16 code unit past the final character to span the whole target line.
-    let end_offset = target_line.encode_utf16().count() as i32 + 1;
-
-    Ok(serde_json::json!({
-        "filePath": format!("/{}", file_path),
-        "rightFileStart": { "line": start_line, "offset": 1 },
-        "rightFileEnd": { "line": end_line, "offset": end_offset }
-    }))
 }
 
 impl AddPrCommentResult {
@@ -971,56 +913,6 @@ allowed-statuses:
             "repository pipeline command should be neutralized with backticks: {:?}",
             result.repository
         );
-    }
-
-    #[test]
-    fn test_build_inline_thread_context_uses_utf16_end_offset() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("suggestion.rs"), "prefix\nab😀\n").unwrap();
-
-        let thread_context =
-            build_inline_thread_context(dir.path(), dir.path(), "suggestion.rs", 2, 2).unwrap();
-
-        assert_eq!(thread_context["rightFileStart"]["line"], 2);
-        assert_eq!(thread_context["rightFileStart"]["offset"], 1);
-        assert_eq!(thread_context["rightFileEnd"]["line"], 2);
-        assert_eq!(thread_context["rightFileEnd"]["offset"], 5);
-    }
-
-    #[test]
-    fn test_build_inline_thread_context_uses_last_line_for_multiline_span() {
-        let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("suggestion.rs"),
-            "first line\nab😀\nthird\n",
-        )
-        .unwrap();
-
-        let thread_context =
-            build_inline_thread_context(dir.path(), dir.path(), "suggestion.rs", 1, 2).unwrap();
-
-        assert_eq!(thread_context["rightFileStart"]["line"], 1);
-        assert_eq!(thread_context["rightFileEnd"]["line"], 2);
-        assert_eq!(thread_context["rightFileEnd"]["offset"], 5);
-    }
-
-    #[test]
-    fn test_build_inline_thread_context_rejects_repo_root_outside_workspace() {
-        let workspace = tempdir().unwrap();
-        let outside_repo = tempdir().unwrap();
-        std::fs::write(outside_repo.path().join("suggestion.rs"), "line 1\n").unwrap();
-
-        let err = build_inline_thread_context(
-            workspace.path(),
-            outside_repo.path(),
-            "suggestion.rs",
-            1,
-            1,
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(err.contains("outside the build workspace"), "got: {err}");
     }
 
     #[test]

@@ -889,8 +889,6 @@ pub use set_pr_auto_complete::*;
 pub use submit_pr_review::*;
 pub use unassign_github_issue_from_user::*;
 pub use update_github_issue::*;
-#[cfg(test)]
-pub use update_pr::*;
 pub use update_pull_request::*;
 pub use update_wiki_page::*;
 pub use update_work_item::*;
@@ -978,7 +976,9 @@ mod tests {
             assert!(CreateBranchResult::REQUIRES_WRITE);
         }
         const {
-            assert!(UpdatePrResult::REQUIRES_WRITE);
+            assert!(AddPrReviewersResult::REQUIRES_WRITE);
+            assert!(AddPrLabelsResult::REQUIRES_WRITE);
+            assert!(SetPrAutoCompleteResult::REQUIRES_WRITE);
         }
         const {
             assert!(UpdatePullRequestResult::REQUIRES_WRITE);
