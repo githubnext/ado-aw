@@ -2695,6 +2695,178 @@ fn warn_create_pr_target_inference(front_matter: &FrontMatter) {
     }
 }
 
+/// Replicates the Agent job's multi-checkout layout into the SafeOutputs job
+/// when `create-pull-request` is configured and there are additional
+/// checked-out repos (issue #1731). Without these checkouts the additional
+/// repo directories don't exist in the SafeOutputs workspace, so
+/// `prepare-pr-base.js` and `ado-aw execute` fail. `self` uses the
+/// compiler-owned `s/self` path in this layout so neither a
+/// repository-resource trigger nor an additional alias can change where the
+/// executor finds the workflow source. Only emitted for the variant that
+/// actually runs `create-pull-request`; other variants (and split-approval
+/// auto-SafeOutputs) don't need them.
+fn push_safeoutputs_multi_checkout_steps(steps: &mut Vec<Step>, front_matter: &FrontMatter) {
+    for repo in &front_matter.checkout {
+        let fetch = front_matter
+            .checkout_fetch
+            .get(repo)
+            .cloned()
+            .unwrap_or_default();
+        steps.push(Step::Checkout(CheckoutStep {
+            repository: CheckoutRepo::Named(repo.clone()),
+            path: Some(format!("s/{repo}")),
+            clean: None,
+            submodules: None,
+            fetch_depth: fetch.depth_for_emit(),
+            fetch_tags: fetch.fetch_tags,
+            persist_credentials: None,
+        }));
+    }
+}
+
+/// Downloads the analyzed Stage-1 outputs artifact, then the compiler itself
+/// (feed-auth'd when a feed mirror is configured), adds it to `PATH`, and
+/// prepares the output staging directory. This is the common bootstrap every
+/// SafeOutputs variant needs before the executor can run.
+fn push_safeoutputs_compiler_bootstrap_steps(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+) {
+    steps.push(Step::Download(DownloadStep {
+        source: "current".to_string(),
+        artifact: "analyzed_outputs_$(Build.BuildId)".to_string(),
+        condition: None,
+    }));
+    // One NuGetAuthenticate@1 for the whole SafeOutputs job (feed mirror).
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
+    steps.push(Step::Bash(
+        ShellScript::new(&ADD_COMPILER_TO_PATH).into_step("Add agentic compiler to path"),
+    ));
+    steps.push(Step::Bash(
+        ShellScript::new(&PREPARE_OUTPUT_DIRECTORY)
+            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+            .into_step("Prepare output directory"),
+    ));
+}
+
+/// When `create-pull-request` is configured, fetches/deepens each target
+/// branch in THIS job's checkout, immediately before the executor runs (issue
+/// #1453). The prepare step also runs in the Agent job (for the containerized
+/// SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
+/// the Agent-job fetch is invisible here — the `create-pull-request` executor
+/// (`ado-aw execute`) builds its worktree from `origin/<target>` in the
+/// SafeOutputs checkout and needs the ref landed locally. Stages the
+/// ado-script bundle in this job (it is otherwise only staged in the
+/// Agent/Setup jobs), then emits the same `prepare-pr-base` step. The bundle
+/// auth projects `System.AccessToken` (the build identity the checkout
+/// persists credentials for), so the git fetch is authenticated regardless of
+/// the write token.
+fn push_safeoutputs_prepare_pr_base_steps(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+    layout: &SafeOutputsCheckoutLayout,
+    github_app_configured: bool,
+) {
+    if variant.runs_create_pull_request || github_app_configured {
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
+    }
+    if !variant.runs_create_pull_request {
+        return;
+    }
+    let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
+    let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+    if !local_repos.is_empty() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+            &local_repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ));
+    }
+    if !cross_org_repos.is_empty() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+            &cross_org_repos,
+            crate::compile::ado_bundle::TokenSource::WriteServiceConnection,
+        ));
+    }
+}
+
+/// Whether the `comment-on-github-issue` safe output needs the GitHub App
+/// actor login (used to skip hiding the actor's own prior comments).
+fn safeoutputs_github_actor_required(
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+) -> Result<bool> {
+    Ok(variant
+        .github_issue_tools
+        .iter()
+        .any(|tool| tool == "comment-on-github-issue")
+        && front_matter
+            .comment_on_github_issue_config()?
+            .is_some_and(|config| config.hide_older_comments))
+}
+
+/// Mints the GitHub App installation token (when a GitHub App is configured
+/// for this variant's tools) immediately before the executor step.
+fn push_safeoutputs_github_app_token_step(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+    github_app: Option<&crate::compile::types::GithubAppTokenConfig>,
+    github_actor_required: bool,
+) -> Result<()> {
+    let Some(app) = github_app else {
+        return Ok(());
+    };
+    let permissions = front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
+    let actor_output_var = github_actor_required
+        .then_some(crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR);
+    steps.push(
+        super::extensions::ado_script::github_app_token_step_typed_for(
+            app,
+            crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+            actor_output_var,
+            "Mint GitHub App token (SafeOutputs)",
+            &permissions,
+        )?,
+    );
+    Ok(())
+}
+
+/// Revokes the GitHub App installation token minted above, unless the app is
+/// configured to skip revocation.
+fn push_safeoutputs_github_app_token_revoke_step(
+    steps: &mut Vec<Step>,
+    github_app: Option<&crate::compile::types::GithubAppTokenConfig>,
+) -> Result<()> {
+    let Some(app) = github_app else {
+        return Ok(());
+    };
+    if app.skip_token_revocation {
+        return Ok(());
+    }
+    steps.push(
+        super::extensions::ado_script::github_app_token_revoke_step_typed_for(
+            app,
+            crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+            "Revoke GitHub App token (SafeOutputs)",
+        )?,
+    );
+    Ok(())
+}
+
 fn build_safeoutputs_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -2715,124 +2887,29 @@ fn build_safeoutputs_job(
         &cfg.self_checkout_fetch,
         layout.multi_checkout,
     ));
-    // When `create-pull-request` is configured and there are additional
-    // checked-out repos, the SafeOutputs job must replicate the Agent job's
-    // multi-checkout layout (issue #1731). Without these checkouts:
-    //   • The additional repo directories don't exist in the SafeOutputs
-    //     workspace, so `prepare-pr-base.js` and `ado-aw execute` fail.
-    // `self` uses the compiler-owned `s/self` path in this layout so neither a
-    // repository-resource trigger nor an additional alias can change where the
-    // executor finds the workflow source.
-    // Only emit these for the variant that actually runs `create-pull-request`;
-    // other variants (and split-approval auto-SafeOutputs) don't need them.
     if variant.runs_create_pull_request {
-        for repo in &front_matter.checkout {
-            let fetch = front_matter
-                .checkout_fetch
-                .get(repo)
-                .cloned()
-                .unwrap_or_default();
-            steps.push(Step::Checkout(CheckoutStep {
-                repository: CheckoutRepo::Named(repo.clone()),
-                path: Some(format!("s/{repo}")),
-                clean: None,
-                submodules: None,
-                fetch_depth: fetch.depth_for_emit(),
-                fetch_tags: fetch.fetch_tags,
-                persist_credentials: None,
-            }));
-        }
+        push_safeoutputs_multi_checkout_steps(&mut steps, front_matter);
     }
     // Acquire write token (when configured)
     if let Some(step) = &cfg.acquire_write_token {
         steps.push(step.clone());
     }
-    // Download analyzed outputs
-    steps.push(Step::Download(DownloadStep {
-        source: "current".to_string(),
-        artifact: "analyzed_outputs_$(Build.BuildId)".to_string(),
-        condition: None,
-    }));
-    // Download compiler
-    //    One NuGetAuthenticate@1 for the whole SafeOutputs job (feed mirror).
-    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
-        steps.push(auth);
-    }
-    steps.extend(download_compiler_step(
-        &cfg.compiler_version,
-        front_matter.supply_chain(),
-    ));
-    // Add compiler to path
-    steps.push(Step::Bash(
-        ShellScript::new(&ADD_COMPILER_TO_PATH).into_step("Add agentic compiler to path"),
-    ));
-    // Prepare output directory
-    steps.push(Step::Bash(
-        ShellScript::new(&PREPARE_OUTPUT_DIRECTORY)
-            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
-            .into_step("Prepare output directory"),
-    ));
-    // When `create-pull-request` is configured, fetch/deepen each target branch
-    // in THIS job's checkout, immediately before the executor runs (issue
-    // #1453). The prepare step also runs in the Agent job (for the containerized
-    // SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
-    // the Agent-job fetch is invisible here — the `create-pull-request` executor
-    // (`ado-aw execute`) builds its worktree from `origin/<target>` in the
-    // SafeOutputs checkout and needs the ref landed locally. Stage the ado-script
-    // bundle in this job (it is otherwise only staged in the Agent/Setup jobs),
-    // then emit the same `prepare-pr-base` step. The bundle auth projects
-    // `System.AccessToken` (the build identity the checkout persists credentials
-    // for), so the git fetch is authenticated regardless of the write token.
-    if variant.runs_create_pull_request || github_app.is_some() {
-        steps.extend(
-            super::extensions::ado_script::install_and_download_steps_typed(
-                front_matter.supply_chain(),
-            ),
-        );
-    }
-    if variant.runs_create_pull_request {
-        let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
-        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
-        if !local_repos.is_empty() {
-            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
-                &local_repos,
-                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
-            ));
-        }
-        if !cross_org_repos.is_empty() {
-            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
-                &cross_org_repos,
-                crate::compile::ado_bundle::TokenSource::WriteServiceConnection,
-            ));
-        }
-    }
-    let github_actor_required = variant
-        .github_issue_tools
-        .iter()
-        .any(|tool| tool == "comment-on-github-issue")
-        && front_matter
-            .comment_on_github_issue_config()?
-            .is_some_and(|config| config.hide_older_comments);
-    if let Some(app) = github_app {
-        let permissions =
-            front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
-        let actor_output_var = if github_actor_required {
-            Some(crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR)
-        } else {
-            None
-        };
-        steps.push(
-            super::extensions::ado_script::github_app_token_step_typed_for(
-                app,
-                crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
-                actor_output_var,
-                "Mint GitHub App token (SafeOutputs)",
-                &permissions,
-            )?,
-        );
-    }
+    push_safeoutputs_compiler_bootstrap_steps(&mut steps, front_matter, cfg);
+    push_safeoutputs_prepare_pr_base_steps(
+        &mut steps,
+        front_matter,
+        variant,
+        &layout,
+        github_app.is_some(),
+    );
+    let github_actor_required = safeoutputs_github_actor_required(front_matter, variant)?;
+    push_safeoutputs_github_app_token_step(
+        &mut steps,
+        front_matter,
+        variant,
+        github_app,
+        github_actor_required,
+    )?;
     let executor_ado_env = common::generate_executor_ado_env(
         front_matter
             .permissions
@@ -2856,17 +2933,7 @@ fn build_safeoutputs_job(
         &executor_ado_env,
         &variant.filter_args,
     )?));
-    if let Some(app) = github_app
-        && !app.skip_token_revocation
-    {
-        steps.push(
-            super::extensions::ado_script::github_app_token_revoke_step_typed_for(
-                app,
-                crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
-                "Revoke GitHub App token (SafeOutputs)",
-            )?,
-        );
-    }
+    push_safeoutputs_github_app_token_revoke_step(&mut steps, github_app)?;
     // Copy logs
     steps.push(Step::Bash(copy_logs_safeoutputs_step(&cfg.engine_log_dir)));
     // Publish
