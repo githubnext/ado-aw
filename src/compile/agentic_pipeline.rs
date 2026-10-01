@@ -1185,22 +1185,17 @@ fn build_setup_job(
     Ok(Some(job))
 }
 
-fn build_agent_job(
+/// Steps 1-2: `checkout: self` plus any additional named repo checkouts
+/// declared under front matter `checkout:`.
+fn push_agent_checkout_steps(
     front_matter: &FrontMatter,
-    extensions: &[Extension],
-    ext_agent_prepare: &[Step],
-    ext_agent_conditions: &[Condition],
     cfg: &StandaloneCtx,
-    prefix: &JobPrefix<'_>,
-) -> Result<Job> {
-    let mut steps: Vec<Step> = Vec::new();
-
-    // 1. checkout: self
+    steps: &mut Vec<Step>,
+) {
     steps.push(checkout_self_step(
         &cfg.self_checkout_fetch,
         !front_matter.checkout.is_empty(),
     ));
-    // 2. additional repo checkouts
     for repo in &front_matter.checkout {
         let fetch = front_matter
             .checkout_fetch
@@ -1217,7 +1212,18 @@ fn build_agent_job(
             persist_credentials: None,
         }));
     }
+}
 
+/// Steps 3-13: acquire the read token, install the engine, download the
+/// compiler, run the integrity check, stage MCPG/tooling/prompt, install
+/// Docker, download AWF, pre-pull images, and splice in extension/user
+/// `steps:`.
+fn push_agent_install_and_prepare_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    ext_agent_prepare: &[Step],
+    steps: &mut Vec<Step>,
+) -> Result<()> {
     // 3. acquire ADO read token (AzureCLI@3 task) — only when configured.
     if let Some(step) = &cfg.acquire_read_token {
         steps.push(step.clone());
@@ -1226,7 +1232,7 @@ fn build_agent_job(
     // 4. engine install steps (Copilot CLI install). YAML string from
     //    `Engine::install_steps`; lowered through `Step::RawYaml`
     //    until a typed `Engine::install_steps_typed` lands.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
+    push_raw_yaml_if_nonempty(steps, &cfg.engine_install_steps_yaml)?;
 
     // 5. Download agentic pipeline compiler
     //    Hoist one NuGetAuthenticate@1 for the whole job when the feed mirror
@@ -1241,7 +1247,7 @@ fn build_agent_job(
 
     // 6. Integrity check (when not skipped)
     push_raw_yaml_if_nonempty(
-        &mut steps,
+        steps,
         &substitute_integrity_check(
             &cfg.integrity_check_yaml,
             &cfg.pipeline_path,
@@ -1278,8 +1284,22 @@ fn build_agent_job(
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
     }
 
+    Ok(())
+}
+
+/// Steps 14-16: AWF path step, renewable Azure WIF refresh sidecars, the
+/// credential-isolated ado-proxy policy engine, MCPG startup, the
+/// topology-peer liveness check, and the debug-only MCP backend check.
+///
+/// Returns whether ado-proxy was enabled, so the caller can gate the
+/// matching teardown steps later in the job.
+fn push_agent_mcp_startup_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    steps: &mut Vec<Step>,
+) -> Result<bool> {
     // 14. AWF path step (when extensions declare path prepends)
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml)?;
+    push_raw_yaml_if_nonempty(steps, &cfg.awf_path_step_yaml)?;
 
     // 14a. Renewable Azure workload-identity assertions for user-defined
     //      stdio MCP servers. The ado-script bundle was delivered by the
@@ -1321,43 +1341,63 @@ fn build_agent_job(
         steps.push(Step::Bash(verify_mcp_backends_step()));
     }
 
-    // 17. Run copilot (AWF network isolated) — the big one.
-    //     When `create-pull-request` is configured, first fetch/deepen the
-    //     target branch so the containerized SafeOutputs MCP server can compute a
-    //     diff base on shallow-default agent pools (issue #1413). Runs after
-    //     `checkout: self` (step 1) so the clone exists, and before the Copilot
-    //     run so the refs are present when the agent proposes a PR. The
-    //     `prepare-pr-base.js` bundle is staged by the ado-script extension's
-    //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
-    //     extension's Agent-job download predicate), so it is guaranteed present.
-    if front_matter.create_pr_config().is_some() {
-        // The prepare step deepens every checkout dir the SafeOutputs MCP server
-        // may generate a patch from — see `create_pr_prepare_repos`. The
-        // compile-time target-inference advisory is emitted here (Agent job)
-        // only, so it never double-prints when the same step is also emitted in
-        // the SafeOutputs job (issue #1453).
-        warn_create_pr_target_inference(front_matter);
-        let repos = create_pr_prepare_repos(front_matter, &cfg.trigger_repo_directory);
-        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
-        if !local_repos.is_empty() {
-            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-                super::extensions::ado_script::PreparePrBaseMode::PatchBase,
-                &local_repos,
-                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
-            ));
-        }
-        if let Some(service_connection) =
-            cross_org_prepare_service_connection(front_matter, &cross_org_repos)
-        {
-            steps.push(
-                super::extensions::ado_script::prepare_pr_base_azure_devops_step_typed(
-                    super::extensions::ado_script::PreparePrBaseMode::PatchBase,
-                    &cross_org_repos,
-                    service_connection,
-                ),
-            );
-        }
+    Ok(ado_proxy_enabled)
+}
+
+/// Part of step 17: when `create-pull-request` is configured, fetch/deepen
+/// the target branch for every checkout dir the SafeOutputs MCP server may
+/// generate a patch from, so it can compute a diff base on shallow-default
+/// agent pools (issue #1413). Runs after `checkout: self` so the clone
+/// exists, and before the Copilot run so the refs are present when the agent
+/// proposes a PR. The `prepare-pr-base.js` bundle is staged by the
+/// ado-script extension's agent-prepare steps, so it is guaranteed present.
+///
+/// The compile-time target-inference advisory is emitted here (Agent job)
+/// only, so it never double-prints when the same step is also emitted in the
+/// SafeOutputs job (issue #1453).
+fn push_agent_create_pr_base_prep_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    steps: &mut Vec<Step>,
+) {
+    if front_matter.create_pr_config().is_none() {
+        return;
     }
+    warn_create_pr_target_inference(front_matter);
+    let repos = create_pr_prepare_repos(front_matter, &cfg.trigger_repo_directory);
+    let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+    if !local_repos.is_empty() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::PatchBase,
+            &local_repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ));
+    }
+    if let Some(service_connection) =
+        cross_org_prepare_service_connection(front_matter, &cross_org_repos)
+    {
+        steps.push(
+            super::extensions::ado_script::prepare_pr_base_azure_devops_step_typed(
+                super::extensions::ado_script::PreparePrBaseMode::PatchBase,
+                &cross_org_repos,
+                service_connection,
+            ),
+        );
+    }
+}
+
+/// Rest of step 17: mint the GitHub App installation token and/or the
+/// external provider token immediately before the Copilot run (so
+/// `copilot_env` can source them via masked same-job variables), then run
+/// the agent itself inside the AWF network-isolated sandbox.
+fn push_agent_run_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    ado_proxy_enabled: bool,
+    steps: &mut Vec<Step>,
+) -> Result<()> {
+    push_agent_create_pr_base_prep_steps(front_matter, cfg, steps);
+
     //     When GitHub App auth is configured, mint the installation token
     //     immediately before the Copilot run; `copilot_env` sources
     //     `GITHUB_TOKEN` from the masked same-job `GITHUB_APP_TOKEN` the mint
@@ -1396,6 +1436,18 @@ fn build_agent_job(
         ado_proxy_enabled,
     )?));
 
+    Ok(())
+}
+
+/// Steps 18a-20b: revoke the GitHub App token, collect safe outputs from
+/// the AWF container, render the safe-outputs summary, and stop MCPG /
+/// WIF-refresh sidecars / the ado-proxy policy engine (+ its network) in
+/// reverse start order.
+fn push_agent_collect_and_stop_steps(
+    front_matter: &FrontMatter,
+    ado_proxy_enabled: bool,
+    steps: &mut Vec<Step>,
+) -> Result<()> {
     // 18a. Revoke the GitHub App token (best-effort, always) once the Copilot
     //      run has returned, so the minted installation token does not remain
     //      valid for its full lifetime. Skipped when `skip-token-revocation`.
@@ -1439,6 +1491,16 @@ fn build_agent_job(
         steps.push(Step::Bash(teardown_ado_proxy_network_step()));
     }
 
+    Ok(())
+}
+
+/// Steps 21-23: user `post_steps:` (finalize steps), log copy, and the
+/// `agent_outputs_$(Build.BuildId)` artifact publish.
+fn push_agent_finalize_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    steps: &mut Vec<Step>,
+) -> Result<()> {
     // 21. User post_steps (finalize_steps)
     for user_step_val in &front_matter.post_steps {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
@@ -1453,6 +1515,29 @@ fn build_agent_job(
         artifact: "agent_outputs_$(Build.BuildId)".to_string(),
         condition: Some(Condition::Always),
     }));
+
+    Ok(())
+}
+
+fn build_agent_job(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    ext_agent_prepare: &[Step],
+    ext_agent_conditions: &[Condition],
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Job> {
+    let mut steps: Vec<Step> = Vec::new();
+
+    push_agent_checkout_steps(front_matter, cfg, &mut steps);
+    push_agent_install_and_prepare_steps(front_matter, cfg, ext_agent_prepare, &mut steps)?;
+    let ado_proxy_enabled = push_agent_mcp_startup_steps(front_matter, cfg, &mut steps)?;
+
+    // 17. Run copilot (AWF network isolated) — the big one.
+    push_agent_run_steps(front_matter, cfg, ado_proxy_enabled, &mut steps)?;
+
+    push_agent_collect_and_stop_steps(front_matter, ado_proxy_enabled, &mut steps)?;
+    push_agent_finalize_steps(front_matter, cfg, &mut steps)?;
 
     let _ = extensions; // currently unused after typed declarations gather
     let _ = &cfg.agent_display_name; // friendly name is the pipeline `name:`, not the job displayName
