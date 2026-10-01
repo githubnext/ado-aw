@@ -25,6 +25,7 @@ export async function setupPr(
   tool: string,
   withThread: boolean,
   draft?: boolean,
+  fixtureContent?: string,
 ): Promise<PrState> {
   const repo = ctx.adoRepo;
   const baseBranch = await defaultBranchShortName(ctx, repo);
@@ -37,7 +38,7 @@ export async function setupPr(
     branch,
     baseSha,
     `/ado-aw-det/${ctx.buildId}/${tool}.md`,
-    `${detBody(ctx, tool)}\n`,
+    fixtureContent ?? `${detBody(ctx, tool)}\n`,
     `deterministic executor e2e ${tool}`,
   );
 

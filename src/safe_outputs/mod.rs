@@ -794,6 +794,7 @@ mod add_pr_labels;
 mod pr_labels;
 pub(crate) mod pr_comments;
 pub(crate) mod pr_http;
+pub(crate) mod pr_patch;
 pub(crate) mod pr_inline;
 mod remove_pull_request_labels;
 mod replace_pull_request_label;

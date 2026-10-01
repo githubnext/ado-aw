@@ -5,16 +5,12 @@ use anyhow::{Context, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use std::path::Path;
 
-use super::create_pull_request::{
-    IfNoChanges, ProtectedFiles, count_patch_files, extract_paths_from_patch, find_protected_files,
-    glob_match_simple, read_file_change, validate_patch_paths,
-};
+use super::create_pull_request::{IfNoChanges, ProtectedFiles};
+use super::pr_patch::{git, git_without_filters, PatchSizeKiB};
 use super::pr_common::{
-    PrMutationPolicy, PrTargetPolicy, PullRequestReference, collection_identity,
-    describe_pr_reference, resolve_configured_pr_target,
+    PrMutationPolicy, PrTargetPolicy, PullRequestReference,     describe_pr_reference, resolve_configured_pr_target,
 };
 use super::pr_mutations::UpdatePrContext;
 use super::{
@@ -24,7 +20,6 @@ use crate::sanitize::SanitizeContent;
 use crate::secure::{CommitSha, GitRefName, RelativeSafePath, StrictRelativePath};
 use crate::tool_result;
 
-const MAX_PATCH: usize = 5 * 1024 * 1024;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -84,6 +79,9 @@ impl SanitizeContent for PushToPullRequestBranchResult {
 #[derive(Debug, Clone, Serialize, Deserialize, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct PushToPullRequestBranchConfig {
+    #[serde(default, rename = "max-patch-size")]
+    #[sanitize_config(skip)]
+    pub max_patch_size: super::pr_patch::PatchSizeKiB,
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
@@ -124,6 +122,7 @@ fn default_no_changes() -> IfNoChanges {
 impl Default for PushToPullRequestBranchConfig {
     fn default() -> Self {
         Self {
+            max_patch_size: Default::default(),
             target: Default::default(),
             target_repo: None,
             allowed_repositories: vec![],
@@ -285,509 +284,21 @@ async fn source_state(
     Ok((pr, repository, head))
 }
 
-async fn git(repo: &Path, args: &[&str]) -> anyhow::Result<std::process::Output> {
-    git_without_filters(repo)
-        .await?
-        .args(args)
-        .output()
-        .await
-        .context("Failed to run PR patch git operation")
-}
-
-fn git_path(path: &Path) -> std::borrow::Cow<'_, str> {
-    let text = path.to_string_lossy();
-    #[cfg(windows)]
-    if let Some(rest) = text.strip_prefix(r"\\?\") {
-        return std::borrow::Cow::Owned(if let Some(unc) = rest.strip_prefix(r"UNC\") {
-            format!(r"\\{unc}")
-        } else {
-            rest.to_string()
-        });
-    }
-    text
-}
-
-async fn git_without_filters(repo: &Path) -> anyhow::Result<Command> {
-    let filters = git_command(repo)
-        .args([
-            "config",
-            "--name-only",
-            "--get-regexp",
-            r"^filter\..*\.(clean|smudge|process|required)$",
-        ])
-        .output()
-        .await?;
-    ensure!(
-        filters.status.success() || filters.status.code() == Some(1),
-        "Could not inspect git filter configuration"
-    );
-    let mut command = git_command(repo);
-    for key in std::str::from_utf8(&filters.stdout)?.lines() {
-        ensure!(
-            key.bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')),
-            "Unsupported git filter configuration key"
-        );
-        command.arg("-c").arg(format!(
-            "{key}={}",
-            if key.ends_with(".required") {
-                "false"
-            } else {
-                ""
-            }
-        ));
-    }
-    Ok(command)
-}
-
-fn git_command(repo: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.env_clear();
-    for name in [
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "SYSTEMROOT",
-        "WINDIR",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "LANG",
-        "LC_ALL",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "GIT_SSL_CAINFO",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    command
-        .args(["-c", "core.hooksPath=/dev/null"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .current_dir(repo);
-    command
-}
-
-async fn ensure_source_commit(
-    repo: &Path,
-    head: &CommitSha,
-    op: &UpdatePrContext<'_>,
-    metadata: &Repository,
-) -> anyhow::Result<()> {
-    if git(repo, &["cat-file", "-e", &format!("{head}^{{commit}}")])
-        .await?
-        .status
-        .success()
-    {
-        return Ok(());
-    }
-    let remote = git(repo, &["remote", "get-url", "origin"]).await?;
-    ensure!(remote.status.success(), "Source checkout has no origin");
-    let remote = String::from_utf8(remote.stdout)?.trim().to_string();
-    let url = reqwest::Url::parse(&remote)
-        .context("Source checkout origin must be HTTPS Azure DevOps")?;
-    ensure!(
-        url.scheme() == "https"
-            && url.password().is_none()
-            && url.query().is_none()
-            && url.fragment().is_none()
-            && url.port().is_none(),
-        "Invalid source checkout origin"
-    );
-    let host = url.host_str().context("Source origin host missing")?;
-    ensure!(
-        host == "dev.azure.com"
-            || host
-                == format!(
-                    "{}.visualstudio.com",
-                    op.target.organization.to_ascii_lowercase()
-                ),
-        "Source origin is not the authorized Azure DevOps organization"
-    );
-    ensure!(
-        url.username().is_empty() || url.username().eq_ignore_ascii_case(&op.target.organization),
-        "Source origin contains an unexpected user-info component"
-    );
-    let parts = url.path().trim_matches('/').split('/').collect::<Vec<_>>();
-    ensure!(
-        (host == "dev.azure.com" && parts.len() == 4 && parts[2] == "_git")
-            || (host != "dev.azure.com" && parts.len() == 3 && parts[1] == "_git")
-            || (host != "dev.azure.com"
-                && parts.len() == 4
-                && parts[0].eq_ignore_ascii_case("DefaultCollection")
-                && parts[2] == "_git"),
-        "Source origin must identify exactly one Azure DevOps repository"
-    );
-    let parsed = crate::ado::parse_ado_remote(&remote)?;
-    ensure!(
-        collection_identity(&parsed.org_url) == collection_identity(&op.target.organization_url),
-        "Source origin organization mismatch"
-    );
-    let project = percent_encoding::percent_decode_str(&parsed.project).decode_utf8()?;
-    let name = percent_encoding::percent_decode_str(&parsed.repo_name).decode_utf8()?;
-    ensure!(
-        (project.eq_ignore_ascii_case(&metadata.project.name)
-            || project.eq_ignore_ascii_case(&metadata.project.id))
-            && (name.eq_ignore_ascii_case(&metadata.name)
-                || name.eq_ignore_ascii_case(&metadata.id)),
-        "Source origin repository mismatch"
-    );
-    let rewrites = git(
-        repo,
-        &[
-            "config",
-            "--get-regexp",
-            r"^url\..*\.(insteadof|pushinsteadof)$",
-        ],
-    )
-    .await?;
-    ensure!(
-        rewrites.status.code() == Some(1),
-        "Git URL rewrite configuration is not permitted for authenticated source fetches"
-    );
-    let mut command = git_command(repo);
-    use base64::Engine;
-    let header = match op.connection_type {
-        Some(_) => format!("Authorization: bearer {}", op.token),
-        None => format!(
-            "Authorization: Basic {}",
-            base64::engine::general_purpose::STANDARD.encode(format!(":{}", op.token))
-        ),
-    };
-    let output = command
-        .args([
-            "-c",
-            "credential.helper=",
-            "-c",
-            "http.followRedirects=false",
-            "-c",
-            "http.sslVerify=true",
-            "fetch",
-            "--no-tags",
-            "--depth=1",
-            "--",
-            &remote,
-            head.as_str(),
-        ])
-        .env("GIT_CONFIG_COUNT", "3")
-        .env("GIT_CONFIG_KEY_0", "http.extraheader")
-        .env("GIT_CONFIG_VALUE_0", "")
-        .env("GIT_CONFIG_KEY_1", format!("http.{remote}.extraheader"))
-        .env("GIT_CONFIG_VALUE_1", "")
-        .env("GIT_CONFIG_KEY_2", format!("http.{remote}.extraheader"))
-        .env("GIT_CONFIG_VALUE_2", header)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .current_dir(repo)
-        .output()
-        .await
-        .context("Source commit fetch failed")?;
-    ensure!(
-        output.status.success(),
-        "Source commit fetch failed; verify checkout and read authorization"
-    );
-    ensure!(
-        git(repo, &["cat-file", "-e", &format!("{head}^{{commit}}")])
-            .await?
-            .status
-            .success(),
-        "Fetched source commit is unavailable"
-    );
-    Ok(())
-}
-
-struct Worktree {
-    repo: PathBuf,
-    path: PathBuf,
-    cleaned: bool,
-}
-impl Worktree {
-    async fn cleanup(&mut self) -> anyhow::Result<()> {
-        let output = git(
-            &self.repo,
-            &[
-                "worktree",
-                "remove",
-                "--force",
-                &self.path.to_string_lossy(),
-            ],
-        )
-        .await?;
-        ensure!(
-            output.status.success(),
-            "PR push worktree cleanup failed; remote push was not attempted"
-        );
-        self.cleaned = true;
-        Ok(())
-    }
-}
-impl Drop for Worktree {
-    fn drop(&mut self) {
-        if self.cleaned {
-            return;
-        }
-        if let Err(error) = std::process::Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.path)
-            .current_dir(&self.repo)
-            .output()
-            .and_then(|result| {
-                if result.status.success() {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::other("git worktree cleanup failed"))
-                }
-            })
-        {
-            log::warn!("PR push worktree cleanup failed: {error}");
-        }
-    }
-}
 
 async fn patch_changes(
     repo: &Path,
     head: &CommitSha,
-    patch: &Path,
+    bytes: &[u8],
     config: &PushToPullRequestBranchConfig,
-) -> anyhow::Result<Vec<Value>> {
-    let excludes = config
-        .excluded_files
-        .iter()
-        .map(|pattern| format!("--exclude={pattern}"))
-        .collect::<Vec<_>>();
-    let mut inspect = vec!["apply", "--numstat", "-z"];
-    inspect.extend(excludes.iter().map(String::as_str));
-    let patch_path = git_path(patch);
-    inspect.push(&patch_path);
-    let summary = git(repo, &inspect).await?;
-    ensure!(
-        summary.status.success(),
-        "Could not inspect PR patch paths: {}",
-        crate::sanitize::neutralize_pipeline_commands(&String::from_utf8_lossy(&summary.stderr))
-    );
-    let mut touched = Vec::new();
-    for record in summary
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-    {
-        let text = std::str::from_utf8(record)?;
-        let path = text
-            .splitn(3, '\t')
-            .nth(2)
-            .context("Invalid PR patch path summary")?;
-        ensure!(
-            !path.is_empty(),
-            "PR patch renames must use delete/add records from the safe-output collector"
-        );
-        crate::secure::RelativeSafePath::parse(path)?;
-        touched.push(path.to_string());
-    }
-    ensure!(
-        touched.len() <= config.max_files,
-        "PR patch path count exceeds max-files"
-    );
-    ensure!(touched.iter().all(|path|path!="aw-context"&&!path.starts_with("aw-context/")),
-        "Compiler-owned aw-context data is not pushable");
-    if touched.is_empty() {
-        return Ok(Vec::new());
-    }
-    ensure!(
-        config.protected_files == ProtectedFiles::Allowed
-            || find_protected_files(
-                &touched
-                    .iter()
-                    .filter(|path| !config
-                        .excluded_files
-                        .iter()
-                        .any(|pattern| glob_match_simple(pattern, path)))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            )
-            .is_empty(),
-        "PR patch touches protected files"
-    );
-    let mut args = vec![
-        "--literal-pathspecs",
-        "ls-tree",
-        "-l",
-        "-z",
-        head.as_str(),
-        "--",
-    ];
-    args.extend(touched.iter().map(String::as_str));
-    let sizes = git(repo, &args).await?;
-    ensure!(
-        sizes.status.success(),
-        "Could not inspect source blob sizes"
-    );
-    let mut total = 0usize;
-    for entry in sizes
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-    {
-        let text = std::str::from_utf8(entry)?;
-        let header = text
-            .split('\t')
-            .next()
-            .context("Invalid source tree metadata")?
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        ensure!(
-            header.len() == 4 && header[1] == "blob",
-            "Changed source path is not a regular blob"
-        );
-        let size: usize = header[3].parse().context("Invalid source blob size")?;
-        ensure!(
-            size <= MAX_PATCH,
-            "Changed source file exceeds the 5 MB limit"
-        );
-        total = total
-            .checked_add(size)
-            .context("Source blob size overflow")?;
-        ensure!(
-            total <= 10 * 1024 * 1024,
-            "Changed source files exceed the 10 MB aggregate bound"
-        );
-    }
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("worktree");
-    let output = git(
-        repo,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            &path.to_string_lossy(),
-            head.as_str(),
-        ],
-    )
-    .await?;
-    ensure!(
-        output.status.success(),
-        "Could not create an isolated source-head worktree"
-    );
-    let mut guard = Worktree {
-        repo: repo.to_path_buf(),
-        path: path.clone(),
-        cleaned: false,
-    };
-    for check in [true, false] {
-        let mut command = git_without_filters(&path).await?;
-        command.args(["apply", "--index", "--binary"]);
-        if check {
-            command.arg("--check");
-        }
-        command
-            .args(&excludes)
-            .arg(patch_path.as_ref())
-            .current_dir(&path);
-        let output = command.output().await?;
-        ensure!(
-            output.status.success(),
-            "Patch does not apply cleanly to the exact source head"
-        );
-    }
-    let output = git(
-        &path,
-        &[
-            "diff",
-            "--cached",
-            "--raw",
-            "-z",
-            "--no-renames",
-            head.as_str(),
-        ],
-    )
-    .await?;
-    ensure!(
-        output.status.success(),
-        "Could not inspect applied PR patch"
-    );
-    let chunks = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    ensure!(chunks.len() % 2 == 0, "Malformed git change records");
-    let mut changes = Vec::new();
-    let mut paths = Vec::new();
-    for pair in chunks.chunks_exact(2) {
-        let header = std::str::from_utf8(pair[0])?
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        ensure!(header.len() == 5, "Malformed git change metadata");
-        let old = header[0].strip_prefix(':').context("Malformed git mode")?;
-        let new = header[1];
-        let file = std::str::from_utf8(pair[1])?;
-        crate::secure::RelativeSafePath::parse(file)?;
-        ensure!(
-            matches!(old, "000000" | "100644" | "100755")
-                && matches!(new, "000000" | "100644" | "100755"),
-            "PR pushes do not support symlink or submodule changes"
-        );
-        ensure!(
-            new == "000000" || old == new || (old == "000000" && new == "100644"),
-            "PR push cannot represent file-mode changes"
-        );
-        paths.push(file.to_string());
-        if new == "000000" {
-            changes.push(json!({"changeType":"delete","item":{"path":format!("/{file}")}}));
-        } else {
-            let full = crate::validate::ensure_path_within_base(
-                &path.join(file),
-                &path,
-                "applied PR file",
-            )?;
-            let size = tokio::fs::metadata(&full).await?.len();
-            ensure!(
-                size <= MAX_PATCH as u64,
-                "Applied PR file exceeds the 5 MB limit"
-            );
-            changes.push(
-                read_file_change(if old == "000000" { "add" } else { "edit" }, file, &full).await?,
-            );
-        }
-    }
-    ensure!(
-        changes.len() <= config.max_files,
-        "Applied changes exceed max-files"
-    );
-    ensure!(
-        config.protected_files == ProtectedFiles::Allowed
-            || find_protected_files(&paths).is_empty(),
-        "Applied PR changes contain protected files"
-    );
-    if !paths.is_empty() {
-        let mut attributes = vec!["check-attr", "--cached", "-z", "filter", "--"];
-        attributes.extend(paths.iter().map(String::as_str));
-        let output = git(&path, &attributes).await?;
-        ensure!(
-            output.status.success(),
-            "Could not inspect applied file filters"
-        );
-        let values = output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>();
-        ensure!(values.len() % 3 == 0, "Malformed file-filter metadata");
-        ensure!(
-            values
-                .chunks_exact(3)
-                .all(|entry| matches!(entry[2], b"unspecified" | b"unset")),
-            "PR pushes do not support LFS or custom-filtered file changes"
-        );
-    }
-    ensure!(
-        serde_json::to_vec(&changes)?.len() <= 10 * 1024 * 1024,
-        "ADO push payload exceeds the 10 MB limit"
-    );
-    guard.cleanup().await?;
-    Ok(changes)
+) -> anyhow::Result<super::pr_patch::IndexChanges> {
+    let prepared = super::pr_patch::prepare(repo, head, bytes, &super::pr_patch::PatchPolicy {
+        limit: config.max_patch_size,
+        max_files: config.max_files,
+        excluded_files: &config.excluded_files,
+        protected_files: config.protected_files,
+        exact: true,
+    }).await?;
+    prepared.apply_to_index(repo, head).await
 }
 
 #[async_trait::async_trait]
@@ -831,7 +342,7 @@ impl Executor for PushToPullRequestBranchResult {
                 .context("No access token available")?,
             connection_type: ctx.write_connection_type,
         };
-        let (pr, metadata, head) = source_state(&op, &config).await?;
+        let (pr, _metadata, head) = source_state(&op, &config).await?;
         ensure!(
             head.eq_ignore_ascii_case(&self.expected_head_sha),
             "PR source head changed; refusing stale patch"
@@ -841,45 +352,16 @@ impl Executor for PushToPullRequestBranchResult {
             &ctx.working_directory,
             "PR patch",
         )?;
-        ensure!(
-            tokio::fs::metadata(&patch).await?.len() <= MAX_PATCH as u64,
-            "PR patch exceeds the 5 MB limit"
-        );
-        let bytes = tokio::fs::read(&patch).await?;
-        ensure!(
-            crate::hash::sha256_hex(&bytes) == self.patch_sha256,
-            "PR patch SHA-256 mismatch"
-        );
-        let text =
-            std::str::from_utf8(&bytes).context("PR patch must be a UTF-8 git binary patch")?;
-        validate_patch_paths(text)?;
-        validate_binary_bounds(text)?;
-        let paths = extract_paths_from_patch(text)
-            .into_iter()
-            .filter(|path| {
-                !config
-                    .excluded_files
-                    .iter()
-                    .any(|pattern| glob_match_simple(pattern, path))
-            })
-            .collect::<Vec<_>>();
-        ensure!(
-            count_patch_files(text) <= config.max_files,
-            "PR patch exceeds max-files"
-        );
-        ensure!(
-            config.protected_files == ProtectedFiles::Allowed
-                || find_protected_files(&paths).is_empty(),
-            "PR patch contains protected files"
-        );
-        if text.trim().is_empty() {
-            return Ok(empty_patch(&config));
-        }
+        let bytes = super::pr_patch::read_patch(&patch, config.max_patch_size).await?;
+        ensure!(crate::hash::sha256_hex(&bytes) == self.patch_sha256, "PR patch SHA-256 mismatch");
         let repo = super::resolve_repository_checkout_dir(&op.target.alias, ctx)?;
-        ensure_source_commit(&repo, &head, &op, &metadata).await?;
-        let changes = patch_changes(&repo, &head, &patch, &config).await?;
+        super::pr_patch::ensure_commit(&repo, &head, &op.target, op.client, op.token, op.connection_type).await?;
+        let applied = patch_changes(&repo, &head, &bytes, &config).await?;
+        let changes = applied.changes;
         if changes.is_empty() {
-            return Ok(empty_patch(&config));
+            let mut result = empty_patch(&config);
+            result.data = Some(json!({"omitted_operations":applied.omitted}));
+            return Ok(result);
         }
         let (current, _, current_head) = source_state(&op, &config).await?;
         ensure!(
@@ -889,7 +371,7 @@ impl Executor for PushToPullRequestBranchResult {
         let payload = json!({"refUpdates":[{"name":pr.source,"oldObjectId":head}],
             "commits":[{"comment":format!("Agentic workflow update for PR #{pr_id}"),"parents":[head],"changes":changes}]});
         let mut data = json!({"pull_request_id":pr_id,"repository":op.target.qualified_repository(),
-            "source_ref":pr.source,"expected_head_sha":head,"push_status":"uncertain"});
+            "source_ref":pr.source,"expected_head_sha":head,"push_status":"uncertain","omitted_operations":applied.omitted});
         let response = authenticate_ado_request(
             client.post(format!(
                 "{}/pushes?api-version=7.1",
@@ -898,7 +380,8 @@ impl Executor for PushToPullRequestBranchResult {
             op.token,
             op.connection_type,
         )
-        .json(&payload)
+        .header("Content-Type", "application/json")
+        .body(super::pr_patch::request_bytes(&payload)?)
         .send()
         .await;
         let response = match response {
@@ -1015,14 +498,14 @@ pub(crate) async fn prepare_agent(
             .context("Source preparation needs read authentication")?,
         connection_type: ctx.write_connection_type,
     };
-    let (pr, metadata, head) = source_state(&op, &config).await?;
+    let (pr, _metadata, head) = source_state(&op, &config).await?;
     let repo = super::resolve_repository_checkout_dir(&op.target.alias, ctx)?;
     let status = git(&repo, &["status", "--porcelain"]).await?;
     ensure!(
         status.status.success() && status.stdout.is_empty(),
         "PR source preparation refuses an invalid or dirty checkout"
     );
-    ensure_source_commit(&repo, &head, &op, &metadata).await?;
+    super::pr_patch::ensure_commit(&repo, &head, &op.target, op.client, op.token, op.connection_type).await?;
     let checkout = git(&repo, &["checkout", "--detach", head.as_str()]).await?;
     ensure!(
         checkout.status.success(),
@@ -1040,7 +523,7 @@ pub(crate) async fn prepare_agent(
     Ok(())
 }
 
-pub(crate) async fn capture_patch(repo: &Path, head: &CommitSha) -> anyhow::Result<Vec<u8>> {
+pub(crate) async fn capture_patch(repo: &Path, head: &CommitSha, limit: PatchSizeKiB) -> anyhow::Result<Vec<u8>> {
     let sparse = git(repo, &["config", "--bool", "core.sparseCheckout"]).await?;
     ensure!(
         sparse.status.code() == Some(1)
@@ -1090,31 +573,13 @@ pub(crate) async fn capture_patch(repo: &Path, head: &CommitSha) -> anyhow::Resu
             "Could not capture PR changes in an isolated index"
         );
     }
-    let output = git_without_filters(repo)
-        .await?
-        .args([
-            "diff",
-            "--cached",
-            "--binary",
-            "--full-index",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-textconv",
-            head.as_str(),
-            "--",
-        ])
-        .env("GIT_INDEX_FILE", &index)
-        .current_dir(repo)
-        .output()
-        .await?;
-    ensure!(
-        output.status.success(),
-        "Could not capture a PR source-head delta"
-    );
-    ensure!(
-        output.stdout.len() <= MAX_PATCH,
-        "PR patch exceeds the 5 MB limit"
-    );
+    let mut command = git_without_filters(repo).await?;
+    command.args(["diff", "--cached", "--binary", "--full-index", "--no-renames",
+        "--no-ext-diff", "--no-textconv", head.as_str(), "--"])
+        .env("GIT_INDEX_FILE", &index);
+    let output = super::pr_patch::bounded_output(&mut command, limit.bytes(), None).await
+        .with_context(|| format!("PR patch capture failed within max-patch-size ({limit} KiB)"))?;
+    ensure!(output.status.success(), "Could not capture a PR source-head delta");
     Ok(output.stdout)
 }
 
@@ -1124,117 +589,6 @@ fn empty_patch(config: &PushToPullRequestBranchConfig) -> ExecutionResult {
         IfNoChanges::Error => ExecutionResult::failure("PR patch has no effective changes"),
         IfNoChanges::Ignore => ExecutionResult::success("PR patch has no effective changes"),
     }
-}
-
-fn validate_binary_bounds(patch: &str) -> anyhow::Result<()> {
-    use std::io::Read;
-    const ALPHABET: &[u8] =
-        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
-    let mut lines = patch.lines().peekable();
-    let mut binary = false;
-    let mut total = 0usize;
-    while let Some(line) = lines.next() {
-        if line.starts_with("diff --git ") {
-            binary = false;
-        }
-        if line == "GIT binary patch" {
-            binary = true;
-            continue;
-        }
-        let Some((kind, length)) = line.split_once(' ') else {
-            continue;
-        };
-        if !binary || !matches!(kind, "literal" | "delta") {
-            continue;
-        }
-        let length: usize = length.parse().context("Invalid binary patch size")?;
-        ensure!(
-            length <= MAX_PATCH,
-            "Binary patch declares more than 5 MB of data"
-        );
-        let mut compressed = Vec::new();
-        while let Some(encoded) = lines.peek().copied().filter(|line| !line.is_empty()) {
-            lines.next();
-            let bytes = encoded.as_bytes();
-            let count = match bytes[0] {
-                b'A'..=b'Z' => usize::from(bytes[0] - b'A') + 1,
-                b'a'..=b'z' => usize::from(bytes[0] - b'a') + 27,
-                _ => anyhow::bail!("Invalid binary patch line length"),
-            };
-            ensure!(
-                bytes.len() == 1 + count.div_ceil(4) * 5,
-                "Malformed binary patch encoding"
-            );
-            let mut decoded = Vec::new();
-            for group in bytes[1..].chunks_exact(5) {
-                let mut value = 0u32;
-                for byte in group {
-                    let digit = u32::try_from(
-                        ALPHABET
-                            .iter()
-                            .position(|candidate| candidate == byte)
-                            .context("Invalid binary patch alphabet")?,
-                    )?;
-                    value = value
-                        .checked_mul(85)
-                        .and_then(|value| value.checked_add(digit))
-                        .context("Binary patch encoding overflow")?;
-                }
-                decoded.extend_from_slice(&value.to_be_bytes());
-            }
-            compressed.extend_from_slice(&decoded[..count]);
-            ensure!(
-                compressed.len() <= MAX_PATCH,
-                "Compressed binary patch exceeds the limit"
-            );
-        }
-        let mut decoded = Vec::new();
-        flate2::read::ZlibDecoder::new(compressed.as_slice())
-            .take((MAX_PATCH + 1) as u64)
-            .read_to_end(&mut decoded)
-            .context("Malformed compressed binary patch")?;
-        ensure!(
-            decoded.len() == length,
-            "Binary patch decompression size mismatch"
-        );
-        let expanded = if kind == "literal" {
-            length
-        } else {
-            let mut cursor = 0;
-            let source = delta_size(&decoded, &mut cursor)?;
-            let target = delta_size(&decoded, &mut cursor)?;
-            ensure!(
-                source <= MAX_PATCH && target <= MAX_PATCH,
-                "Binary delta expands beyond the 5 MB limit"
-            );
-            target
-        };
-        total = total
-            .checked_add(expanded)
-            .context("Binary patch size overflow")?;
-        ensure!(
-            total <= 10 * 1024 * 1024,
-            "Aggregate binary patch expansion exceeds 10 MB"
-        );
-    }
-    Ok(())
-}
-
-fn delta_size(bytes: &[u8], cursor: &mut usize) -> anyhow::Result<usize> {
-    let mut size = 0usize;
-    for shift in (0..usize::BITS).step_by(7) {
-        let byte = *bytes
-            .get(*cursor)
-            .context("Truncated binary delta header")?;
-        *cursor += 1;
-        let part = usize::from(byte & 0x7f);
-        ensure!(part <= usize::MAX >> shift, "Binary delta length overflow");
-        size |= part << shift;
-        if byte & 0x80 == 0 {
-            return Ok(size);
-        }
-    }
-    anyhow::bail!("Binary delta length overflow")
 }
 
 #[cfg(test)]
@@ -1355,6 +709,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_regression_patch_exclusions_and_blob_fidelity() {
+        for case in ["basename", "recursive-root", "crlf"] {
+            let (repo, head) = repository();
+            let mut config = PushToPullRequestBranchConfig::default();
+            let expected = "agent change\nsecond line\n";
+            if case == "crlf" {
+                command(repo.path(), &["config", "core.autocrlf", "true"]);
+            } else {
+                let file = if case == "basename" { "nested/secret.txt" } else { "secret.txt" };
+                std::fs::create_dir_all(repo.path().join("nested")).unwrap();
+                std::fs::write(repo.path().join(file), "excluded fixture content\n").unwrap();
+                config.excluded_files.push(if case == "basename" { "secret.txt" } else { "**/secret.txt" }.into());
+            }
+            std::fs::write(repo.path().join("src.txt"), expected).unwrap();
+            let bytes = capture_patch(repo.path(), &head, Default::default()).await.unwrap();
+            let output = tempfile::tempdir().unwrap();
+            let patch = output.path().join("patch.diff");
+            std::fs::write(&patch, &bytes).unwrap();
+            let changes = patch_changes(repo.path(), &head, &bytes, &config).await.unwrap().changes;
+            assert_eq!(changes.len(), 1, "{case}: excluded paths must never reach output");
+            assert_eq!(changes[0]["item"]["path"], "/src.txt");
+            assert_eq!(changes[0]["newContent"]["content"], expected, "{case}: serialize Git blob bytes, not checkout bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn review_regression_native_copy_expansion_is_preflighted() {
+        let (repo, _) = repository();
+        std::fs::write(repo.path().join("large.bin"), vec![0x81; 429_575]).unwrap();
+        command(repo.path(), &["add", "large.bin"]);
+        command(repo.path(), &["commit", "--quiet", "-m", "copy preimage"]);
+        let head = CommitSha::parse(command(repo.path(), &["rev-parse", "HEAD"])).unwrap();
+        let text = (0..99).map(|index| format!(
+            "diff --git a/large.bin b/copy-{index}.bin\nsimilarity index 100%\ncopy from large.bin\ncopy to copy-{index}.bin\n"
+        )).collect::<String>();
+        assert!(text.len() < 16_000);
+        let output = tempfile::tempdir().unwrap();
+        let patch = output.path().join("copies.diff");
+        std::fs::write(&patch, &text).unwrap();
+        let error = patch_changes(repo.path(), &head, text.as_bytes(), &PushToPullRequestBranchConfig::default())
+            .await.unwrap_err();
+        assert!(error.to_string().contains("pre-application expansion"), "{error:#}");
+    }
+
+    #[tokio::test]
     async fn capture_includes_only_agent_delta_and_preserves_head_index_and_worktree() {
         let (repo, head) = repository();
         std::fs::write(repo.path().join("src.txt"), "agent commit\n").unwrap();
@@ -1369,7 +768,7 @@ mod tests {
         let before = command(repo.path(), &["status", "--porcelain"]);
         let committed = command(repo.path(), &["rev-parse", "HEAD"]);
         let index = command(repo.path(), &["diff", "--cached", "--binary"]);
-        let bytes = capture_patch(repo.path(), &head).await.unwrap();
+        let bytes = capture_patch(repo.path(), &head, Default::default()).await.unwrap();
         let patch = String::from_utf8(bytes).unwrap();
         assert!(
             patch.contains("agent commit")
@@ -1379,7 +778,6 @@ mod tests {
         assert!(!patch.contains("pr-existing.txt"));
         assert!(!patch.contains("aw-context"));
         assert!(patch.contains("GIT binary patch"));
-        validate_binary_bounds(&patch).unwrap();
         assert_eq!(command(repo.path(), &["status", "--porcelain"]), before);
         assert_eq!(command(repo.path(), &["rev-parse", "HEAD"]), committed);
         assert_eq!(
@@ -1402,7 +800,7 @@ mod tests {
             let (repo, head) = repository();
             std::fs::write(repo.path().join("src.txt"), "agent update\n").unwrap();
             std::fs::write(repo.path().join("new.bin"), [0, 255, 0, 128]).unwrap();
-            let patch = capture_patch(repo.path(), &head).await.unwrap();
+            let patch = capture_patch(repo.path(), &head, Default::default()).await.unwrap();
             let output = tempfile::tempdir().unwrap();
             std::fs::write(output.path().join("patch.diff"), &patch).unwrap();
             let server = MockServer::start().await;
@@ -1462,7 +860,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&std::fs::read(snapshot).unwrap()).unwrap();
         assert_eq!(value["expected_head_sha"], head.as_str());
         assert_eq!(value["repository"], "self");
-        assert!(capture_patch(repo.path(), &head).await.unwrap().is_empty());
+        assert!(capture_patch(repo.path(), &head, Default::default()).await.unwrap().is_empty());
         assert!(updates.lock().unwrap().is_empty());
     }
 
@@ -1481,7 +879,7 @@ mod tests {
                 )
                 .unwrap();
             }
-            let patch = capture_patch(repo.path(), &head).await.unwrap();
+            let patch = capture_patch(repo.path(), &head, Default::default()).await.unwrap();
             let output = tempfile::tempdir().unwrap();
             std::fs::write(output.path().join("patch.diff"), &patch).unwrap();
             let server = MockServer::start().await;
@@ -1557,12 +955,4 @@ mod tests {
         assert!(results[4].success);
     }
 
-    #[test]
-    fn binary_size_guards_reject_declared_and_encoded_expansion_limits() {
-        assert!(validate_binary_bounds("GIT binary patch\nliteral 999999999\n").is_err());
-        assert!(validate_binary_bounds("GIT binary patch\ndelta 2\nAbad\n").is_err());
-        assert!(delta_size(&[0xff; 20], &mut 0).is_err());
-        assert!(delta_size(&[0x80], &mut 0).is_err());
-        assert_eq!(delta_size(&[0x81, 0x01], &mut 0).unwrap(), 129);
-    }
 }

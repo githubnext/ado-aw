@@ -1149,39 +1149,55 @@ runtime integrity check stays enabled. See [`docs/ado-script.md`](ado-script.md)
 > `target-branch`; enable `infer-target-from-checkout-ref` (and/or
 > `target-branches`) to give each repo its own base branch.
 
-**Stage 3 Execution Architecture (Hybrid Git + ADO API):**
+**Stage 3 execution (local Git + ADO REST):**
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Stage 3 Execution                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1. Security Validation                                         │
-│     ├── Patch file size limit (5 MB)                           │
-│     └── Path validation (no .., .git, absolute paths)          │
-│                                                                 │
-│  2. Git Worktree (local operations only)                       │
-│     ├── Create worktree at target branch                       │
-│     ├── git apply --check (dry run)                            │
-│     ├── git apply (apply patch correctly)                      │
-│     └── git status --porcelain (detect changes)                │
-│                                                                 │
-│  3. ADO REST API (authenticated, no git config needed)         │
-│     ├── Read full file contents from worktree                  │
-│     ├── POST /pushes (create branch + commit)                  │
-│     ├── POST /pullrequests (create PR)                         │
-│     ├── PATCH (set auto-complete if configured)                │
-│     └── PUT (add reviewers)                                    │
-│                                                                 │
-│  4. Cleanup                                                     │
-│     └── WorktreeGuard removes worktree on drop                 │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+1. Verify the patch hash, paths, operation selection and resource limits before
+   applying it. Resolve the exact target ref; a captured base behind that ref
+   must be a verified ancestor, not an unrelated commit.
+2. Apply at the captured base in a detached temporary worktree. Unfiltered
+   mailbox input uses `git am --3way`; filtered patches and the raw-diff fallback
+   apply selected commit batches to the index. Copy/rename endpoints within
+   each commit refer to that commit's pre-change tree.
+3. Read exact Git blobs from the resulting tree/index, then remove the private
+   worktree before remote writes. No temporary local source ref is created.
+4. Use REST to create the branch/commit and PR, with the same validated base as
+   the commit parent, then apply configured follow-ups. Errors after a successful
+   push remain visible; creating the PR is not an atomic transaction with it.
 
-This hybrid approach combines:
-- **Git worktree + apply**: Correct patch application using git's battle-tested diff parser
-- **ADO REST API**: No git config (user.email/name) needed, authentication handled via token
+MCP capture also uses a private index and detached commit objects: it does not
+commit or reset the author's real HEAD, index or working tree.
+
+#### Shared PR patch limits
+
+Creation and guarded source-branch pushes accept native text/binary copy and
+rename records, rename-with-edit, and ordinary additions/edits/deletions.
+`excluded-files` uses application glob semantics: a basename matches at any
+depth, and `**/name` matches both root and nested paths. If either endpoint of
+a copy/rename is excluded, the **whole operation** is omitted and reported in
+`omitted_operations` (operation, source, destination). A retained operation
+depending on an omitted operation is rejected, not silently reinterpreted.
+Malformed metadata is rejected even in excluded operations.
+
+| Limit | Contract for both PR code-output tools |
+| --- | --- |
+| `max-patch-size` | Integer KiB, default **4096** (4 MiB), range **1–10240**. Bounds the entire captured patch, each result blob and aggregate expanded selected content. |
+| `max-files` | Default **100** unique paths; both endpoints of native moves/copies count. Push configuration additionally caps this at 1,000. |
+| Source processing | Separate **10 MiB** bound on source/referenced/intermediate blob processing, including binary expansion. |
+| Encoded push request | Separate **10 MiB** ceiling including JSON escaping, base64 and the enclosing REST body. |
+
+These checks run before application and again against actual Git output.
+For example, a small native patch copying a 429,575-byte file 99 times is
+rejected before Git application: it expands to over 40 MiB. Raising
+`max-patch-size` cannot bypass the source-processing or encoded-request bounds.
+Blob content comes from Git objects, not checkout files; `core.autocrlf`, EOL
+attributes and filesystem conversions do not change the bytes sent to ADO.
+
+**Intentional tightening:** the previous 5 MiB patch default becomes 4 MiB;
+creation also gains expanded-content and encoded-payload bounds. Authors who
+need a larger patch can explicitly configure, for example,
+`create-pull-request: {max-patch-size: 5120}`. Configure push separately.
+There is no top-level inherited size setting, automatic larger-limit migration,
+or agent-proposal override.
 
 **Agent parameters:**
 - `title` - PR title (required, 5-200 characters)
@@ -1237,6 +1253,7 @@ input to `create-pull-request`.
 - `title-prefix` - Optional string prepended to all PR titles created by this agent (e.g., `"[Bot] "`)
 - `if-no-changes` - Behavior when the agent's patch produces no file changes: `"warn"` (default, succeed with a warning), `"error"` (fail the step), `"ignore"` (succeed silently)
 - `max-files` - Maximum number of files allowed in a single PR (default: 100). PRs exceeding this limit are rejected.
+- `max-patch-size` - Patch and expanded selected content limit in KiB (default: 4096, integer range: 1–10240); see [shared PR patch limits](#shared-pr-patch-limits).
 - `protected-files` - Controls whether manifest/CI files (e.g., `package-lock.json`, `.github/`, `*.lock`) can be modified: `"blocked"` (default, reject changes to these files) or `"allowed"` (permit all files)
 - `excluded-files` - Glob patterns for files to strip from the patch before applying (e.g., `["*.lock", "dist/**"]`)
 - `allowed-labels` - Allowlist of labels the agent is permitted to apply. If empty (default), any labels are accepted.
@@ -1609,6 +1626,7 @@ safe-outputs:
     protected-files: blocked
     excluded-files: ["dist/**"]
     max-files: 100
+    max-patch-size: 4096         # KiB, integer range 1–10240
     if-no-changes: warn          # warn, error, ignore
     max: 1
 ```
@@ -1630,14 +1648,14 @@ The MCP tool captures committed and uncommitted changes through a temporary
 index without changing the original HEAD, index or working tree. Synthetic
 merge history and sparse checkouts are rejected. Stage 3 verifies the patch
 hash, paths, protected/excluded files and limits, applies it in an isolated
-worktree at the expected source commit, rechecks the PR, then uses ADO's
+index at the expected source commit without checking out its tree, rechecks the PR, then uses ADO's
 `oldObjectId` concurrency guard. A changed source head fails rather than
 rebasing, replaying or overwriting another contributor's work.
 
-Patches and individual changed files are limited to 5 MB; expanded binary
-data and the resulting request are bounded to 10 MB. `max-files` defaults to
-100 (maximum 1,000). Ordinary text/binary edits, additions and deletions are
-supported; renames are represented as delete/add. Symlinks, submodules,
+The [shared PR patch limits](#shared-pr-patch-limits) apply, including native
+copy/rename support and whole-operation exclusions. The resulting push
+represents renames as delete/add while preserving exact blob content.
+Symlinks, submodules,
 file-mode changes and LFS/custom-filtered changes are rejected explicitly.
 Authenticated fetches require an exact approved ADO origin and do not persist
 credentials or follow redirects.
@@ -1647,6 +1665,19 @@ auto-complete proposals from implying a successful repair. These follow-up
 tools must share the push tool's approval/staged lane; diagnostic outputs and
 independent targets remain separate. Lost responses are not blindly replayed,
 and results distinguish an accepted-but-unconfirmed push from a verified head.
+
+#### gh-aw comparison boundary
+
+The comparison is pinned to `github/gh-aw` v0.89.21 and commit
+`856e7fa3ca4f1597f9adbd519eec415ce92320e2` (reviewed September 30, 2026), not
+an assertion about future releases. Native copy/rename acceptance and the
+4096 KiB default / 1–10240 KiB configuration range align with that reference.
+Its default code transport is a Git bundle, with a format-patch/git-am
+alternative; ado-aw retains patch artifacts and full-blob ADO REST pushes.
+ADO-native targeting, `max-files`, exact-head compare-and-swap pushes, and the
+separate source-processing/encoded-request ceilings remain deliberate
+differences. Creation history/base handling and standalone-comment versus
+self-contained review semantics are not a drop-in gh-aw schema or transport.
 
 ### Migrating PR tool names
 

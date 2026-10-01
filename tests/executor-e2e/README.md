@@ -120,6 +120,23 @@ and preservation of the PR's pre-existing changes. Stale-head, forbidden-branch,
 protected-file and bad-hash cases require unchanged remote heads; the empty
 case is a configured no-op. Every target is a harness-owned disposable PR/ref.
 
+The create and push matrices add `native-copy`, `native-rename`, `crlf`,
+`binary` and `expansion-denied` cases. Whole-operation exclusion is covered by
+`create-pull-request-excluded-copy` and `pr-push-excluded-native-copy`.
+Read-back compares Git blob IDs and direct commit parents, not normalized
+checkout text. Negative expansion cases use 99 compact native copies of a
+429,575-byte source and require unchanged remote refs, not just an expected
+error message.
+
+Native creation fixtures use separately seeded disposable targets. Cleanup
+requires exact PR source/target/title ownership and confirmed abandonment
+before either ref is deleted. An unconfirmed creation retains and reports both
+refs; a confirmed pre-write rejection may remove its unchanged target.
+Every ref deletion uses the observed SHA, checks the API's per-entry success,
+and verifies absence. HTTP 200 alone is not cleanup proof, and failed or
+uncertain deletions are never blindly replayed. These rules are test-harness
+behavior, not production safe-output cleanup.
+
 The `pr-api-draft-publication`, `pr-api-owned-comments`,
 `pr-api-label-replacement` and `pr-api-push-concurrency` scenarios probe ADO
 platform prerequisites directly on harness-owned disposable PRs. They use a

@@ -257,6 +257,10 @@ enum Commands {
         /// definitions to register as dynamic MCP tools.
         #[arg(long = "custom-tools")]
         custom_tools: Option<PathBuf>,
+        #[arg(long, hide = true, default_value_t = safe_outputs::pr_patch::PatchSizeKiB::default())]
+        create_pull_request_max_patch_size: safe_outputs::pr_patch::PatchSizeKiB,
+        #[arg(long, hide = true, default_value_t = safe_outputs::pr_patch::PatchSizeKiB::default())]
+        push_to_pull_request_branch_max_patch_size: safe_outputs::pr_patch::PatchSizeKiB,
     },
     /// Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
     McpAuthor {},
@@ -1727,6 +1731,8 @@ async fn main() -> Result<()> {
             self_repository_directory,
             enabled_tools,
             custom_tools,
+            create_pull_request_max_patch_size,
+            push_to_pull_request_branch_max_patch_size,
         } => {
             let filter = if enabled_tools.is_empty() {
                 None
@@ -1739,6 +1745,8 @@ async fn main() -> Result<()> {
                 self_repository_directory.as_deref(),
                 filter.as_deref(),
                 custom_tools.as_deref(),
+                create_pull_request_max_patch_size,
+                push_to_pull_request_branch_max_patch_size,
             )
             .await?;
         }
@@ -1855,6 +1863,26 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::is_github_remote;
+    use clap::Parser;
+
+    #[test]
+    fn mcp_patch_limits_are_validated_and_preserved_per_tool() {
+        let args = super::Args::try_parse_from([
+            "ado-aw", "mcp", "out", "repo",
+            "--create-pull-request-max-patch-size", "1",
+            "--push-to-pull-request-branch-max-patch-size", "10240",
+        ]).unwrap();
+        let Some(super::Commands::Mcp {
+            create_pull_request_max_patch_size, push_to_pull_request_branch_max_patch_size, ..
+        }) = args.command else { panic!("expected MCP command"); };
+        assert_eq!(create_pull_request_max_patch_size.bytes(), 1024);
+        assert_eq!(push_to_pull_request_branch_max_patch_size.bytes(), 10 * 1024 * 1024);
+        for value in ["0", "10241", "true", "1.5", "-1"] {
+            assert!(super::Args::try_parse_from([
+                "ado-aw", "mcp", "out", "repo", "--create-pull-request-max-patch-size", value,
+            ]).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn detects_github_https_remote() {

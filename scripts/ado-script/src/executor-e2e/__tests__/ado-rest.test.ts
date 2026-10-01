@@ -16,6 +16,48 @@ function stubFetch(responder: (url: string) => Response): ReturnType<typeof vi.f
   return fetchMock;
 }
 
+describe("disposable ref cleanup", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const name = "refs/heads/owned";
+  const objectId = "a".repeat(40);
+
+  it.each([{}, { value: null }, { value: [null] }, { value: [{ name }] },
+    { value: [{ name, objectId }, { name, objectId }] }])("rejects incomplete or ambiguous discovery %j", async (body) => {
+    const fetch = stubFetch(() => Response.json(body));
+    await expect(new AdoRest(options).deleteRef("repo", name)).rejects.toThrow(/incomplete|ambiguous/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the exact observed SHA and verifies absence", async () => {
+    let reads = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+      if (init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual([{ name, oldObjectId: objectId, newObjectId: "0".repeat(40) }]);
+        return Response.json({ value: [{ name, success: true }] });
+      }
+      return Response.json({ value: ++reads === 1 ? [{ name: `${name}-other`, objectId: "b".repeat(40) }, { name, objectId }] : [] });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await expect(new AdoRest(options).deleteRef("repo", name)).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["per-entry-failure", "malformed-response", "ref-remains", "lost-response"])(
+    "does not retry an unconfirmed deletion: %s", async (mode) => {
+      let writes = 0;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+        if (init?.method !== "POST") return Response.json({ value: [{ name, objectId }] });
+        writes += 1;
+        if (mode === "lost-response") throw new Error("lost response");
+        if (mode === "malformed-response") return Response.json({});
+        return Response.json({ value: [{ name, success: mode === "ref-remains", updateStatus: "staleOldObjectId" }] });
+      }));
+      await expect(new AdoRest(options).deleteRef("repo", name)).rejects.toThrow();
+      expect(writes).toBe(1);
+    },
+  );
+});
+
 describe("auto-complete scenario cleanup", () => {
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 

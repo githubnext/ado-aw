@@ -7132,7 +7132,7 @@ mod tests {
         use crate::compile::extensions::{CompileContext,collect_extensions};
         for target in ["standalone","1es","job","stage"] {
             let fm=test_front_matter(&format!(
-                "name: push-contract\ndescription: Test\ntarget: {target}\npermissions:\n  read: read-sc\n  write: write-sc\nsafe-outputs:\n  push-to-pull-request-branch:\n    allowed-branches: ['agent/*']\nsteps:\n  - bash: echo user-step-after-source-preparation\n"
+                "name: push-contract\ndescription: Test\ntarget: {target}\npermissions:\n  read: read-sc\n  write: write-sc\nsafe-outputs:\n  push-to-pull-request-branch:\n    allowed-branches: ['agent/*']\n    max-patch-size: 2048\nsteps:\n  - bash: echo user-step-after-source-preparation\n"
             ));
             let extensions=collect_extensions(&fm);
             let ctx=CompileContext::for_test(&fm);
@@ -7150,6 +7150,7 @@ mod tests {
             let tooling=emitted.find("displayName: Prepare tooling").unwrap();
             assert!(tooling<prepare,"{target}");
             assert!(emitted.contains("/tmp/awf-tools/ado-aw prepare-pr-push"),"{target}");
+            assert!(emitted.contains("--push-to-pull-request-branch-max-patch-size"), "{target}");
             assert!(prepare<user,"{target}");
             let step=&emitted[prepare..user];
             assert!(step.contains("SC_READ_TOKEN"),"{target}");

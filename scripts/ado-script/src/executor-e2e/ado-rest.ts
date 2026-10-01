@@ -319,17 +319,24 @@ export class AdoRest {
     // `filter` is a prefix match (heads/main also matches heads/main-foo), so
     // select the exact ref by name rather than trusting the first result.
     const fullName = `refs/${refFilter}`;
-    return res?.value?.find((r) => r.name === fullName)?.objectId;
+    if (!Array.isArray(res?.value) || res.value.some((ref) =>
+      !ref || typeof ref.name !== "string" || typeof ref.objectId !== "string")) {
+      throw new Error(`Ref discovery for ${fullName} is incomplete`);
+    }
+    const matches = res.value.filter((ref) => ref.name === fullName);
+    if (matches.length > 1) throw new Error(`Ref discovery for ${fullName} is ambiguous`);
+    return matches[0]?.objectId;
   }
 
   /** Delete a ref (branch or tag) by setting its newObjectId to zeros. */
   async deleteRef(repo: string, refName: string): Promise<void> {
     const oldId = await this.getRefObjectId(repo, refName.replace(/^refs\//, ""));
     if (!oldId) return;
+    if (!/^[a-f0-9]{40}$/i.test(oldId)) throw new Error(`Cannot delete ${refName}: invalid observed SHA`);
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/refs?api-version=7.1`,
     );
-    await this.request(path, {
+    const response = await this.request<{ value?: { name?: string; success?: boolean; updateStatus?: string }[] }>(path, {
       method: "POST",
       body: [
         {
@@ -340,6 +347,13 @@ export class AdoRest {
       ],
       allow404: true,
     });
+    const fullName = refName.startsWith("refs/") ? refName : `refs/${refName}`;
+    if (!Array.isArray(response?.value) || response.value.length !== 1 || response.value[0]?.name !== fullName || response.value[0]?.success !== true) {
+      throw new Error(`Ref deletion was not confirmed for ${fullName}: ${response?.value?.[0]?.updateStatus ?? "invalid response"}`);
+    }
+    if (await this.getRefObjectId(repo, fullName.replace(/^refs\//, ""))) {
+      throw new Error(`Ref remains after deletion: ${fullName}`);
+    }
   }
 
   /**
@@ -488,6 +502,7 @@ export class AdoRest {
     prId: number,
   ): Promise<{
     pullRequestId: number; status: string; title: string; description?: string; isDraft?: boolean;
+    sourceRefName?: string; targetRefName?: string;
     labels?: { name: string }[]; autoCompleteSetBy?: { id?: string };
   }> {
     const path = this.projPath(
@@ -499,6 +514,8 @@ export class AdoRest {
       title: string;
       description?: string;
       isDraft?: boolean;
+      sourceRefName?: string;
+      targetRefName?: string;
       labels?: { name: string }[];
       autoCompleteSetBy?: { id?: string };
     }>(path);

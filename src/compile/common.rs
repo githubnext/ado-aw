@@ -3912,6 +3912,21 @@ pub fn compile_mcpg(
         registry_base,
     );
     let mut safeoutputs_entrypoint_args = vec!["mcp".to_string()];
+    let patch_limits = [
+        ("--create-pull-request-max-patch-size",
+            front_matter.typed_safe_output_config::<crate::safe_outputs::CreatePrConfig>("create-pull-request")?
+                .map(|config| config.max_patch_size)),
+        ("--push-to-pull-request-branch-max-patch-size",
+            front_matter.typed_safe_output_config::<crate::safe_outputs::PushToPullRequestBranchConfig>("push-to-pull-request-branch")?
+                .map(|config| config.max_patch_size)),
+    ];
+    for (flag, limit) in patch_limits {
+        if let Some(limit) = limit
+            && limit != crate::safe_outputs::pr_patch::PatchSizeKiB::default()
+        {
+            safeoutputs_entrypoint_args.extend([flag.to_string(), limit.to_string()]);
+        }
+    }
     safeoutputs_entrypoint_args.extend(
         generate_enabled_tools_args(front_matter)
             .split_whitespace()
@@ -8486,6 +8501,30 @@ safe-outputs:
             }),
             "SafeOutputs must load the staged custom tool definitions: {args:?}"
         );
+    }
+
+    #[test]
+    fn patch_size_overrides_reach_mcp_without_becoming_agent_parameters() {
+        let mut fm = minimal_front_matter();
+        fm.safe_outputs.insert("create-pull-request".into(), serde_json::json!({"max-patch-size":1}));
+        fm.safe_outputs.insert("push-to-pull-request-branch".into(), serde_json::json!({
+            "allowed-branches":["agent/*"], "max-patch-size":10240,
+        }));
+        validate_pull_request_outputs_config(&fm).unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let args = config.mcp_servers["safeoutputs"].entrypoint_args.as_ref().unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--create-pull-request-max-patch-size", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["--push-to-pull-request-branch-max-patch-size", "10240"]));
+        for tool in ["create-pull-request", "push-to-pull-request-branch"] {
+            for value in [serde_json::json!(0), serde_json::json!(10241), serde_json::json!("4096"), serde_json::json!(true)] {
+                fm.safe_outputs.get_mut(tool).unwrap()["max-patch-size"] = value;
+                assert!(validate_pull_request_outputs_config(&fm).is_err());
+            }
+            fm.safe_outputs.get_mut(tool).unwrap()["max-patch-size"] = serde_json::json!(4096);
+        }
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let args = config.mcp_servers["safeoutputs"].entrypoint_args.as_ref().unwrap();
+        assert!(!args.iter().any(|argument| argument.contains("max-patch-size")));
     }
 
     #[test]

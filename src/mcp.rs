@@ -220,6 +220,8 @@ async fn try_root_commit_fallback(git_dir: &std::path::Path) -> Option<String> {
 /// fresh on each call, so no shared mutable state exists between clones.
 #[derive(Clone, Debug)]
 pub struct SafeOutputs {
+    create_pr_patch_size: crate::safe_outputs::pr_patch::PatchSizeKiB,
+    push_pr_patch_size: crate::safe_outputs::pr_patch::PatchSizeKiB,
     bounding_directory: PathBuf,
     self_repository_directory: PathBuf,
     output_directory: PathBuf,
@@ -265,138 +267,6 @@ fn resolve_git_dir_for_patch(
             .map_err(anyhow_to_mcp_error)
         }
     }
-}
-
-/// Check whether the working tree has uncommitted changes (staged or unstaged).
-async fn check_uncommitted_changes(git_dir: &std::path::Path) -> Result<bool, McpError> {
-    use tokio::process::Command;
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e)))?;
-    if !status_output.status.success() {
-        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&status_output.stderr)
-        )));
-    }
-    Ok(!String::from_utf8_lossy(&status_output.stdout)
-        .trim()
-        .is_empty())
-}
-
-/// Stage all changes and create a temporary "agent changes" commit so that
-/// uncommitted work is captured by `git format-patch`.
-///
-/// On any failure the staging area is reset before the error is returned,
-/// leaving the working tree in the same state as before the call.
-async fn make_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError> {
-    use tokio::process::Command;
-
-    let add_output = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git add -A: {}", e)))?;
-
-    if !add_output.status.success() {
-        // Reset index to clean state on failure
-        let _ = Command::new("git")
-            .args(["reset", "HEAD", "--quiet"])
-            .current_dir(git_dir)
-            .output()
-            .await;
-        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "git add -A failed: {}",
-            String::from_utf8_lossy(&add_output.stderr)
-        )));
-    }
-
-    // Create a temporary commit with git identity flags to avoid config dependency
-    let commit_output = Command::new("git")
-        .args([
-            "-c",
-            "user.email=agent@ado-aw",
-            "-c",
-            "user.name=ADO Agent",
-            "commit",
-            "-m",
-            "agent changes",
-            "--allow-empty",
-            "--no-verify",
-        ])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to create temporary commit: {}", e))
-        })?;
-
-    if !commit_output.status.success() {
-        // Reset staging on failure
-        let _ = Command::new("git")
-            .args(["reset", "HEAD", "--quiet"])
-            .current_dir(git_dir)
-            .output()
-            .await;
-        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "Failed to create temporary commit: {}",
-            String::from_utf8_lossy(&commit_output.stderr)
-        )));
-    }
-
-    Ok(())
-}
-
-/// Undo the synthetic commit created by [`make_synthetic_commit`], restoring
-/// all changes to the working tree.
-///
-/// `git reset --mixed HEAD~1` resets the index to the parent tree, leaving
-/// modified files as unstaged changes and previously-untracked files as
-/// untracked again.
-async fn undo_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError> {
-    use tokio::process::Command;
-
-    // Capture the synthetic commit SHA for diagnostics before resetting
-    let head_sha = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
-
-    let reset_output = Command::new("git")
-        .args(["reset", "HEAD~1", "--mixed", "--quiet"])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "Failed to run git reset (synthetic commit {} may remain): {}",
-                head_sha,
-                e
-            ))
-        })?;
-
-    if !reset_output.status.success() {
-        warn!(
-            "WARNING: synthetic commit {} was not cleaned up; \
-             run `git reset HEAD~1` to restore state",
-            head_sha
-        );
-        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "git reset HEAD~1 failed (synthetic commit {} may remain): {}",
-            head_sha,
-            String::from_utf8_lossy(&reset_output.stderr)
-        )));
-    }
-
-    Ok(())
 }
 
 /// Decide whether a single tool should remain in the router after filtering.
@@ -644,6 +514,8 @@ impl SafeOutputs {
         }
 
         Ok(Self {
+            create_pr_patch_size: Default::default(),
+            push_pr_patch_size: Default::default(),
             bounding_directory: bounding_dir,
             self_repository_directory: self_repository_dir,
             output_directory: output_dir,
@@ -657,68 +529,50 @@ impl SafeOutputs {
     /// Generate a git diff patch from a specific directory
     /// If `repository` is Some, it's treated as a subdirectory of bounding_directory.
     /// If `repository` is None or "self", use the explicit self checkout.
-    async fn generate_patch(&self, repository: Option<&str>) -> Result<(String, String), McpError> {
-        use tokio::process::Command;
-
+    async fn generate_patch(&self, repository: Option<&str>) -> Result<(Vec<u8>, String), McpError> {
+        use crate::safe_outputs::pr_patch::{bounded_output, git, git_without_filters};
         let git_dir = resolve_git_dir_for_patch(
-            &self.bounding_directory,
-            &self.self_repository_directory,
-            repository,
+            &self.bounding_directory, &self.self_repository_directory, repository,
         )?;
-
-        // Generate patch using git format-patch for proper commit metadata,
-        // rename detection, and binary file handling.
-        //
-        // Handles both committed and uncommitted changes:
-        // 1. Find the merge-base with the upstream branch (origin/HEAD or origin/main)
-        // 2. If there are uncommitted changes, stage and create a temporary commit
-        // 3. Generate format-patch from merge-base..HEAD to capture ALL changes
-        // 4. If a temporary commit was created, reset it (preserving working tree)
-
         let merge_base = Self::find_merge_base(&git_dir).await?;
-        debug!("Using merge base: {}", merge_base);
-
-        let has_uncommitted = check_uncommitted_changes(&git_dir).await?;
-        if has_uncommitted {
-            debug!("Uncommitted changes detected, creating synthetic commit");
-            make_synthetic_commit(&git_dir).await?;
-        } else {
-            debug!("No uncommitted changes — capturing committed changes only");
-        }
-
-        // Capture (don't propagate) the format-patch result so the synthetic commit
-        // is always undone first, even when format-patch fails.
-        let format_patch_result = Command::new("git")
-            .args([
-                "format-patch",
-                &format!("{}..HEAD", merge_base),
-                "--stdout",
-                "-M",
-            ])
-            .current_dir(&git_dir)
-            .output()
-            .await;
-
-        // Always undo the temporary commit before propagating errors.
-        // `git reset --mixed HEAD~1` undoes the commit and resets the index
-        // to the parent tree, which leaves modified files as unstaged changes
-        // and previously-untracked files as untracked again.
-        if has_uncommitted {
-            undo_synthetic_commit(&git_dir).await?;
-        }
-
-        let format_patch_output = format_patch_result.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git format-patch: {}", e))
-        })?;
-
-        if !format_patch_output.status.success() {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "git format-patch failed: {}",
-                String::from_utf8_lossy(&format_patch_output.stderr)
-            )));
-        }
-
-        let patch = String::from_utf8_lossy(&format_patch_output.stdout).to_string();
+        let scratch = tempfile::tempdir().map_err(|error| anyhow_to_mcp_error(error.into()))?;
+        let index = scratch.path().join("index");
+        let captured: anyhow::Result<Vec<u8>> = async {
+            let original = git(&git_dir, &["rev-parse", "--verify", "HEAD^{commit}"]).await?;
+            anyhow::ensure!(original.status.success(), "Could not resolve capture HEAD");
+            let head = crate::secure::CommitSha::parse(std::str::from_utf8(&original.stdout)?.trim())?;
+            for args in [vec!["read-tree", head.as_str()], vec!["add", "-A"]] {
+                let output = bounded_output(git_without_filters(&git_dir).await?.args(args)
+                    .env("GIT_INDEX_FILE", &index), crate::safe_outputs::pr_patch::MAX_SOURCE_BYTES, None).await?;
+                anyhow::ensure!(output.status.success(), "Could not capture changes in a private Git index");
+            }
+            let tree = bounded_output(git_without_filters(&git_dir).await?.arg("write-tree")
+                .env("GIT_INDEX_FILE", &index), 1024, None).await?;
+            anyhow::ensure!(tree.status.success(), "Could not write captured Git tree");
+            let tree = std::str::from_utf8(&tree.stdout)?.trim();
+            anyhow::ensure!(crate::validate::is_valid_commit_sha(tree), "Git returned an invalid tree ID");
+            let original_tree = git(&git_dir, &["rev-parse", &format!("{head}^{{tree}}")]).await?;
+            anyhow::ensure!(original_tree.status.success(), "Could not resolve original Git tree");
+            let tip = if std::str::from_utf8(&original_tree.stdout)?.trim() == tree {
+                head
+            } else {
+                let commit = bounded_output(git_without_filters(&git_dir).await?.args([
+                    "-c", "user.email=agent@ado-aw", "-c", "user.name=ADO Agent", "-c", "commit.gpgSign=false",
+                    "commit-tree", tree, "-p", head.as_str(), "-m", "agent changes",
+                ]), 1024, None).await?;
+                anyhow::ensure!(commit.status.success(), "Could not create detached capture commit");
+                crate::secure::CommitSha::parse(std::str::from_utf8(&commit.stdout)?.trim())?
+            };
+            let output = bounded_output(git_without_filters(&git_dir).await?.args([
+                "format-patch", &format!("{merge_base}..{tip}"), "--stdout", "-M", "--full-index",
+                "--binary", "--no-ext-diff", "--no-textconv",
+            ]), self.create_pr_patch_size.bytes(), None).await?;
+            anyhow::ensure!(output.status.success(), "git format-patch failed: {}",
+                crate::sanitize::neutralize_pipeline_commands(&String::from_utf8_lossy(&output.stderr)));
+            Ok(output.stdout)
+        }.await;
+        let patch = crate::safe_outputs::pr_patch::finish_scratch(scratch, captured)
+            .map_err(anyhow_to_mcp_error)?;
         Ok((patch, merge_base))
     }
 
@@ -1139,7 +993,7 @@ Returns a generated temporary_id for configured PR content, reviewer, label, rev
         debug!("Generating patch for repository: {}", repository);
         let (patch_content, merge_base) = self.generate_patch(Some(repository)).await?;
 
-        if patch_content.trim().is_empty() {
+        if patch_content.iter().all(u8::is_ascii_whitespace) {
             warn!("No changes detected in repository '{}'", repository);
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                 "No changes detected in repository '{}'. Make code changes before creating a PR.",
@@ -1147,6 +1001,7 @@ Returns a generated temporary_id for configured PR content, reviewer, label, rev
             )));
         }
         debug!("Patch size: {} bytes", patch_content.len());
+        crate::safe_outputs::pr_patch::inspected_paths(&patch_content).map_err(anyhow_to_mcp_error)?;
 
         // Generate a unique filename for the patch (include repo for clarity)
         let patch_filename = self.generate_patch_filename(repository);
@@ -1161,7 +1016,7 @@ Returns a generated temporary_id for configured PR content, reviewer, label, rev
             })?;
 
         // Compute SHA-256 of the patch for cross-stage integrity verification.
-        let patch_sha256 = crate::hash::sha256_hex(patch_content.as_bytes());
+        let patch_sha256 = crate::hash::sha256_hex(&patch_content);
 
         // Generate source branch name from sanitized title + short unique suffix
         let title_slug = slugify_title(&sanitized.title);
@@ -1233,8 +1088,9 @@ Returns a generated temporary_id for configured PR content, reviewer, label, rev
         params.0.validate().map_err(anyhow_to_mcp_error)?;
         let _guard = self.create_pr_proposal_lock.lock().await;
         let dir = resolve_git_dir_for_patch(&self.bounding_directory,&self.self_repository_directory,Some(params.0.repository.as_str()))?;
-        let bytes = crate::safe_outputs::push_to_pull_request_branch::capture_patch(&dir,&params.0.expected_head_sha)
+        let bytes = crate::safe_outputs::push_to_pull_request_branch::capture_patch(&dir,&params.0.expected_head_sha,self.push_pr_patch_size)
             .await.map_err(anyhow_to_mcp_error)?;
+        crate::safe_outputs::pr_patch::inspected_paths(&bytes).map_err(anyhow_to_mcp_error)?;
         let filename = format!("{}-{}", generate_short_id(), self.generate_patch_filename(params.0.repository.as_str()));
         tokio::fs::write(self.output_directory.join(&filename),&bytes).await
             .map_err(|error|anyhow_to_mcp_error(anyhow::anyhow!("Failed to stage PR patch: {error}")))?;
@@ -1945,17 +1801,21 @@ pub async fn run(
     self_repository_directory: Option<&str>,
     enabled_tools: Option<&[String]>,
     custom_tools: Option<&std::path::Path>,
+    create_pr_patch_size: crate::safe_outputs::pr_patch::PatchSizeKiB,
+    push_pr_patch_size: crate::safe_outputs::pr_patch::PatchSizeKiB,
 ) -> Result<()> {
     // Create and run the server with STDIO transport
-    let service = SafeOutputs::new_with_self_repository_directory(
+    let mut service = SafeOutputs::new_with_self_repository_directory(
         bounding_directory,
         output_directory,
         self_repository_directory.map(PathBuf::from),
         enabled_tools,
         custom_tools,
     )
-    .await?
-    .serve(stdio())
+    .await?;
+    service.create_pr_patch_size = create_pr_patch_size;
+    service.push_pr_patch_size = push_pr_patch_size;
+    let service = service.serve(stdio())
     .await
     .inspect_err(|e| {
         error!("Error starting MCP server: {}", e);
@@ -2236,6 +2096,36 @@ mod tests {
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0]["name"], "create-pull-request");
         assert_eq!(proposals[0]["temporary_id"], temporary_id);
+    }
+
+    #[tokio::test]
+    async fn creation_capture_preserves_head_index_and_worktree_on_success_and_size_failure() {
+        for limited in [false, true] {
+            let repo = tempdir().unwrap();
+            let output = tempdir().unwrap();
+            initialize_git_repo_with_change(repo.path());
+            let command = |args: &[&str]| {
+                let result = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+                assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+                result.stdout
+            };
+            command(&["add", "file.txt"]);
+            std::fs::write(repo.path().join("file.txt"), "unstaged version\n").unwrap();
+            std::fs::write(repo.path().join("untracked.txt"), "x".repeat(4096)).unwrap();
+            let head = command(&["rev-parse", "HEAD"]);
+            let index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let mut service = SafeOutputs::new(repo.path(), output.path(), None, None).await.unwrap();
+            if limited {
+                service.create_pr_patch_size = crate::safe_outputs::pr_patch::PatchSizeKiB::try_from(1).unwrap();
+            }
+            let result = service.generate_patch(None).await;
+            assert_eq!(result.is_ok(), !limited);
+            assert_eq!(command(&["rev-parse", "HEAD"]), head);
+            assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), index);
+            assert_eq!(std::fs::read(repo.path().join("file.txt")).unwrap(), b"unstaged version\n");
+            assert_eq!(std::fs::read(repo.path().join("untracked.txt")).unwrap().len(), 4096);
+            assert!(service.read_safe_output_file().await.unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

@@ -2280,13 +2280,14 @@ mod tests {
     #[tokio::test]
     async fn test_execute_safe_outputs_creates_then_updates_temporary_pr_reference() {
         use std::process::Command;
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let api_base = "/Target%20Project/_apis/git/repositories/repo-id";
         Mock::given(method("GET"))
             .and(path(format!("{api_base}/refs")))
+            .and(query_param("filter", "heads/agent/update-test-file-abc123"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": []
             })))
@@ -2353,6 +2354,14 @@ mod tests {
             .unwrap()
             .trim()
             .to_string();
+        Mock::given(method("GET"))
+            .and(path(format!("{api_base}/refs")))
+            .and(query_param("filter", "heads/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value":[{"name":"refs/heads/main","objectId":base_commit}]
+            })))
+            .expect(1)
+            .mount(&server).await;
         let patch_file = safe_outputs_dir.join("change.patch");
         std::fs::write(&patch_file, &patch).unwrap();
         let patch_sha256 = crate::hash::sha256_hex(&patch);
