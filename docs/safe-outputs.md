@@ -1171,6 +1171,9 @@ commit or reset the author's real HEAD, index or working tree.
 
 Creation and guarded source-branch pushes accept native text/binary copy and
 rename records, rename-with-edit, and ordinary additions/edits/deletions.
+After applying the native records, both serialize the resulting tree delta as
+one REST add/edit/delete per path. This avoids ADO's rejection of separate
+rename and edit operations on the same destination in one commit.
 `excluded-files` uses application glob semantics: a basename matches at any
 depth, and `**/name` matches both root and nested paths. If either endpoint of
 a copy/rename is excluded, the **whole operation** is omitted and reported in

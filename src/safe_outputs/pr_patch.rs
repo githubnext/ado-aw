@@ -895,12 +895,8 @@ impl PreparedPatch {
             "--no-abbrev",
             "--no-ext-diff",
             "--no-textconv",
+            "--no-renames",
         ]);
-        command.arg(if self.exact {
-            "--no-renames"
-        } else {
-            "--find-renames"
-        });
         if tip.is_none() {
             command.arg("--cached");
         }
@@ -933,42 +929,19 @@ impl PreparedPatch {
                 .collect::<Vec<_>>();
             ensure!(fields.len() == 5, "Malformed resulting Git metadata");
             ensure!(
-                matches!(fields[4], "A" | "D" | "M" | "T") || fields[4].starts_with('R'),
+                matches!(fields[4], "A" | "D" | "M" | "T"),
                 "Unmerged or unsupported resulting Git change"
             );
             let old_mode = fields[0]
                 .strip_prefix(':')
                 .context("Malformed old Git mode")?;
             let mode = fields[1];
-            let source = std::str::from_utf8(
+            let path = std::str::from_utf8(
                 records
                     .get(cursor + 1)
                     .context("Missing resulting Git path")?,
             )?;
             cursor += 2;
-            let renamed = fields[4].starts_with('R');
-            let path = if renamed {
-                let destination = std::str::from_utf8(
-                    records.get(cursor).context("Missing rename destination")?,
-                )?;
-                cursor += 1;
-                RelativeSafePath::parse(source)?;
-                ensure!(
-                    self.paths.contains(source),
-                    "Resulting rename source was not authorized"
-                );
-                append_change(
-                    &mut changes,
-                    &mut encoded_size,
-                    json!({
-                        "changeType":"rename","sourceServerItem":format!("/{source}"),
-                        "item":{"path":format!("/{destination}")}
-                    }),
-                )?;
-                destination
-            } else {
-                source
-            };
             RelativeSafePath::parse(path)?;
             changed_paths.insert(path.to_string());
             ensure!(
@@ -1051,7 +1024,7 @@ impl PreparedPatch {
                 &mut changes,
                 &mut encoded_size,
                 json!({
-                    "changeType":if old_mode == "000000" && !renamed { "add" } else { "edit" },
+                    "changeType":if old_mode == "000000" { "add" } else { "edit" },
                     "item":{"path":format!("/{path}")},"newContent":content,
                 }),
             )?;

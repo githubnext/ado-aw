@@ -946,10 +946,18 @@ impl Executor for CreatePrResult {
             .await
             .context("Failed to check source branch existence")?;
 
-            if check_ref_response.status().is_success() {
-                let check_data: serde_json::Value = check_ref_response.bounded_json().await?;
-                let refs = check_data["value"].as_array();
-                if refs.is_some_and(|r| !r.is_empty()) {
+            anyhow::ensure!(check_ref_response.status().is_success(),
+                "Failed to check source branch existence (HTTP {})", check_ref_response.status());
+            anyhow::ensure!(check_ref_response.headers().get("x-ms-continuationtoken")
+                .is_none_or(|value| value.as_bytes().is_empty()), "Source branch discovery is incomplete");
+            #[derive(Deserialize)]
+            struct RefEntry { name: String, #[serde(rename = "objectId")] _sha: crate::secure::CommitSha }
+            #[derive(Deserialize)]
+            struct RefList { value: Vec<RefEntry> }
+            let refs: RefList = check_ref_response.bounded_json().await?;
+            let exact = refs.value.iter().filter(|entry| entry.name == source_ref).count();
+            anyhow::ensure!(exact <= 1, "Source branch discovery is ambiguous");
+                if exact == 1 {
                     warn!(
                         "Branch '{}' already exists, generating new suffix (attempt {})",
                         source_branch,
@@ -960,7 +968,6 @@ impl Executor for CreatePrResult {
                     info!("Renamed source branch to '{}'", source_branch);
                     continue;
                 }
-            }
             break;
         }
 
@@ -1817,7 +1824,7 @@ mod tests {
         use crate::safe_outputs::pr_patch::tests::{command, movement, repository};
         use std::sync::{Arc, Mutex};
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, query_param}};
-        for case in ["copy", "rename-edit", "crlf", "excluded-copy", "series", "filtered-series", "base-drift", "unrelated-base"] {
+        for case in ["copy", "rename-edit", "crlf", "excluded-copy", "series", "filtered-series", "base-drift", "unrelated-base", "prefix-ref"] {
             let (repo, base) = repository(&[("old.txt", b"base\n"), ("nested/secret.txt", b"excluded\n"), ("keep.txt", b"old\n")]);
             let mut current = base.clone();
             let mut text = match case {
@@ -1860,7 +1867,11 @@ mod tests {
                 }))).mount(&server).await;
             Mock::given(method("GET")).and(path(format!("{api}/refs")))
                 .and(query_param("filter", format!("heads/agent/{case}")))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"value":[]})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": if case == "prefix-ref" {
+                        vec![serde_json::json!({"name":"refs/heads/agent/prefix-ref-target", "objectId":base})]
+                    } else { vec![] }
+                })))
                 .mount(&server).await;
             Mock::given(method("GET")).and(path(format!("{api}/diffs/commits")))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1908,8 +1919,11 @@ mod tests {
             assert!(result.success, "{case}: {}", result.message);
             let pushes = pushes.lock().unwrap();
             assert_eq!(pushes.len(), 1, "{case}");
+            assert_eq!(pushes[0]["refUpdates"][0]["name"], format!("refs/heads/agent/{case}"));
             assert_eq!(pushes[0]["commits"][0]["parents"], serde_json::json!([base]));
             let changes = pushes[0]["commits"][0]["changes"].as_array().unwrap();
+            let unique = changes.iter().map(|change| change["item"]["path"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(unique.len(), changes.len(), "ADO allows one operation per path: {case}");
             let content = changes.iter().find(|change| change.get("newContent").is_some()).unwrap();
             assert_eq!(content["newContent"]["content"], if case == "copy" { "base\n" } else { "changed\n" }, "{case}");
             if case == "excluded-copy" {

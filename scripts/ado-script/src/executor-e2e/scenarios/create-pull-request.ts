@@ -281,7 +281,9 @@ async function setupCreatePullRequestCheckout(
     if (options.patchMode === "native-copy") await copyFile(join(checkoutDir, originalFile), absFile);
     else if (options.patchMode === "native-rename") await rename(join(checkoutDir, originalFile), absFile);
     else if (options.patchMode === "binary") await writeFile(absFile, Buffer.from([0, 255, 128, 10]));
-    else await writeFile(absFile, `${detBody(ctx, options.id)}\n`, "utf8");
+    else await writeFile(absFile, options.patchMode === "excluded-copy"
+      ? "Independent retained content, not derived from the excluded seed.\n".repeat(20)
+      : `${detBody(ctx, options.id)}\n`, "utf8");
     if (options.patchMode === "excluded-copy") {
       omittedCopy = `${relFile}.excluded`;
       await copyFile(join(checkoutDir, originalFile), join(checkoutDir, omittedCopy));
