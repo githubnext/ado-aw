@@ -78,6 +78,8 @@ Sub-agent contract:
 
 - Start `rust-critic` exactly once, immediately, and let it work while you do
   your own pass in Step 2.
+- Do not specify a model or model alias when launching the sub-agent. Omit the
+  model parameter so it inherits the parent/runtime model selection.
 - It must return strict JSONL, one finding per line.
 - Collect its output before Step 3, and **wait for it** rather than polling: make
   a single blocking read that waits for the sub-agent to finish. Only give up
@@ -169,7 +171,6 @@ and the themes in a `<details>` block.
 ## agent: `rust-critic`
 ---
 description: Hostile first-pass Rust reviewer that mines merge-blocking defects from changed lines
-model: small
 ---
 You are a hostile senior Rust reviewer performing a first-pass audit.
 

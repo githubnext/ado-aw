@@ -126,6 +126,8 @@ pub struct ExecutionContext {
     pub ado_project: Option<String>,
     /// Azure DevOps project GUID (`SYSTEM_TEAMPROJECTID`)
     pub ado_project_id: Option<String>,
+    /// Original pipeline collection, independent of CLI target overrides.
+    pub pipeline_collection_uri: Option<String>,
     /// Write-capable ADO access token used by Stage 3 executors. Populated
     /// from the `SYSTEM_ACCESSTOKEN` env var, which the compiler maps to
     /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)`
@@ -259,6 +261,8 @@ pub struct ExecutionContext {
     /// PR ID when `BUILD_REASON=PullRequest` (`SYSTEM_PULLREQUEST_PULLREQUESTID`)
     #[allow(dead_code)]
     pub pull_request_id: Option<String>,
+    /// Trusted trigger identity, independent of compiler-owned self and CLI routing overrides.
+    pub triggering_pr: Option<super::pr_common::TriggeringPullRequest>,
     /// PR source branch (`SYSTEM_PULLREQUEST_SOURCEBRANCH`)
     #[allow(dead_code)]
     pub pull_request_source_branch: Option<String>,
@@ -284,6 +288,7 @@ pub struct ExecutionContext {
     pub resolved_work_items: Arc<Mutex<HashMap<String, ResolvedWorkItem>>>,
     /// Temporary pull-request IDs resolved by successful `create-pull-request` calls.
     pub resolved_pull_requests: Arc<Mutex<HashMap<String, ResolvedPullRequest>>>,
+    pub budget_groups: crate::compile::pr_migration::BudgetGroups,
 }
 
 impl ExecutionContext {
@@ -313,6 +318,7 @@ impl ExecutionContext {
                 if let Some(object) = value.as_object_mut() {
                     object.remove("require-approval");
                     object.remove("staged");
+                    object.remove(crate::compile::pr_migration::LEGACY_PR_CONFIG);
                 }
                 serde_json::from_value(value).map_err(|error| {
                     anyhow::anyhow!("failed to deserialize config for tool '{tool_name}': {error}")
@@ -491,6 +497,7 @@ impl ExecutionContext {
             ado_organization,
             ado_project: env("SYSTEM_TEAMPROJECT"),
             ado_project_id: env("SYSTEM_TEAMPROJECTID"),
+            pipeline_collection_uri: env("SYSTEM_COLLECTIONURI"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
             github_token: env("ADO_AW_GITHUB_TOKEN"),
             github_actor_login: env("ADO_AW_GITHUB_ACTOR_LOGIN"),
@@ -534,6 +541,7 @@ impl ExecutionContext {
 
             // Pull request variables
             pull_request_id: env("SYSTEM_PULLREQUEST_PULLREQUESTID"),
+            triggering_pr: super::pr_common::TriggeringPullRequest::from_env(&env),
             pull_request_source_branch: env("SYSTEM_PULLREQUEST_SOURCEBRANCH"),
             pull_request_target_branch: env("SYSTEM_PULLREQUEST_TARGETBRANCH"),
 
@@ -542,6 +550,7 @@ impl ExecutionContext {
             resolved_github_issues: Arc::new(Mutex::new(HashMap::new())),
             resolved_work_items: Arc::new(Mutex::new(HashMap::new())),
             resolved_pull_requests: Arc::new(Mutex::new(HashMap::new())),
+            budget_groups: Default::default(),
         }
     }
 }
@@ -782,8 +791,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -825,8 +834,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -867,8 +876,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -908,8 +917,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,

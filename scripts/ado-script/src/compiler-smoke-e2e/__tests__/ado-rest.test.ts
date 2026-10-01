@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { AdoRest, redactToken } from "../ado-rest.js";
+import { AdoHttpError, AdoRest, redactToken, transientReadRetryAfter, type OwnedBoundaryPr } from "../ado-rest.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -74,6 +74,63 @@ describe("AdoRest.getArtifact", () => {
     });
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
     await rest.getArtifact(100, "a");
+  });
+});
+
+describe("build status read failures", () => {
+  it.each([408, 429, 500, 502, 503, 504])("preserves transient HTTP %i and Retry-After without retrying the request", async (status) => {
+    const fetchImpl = vi.fn(async () => new Response("try later", {
+      status, headers: { "retry-after": "2" },
+    }));
+    const error = await makeRest(fetchImpl).getBuild(1).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(AdoHttpError);
+    expect(error).toMatchObject({ status, retryAfterMs: 2_000 });
+    expect(transientReadRetryAfter(error)).toBe(2_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([400, 401, 403, 404, 409, 422])("never retries permanent HTTP %i", async (status) => {
+    const error = await makeRest(vi.fn(async () => new Response("rejected", {
+      status, headers: { "retry-after": "2" },
+    }))).getBuild(1).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(AdoHttpError);
+    expect(transientReadRetryAfter(error)).toBeUndefined();
+  });
+
+  it("distinguishes socket errors from programming and malformed-response errors", () => {
+    for (const error of [
+      new TypeError("fetch failed", { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) }),
+      new DOMException("request timed out", "TimeoutError"),
+    ]) expect(transientReadRetryAfter(error)).toBe(0);
+    for (const error of [
+      new TypeError("fetch failed"),
+      new TypeError("bad URL", { cause: Object.assign(new Error("bad URL"), { code: "ERR_INVALID_URL" }) }),
+      new SyntaxError("truncated JSON"),
+      new Error("transient network error"),
+    ]) expect(transientReadRetryAfter(error)).toBeUndefined();
+  });
+
+  it.each([{}, [], "invalid", { id: 2, status: "completed" }, { id: 1 }, { id: 1, status: "unknown" }])("rejects malformed build summaries %j", async (body) => {
+    const error = await makeRest(vi.fn(async () => jsonResponse(200, body)))
+      .getBuild(1).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(Error);
+    expect(transientReadRetryAfter(error)).toBeUndefined();
+  });
+
+  it("leaves malformed JSON non-retryable", async () => {
+    const fetchImpl = vi.fn(async () => new Response('{"id":1,', { status: 200 }));
+    const error = await makeRest(fetchImpl).getBuild(1).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(SyntaxError);
+    expect(transientReadRetryAfter(error)).toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a mutating request even when its HTTP error is transient", async () => {
+    const fetchImpl = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    await expect(makeRest(fetchImpl).queueBuild(1, {
+      sourceBranch: "refs/heads/x", sourceVersion: "sha",
+    })).rejects.toThrow(AdoHttpError);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -185,29 +242,38 @@ describe("AdoRest.getBuild / cancelBuild", () => {
   });
 });
 
-describe("AdoRest.listBuildsForDefinitionBranch", () => {
-  it("queries a single definition + exact branch and returns every build regardless of status", async () => {
+describe("AdoRest.listBuildsForBranch", () => {
+  it.each([
+    {},
+    { value: null },
+    { value: [{ id: 1, status: "completed" }] },
+    { value: [{ id: 1, status: "completed", definition: { id: 3002 }, sourceBranch: "refs/heads/wrong" }] },
+    { value: Array.from({ length: 50 }, (_, i) => ({
+      id: i + 1, status: "completed", definition: { id: 3001 }, sourceBranch: "refs/heads/case",
+    })) },
+  ])("rejects malformed, mismatched or possibly truncated child metadata", async (body) => {
+    const rest = makeRest(vi.fn(async () => jsonResponse(200, body)));
+    await expect(rest.listBuildsForBranch("refs/heads/case")).rejects.toThrow("incomplete");
+  });
+
+  it("queries every definition on the exact branch, regardless of status", async () => {
     let requestedPath = "";
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       requestedPath = String(input);
       return jsonResponse(200, {
         value: [
-          { id: 1, status: "completed", result: "succeeded" },
-          { id: 2, status: "inProgress" },
+          { id: 1, status: "completed", result: "succeeded", definition: { id: 3001 }, sourceBranch: "refs/heads/ado-aw-smoke-candidate/1" },
+          { id: 2, status: "inProgress", definition: { id: 3999 }, sourceBranch: "refs/heads/ado-aw-smoke-candidate/1" },
         ],
       });
     });
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
-    const builds = await rest.listBuildsForDefinitionBranch(
-      3001,
+    const builds = await rest.listBuildsForBranch(
       "refs/heads/ado-aw-smoke-candidate/1",
     );
     expect(builds).toHaveLength(2);
     expect(builds[1]?.status).toBe("inProgress");
-    // The query is scoped to exactly one definition id + the exact branch —
-    // never a comma-separated statusFilter (status is inspected client-side
-    // instead, per the stale-scan safety requirement).
-    expect(requestedPath).toContain("definitions=3001");
+    expect(requestedPath).not.toContain("definitions=");
     expect(requestedPath).toContain(
       encodeURIComponent("refs/heads/ado-aw-smoke-candidate/1"),
     );
@@ -217,11 +283,77 @@ describe("AdoRest.listBuildsForDefinitionBranch", () => {
   it("returns an empty array when there are no builds on that branch", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(200, { value: [] }));
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
-    const builds = await rest.listBuildsForDefinitionBranch(
-      3001,
+    const builds = await rest.listBuildsForBranch(
       "refs/heads/ado-aw-smoke-candidate/2",
     );
     expect(builds).toEqual([]);
+  });
+});
+
+describe("owned boundary PR recovery", () => {
+  const source = "refs/heads/ado-aw-smoke-candidate/42/check";
+  const pr: OwnedBoundaryPr = {
+    pullRequestId: 7, status: "active",
+    title: "ado-aw-boundary-original-42-check",
+    sourceRefName: source, targetRefName: "refs/heads/ado-aw-smoke-boundary-target/42/check",
+    repository: { name: "mirror", project: { name: "AgentPlayground" } },
+  };
+
+  it.each([pr.targetRefName, `${source}-target`])("recovers exact source/target/marker identity (%s)", async (targetRefName) => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("searchCriteria.sourceRefName")).toBe(source);
+      expect(url.searchParams.get("searchCriteria.status")).toBe("all");
+      expect(url.searchParams.get("$top")).toBe("2");
+      return jsonResponse(200, { value: [{ ...pr, targetRefName }] });
+    });
+    await expect(makeRest(fetch).findBoundaryPr("mirror", source)).resolves.toMatchObject({ targetRefName });
+  });
+
+  it.each([
+    {},
+    { value: [null] },
+    { value: [pr, pr] },
+    { value: [{ ...pr, sourceRefName: `${source}-other` }] },
+    { value: [{ ...pr, targetRefName: "refs/heads/main" }] },
+    { value: [{ ...pr, title: "human PR" }] },
+    { value: [{ ...pr, repository: { name: "other", project: { name: "AgentPlayground" } } }] },
+    { value: [{ ...pr, repository: { name: "mirror", project: { name: "other" } } }] },
+    { value: [{ ...pr, forkSource: {} }] },
+  ])("rejects incomplete or contradictory ownership evidence", async (body) => {
+    await expect(makeRest(vi.fn(async () => jsonResponse(200, body))).findBoundaryPr("mirror", source))
+      .rejects.toThrow();
+  });
+
+  it("does not treat a continuation as complete discovery", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ value: [] }), {
+      headers: { "content-type": "application/json", "x-ms-continuationtoken": "more" },
+    }));
+    await expect(makeRest(fetch).findBoundaryPr("mirror", source)).rejects.toThrow("Incomplete");
+  });
+
+  it.each(["abandoned", "completed", "active", "wrong-target", "read-error"])(
+    "reconciles a lost abandonment response without retrying (%s)", async (outcome) => {
+      let writes = 0;
+      const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+        if (init?.method === "PATCH") { writes += 1; throw new Error("lost response"); }
+        if (writes === 0) return jsonResponse(200, pr);
+        if (outcome === "read-error") return new Response("forbidden", { status: 403 });
+        return jsonResponse(200, outcome === "wrong-target"
+          ? { ...pr, status: "abandoned", targetRefName: "refs/heads/main" }
+          : { ...pr, status: outcome });
+      });
+      const operation = makeRest(fetch).abandonBoundaryPr("mirror", pr);
+      if (outcome === "abandoned") await expect(operation).resolves.toBeUndefined();
+      else await expect(operation).rejects.toThrow();
+      expect(writes).toBe(1);
+    },
+  );
+
+  it("retains an ordinary boundary PR that unexpectedly completed", async () => {
+    const fetch = vi.fn(async () => jsonResponse(200, { ...pr, status: "completed" }));
+    await expect(makeRest(fetch).abandonBoundaryPr("mirror", pr)).rejects.toThrow("unexpectedly completed");
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 

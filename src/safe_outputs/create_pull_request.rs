@@ -1,5 +1,6 @@
 //! Create pull request safe output tool
 
+use super::pr_http::BoundedPrResponse;
 use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
@@ -14,8 +15,6 @@ use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
-/// Maximum allowed patch file size (5 MB)
-const MAX_PATCH_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Default maximum files allowed in a single PR
 const DEFAULT_MAX_FILES: usize = 100;
@@ -205,7 +204,7 @@ async fn resolve_reviewer_identity(
         return None;
     }
 
-    match resp.json::<serde_json::Value>().await {
+    match resp.bounded_json::<serde_json::Value>().await {
         Ok(data) => {
             let result = find_identity_in_response(&data, reviewer);
             if result.is_none() {
@@ -300,6 +299,7 @@ tool_result! {
     write = true,
     params = CreatePrResultFields,
     /// Result of creating a pull request - stored as safe output
+    #[serde(deny_unknown_fields)]
     pub struct CreatePrResult {
         /// Title for the pull request
         title: String,
@@ -399,7 +399,15 @@ pub enum ProtectedFiles {
 ///       - "agent-created"
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePrConfig {
+    /// Maximum patch and expanded selected content, in KiB (default 4096).
+    #[serde(default, rename = "max-patch-size")]
+    #[sanitize_config(skip)]
+    pub max_patch_size: super::pr_patch::PatchSizeKiB,
+    /// Optional restriction within the compiler-authorized checkout destinations.
+    #[serde(default, rename = "allowed-repositories")]
+    pub allowed_repositories: Vec<String>,
     /// Target branch to merge into (default: "main"). This is the literal
     /// fallback applied to every repo unless overridden by `target_branches`
     /// or `infer_target_from_checkout_ref`. It is always a plain branch name —
@@ -487,6 +495,9 @@ pub struct CreatePrConfig {
     /// Whether to include agent execution stats in the PR description (default: true).
     #[serde(default = "default_true", rename = "include-stats")]
     pub include_stats: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
 }
 
 fn default_target_branch() -> String {
@@ -567,6 +578,8 @@ fn repository_api_base(target: &crate::safe_outputs::result::AdoRepositoryTarget
 impl Default for CreatePrConfig {
     fn default() -> Self {
         Self {
+            max_patch_size: Default::default(),
+            allowed_repositories: Vec::new(),
             target_branch: default_target_branch(),
             target_branches: std::collections::HashMap::new(),
             infer_target_from_checkout_ref: false,
@@ -585,6 +598,7 @@ impl Default for CreatePrConfig {
             work_items: Vec::new(),
             fallback_record_branch: true,
             include_stats: true,
+            max: None,
         }
     }
 }
@@ -593,20 +607,29 @@ impl Default for CreatePrConfig {
 struct WorktreeGuard {
     repo_dir: std::path::PathBuf,
     worktree_path: std::path::PathBuf,
+    removed: bool,
+}
+
+impl WorktreeGuard {
+    fn remove(&mut self) -> anyhow::Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(super::pr_patch::git_path(&self.worktree_path).as_ref())
+            .current_dir(&self.repo_dir)
+            .output().context("Failed to remove private PR worktree")?;
+        anyhow::ensure!(output.status.success(), "Private PR worktree cleanup failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+        self.removed = true;
+        Ok(())
+    }
 }
 
 impl Drop for WorktreeGuard {
     fn drop(&mut self) {
-        // Best effort cleanup - ignore errors
-        let _ = std::process::Command::new("git")
-            .args([
-                "worktree",
-                "remove",
-                "--force",
-                &self.worktree_path.to_string_lossy(),
-            ])
-            .current_dir(&self.repo_dir)
-            .output();
+        if !self.removed
+            && let Err(error) = self.remove() {
+                warn!("Private PR worktree cleanup failed: {error:#}");
+            }
     }
 }
 
@@ -700,6 +723,11 @@ impl Executor for CreatePrResult {
             Err(failure) => return Ok(failure),
         };
         debug!("Resolved repository ID: {}", target.repository_locator());
+        if let Err(failure) = super::pr_common::validate_pr_repository_policy(
+            &target, &config.allowed_repositories, ctx,
+        ) {
+            return Ok(failure);
+        }
         if ctx.has_resolved_pull_request(&self.temporary_id)? {
             return Ok(ExecutionResult::failure(format!(
                 "temporary_id '{}' was already used in this run",
@@ -741,107 +769,14 @@ impl Executor for CreatePrResult {
             )));
         }
 
-        // Security: Enforce patch file size limit
-        let metadata = tokio::fs::metadata(&patch_path)
-            .await
-            .context("Failed to get patch file metadata")?;
-        if metadata.len() > MAX_PATCH_SIZE_BYTES {
-            return Ok(ExecutionResult::failure(format!(
-                "Patch file exceeds maximum size of {} bytes (got {} bytes)",
-                MAX_PATCH_SIZE_BYTES,
-                metadata.len()
-            )));
-        }
-
-        // Read patch content for validation
-        debug!("Reading patch file content");
-        let patch_content = tokio::fs::read_to_string(&patch_path)
-            .await
-            .context("Failed to read patch file")?;
-        debug!("Patch content size: {} bytes", patch_content.len());
-
-        // SHA-256 integrity check: verify the patch file hasn't been tampered
-        // with between Stage 1 and Stage 3.
-        let live_hash = crate::hash::sha256_hex(patch_content.as_bytes());
+        let patch_path = crate::validate::ensure_path_within_base(
+            &patch_path, &ctx.working_directory, "PR patch",
+        )?;
+        let patch_bytes = super::pr_patch::read_patch(&patch_path, config.max_patch_size).await?;
+        let live_hash = crate::hash::sha256_hex(&patch_bytes);
         if live_hash != self.patch_sha256 {
             return Ok(ExecutionResult::failure(format!(
-                "Patch file SHA-256 mismatch: expected {}, got {} — \
-                 the file may have been tampered with between stages",
-                self.patch_sha256, live_hash
-            )));
-        }
-        debug!("Patch file SHA-256 verified: {}", live_hash);
-
-        // Excluded files are handled via --exclude flags on git am / git apply,
-        // which filters them at the git level rather than post-processing patch content.
-        // This is the same approach used by gh-aw (via :(exclude) pathspecs).
-        // Note: Exclusion happens during patch application (before the protection check).
-        // If a protected file matches an excluded-files pattern, it is silently dropped
-        // from the patch rather than triggering a protection error.
-        let exclude_args: Vec<String> = config
-            .excluded_files
-            .iter()
-            .map(|p| format!("--exclude={}", p))
-            .collect();
-        if !exclude_args.is_empty() {
-            debug!(
-                "Will apply {} excluded-files patterns via --exclude flags",
-                exclude_args.len()
-            );
-        }
-
-        // Security: Validate patch paths before applying
-        debug!("Validating patch paths for security");
-        if let Err(e) = validate_patch_paths(&patch_content) {
-            warn!("Patch path validation failed: {}", e);
-            return Ok(ExecutionResult::failure(format!(
-                "Patch validation failed: {}",
-                e
-            )));
-        }
-        debug!("Patch path validation passed");
-
-        // Extract file paths from patch for validation.
-        // Filter out excluded files before the protection check — if a protected file
-        // matches an excluded-files pattern, it will be excluded from the patch by
-        // git am/apply --exclude and should not trigger a protection error.
-        let patch_paths: Vec<String> = extract_paths_from_patch(&patch_content)
-            .into_iter()
-            .filter(|p| {
-                !config
-                    .excluded_files
-                    .iter()
-                    .any(|pat| glob_match_simple(pat, p))
-            })
-            .collect();
-
-        // Security: File protection check
-        if config.protected_files != ProtectedFiles::Allowed {
-            let protected = find_protected_files(&patch_paths);
-            if !protected.is_empty() {
-                warn!(
-                    "Patch modifies {} protected file(s): {:?}",
-                    protected.len(),
-                    protected
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Patch modifies protected files (set protected-files: allowed to override): {}",
-                    protected.join(", ")
-                )));
-            }
-        }
-
-        // Security: Max files per PR check (count diff blocks, not paths, to avoid
-        // double-counting renames which appear in both --- and +++ lines)
-        let file_count = count_patch_files(&patch_content);
-        if file_count > config.max_files {
-            warn!(
-                "Patch contains {} files, exceeding max of {}",
-                file_count, config.max_files
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Patch contains {} files, exceeding maximum of {} files per PR",
-                file_count, config.max_files
+                "Patch file SHA-256 mismatch: expected {}, got {}", self.patch_sha256, live_hash
             )));
         }
 
@@ -880,233 +815,108 @@ impl Executor for CreatePrResult {
         }
         debug!("Git repository verified");
 
-        // Create a temporary directory for the worktree
+        let client = super::pr_http::client()?;
+        #[derive(Deserialize)]
+        struct RefTip {
+            name: String,
+            #[serde(rename = "objectId")]
+            oid: crate::secure::CommitSha,
+        }
+        #[derive(Deserialize)]
+        struct Refs { value: Vec<RefTip> }
+        let response = crate::safe_outputs::authenticate_ado_request(
+            client.get(format!("{}/refs", repository_api_base(&target))).query(&[
+                ("filter", format!("heads/{target_branch}")), ("api-version", "7.1".into()),
+            ]), token, ctx.write_connection_type,
+        ).send().await.context("Failed to resolve PR target ref")?;
+        anyhow::ensure!(response.status().is_success(), "Failed to resolve PR target ref (HTTP {})", response.status());
+        let refs: Refs = response.bounded_json().await?;
+        let mut matches = refs.value.into_iter().filter(|reference| reference.name == target_ref);
+        let current = matches.next().context("PR target ref is missing")?.oid;
+        anyhow::ensure!(matches.next().is_none(), "PR target ref is ambiguous");
+        let base_sha = self.base_commit.as_deref().map(crate::secure::CommitSha::parse)
+            .transpose().context("Invalid base_commit SHA from Stage 1")?.unwrap_or_else(|| current.clone());
+        if !base_sha.eq_ignore_ascii_case(current.as_str()) {
+            #[derive(Deserialize)]
+            struct Ancestry {
+                #[serde(rename = "baseCommit")]
+                base: crate::secure::CommitSha,
+                #[serde(rename = "targetCommit")]
+                target: crate::secure::CommitSha,
+                #[serde(rename = "commonCommit")]
+                common: crate::secure::CommitSha,
+            }
+            let response = crate::safe_outputs::authenticate_ado_request(
+                client.get(format!("{}/diffs/commits", repository_api_base(&target))).query(&[
+                    ("baseVersion", base_sha.as_str()), ("baseVersionType", "commit"),
+                    ("targetVersion", current.as_str()), ("targetVersionType", "commit"),
+                    ("diffCommonCommit", "true"), ("$top", "1"), ("api-version", "7.1"),
+                ]), token, ctx.write_connection_type,
+            ).send().await.context("Failed to verify captured PR base ancestry")?;
+            anyhow::ensure!(response.status().is_success(), "Failed to verify captured PR base ancestry (HTTP {})", response.status());
+            let ancestry: Ancestry = response.bounded_json().await?;
+            anyhow::ensure!(ancestry.base.eq_ignore_ascii_case(base_sha.as_str())
+                && ancestry.target.eq_ignore_ascii_case(current.as_str())
+                && ancestry.common.eq_ignore_ascii_case(base_sha.as_str()),
+                "Captured PR base is not a verified ancestor of the configured target");
+        }
+        super::pr_patch::ensure_commit(&repo_git_dir, &base_sha, &target, &client, token, ctx.write_connection_type).await?;
+        let prepared = super::pr_patch::prepare(&repo_git_dir, &base_sha, &patch_bytes, &super::pr_patch::PatchPolicy {
+            limit: config.max_patch_size, max_files: config.max_files,
+            excluded_files: &config.excluded_files, protected_files: config.protected_files, exact: false,
+        }).await?;
+        if prepared.is_empty() {
+            let mut result = handle_no_changes(&config, &[]);
+            result.data = Some(serde_json::json!({"omitted_operations":prepared.omitted}));
+            return Ok(result);
+        }
         let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
         let worktree_path = temp_dir.path().join("worktree");
-        debug!("Creating worktree at: {}", worktree_path.display());
-
-        // Create a worktree at the target branch
-        let worktree_output = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                &worktree_path.to_string_lossy(),
-                &format!("origin/{}", target_branch),
-            ])
-            .current_dir(&repo_git_dir)
-            .output()
-            .await
-            .context("Failed to create git worktree")?;
-
-        if !worktree_output.status.success() {
-            debug!(
-                "Worktree creation with origin/ prefix failed, trying without: {}",
-                String::from_utf8_lossy(&worktree_output.stderr)
-            );
-            // Try with just the branch name if origin/ prefix fails
-            let worktree_output = Command::new("git")
-                .args([
-                    "worktree",
-                    "add",
-                    &worktree_path.to_string_lossy(),
-                    target_branch,
-                ])
-                .current_dir(&repo_git_dir)
-                .output()
-                .await
-                .context("Failed to create git worktree")?;
-
-            if !worktree_output.status.success() {
-                warn!(
-                    "Failed to create worktree: {}",
-                    String::from_utf8_lossy(&worktree_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to create worktree: {}",
-                    String::from_utf8_lossy(&worktree_output.stderr)
-                )));
-            }
-        }
-        debug!("Worktree created successfully");
+        let verified_patch = temp_dir.path().join("verified.patch");
+        tokio::fs::write(&verified_patch, &prepared.bytes).await?;
+        let worktree_output = super::pr_patch::bounded_output(
+            super::pr_patch::git_without_filters(&repo_git_dir).await?
+                .args(["worktree", "add", "--detach", &worktree_path.to_string_lossy(), base_sha.as_str()]),
+            super::pr_patch::MAX_SOURCE_BYTES, None,
+        ).await?;
+        anyhow::ensure!(worktree_output.status.success(), "Failed to create PR worktree at its verified base");
 
         // Ensure worktree cleanup on exit
-        let _worktree_guard = WorktreeGuard {
+        let mut worktree_guard = WorktreeGuard {
             repo_dir: repo_git_dir.clone(),
             worktree_path: worktree_path.clone(),
+            removed: false,
         };
 
-        // Create and checkout a local branch in the worktree for patch application.
-        // Note: this local branch name may differ from the final remote branch name
-        // if a collision is detected later — the ADO push is REST-only, so the local
-        // branch name is not used for the remote ref.
-        debug!("Creating source branch: {}", source_branch);
-        let checkout_output = Command::new("git")
-            .args(["checkout", "-b", &source_branch])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to create source branch")?;
-
-        if !checkout_output.status.success() {
-            warn!(
-                "Failed to create source branch: {}",
-                String::from_utf8_lossy(&checkout_output.stderr)
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to create source branch: {}",
-                String::from_utf8_lossy(&checkout_output.stderr)
-            )));
-        }
-        debug!("Source branch created");
-
-        // Record the worktree HEAD before applying the patch so we can diff against
-        // it later. For multi-commit patches, git am creates N commits and diff-tree HEAD
-        // alone only shows the last commit's changes — we need base_sha..HEAD.
-        let base_sha_output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to get worktree HEAD SHA")?;
-        let base_sha = String::from_utf8_lossy(&base_sha_output.stdout)
-            .trim()
-            .to_string();
-        debug!("Worktree base SHA before patch: {}", base_sha);
-
-        // Apply the patch. Strategy depends on whether excluded-files are configured:
-        // - Without exclusions: prefer git am --3way (preserves commit metadata)
-        //   with git apply --3way as fallback
-        // - With exclusions: use git apply --3way directly (git am does not support
-        //   --exclude flags; git apply does)
-        let patch_committed =
-            match apply_patch_to_worktree(&worktree_path, &patch_path, &exclude_args).await? {
+        let application = async {
+            let patch_committed = match apply_patch_to_worktree(
+                &worktree_path, &verified_patch, &prepared.batches, !config.excluded_files.is_empty(),
+            ).await? {
                 Ok(committed) => committed,
-                Err(result) => return Ok(result),
+                Err(result) => return Ok(Err(result)),
             };
-
-        // Collect changed files. The method depends on how the patch was applied:
-        // - git am: changes are committed → use git diff-tree to compare base_sha..HEAD
-        //   (covers all commits in multi-commit patches, not just the last one)
-        // - git apply: changes are in working tree → use git status --porcelain
-        debug!("Getting list of changed files");
-        let (status_str, use_diff_tree) = if patch_committed {
-            let diff_tree_output = Command::new("git")
-                .args(["diff-tree", "-r", "--name-status", &base_sha, "HEAD"])
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git diff-tree")?;
-
-            if !diff_tree_output.status.success() {
-                warn!(
-                    "Failed to get diff-tree: {}",
-                    String::from_utf8_lossy(&diff_tree_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get diff-tree: {}",
-                    String::from_utf8_lossy(&diff_tree_output.stderr)
-                )));
-            }
-            (
-                String::from_utf8_lossy(&diff_tree_output.stdout).to_string(),
-                true,
-            )
-        } else {
-            let status_output = Command::new("git")
-                .args(["status", "--porcelain"])
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git status")?;
-
-            if !status_output.status.success() {
-                warn!(
-                    "Failed to get git status: {}",
-                    String::from_utf8_lossy(&status_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get git status: {}",
-                    String::from_utf8_lossy(&status_output.stderr)
-                )));
-            }
-            (
-                String::from_utf8_lossy(&status_output.stdout).to_string(),
-                false,
-            )
+            prepared.collect(&worktree_path, &base_sha, None,
+                if patch_committed { Some("HEAD") } else { None }).await.map(Ok)
+        }.await;
+        let application = match (application, worktree_guard.remove()) {
+            (result, Ok(())) => result,
+            (Ok(_), Err(cleanup)) => Err(cleanup),
+            (Err(error), Err(cleanup)) => Err(error.context(format!("PR worktree cleanup also failed: {cleanup:#}"))),
         };
-
-        debug!("Change detection output:\n{}", status_str);
-        let (changes, skipped_symlinks) = if use_diff_tree {
-            collect_changes_from_diff_tree(&worktree_path, &status_str).await?
-        } else {
-            collect_changes_from_worktree(&worktree_path, &status_str).await?
+        let applied = match super::pr_patch::finish_scratch(temp_dir, application)? {
+            Ok(applied) => applied,
+            Err(result) => return Ok(result),
         };
-        debug!("Collected {} file changes for push", changes.len());
-        if !skipped_symlinks.is_empty() {
-            warn!(
-                "Skipped {} symlink(s) when collecting PR file changes: {}",
-                skipped_symlinks.len(),
-                skipped_symlinks.join(", ")
-            );
-        }
-
+        let changes = applied.changes;
+        let skipped_symlinks = applied.skipped_symlinks;
+        let omitted_paths = applied.omitted;
         if changes.is_empty() {
-            return Ok(handle_no_changes(&config, &skipped_symlinks));
+            let mut result = handle_no_changes(&config, &skipped_symlinks);
+            result.data = Some(serde_json::json!({"omitted_operations":omitted_paths}));
+            return Ok(result);
         }
 
-        // Use ADO REST API to create branch and push changes
-        let client = reqwest::Client::new();
-
-        // Get the target branch ref to find the base commit
-        debug!("Getting target branch ref from ADO");
-        let refs_url = format!("{}/refs", repository_api_base(&target));
-        debug!("Refs URL: {}", refs_url);
-
-        // Resolve the base commit for the push.
-        // Prefer the merge-base SHA recorded at patch generation time (Stage 1) so the
-        // patch is applied against the exact commit it was created from.  Fall back to
-        // querying the ADO refs API when the field is absent (backward compat with old
-        // NDJSON entries).
-        let base_commit: String = if let Some(ref recorded) = self.base_commit {
-            // Validate SHA format before trusting Stage 1 data
-            if recorded.len() != 40 || !recorded.chars().all(|c| c.is_ascii_hexdigit()) {
-                anyhow::bail!(
-                    "Invalid base_commit SHA from Stage 1 NDJSON: {:?}",
-                    recorded
-                );
-            }
-            info!("Using recorded base_commit from Stage 1: {}", recorded);
-            recorded.clone()
-        } else {
-            debug!("No recorded base_commit — resolving from ADO refs API");
-            let refs_response = crate::safe_outputs::authenticate_ado_request(
-                client.get(&refs_url).query(&[
-                    ("filter", format!("heads/{target_branch}")),
-                    ("api-version", "7.1".to_string()),
-                ]),
-                token,
-                ctx.write_connection_type,
-            )
-            .send()
-            .await
-            .context("Failed to get target branch ref")?;
-
-            if !refs_response.status().is_success() {
-                let status = refs_response.status();
-                let body = refs_response.text().await.unwrap_or_default();
-                warn!("Failed to get target branch ref: {} - {}", status, body);
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get target branch ref: {} - {}",
-                    status, body
-                )));
-            }
-
-            let refs_data: serde_json::Value = refs_response.json().await?;
-            let resolved = refs_data["value"][0]["objectId"]
-                .as_str()
-                .context("Could not find target branch commit")?;
-            resolved.to_string()
-        };
+        let base_commit = base_sha.to_string();
         debug!("Base commit: {}", base_commit);
 
         info!(
@@ -1136,10 +946,18 @@ impl Executor for CreatePrResult {
             .await
             .context("Failed to check source branch existence")?;
 
-            if check_ref_response.status().is_success() {
-                let check_data: serde_json::Value = check_ref_response.json().await?;
-                let refs = check_data["value"].as_array();
-                if refs.is_some_and(|r| !r.is_empty()) {
+            anyhow::ensure!(check_ref_response.status().is_success(),
+                "Failed to check source branch existence (HTTP {})", check_ref_response.status());
+            anyhow::ensure!(check_ref_response.headers().get("x-ms-continuationtoken")
+                .is_none_or(|value| value.as_bytes().is_empty()), "Source branch discovery is incomplete");
+            #[derive(Deserialize)]
+            struct RefEntry { name: String, #[serde(rename = "objectId")] _sha: crate::secure::CommitSha }
+            #[derive(Deserialize)]
+            struct RefList { value: Vec<RefEntry> }
+            let refs: RefList = check_ref_response.bounded_json().await?;
+            let exact = refs.value.iter().filter(|entry| entry.name == source_ref).count();
+            anyhow::ensure!(exact <= 1, "Source branch discovery is ambiguous");
+                if exact == 1 {
                     warn!(
                         "Branch '{}' already exists, generating new suffix (attempt {})",
                         source_branch,
@@ -1150,7 +968,6 @@ impl Executor for CreatePrResult {
                     info!("Renamed source branch to '{}'", source_branch);
                     continue;
                 }
-            }
             break;
         }
 
@@ -1233,11 +1050,11 @@ impl Executor for CreatePrResult {
         .json(&pr_body)
         .send()
         .await
-        .context("Failed to create pull request")?;
+        .context("Failed to create pull request; delivery is uncertain and must not be replayed blindly")?;
 
         if !pr_response.status().is_success() {
             let status = pr_response.status();
-            let body = pr_response.text().await.unwrap_or_default();
+            let body = pr_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             warn!("Failed to create pull request: {} - {}", status, body);
 
             // Record branch info for manual recovery if enabled
@@ -1286,7 +1103,8 @@ impl Executor for CreatePrResult {
             )));
         }
 
-        let pr_data: serde_json::Value = pr_response.json().await?;
+        let pr_data: serde_json::Value = pr_response.bounded_json().await
+            .context("PR creation response is unavailable or invalid; the branch was pushed and PR delivery is uncertain")?;
         let pr_id = pr_data["pullRequestId"].as_u64().unwrap_or(0);
         let pr_web_url = pr_data["url"].as_str().unwrap_or("");
         info!("Pull request created: #{} - {}", pr_id, pr_web_url);
@@ -1350,6 +1168,7 @@ impl Executor for CreatePrResult {
                 "target_branch": target_branch,
                 "draft": config.draft,
                 "temporary_id": self.temporary_id.canonical(),
+                "omitted_operations": omitted_paths,
             }),
         ))
     }
@@ -1363,11 +1182,9 @@ impl Executor for CreatePrResult {
 async fn check_for_conflict_markers(
     worktree_path: &std::path::Path,
 ) -> anyhow::Result<Option<ExecutionResult>> {
-    let conflict_check = Command::new("git")
-        .args(["grep", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"])
-        .current_dir(worktree_path)
-        .output()
-        .await
+    let conflict_check = super::pr_patch::git(
+        worktree_path, &["grep", "--cached", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"],
+    ).await
         .context("Failed to run git grep for conflict markers")?;
 
     if conflict_check.status.success() {
@@ -1381,28 +1198,21 @@ async fn check_for_conflict_markers(
         warn!("{}", err_msg);
         return Ok(Some(ExecutionResult::failure(err_msg)));
     }
+    anyhow::ensure!(conflict_check.status.code() == Some(1), "Could not inspect patch conflict markers");
     Ok(None)
 }
 
-/// Apply a patch to a git worktree using `git apply --3way` with `--exclude` flags.
-///
-/// Used when `excluded-files` are configured (git am does not support `--exclude`).
-/// Returns `Ok(false)` on success (`false` = changes are staged, not committed).
+/// Apply already-selected operations to the index; never reinterpret policy globs.
 async fn apply_patch_with_exclusions(
     worktree_path: &std::path::Path,
-    patch_path: &std::path::Path,
-    exclude_args: &[String],
+    batches: &[Vec<u8>],
 ) -> anyhow::Result<Result<bool, ExecutionResult>> {
-    debug!("Using git apply --3way (excluded-files configured)");
-    let mut apply_args: Vec<String> = vec!["apply".into(), "--3way".into()];
-    apply_args.extend(exclude_args.iter().cloned());
-    apply_args.push(patch_path.to_string_lossy().into_owned());
-
-    let apply_output = Command::new("git")
-        .args(&apply_args)
-        .current_dir(worktree_path)
-        .output()
-        .await
+    for batch in batches {
+    let apply_output = super::pr_patch::bounded_output(
+        super::pr_patch::git_without_filters(worktree_path).await?
+            .args(["apply", "--cached", "--3way", "--whitespace=nowarn"]),
+        super::pr_patch::MAX_SOURCE_BYTES, Some(batch),
+    ).await
         .context("Failed to run git apply --3way")?;
 
     if !apply_output.status.success() {
@@ -1412,6 +1222,7 @@ async fn apply_patch_with_exclusions(
         );
         warn!("{}", err_msg);
         return Ok(Err(ExecutionResult::failure(err_msg)));
+    }
     }
     debug!("Patch applied with git apply --3way");
 
@@ -1430,14 +1241,16 @@ async fn apply_patch_with_exclusions(
 async fn apply_patch_without_exclusions(
     worktree_path: &std::path::Path,
     patch_path: &std::path::Path,
+    batches: &[Vec<u8>],
 ) -> anyhow::Result<Result<bool, ExecutionResult>> {
     // No exclusions — use git am --3way for proper commit metadata preservation
     debug!("Applying patch with git am --3way");
-    let am_output = Command::new("git")
-        .args(["am", "--3way", &patch_path.to_string_lossy()])
-        .current_dir(worktree_path)
-        .output()
-        .await
+    let am_output = super::pr_patch::bounded_output(
+        super::pr_patch::git_without_filters(worktree_path).await?
+            .args(["am", "--3way", "--keep-cr", "--whitespace=nowarn",
+                super::pr_patch::git_path(patch_path).as_ref()]),
+        super::pr_patch::MAX_SOURCE_BYTES, None,
+    ).await
         .context("Failed to run git am")?;
 
     if am_output.status.success() {
@@ -1449,41 +1262,24 @@ async fn apply_patch_without_exclusions(
     debug!("git am --3way failed: {}", stderr);
 
     // Abort the failed am to leave worktree clean
-    let _ = Command::new("git")
-        .args(["am", "--abort"])
-        .current_dir(worktree_path)
-        .output()
-        .await;
+    let abort = super::pr_patch::git(worktree_path, &["am", "--abort"]).await?;
+    if !abort.status.success() {
+        // A raw diff is not a mailbox and never starts an am session.
+        let state = super::pr_patch::git(worktree_path, &["rev-parse", "--git-path", "rebase-apply"]).await?;
+        anyhow::ensure!(state.status.success(), "Could not inspect failed git am state");
+        let path = worktree_path.join(std::str::from_utf8(&state.stdout)?.trim());
+        anyhow::ensure!(!path.exists(), "Failed to abort partially applied git am session");
+    }
 
     // Fallback: try git apply --3way
     debug!("Falling back to git apply --3way");
-    let apply_output = Command::new("git")
-        .args(["apply", "--3way", &patch_path.to_string_lossy()])
-        .current_dir(worktree_path)
-        .output()
-        .await
-        .context("Failed to run git apply --3way")?;
-
-    if !apply_output.status.success() {
-        let err_msg = format!(
-            "Patch could not be applied (conflicts): {}",
-            String::from_utf8_lossy(&apply_output.stderr)
-        );
-        warn!("{}", err_msg);
-        return Ok(Err(ExecutionResult::failure(err_msg)));
-    }
-    debug!("Patch applied with git apply --3way fallback");
-
-    if let Some(conflict_result) = check_for_conflict_markers(worktree_path).await? {
-        return Ok(Err(conflict_result));
-    }
-    Ok(Ok(false))
+    apply_patch_with_exclusions(worktree_path, batches).await
 }
 
 /// Apply a patch to a git worktree, choosing the right strategy automatically.
 ///
-/// Delegates to [`apply_patch_with_exclusions`] when `exclude_args` is non-empty
-/// (because `git am` doesn't support `--exclude`), otherwise delegates to
+/// Delegates to [`apply_patch_with_exclusions`] for filtered patches,
+/// otherwise delegates to
 /// [`apply_patch_without_exclusions`] which prefers `git am` for commit metadata.
 ///
 /// Returns `Ok(patch_committed)` on success (`true` = changes are committed via
@@ -1492,12 +1288,13 @@ async fn apply_patch_without_exclusions(
 async fn apply_patch_to_worktree(
     worktree_path: &std::path::Path,
     patch_path: &std::path::Path,
-    exclude_args: &[String],
+    batches: &[Vec<u8>],
+    filtered: bool,
 ) -> anyhow::Result<Result<bool, ExecutionResult>> {
-    if !exclude_args.is_empty() {
-        apply_patch_with_exclusions(worktree_path, patch_path, exclude_args).await
+    if filtered {
+        apply_patch_with_exclusions(worktree_path, batches).await
     } else {
-        apply_patch_without_exclusions(worktree_path, patch_path).await
+        apply_patch_without_exclusions(worktree_path, patch_path, batches).await
     }
 }
 
@@ -1581,7 +1378,8 @@ async fn push_new_branch(
         token,
         connection_type,
     )
-    .json(&push_body)
+    .header("Content-Type", "application/json")
+    .body(super::pr_patch::request_bytes(&push_body)?)
     .send()
     .await
     .context("Failed to push changes")?;
@@ -1591,7 +1389,7 @@ async fn push_new_branch(
     }
 
     let status = push_response.status();
-    let body = push_response.text().await.unwrap_or_default();
+    let body = push_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
 
     // Handle TOCTOU branch collision: retry once with a new random suffix
     if status.as_u16() == 409 || (status.as_u16() == 400 && body.contains("already exists")) {
@@ -1609,14 +1407,15 @@ async fn push_new_branch(
             token,
             connection_type,
         )
-        .json(&retry_body)
+        .header("Content-Type", "application/json")
+        .body(super::pr_patch::request_bytes(&retry_body)?)
         .send()
         .await
         .context("Failed to push changes (retry)")?;
 
         if !retry_response.status().is_success() {
             let retry_status = retry_response.status();
-            let retry_body_text = retry_response.text().await.unwrap_or_default();
+            let retry_body_text = retry_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             warn!(
                 "Retry push also failed: {} - {}",
                 retry_status, retry_body_text
@@ -1877,283 +1676,6 @@ async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
     }
 }
 
-/// Collect file changes from a worktree based on git status output
-///
-/// Parses git status --porcelain output and reads file contents to build
-/// ADO Push API change objects with full file content.
-async fn collect_changes_from_worktree(
-    worktree_path: &std::path::Path,
-    status_output: &str,
-) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
-    let mut changes = Vec::new();
-    let mut skipped_symlinks: Vec<String> = Vec::new();
-
-    for line in status_output.lines() {
-        if line.len() < 3 {
-            continue;
-        }
-
-        let status_code = &line[0..2];
-        let file_path = line[3..].trim();
-
-        // Skip empty paths
-        if file_path.is_empty() {
-            continue;
-        }
-
-        // Validate path for security
-        validate_single_path(file_path)?;
-
-        let full_path = worktree_path.join(file_path);
-
-        match status_code {
-            // Deleted files
-            " D" | "D " | "DD" => {
-                changes.push(serde_json::json!({
-                    "changeType": "delete",
-                    "item": {
-                        "path": format!("/{}", file_path)
-                    }
-                }));
-            }
-            // New/untracked files
-            "??" | "A " | " A" | "AM" => {
-                push_file_change_skipping_symlinks(
-                    &mut changes,
-                    &mut skipped_symlinks,
-                    "add",
-                    file_path,
-                    &full_path,
-                )
-                .await?;
-            }
-            // Modified files
-            " M" | "M " | "MM" => {
-                push_file_change_skipping_symlinks(
-                    &mut changes,
-                    &mut skipped_symlinks,
-                    "edit",
-                    file_path,
-                    &full_path,
-                )
-                .await?;
-            }
-            // Renamed files - format is "R  old_path -> new_path"
-            // For "RM" (renamed + modified), we emit both a rename and an edit change.
-            // The ADO Pushes API processes changes sequentially within a single push,
-            // so the rename establishes the file at the new path, then the edit updates
-            // its content — this is the correct way to express rename-with-modification.
-            "R " | " R" | "RM" => {
-                if let Some((old_path, new_path)) = file_path.split_once(" -> ") {
-                    validate_single_path(old_path.trim())?;
-                    validate_single_path(new_path.trim())?;
-
-                    changes.push(serde_json::json!({
-                        "changeType": "rename",
-                        "sourceServerItem": format!("/{}", old_path.trim()),
-                        "item": {
-                            "path": format!("/{}", new_path.trim())
-                        }
-                    }));
-
-                    // If status is "RM" (renamed + modified), also emit content
-                    if status_code == "RM" {
-                        let new_path_trimmed = new_path.trim();
-                        let new_full_path = worktree_path.join(new_path_trimmed);
-                        push_file_change_skipping_symlinks(
-                            &mut changes,
-                            &mut skipped_symlinks,
-                            "edit",
-                            new_path_trimmed,
-                            &new_full_path,
-                        )
-                        .await?;
-                    }
-                }
-            }
-            // Other statuses - try to handle as edit if file exists
-            _ => {
-                push_file_change_skipping_symlinks(
-                    &mut changes,
-                    &mut skipped_symlinks,
-                    "edit",
-                    file_path,
-                    &full_path,
-                )
-                .await?;
-            }
-        }
-    }
-
-    Ok((changes, skipped_symlinks))
-}
-
-/// Collect file changes from a git diff-tree --name-status output.
-///
-/// Used when git am has already committed the changes. Parses the output format:
-/// `M\tpath`, `A\tpath`, `D\tpath`, `R100\told_path\tnew_path`
-async fn collect_changes_from_diff_tree(
-    worktree_path: &std::path::Path,
-    diff_tree_output: &str,
-) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
-    let mut changes = Vec::new();
-    let mut skipped_symlinks: Vec<String> = Vec::new();
-
-    for line in diff_tree_output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-
-        let status_code = parts[0];
-        let file_path = parts[1];
-
-        // Validate path for security
-        validate_single_path(file_path)?;
-
-        let full_path = worktree_path.join(file_path);
-
-        if status_code == "D" {
-            // Deleted file
-            changes.push(serde_json::json!({
-                "changeType": "delete",
-                "item": {
-                    "path": format!("/{}", file_path)
-                }
-            }));
-        } else if status_code == "A" {
-            // Added file
-            push_file_change_skipping_symlinks(
-                &mut changes,
-                &mut skipped_symlinks,
-                "add",
-                file_path,
-                &full_path,
-            )
-            .await?;
-        } else if status_code.starts_with('R') && parts.len() >= 3 {
-            // Renamed file: R100\told_path\tnew_path
-            let old_path = file_path;
-            let new_path = parts[2];
-            // old_path (= file_path) is already validated above
-            validate_single_path(new_path)?;
-
-            // Emit the rename
-            changes.push(serde_json::json!({
-                "changeType": "rename",
-                "sourceServerItem": format!("/{}", old_path),
-                "item": {
-                    "path": format!("/{}", new_path)
-                }
-            }));
-
-            // If the file was also modified (similarity < 100), emit an edit with content
-            let new_full_path = worktree_path.join(new_path);
-            if status_code != "R100" {
-                push_file_change_skipping_symlinks(
-                    &mut changes,
-                    &mut skipped_symlinks,
-                    "edit",
-                    new_path,
-                    &new_full_path,
-                )
-                .await?;
-            }
-        } else if status_code.starts_with('C') && parts.len() >= 3 {
-            // Copied file: C100\tsrc_path\tdest_path
-            let dest_path = parts[2];
-            validate_single_path(dest_path)?;
-
-            let dest_full_path = worktree_path.join(dest_path);
-            push_file_change_skipping_symlinks(
-                &mut changes,
-                &mut skipped_symlinks,
-                "add",
-                dest_path,
-                &dest_full_path,
-            )
-            .await?;
-        } else {
-            // Modified or other — read current content
-            push_file_change_skipping_symlinks(
-                &mut changes,
-                &mut skipped_symlinks,
-                "edit",
-                file_path,
-                &full_path,
-            )
-            .await?;
-        }
-    }
-
-    Ok((changes, skipped_symlinks))
-}
-
-/// Push a file change into `changes`, skipping symlinks with a warning.
-///
-/// Centralizes the "regular file → read & push; symlink → warn & skip; other → ignore"
-/// logic used in multiple places when collecting changes from a worktree or diff tree.
-/// Uses `symlink_metadata` so symlinks are detected without being followed — this is
-/// the primary defense against symlink-following exfiltration attacks in Stage 3.
-///
-/// Skipped symlink paths are appended to `skipped_symlinks` so the caller can surface
-/// them in the PR description (the agent that produced the PR would otherwise have no
-/// way to see that some of its intended file content was dropped).
-async fn push_file_change_skipping_symlinks(
-    changes: &mut Vec<serde_json::Value>,
-    skipped_symlinks: &mut Vec<String>,
-    change_type: &str,
-    file_path: &str,
-    full_path: &std::path::Path,
-) -> anyhow::Result<()> {
-    // Note: there is a theoretical TOCTOU window between the symlink_metadata
-    // (lstat) call below and the subsequent tokio::fs::read inside
-    // read_file_change (which follows symlinks). A concurrent rename(2) could
-    // swap a regular file for a symlink between the two syscalls. This is not
-    // exploitable in Stage 3's deployment model: the worktree has no concurrent
-    // writer (the agent's patch has already been applied; only this serial
-    // collector reads from it). Closing the window fully would require platform-
-    // specific O_NOFOLLOW open syscalls, which is overkill given the threat
-    // model. If that ever changes, switch to opening the fd here with
-    // O_NOFOLLOW and reading from the fd inside read_file_change.
-    match tokio::fs::symlink_metadata(full_path).await {
-        Ok(meta) if meta.file_type().is_file() => {
-            changes.push(read_file_change(change_type, file_path, full_path).await?);
-        }
-        Ok(meta) if meta.file_type().is_symlink() => {
-            warn!(
-                "Skipping symlink in worktree: {} (symlink-following attack prevention)",
-                file_path
-            );
-            skipped_symlinks.push(file_path.to_string());
-        }
-        Ok(_) => {
-            // Not a regular file (e.g. directory, fifo, socket) — silently skip.
-        }
-        Err(e) => {
-            // NotFound is a normal transient condition (worktree mid-rebase, file
-            // already pruned by git apply, etc.). Anything else — most notably
-            // PermissionDenied — is unusual and worth flagging at warn for triage.
-            if e.kind() == std::io::ErrorKind::NotFound {
-                debug!("File no longer present for {} — skipping", file_path);
-            } else {
-                warn!(
-                    "Failed to read metadata for {}: {} (kind={:?}) — skipping",
-                    file_path,
-                    e,
-                    e.kind()
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 /// If any symlinks were skipped during PR file collection, append a clearly
 /// marked notice to the PR description so the agent/author can see that some
 /// intended content was deliberately dropped.
@@ -2220,126 +1742,6 @@ fn sanitize_path_for_markdown(path: &str) -> String {
         .collect()
 }
 
-/// Read a file and produce an ADO push change entry.
-/// Handles both text (rawtext) and binary (base64encoded) content.
-async fn read_file_change(
-    change_type: &str,
-    file_path: &str,
-    full_path: &std::path::Path,
-) -> anyhow::Result<serde_json::Value> {
-    let bytes = tokio::fs::read(full_path)
-        .await
-        .with_context(|| format!("Failed to read file: {}", file_path))?;
-
-    // Try UTF-8 first; fall back to base64 for binary files
-    match String::from_utf8(bytes.clone()) {
-        Ok(content) => Ok(serde_json::json!({
-            "changeType": change_type,
-            "item": {
-                "path": format!("/{}", file_path)
-            },
-            "newContent": {
-                "content": content,
-                "contentType": "rawtext"
-            }
-        })),
-        Err(_) => {
-            use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            Ok(serde_json::json!({
-                "changeType": change_type,
-                "item": {
-                    "path": format!("/{}", file_path)
-                },
-                "newContent": {
-                    "content": encoded,
-                    "contentType": "base64encoded"
-                }
-            }))
-        }
-    }
-}
-///
-/// Security checks:
-/// - No path traversal (..)
-/// - No .git directory modifications
-/// - No absolute paths
-/// - No null bytes
-/// - No symlink entries (mode 120000)
-fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
-    let mut in_diff = false;
-    for line in patch_content.lines() {
-        // Only validate paths within diff blocks, not commit message bodies.
-        // format-patch output includes commit messages before each diff section.
-        if line.starts_with("diff --git") {
-            in_diff = true;
-            // Extract paths using strip_prefix for correct handling of spaces
-            if let Some(rest) = line.strip_prefix("diff --git a/") {
-                // The b/ path starts after the last " b/" — but for simple validation,
-                // validate the a/ path (everything before " b/") and the b/ path
-                if let Some((a_path, b_path)) = rest.rsplit_once(" b/") {
-                    validate_single_path(a_path.trim_matches('"'))?;
-                    validate_single_path(b_path.trim_matches('"'))?;
-                }
-            }
-            continue;
-        }
-        // Reset on commit envelope boundaries
-        if line.starts_with("From ") && in_diff {
-            in_diff = false;
-            continue;
-        }
-        if !in_diff {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("--- a/") {
-            let path = rest.trim().trim_matches('"');
-            validate_single_path(path)?;
-        } else if let Some(rest) = line.strip_prefix("+++ b/") {
-            let path = rest.trim().trim_matches('"');
-            validate_single_path(path)?;
-        } else if line.starts_with("--- /dev/null") || line.starts_with("+++ /dev/null") {
-            // New or deleted files — no path to validate
-        } else if line.starts_with("rename from ")
-            || line.starts_with("rename to ")
-            || line.starts_with("copy from ")
-            || line.starts_with("copy to ")
-        {
-            let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
-            validate_single_path(path)?;
-        }
-        // Only consider this a real header line if it has no leading
-        // whitespace — diff context lines are space-prefixed, so a line
-        // body of "new file mode 120000" inside a hunk would look identical
-        // to a real mode header after trim(). Real git header lines never
-        // start with whitespace; we require the same here to avoid false
-        // positives on adversarial-but-benign diff content. Added (+)/
-        // removed (-) lines start with a non-whitespace prefix that
-        // survives trim() and so cannot match the exact mode-line strings.
-        let is_symlink_mode_header = {
-            let starts_with_ws = line.chars().next().is_some_and(|c| c.is_whitespace());
-            let trimmed = line.trim();
-            !starts_with_ws && (trimmed == "new file mode 120000" || trimmed == "new mode 120000")
-        };
-        if is_symlink_mode_header {
-            // Reject patch lines that INTRODUCE a symlink (git mode 120000).
-            // Either of these lines means the resulting tree contains a symlink:
-            //   - "new file mode 120000" — a freshly added symlink
-            //   - "new mode 120000"      — an existing file converted to a symlink
-            // A symlink in the worktree could make Stage 3 follow it to arbitrary
-            // filesystem paths (e.g. /proc/self/environ) when collecting file
-            // changes to upload to ADO.
-            //
-            // We deliberately do NOT reject "old mode 120000" on its own: a patch
-            // with "old mode 120000" + "new mode 100644" converts a symlink into a
-            // regular file, which is a legitimate cleanup operation and produces a
-            // safe worktree.
-            anyhow::bail!("Patch introduces a symlink (mode 120000), which is not allowed");
-        }
-    }
-    Ok(())
-}
-
 /// Truncate an error response body to avoid embedding large or sensitive content.
 fn truncate_error_body(body: &str, max_len: usize) -> &str {
     match body.char_indices().nth(max_len) {
@@ -2356,78 +1758,13 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
 /// Patterns without `/` are treated as basename matches (e.g., `*.lock` matches
 /// `subdir/Cargo.lock`). Patterns with `**/` prefix match at any depth.
 /// Uses the `glob-match` crate for correct glob semantics (`*` does not cross `/`).
-fn glob_match_simple(pattern: &str, path: &str) -> bool {
+pub(crate) fn glob_match_simple(pattern: &str, path: &str) -> bool {
     if !pattern.contains('/') {
         // Basename-only pattern: auto-prefix with **/ for any-depth matching
         let full_pattern = format!("**/{}", pattern);
         return glob_match::glob_match(&full_pattern, path);
     }
     glob_match::glob_match(pattern, path)
-}
-
-/// Validate a single file path for security issues.
-///
-/// Thin wrapper over the canonical [`crate::validate::validate_relative_safe_path`]
-/// primitive so all path-traversal / absolute / `.git` / null-byte / pipeline
-/// command checks live in one place.
-fn validate_single_path(path: &str) -> anyhow::Result<()> {
-    crate::validate::validate_relative_safe_path(path, "path")
-}
-
-/// Extract all file paths from a patch/diff content.
-/// Returns deduplicated list of file paths referenced in the patch (both source and destination).
-/// Uses `--- a/` and `+++ b/` lines for robust parsing (handles quoted paths
-/// with spaces that break `diff --git` header parsing via split_whitespace).
-fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let mut in_diff = false;
-    for line in patch_content.lines() {
-        // Only extract paths after the first diff --git header to avoid
-        // false positives from commit messages that quote patch fragments
-        if line.starts_with("diff --git") {
-            in_diff = true;
-            continue;
-        }
-        if !in_diff {
-            continue;
-        }
-        // A new commit envelope resets — skip until next diff --git
-        if line.starts_with("From ") {
-            in_diff = false;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("--- a/") {
-            let path = rest.trim().trim_matches('"');
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("+++ b/") {
-            let path = rest.trim().trim_matches('"');
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        } else if line.starts_with("rename from ")
-            || line.starts_with("rename to ")
-            || line.starts_with("copy from ")
-            || line.starts_with("copy to ")
-        {
-            // "rename from <path>" / "rename to <path>"
-            let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
-/// Count the number of distinct files changed in a patch.
-/// Reuses `extract_paths_from_patch` which correctly handles quoted paths,
-/// renames, copies, and multi-commit deduplication.
-fn count_patch_files(patch_content: &str) -> usize {
-    extract_paths_from_patch(patch_content).len()
 }
 
 /// Check if any file paths in the patch are protected.
@@ -2439,7 +1776,7 @@ fn count_patch_files(patch_content: &str) -> usize {
 /// - Access control files (CODEOWNERS)
 ///
 /// Returns a list of protected file paths found, or empty vec if none.
-fn find_protected_files(paths: &[String]) -> Vec<String> {
+pub(crate) fn find_protected_files(paths: &[String]) -> Vec<String> {
     let mut protected = Vec::new();
     for path in paths {
         let lower_path = path.to_lowercase();
@@ -2481,6 +1818,120 @@ fn find_protected_files(paths: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::safe_outputs::ToolResult;
+
+    #[tokio::test]
+    async fn creation_uses_shared_patch_selection_blobs_and_verified_parent() {
+        use crate::safe_outputs::pr_patch::tests::{command, movement, repository};
+        use std::sync::{Arc, Mutex};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, query_param}};
+        for case in ["copy", "rename-edit", "crlf", "excluded-copy", "series", "filtered-series", "base-drift", "unrelated-base", "prefix-ref"] {
+            let (repo, base) = repository(&[("old.txt", b"base\n"), ("nested/secret.txt", b"excluded\n"), ("keep.txt", b"old\n")]);
+            let mut current = base.clone();
+            let mut text = match case {
+                "copy" => movement("copy", "old.txt", "new.txt"),
+                "rename-edit" => movement("rename", "old.txt", "new.txt")
+                    + "--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-base\n+changed\n",
+                "excluded-copy" => movement("copy", "nested/secret.txt", "public.txt")
+                    + "diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ b/old.txt\n@@ -1 +1 @@\n-base\n+changed\n",
+                _ => "diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ b/old.txt\n@@ -1 +1 @@\n-base\n+changed\n".into(),
+            };
+            if case == "crlf" { command(repo.path(), &["config", "core.autocrlf", "true"]); }
+            if case == "series" || case == "filtered-series" {
+                for content in ["first\n", "changed\n"] {
+                    std::fs::write(repo.path().join("old.txt"), content).unwrap();
+                    command(repo.path(), &["add", "old.txt"]);
+                    command(repo.path(), &["commit", "--quiet", "-m", content.trim()]);
+                }
+                let output = std::process::Command::new("git")
+                    .args(["format-patch", "--full-index", "--stdout", &format!("{base}..HEAD")])
+                    .current_dir(repo.path()).output().unwrap();
+                assert!(output.status.success());
+                text = String::from_utf8(output.stdout).unwrap();
+                command(repo.path(), &["checkout", "--detach", base.as_str()]);
+            }
+            if case == "base-drift" {
+                std::fs::write(repo.path().join("keep.txt"), "target changed\n").unwrap();
+                command(repo.path(), &["add", "keep.txt"]);
+                command(repo.path(), &["commit", "--quiet", "-m", "advance target"]);
+                current = crate::secure::CommitSha::parse(command(repo.path(), &["rev-parse", "HEAD"])).unwrap();
+            }
+            let recorded = if case == "unrelated-base" { "f".repeat(40) } else { base.to_string() };
+            let original_refs = command(repo.path(), &["show-ref"]);
+            let original_index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let original_status = command(repo.path(), &["status", "--porcelain"]);
+            let server = MockServer::start().await;
+            let api = "/P/_apis/git/repositories/repo";
+            Mock::given(method("GET")).and(path(format!("{api}/refs"))).and(query_param("filter", "heads/main"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value":[{"name":"refs/heads/main","objectId":current}]
+                }))).mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("{api}/refs")))
+                .and(query_param("filter", format!("heads/agent/{case}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": if case == "prefix-ref" {
+                        vec![serde_json::json!({"name":"refs/heads/agent/prefix-ref-target", "objectId":base})]
+                    } else { vec![] }
+                })))
+                .mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("{api}/diffs/commits")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "baseCommit":recorded,"targetCommit":current,"commonCommit":base
+                }))).mount(&server).await;
+            let pushes = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+            let observed = pushes.clone();
+            Mock::given(method("POST")).and(path(format!("{api}/pushes")))
+                .respond_with(move |request: &wiremock::Request| {
+                    observed.lock().unwrap().push(serde_json::from_slice(&request.body).unwrap());
+                    ResponseTemplate::new(201).set_body_json(serde_json::json!({"pushId":1}))
+                }).mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("{api}/pullrequests")))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "pullRequestId":7,"url":"https://example.test/pr/7"
+                }))).mount(&server).await;
+            let output = tempfile::tempdir().unwrap();
+            std::fs::write(output.path().join("changes.patch"), &text).unwrap();
+            let mut ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()), ado_organization: Some("org".into()),
+                ado_project: Some("P".into()), repository_name: Some("repo".into()),
+                repository_provider: Some("TfsGit".into()), access_token: Some("token".into()),
+                source_directory: repo.path().into(), self_repository_directory: repo.path().into(),
+                working_directory: output.path().into(), ..Default::default()
+            };
+            ctx.tool_configs.insert("create-pull-request".into(), serde_json::json!({
+                "include-stats":false, "excluded-files":if case == "excluded-copy" || case == "filtered-series" { vec!["secret.txt"] } else { vec![] }
+            }));
+            let result = crate::execute::execute_safe_output(&serde_json::json!({
+                "name":"create-pull-request", "title":"Patch fixture", "description":"A validated code change.",
+                "source_branch":format!("agent/{case}"), "repository":"self", "temporary_id":"#aw_fixture",
+                "patch_file":"changes.patch", "patch_sha256":crate::hash::sha256_hex(text.as_bytes()),
+                "base_commit":recorded
+            }), &ctx).await;
+            assert_eq!(command(repo.path(), &["show-ref"]), original_refs, "{case}");
+            assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), original_index, "{case}");
+            assert_eq!(command(repo.path(), &["status", "--porcelain"]), original_status, "{case}");
+            if case == "unrelated-base" {
+                assert!(result.is_err());
+                assert!(pushes.lock().unwrap().is_empty());
+                assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() == "GET"));
+                continue;
+            }
+            let (_, result) = result.unwrap();
+            assert!(result.success, "{case}: {}", result.message);
+            let pushes = pushes.lock().unwrap();
+            assert_eq!(pushes.len(), 1, "{case}");
+            assert_eq!(pushes[0]["refUpdates"][0]["name"], format!("refs/heads/agent/{case}"));
+            assert_eq!(pushes[0]["commits"][0]["parents"], serde_json::json!([base]));
+            let changes = pushes[0]["commits"][0]["changes"].as_array().unwrap();
+            let unique = changes.iter().map(|change| change["item"]["path"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(unique.len(), changes.len(), "ADO allows one operation per path: {case}");
+            let content = changes.iter().find(|change| change.get("newContent").is_some()).unwrap();
+            assert_eq!(content["newContent"]["content"], if case == "copy" { "base\n" } else { "changed\n" }, "{case}");
+            if case == "excluded-copy" {
+                assert!(changes.iter().all(|change| change["item"]["path"] == "/old.txt"));
+                assert_eq!(result.data.unwrap()["omitted_operations"][0]["operation"], "copy");
+            }
+        }
+    }
 
     #[test]
     fn test_validate_params_valid() {
@@ -2913,7 +2364,7 @@ mod tests {
     #[test]
     fn test_validate_patch_paths_valid() {
         let patch = r#"diff --git a/src/main.rs b/src/main.rs
-index 1234567..abcdefg 100644
+index 1234567..abcdef0 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -1,3 +1,4 @@
@@ -2922,7 +2373,7 @@ index 1234567..abcdefg 100644
      println!("World");
  }
 "#;
-        assert!(validate_patch_paths(patch).is_ok());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_ok());
     }
 
     #[test]
@@ -2936,7 +2387,7 @@ index 0000000..1234567
 +Hello
 +World
 "#;
-        assert!(validate_patch_paths(patch).is_ok());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_ok());
     }
 
     #[test]
@@ -2945,7 +2396,7 @@ index 0000000..1234567
 --- a/../../../etc/passwd
 +++ b/../../../etc/passwd
 "#;
-        assert!(validate_patch_paths(patch).is_err());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err());
     }
 
     #[test]
@@ -2957,7 +2408,7 @@ new file mode 100755
 @@ -0,0 +1 @@
 +#!/bin/bash
 "#;
-        assert!(validate_patch_paths(patch).is_err());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err());
     }
 
     #[test]
@@ -2966,7 +2417,7 @@ new file mode 100755
 --- a//etc/passwd
 +++ b//etc/passwd
 "#;
-        assert!(validate_patch_paths(patch).is_err());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err());
     }
 
     #[test]
@@ -2977,7 +2428,7 @@ new file mode 100755
         let patch = "diff --git a/old b/new\n\
                      rename from some dir/../.git/config\n\
                      rename to new name\n";
-        let result = validate_patch_paths(patch);
+        let result = super::super::pr_patch::inspected_paths((patch).as_bytes());
         assert!(
             result.is_err(),
             "rename with spaces and traversal should be rejected"
@@ -2987,7 +2438,7 @@ new file mode 100755
         let patch_copy = "diff --git a/old b/new\n\
                           copy from some dir/../.git/config\n\
                           copy to new name\n";
-        let result_copy = validate_patch_paths(patch_copy);
+        let result_copy = super::super::pr_patch::inspected_paths((patch_copy).as_bytes());
         assert!(
             result_copy.is_err(),
             "copy with spaces and traversal should be rejected"
@@ -3000,7 +2451,7 @@ new file mode 100755
         // This is the primary attack vector for symlink exfiltration of Stage 3 secrets.
         let patch = r#"diff --git a/secrets.txt b/secrets.txt
 new file mode 120000
-index 0000000..abcdefg
+index 0000000..abcdef0
 --- /dev/null
 +++ b/secrets.txt
 @@ -0,0 +1 @@
@@ -3008,7 +2459,7 @@ index 0000000..abcdefg
 \ No newline at end of file
 "#;
         assert!(
-            validate_patch_paths(patch).is_err(),
+            super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err(),
             "patch with symlink mode 120000 should be rejected"
         );
     }
@@ -3020,7 +2471,7 @@ index 0000000..abcdefg
                      old mode 100644\n\
                      new mode 120000\n";
         assert!(
-            validate_patch_paths(patch).is_err(),
+            super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err(),
             "patch that introduces symlink via mode change should be rejected"
         );
     }
@@ -3040,7 +2491,7 @@ index 0000000..abcdefg
                      -/etc/passwd\n\
                      +hello world\n";
         assert!(
-            validate_patch_paths(patch).is_ok(),
+            super::super::pr_patch::inspected_paths((patch).as_bytes()).is_ok(),
             "patch converting symlink → regular file should be allowed"
         );
     }
@@ -3054,7 +2505,7 @@ index 0000000..abcdefg
                      --- a/link\n\
                      +++ /dev/null\n";
         assert!(
-            validate_patch_paths(patch).is_ok(),
+            super::super::pr_patch::inspected_paths((patch).as_bytes()).is_ok(),
             "patch deleting an existing symlink should be allowed"
         );
     }
@@ -3068,7 +2519,7 @@ index 0000000..abcdefg
         // padding.
         let patch_trailing_ws = "diff --git a/x b/x\nnew file mode 120000 \n";
         assert!(
-            validate_patch_paths(patch_trailing_ws).is_err(),
+            super::super::pr_patch::inspected_paths((patch_trailing_ws).as_bytes()).is_err(),
             "trailing whitespace must not let a symlink mode line bypass the check"
         );
 
@@ -3076,7 +2527,7 @@ index 0000000..abcdefg
         // not bypass.
         let patch_crlf = "diff --git a/x b/x\nnew file mode 120000\r\n";
         assert!(
-            validate_patch_paths(patch_crlf).is_err(),
+            super::super::pr_patch::inspected_paths((patch_crlf).as_bytes()).is_err(),
             "trailing \\r must not let a symlink mode line bypass the check"
         );
 
@@ -3098,7 +2549,7 @@ index 0000000..abcdefg
             + " new file mode 120000\n"
             + " keep line\n";
         assert!(
-            validate_patch_paths(&patch_context_line).is_ok(),
+            super::super::pr_patch::inspected_paths(patch_context_line.as_bytes()).is_ok(),
             "diff context line containing the mode string as data must not be rejected"
         );
 
@@ -3113,7 +2564,7 @@ index 0000000..abcdefg
                             -count: 1200000\n\
                             +count: 1200001\n";
         assert!(
-            validate_patch_paths(patch_benign).is_ok(),
+            super::super::pr_patch::inspected_paths((patch_benign).as_bytes()).is_ok(),
             "patch body lines containing '120000' as data must not be rejected"
         );
     }
@@ -3214,36 +2665,36 @@ index 0000000..abcdefg
 
     #[test]
     fn test_validate_single_path_valid() {
-        assert!(validate_single_path("src/main.rs").is_ok());
-        assert!(validate_single_path("deeply/nested/path/file.txt").is_ok());
-        assert!(validate_single_path("file.txt").is_ok());
+        assert!(crate::secure::RelativeSafePath::parse("src/main.rs").is_ok());
+        assert!(crate::secure::RelativeSafePath::parse("deeply/nested/path/file.txt").is_ok());
+        assert!(crate::secure::RelativeSafePath::parse("file.txt").is_ok());
     }
 
     #[test]
     fn test_validate_single_path_traversal() {
-        assert!(validate_single_path("../secret.txt").is_err());
-        assert!(validate_single_path("foo/../bar").is_err());
-        assert!(validate_single_path("foo/bar/../../baz").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("../secret.txt").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("foo/../bar").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("foo/bar/../../baz").is_err());
     }
 
     #[test]
     fn test_validate_single_path_git_dir() {
-        assert!(validate_single_path(".git").is_err());
-        assert!(validate_single_path(".git/config").is_err());
-        assert!(validate_single_path(".git/hooks/pre-commit").is_err());
-        assert!(validate_single_path(".GIT/config").is_err()); // case insensitive
+        assert!(crate::secure::RelativeSafePath::parse(".git").is_err());
+        assert!(crate::secure::RelativeSafePath::parse(".git/config").is_err());
+        assert!(crate::secure::RelativeSafePath::parse(".git/hooks/pre-commit").is_err());
+        assert!(crate::secure::RelativeSafePath::parse(".GIT/config").is_err()); // case insensitive
     }
 
     #[test]
     fn test_validate_single_path_absolute() {
-        assert!(validate_single_path("/etc/passwd").is_err());
-        assert!(validate_single_path("\\Windows\\System32").is_err());
-        assert!(validate_single_path("C:\\Windows").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("/etc/passwd").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("\\Windows\\System32").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("C:\\Windows").is_err());
     }
 
     #[test]
     fn test_validate_single_path_null_byte() {
-        assert!(validate_single_path("file\0.txt").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("file\0.txt").is_err());
     }
 
     // ─── Protected files detection ──────────────────────────────────────────
@@ -3369,27 +2820,27 @@ index 0000000..abcdefg
 
     #[test]
     fn test_extract_paths_from_patch() {
-        let patch = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def\n--- a/src/main.rs\n+++ b/src/main.rs\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n";
-        let paths = extract_paths_from_patch(patch);
-        assert!(paths.contains(&"src/main.rs".to_string()));
-        assert!(paths.contains(&"README.md".to_string()));
+        let patch = "diff --git a/src/main.rs b/src/main.rs\nindex abc1234..def1234\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
+        let paths = super::super::pr_patch::inspected_paths((patch).as_bytes()).unwrap();
+        assert!(paths.contains("src/main.rs"));
+        assert!(paths.contains("README.md"));
     }
 
     #[test]
     fn test_extract_paths_from_patch_with_spaces() {
-        let patch = "diff --git \"a/path with spaces/file.txt\" \"b/path with spaces/file.txt\"\n--- a/path with spaces/file.txt\n+++ b/path with spaces/file.txt\n";
-        let paths = extract_paths_from_patch(patch);
-        assert!(paths.contains(&"path with spaces/file.txt".to_string()));
+        let patch = "diff --git \"a/path with spaces/file.txt\" \"b/path with spaces/file.txt\"\n--- a/path with spaces/file.txt\n+++ b/path with spaces/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let paths = super::super::pr_patch::inspected_paths((patch).as_bytes()).unwrap();
+        assert!(paths.contains("path with spaces/file.txt"));
     }
 
     #[test]
     fn test_extract_paths_new_file() {
         let patch =
             "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n";
-        let paths = extract_paths_from_patch(patch);
-        assert!(paths.contains(&"new.txt".to_string()));
+        let paths = super::super::pr_patch::inspected_paths((patch).as_bytes()).unwrap();
+        assert!(paths.contains("new.txt"));
         // /dev/null from --- should not be included (no a/ prefix)
-        assert!(!paths.contains(&"/dev/null".to_string()));
+        assert!(!paths.contains("/dev/null"));
     }
 
     #[test]
@@ -3529,6 +2980,7 @@ index 0000000..abcdefg
             ado_organization: Some("test".to_string()),
             ado_project: Some("TestProject".to_string()),
             ado_project_id: None,
+            pipeline_collection_uri: None,
             access_token: Some("fake-token".to_string()),
             github_token: None,
             github_actor_login: None,
@@ -3565,6 +3017,8 @@ index 0000000..abcdefg
             resolved_pull_requests: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            budget_groups: Default::default(),
+            triggering_pr: Default::default(),
             triggered_by_build_id: None,
             triggered_by_definition_name: None,
             triggered_by_build_number: None,

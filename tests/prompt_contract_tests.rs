@@ -142,3 +142,59 @@ fn authoring_prompts_keep_expected_output_contracts() {
         );
     }
 }
+
+#[test]
+fn authoring_prompts_separate_pr_conversations_reviews_and_votes() {
+    for rel in [
+        "prompts/create-ado-agentic-workflow.md",
+        "prompts/update-ado-agentic-workflow.md",
+    ] {
+        let content = read(rel);
+        for required in [
+            "`add-pull-request-comment`",
+            "`submit-pull-request-review`",
+            "`comment` is non-voting",
+            "`reset` explicitly clears",
+            "never buffered",
+            "`max-comments`",
+            "`expected_head_sha`",
+            "`update-pull-request-comment`",
+        ] {
+            assert!(content.contains(required), "{rel} is missing PR intent contract {required}");
+        }
+    }
+}
+
+#[test]
+fn repository_workflow_subagents_inherit_model_selection() {
+    let mut subagents = Vec::new();
+    for entry in fs::read_dir(repo_path(".github/workflows")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+            continue;
+        }
+        let content = fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+        for block in content.split("\n## agent: ").skip(1) {
+            let (name, body) = block.split_once('\n').expect("inline agent heading");
+            let front_matter = body
+                .strip_prefix("---\n")
+                .and_then(|body| body.split_once("\n---").map(|(front_matter, _)| front_matter))
+                .expect("inline agent front matter");
+            let config: serde_yaml::Mapping = serde_yaml::from_str(front_matter).unwrap();
+            assert!(
+                !config.contains_key(serde_yaml::Value::String("model".into())),
+                "{}: {name} must inherit runtime model selection, not override it",
+                path.display()
+            );
+            assert!(
+                content.contains("Do not specify a model or model alias when launching"),
+                "{} must prevent launch-time model overrides",
+                path.display()
+            );
+            subagents.push(name.to_string());
+        }
+    }
+    for name in ["`rust-critic`", "`ts-critic`", "`pr-processor`"] {
+        assert!(subagents.iter().any(|agent| agent == name), "missing inline agent {name}");
+    }
+}

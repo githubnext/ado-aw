@@ -7,6 +7,7 @@
 #[cfg(test)]
 mod integration_tests;
 pub mod merge;
+pub(crate) mod pr_policy;
 pub mod schema;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};

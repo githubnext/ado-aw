@@ -23,6 +23,64 @@ describe("exec-context-pr-synth main", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
+  it("emits the complete native identity from Build.Repository rather than self or fork source", async () => {
+    const {output} = await runMain(makeEnv({
+      BUILD_REASON: "PullRequest", SYSTEM_PULLREQUEST_PULLREQUESTID: "42",
+      ADO_AW_SELF_REPOSITORY_NAME: "templates",
+      SYSTEM_PULLREQUEST_SOURCEREPOSITORYURI: "https://dev.azure.com/fork/Elsewhere/_git/source",
+    }));
+    expect(output).toContain('AW_PR_TRIGGERING_IDENTITY;isOutput=true]{"collection_uri":"https://dev.azure.com/org/","project":"MyProject","repository_name":"target"');
+    expect(output).toContain('"repository_id":"00000000-0000-0000-0000-000000000000","id":"42"');
+    expect(mocked.listActivePullRequestsBySourceRef).not.toHaveBeenCalled();
+  });
+
+  it("emits the exact synthetic selection identity without another API lookup", async () => {
+    mocked.listActivePullRequestsBySourceRef.mockResolvedValue([
+      {pullRequestId:42,sourceRefName:"refs/heads/feature/x",targetRefName:"refs/heads/main",
+        repository:{id:"00000000-0000-0000-0000-000000000000"}},
+    ]);
+    const {output} = await runMain(makeEnv({PR_SYNTH_SPEC:build_pr_synth_spec()}));
+    expect(output).toContain('AW_PR_TRIGGERING_IDENTITY;isOutput=true]{"collection_uri":"https://dev.azure.com/org/"');
+    expect(output).toContain('"id":"42"');
+    expect(mocked.listActivePullRequestsBySourceRef).toHaveBeenCalledExactlyOnceWith("MyProject","00000000-0000-0000-0000-000000000000","refs/heads/feature/x");
+    expect(mocked.getPullRequestIterations).not.toHaveBeenCalled();
+  });
+
+  it("does not emit authority for missing, foreign, non-ADO or mismatched identities", async () => {
+    const invalid: Record<string, string>[] = [
+      {BUILD_REPOSITORY_URI:""},
+      {BUILD_REPOSITORY_ID:""},
+      {BUILD_REPOSITORY_PROVIDER:"GitHub"},
+      {SYSTEM_COLLECTIONURI:"https://dev.azure.com/foreign/"},
+    ];
+    for (const override of invalid) {
+      const {output} = await runMain(makeEnv({
+        BUILD_REASON:"PullRequest",SYSTEM_PULLREQUEST_PULLREQUESTID:"42",...override,
+      }));
+      expect(output).toContain("AW_PR_TRIGGERING_IDENTITY;isOutput=true]\n");
+      expect(output).not.toContain('AW_PR_TRIGGERING_IDENTITY;isOutput=true]{');
+    }
+    mocked.listActivePullRequestsBySourceRef.mockResolvedValue([
+      {pullRequestId:42,sourceRefName:"refs/heads/feature/x",targetRefName:"refs/heads/main",repository:{id:"foreign"}},
+    ]);
+    const {output} = await runMain(makeEnv({PR_SYNTH_SPEC:build_pr_synth_spec()}));
+    expect(output).toContain("AW_PR_TRIGGERING_IDENTITY;isOutput=true]\n");
+  });
+
+  it("looks up synthetic PRs in the trusted triggering repository project, not pipeline self project", async () => {
+    mocked.listActivePullRequestsBySourceRef.mockResolvedValue([
+      {pullRequestId:42,sourceRefName:"refs/heads/feature/x",targetRefName:"refs/heads/main",
+        repository:{id:"00000000-0000-0000-0000-000000000000",name:"target",project:{name:"Other"}}},
+    ]);
+    const {output} = await runMain(makeEnv({
+      SYSTEM_TEAMPROJECT:"PipelineProject",
+      BUILD_REPOSITORY_URI:"https://dev.azure.com/org/Other/_git/target",
+      PR_SYNTH_SPEC:build_pr_synth_spec(),
+    }));
+    expect(mocked.listActivePullRequestsBySourceRef).toHaveBeenCalledExactlyOnceWith("Other","00000000-0000-0000-0000-000000000000","refs/heads/feature/x");
+    expect(output).toContain('"project":"Other"');
+  });
+
   // ── Real-PR path ─────────────────────────────────────────────────
   //
   // On a real PR build, ADO populates `SYSTEM_PULLREQUEST_*` env vars

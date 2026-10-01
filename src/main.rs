@@ -257,9 +257,21 @@ enum Commands {
         /// definitions to register as dynamic MCP tools.
         #[arg(long = "custom-tools")]
         custom_tools: Option<PathBuf>,
+        #[arg(long, hide = true, default_value_t = safe_outputs::pr_patch::PatchSizeKiB::default())]
+        create_pull_request_max_patch_size: safe_outputs::pr_patch::PatchSizeKiB,
+        #[arg(long, hide = true, default_value_t = safe_outputs::pr_patch::PatchSizeKiB::default())]
+        push_to_pull_request_branch_max_patch_size: safe_outputs::pr_patch::PatchSizeKiB,
     },
     /// Run the author-facing MCP server over stdio (IDE/Copilot Chat integration)
     McpAuthor {},
+    /// Trusted pre-agent source snapshot preparation; never performs remote writes.
+    #[command(hide = true)]
+    PreparePrPush {
+        #[arg(long)]
+        resolved_config: PathBuf,
+        #[arg(long)]
+        snapshot_path: PathBuf,
+    },
     /// Execute safe outputs from Stage 1 (Stage 3 of the pipeline)
     Execute {
         /// Path to the source markdown file (used by built-in safe-output execution)
@@ -669,6 +681,7 @@ impl Commands {
             Commands::Mcp { .. } => "mcp",
             Commands::McpAuthor {} => "mcp-author",
             Commands::Execute { .. } => "execute",
+            Commands::PreparePrPush { .. } => "prepare-pr-push",
             Commands::Init { .. } => "init",
             Commands::Configure { .. } => "configure",
             Commands::Secrets { .. } => "secrets",
@@ -806,6 +819,8 @@ struct ResolvedExecutionConfig {
     #[serde(default)]
     tool_configs: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
+    budget_groups: compile::pr_migration::BudgetGroups,
+    #[serde(default)]
     repositories: Vec<ResolvedExecutionRepository>,
     #[serde(default)]
     checkout: Vec<String>,
@@ -890,6 +905,7 @@ async fn build_execution_context_from_resolved(
     }
     ctx.working_directory = safe_output_dir.to_path_buf();
     ctx.tool_configs = config.tool_configs.clone();
+    ctx.budget_groups = config.budget_groups.clone();
     crate::safe_outputs::configure_repository_write_context(
         &mut ctx,
         &config.checkout,
@@ -984,27 +1000,10 @@ async fn run_execute(options: RunExecuteOptions) -> Result<()> {
     }
 
     let source = source.context("--source or --resolved-config is required for execution")?;
-    // Read and parse source markdown to get tool configs.
-    // Use parse_markdown_detailed so Stage 3 benefits from in-memory
-    // codemod fixes when a source has deprecated shapes. Stage 3 must
-    // NOT rewrite the source file (the executor's working tree is not
-    // the source-of-truth tree), so we just emit a log warning.
-    let content = tokio::fs::read_to_string(&source)
+    // Match compile's effective imported policy without rewriting source/cache files.
+    let mut front_matter = compile::prepare_source_front_matter(&source)
         .await
-        .with_context(|| format!("Failed to read source file: {}", source.display()))?;
-
-    let parsed = compile::parse_markdown_detailed(&content)
-        .with_context(|| format!("Failed to parse source file: {}", source.display()))?;
-
-    if parsed.codemods.changed() {
-        log::warn!(
-            "front matter at {} contains deprecated shapes; running with in-memory codemod fixes applied. Run `ado-aw compile {}` to update the source.",
-            source.display(),
-            source.display(),
-        );
-    }
-
-    let mut front_matter = parsed.front_matter;
+        .with_context(|| format!("Failed to prepare source file: {}", source.display()))?;
 
     // Sanitize before lowering repos, mirroring compile_pipeline_inner
     // and check_pipeline so unsanitized fields never flow into the
@@ -1033,7 +1032,7 @@ async fn run_execute(options: RunExecuteOptions) -> Result<()> {
         ado_project,
         dry_run,
     )
-    .await;
+    .await?;
 
     let results = execute::execute_safe_outputs(&safe_output_dir, &ctx, &filter).await?;
 
@@ -1063,8 +1062,11 @@ async fn build_execution_context(
     ado_org_url: Option<String>,
     ado_project: Option<String>,
     dry_run: bool,
-) -> crate::safe_outputs::ExecutionContext {
-    let mut ctx = crate::safe_outputs::ExecutionContext::default();
+) -> Result<crate::safe_outputs::ExecutionContext> {
+    let mut ctx = crate::safe_outputs::ExecutionContext {
+        budget_groups: compile::pr_migration::budget_groups(&front_matter)?,
+        ..Default::default()
+    };
     // Only override env-derived values when CLI args are explicitly provided;
     // otherwise keep the defaults from SYSTEM_TEAMFOUNDATIONCOLLECTIONURI /
     // SYSTEM_TEAMPROJECT that ExecutionContext::default() already resolved.
@@ -1155,7 +1157,7 @@ async fn build_execution_context(
         log::debug!("No OTel stats file found at {}", otel_path.display());
     }
 
-    ctx
+    Ok(ctx)
 }
 
 async fn process_cache_memory(
@@ -1689,7 +1691,7 @@ async fn main() -> Result<()> {
     // Also skipped in CI environments to avoid unnecessary outbound calls.
     let is_pipeline_internal = matches!(
         command,
-        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpAuthor { .. }
+        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpAuthor { .. } | Commands::PreparePrPush { .. }
     );
     let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
         Some(tokio::spawn(update_check::check_for_update()))
@@ -1729,6 +1731,8 @@ async fn main() -> Result<()> {
             self_repository_directory,
             enabled_tools,
             custom_tools,
+            create_pull_request_max_patch_size,
+            push_to_pull_request_branch_max_patch_size,
         } => {
             let filter = if enabled_tools.is_empty() {
                 None
@@ -1741,11 +1745,22 @@ async fn main() -> Result<()> {
                 self_repository_directory.as_deref(),
                 filter.as_deref(),
                 custom_tools.as_deref(),
+                create_pull_request_max_patch_size,
+                push_to_pull_request_branch_max_patch_size,
             )
             .await?;
         }
         Commands::McpAuthor {} => {
             mcp_author::run_stdio().await?;
+        }
+        Commands::PreparePrPush { resolved_config, snapshot_path } => {
+            let config: ResolvedExecutionConfig = serde_json::from_slice(
+                &tokio::fs::read(&resolved_config).await.context("Failed to read PR source preparation config")?
+            ).context("Invalid PR source preparation config")?;
+            let ctx = build_execution_context_from_resolved(
+                &config, &std::env::current_dir()?, None, None, false,
+            ).await;
+            safe_outputs::push_to_pull_request_branch::prepare_agent(&ctx,&snapshot_path).await?;
         }
         Commands::Execute {
             source,
@@ -1848,6 +1863,26 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::is_github_remote;
+    use clap::Parser;
+
+    #[test]
+    fn mcp_patch_limits_are_validated_and_preserved_per_tool() {
+        let args = super::Args::try_parse_from([
+            "ado-aw", "mcp", "out", "repo",
+            "--create-pull-request-max-patch-size", "1",
+            "--push-to-pull-request-branch-max-patch-size", "10240",
+        ]).unwrap();
+        let Some(super::Commands::Mcp {
+            create_pull_request_max_patch_size, push_to_pull_request_branch_max_patch_size, ..
+        }) = args.command else { panic!("expected MCP command"); };
+        assert_eq!(create_pull_request_max_patch_size.bytes(), 1024);
+        assert_eq!(push_to_pull_request_branch_max_patch_size.bytes(), 10 * 1024 * 1024);
+        for value in ["0", "10241", "true", "1.5", "-1"] {
+            assert!(super::Args::try_parse_from([
+                "ado-aw", "mcp", "out", "repo", "--create-pull-request-max-patch-size", value,
+            ]).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn detects_github_https_remote() {

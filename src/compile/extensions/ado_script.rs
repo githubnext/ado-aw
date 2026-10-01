@@ -998,13 +998,7 @@ pub fn synthetic_pr_step_typed(spec_b64: &str) -> Result<BashStep> {
     let script = ShellScript::new(&RESOLVE_SYNTHETIC_PR)
         .bind_text("BUNDLE", EXEC_CONTEXT_PR_SYNTH_PATH)
         .render();
-    let condition = Condition::And(vec![
-        Condition::Succeeded,
-        Condition::Ne(
-            Expr::Variable("Build.Reason".to_string()),
-            Expr::Literal("PullRequest".to_string()),
-        ),
-    ]);
+    let condition = Condition::Succeeded;
     let mut step = BashStep::new("Resolve synthetic PR context", script)
         .with_id(StepId::new("synthPr")?)
         .with_condition(condition);
@@ -1045,6 +1039,7 @@ pub const SYNTH_PR_OUTPUT_NAMES: &[&str] = &[
     "AW_PR_TARGETBRANCH",
     "AW_PR_SOURCEBRANCH",
     "AW_PR_IS_DRAFT",
+    "AW_PR_TRIGGERING_IDENTITY",
     // Always-emitted control flags.
     "AW_SYNTHETIC_PR",
     "AW_SYNTHETIC_PR_SKIP",
@@ -1068,6 +1063,7 @@ pub const SYNTH_PR_AGENT_HOIST_NAMES: &[&str] = &[
     "AW_PR_TARGETBRANCH",
     "AW_PR_SOURCEBRANCH",
     "AW_PR_IS_DRAFT",
+    "AW_PR_TRIGGERING_IDENTITY",
     "AW_SYNTHETIC_PR",
 ];
 
@@ -2862,25 +2858,16 @@ mod tests {
                         "AW_PR_TARGETBRANCH",
                         "AW_PR_SOURCEBRANCH",
                         "AW_PR_IS_DRAFT",
+                        "AW_PR_TRIGGERING_IDENTITY",
                         "AW_SYNTHETIC_PR",
                         "AW_SYNTHETIC_PR_SKIP",
                     ]
                 );
-                // Condition is a typed And(Succeeded, Ne(BuildReason, "PullRequest")).
-                match b.condition.as_ref().expect("condition required") {
-                    crate::compile::ir::condition::Condition::And(parts) => {
-                        assert_eq!(parts.len(), 2);
-                        assert!(matches!(
-                            parts[0],
-                            crate::compile::ir::condition::Condition::Succeeded
-                        ));
-                        assert!(matches!(
-                            parts[1],
-                            crate::compile::ir::condition::Condition::Ne(_, _)
-                        ));
-                    }
-                    other => panic!("expected Condition::And, got {other:?}"),
-                }
+                assert_eq!(
+                    b.condition,
+                    Some(Condition::Succeeded),
+                    "native PR runs also need the unified trusted identity output"
+                );
             }
             other => panic!("expected Bash(synthPr) with id, got {other:?}"),
         }
