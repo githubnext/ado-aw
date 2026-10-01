@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::compile::extensions::Declarations;
 use crate::compile::shell::{Binding, ShellScript};
@@ -88,7 +89,8 @@ pub const ADO_AW_MODEL_DETECTION_COPILOT: &str = "ADO_AW_MODEL_DETECTION_COPILOT
 /// Shared runtime pipeline-variable fallback for Copilot models.
 pub const ADO_AW_DEFAULT_MODEL_COPILOT: &str = "ADO_AW_DEFAULT_MODEL_COPILOT";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum RuntimeModelRole {
     Agent,
     Detection,
@@ -99,6 +101,42 @@ impl RuntimeModelRole {
         match self {
             RuntimeModelRole::Agent => ADO_AW_MODEL_AGENT_COPILOT,
             RuntimeModelRole::Detection => ADO_AW_MODEL_DETECTION_COPILOT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CopilotInvocationDocument {
+    pub(crate) schema_version: u32,
+    pub(crate) role: RuntimeModelRole,
+    pub(crate) command: String,
+    pub(crate) prompt_path: String,
+    pub(crate) mcp_config_path: Option<String>,
+    pub(crate) args: Vec<String>,
+    pub(crate) explicit_model: Option<String>,
+    pub(crate) result_path: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CopilotInvocationContext<'a> {
+    role: RuntimeModelRole,
+    prompt_path: &'a str,
+    mcp_config_path: Option<&'a str>,
+    result_path: &'a str,
+}
+
+impl<'a> CopilotInvocationContext<'a> {
+    pub(crate) const fn new(
+        role: RuntimeModelRole,
+        prompt_path: &'a str,
+        mcp_config_path: Option<&'a str>,
+        result_path: &'a str,
+    ) -> Self {
+        Self {
+            role,
+            prompt_path,
+            mcp_config_path,
+            result_path,
         }
     }
 }
@@ -323,17 +361,24 @@ impl Engine {
         }
     }
 
-    /// Generate CLI arguments for the engine invocation.
+    /// Generate the legacy display form of the Copilot CLI arguments.
+    ///
+    /// Runtime execution consumes [`Self::args_with_config`] as a typed argv
+    /// vector; this joined form remains useful for diagnostics and focused
+    /// validation tests.
+    #[allow(dead_code)]
     pub fn args(
         &self,
         front_matter: &FrontMatter,
         extension_declarations: &[Declarations],
     ) -> Result<String> {
-        self.args_with_config(
-            &front_matter.engine,
-            front_matter,
-            extension_declarations,
-        )
+        Ok(self
+            .args_with_config(
+                &front_matter.engine,
+                front_matter,
+                extension_declarations,
+            )?
+            .join(" "))
     }
 
     /// Generate CLI arguments using an explicit engine configuration while
@@ -343,7 +388,7 @@ impl Engine {
         engine_config: &EngineConfig,
         front_matter: &FrontMatter,
         extension_declarations: &[Declarations],
-    ) -> Result<String> {
+    ) -> Result<Vec<String>> {
         match self {
             Engine::Copilot => copilot_args(engine_config, front_matter, extension_declarations),
         }
@@ -437,55 +482,37 @@ impl Engine {
         }
     }
 
-    /// Generate the full AWF `--` command string for running the engine.
-    ///
-    /// Returns the content for the AWF `-- '<command>'` argument, including the
-    /// binary path, prompt delivery flag, MCP config flag, and all CLI arguments.
-    /// The engine controls how the prompt is provided (e.g., `--prompt="$(cat ...)"`
-    /// for Copilot) and how MCP config is referenced.
-    ///
-    /// `prompt_path` is the path to the prompt file inside the AWF container.
-    /// `mcp_config_path` is optionally the path to the MCP config file
-    /// (Some for Agent job, None for Detection job which has no MCP).
-    pub fn invocation(
+    pub(crate) fn invocation_document(
         &self,
         front_matter: &FrontMatter,
         extension_declarations: &[Declarations],
-        prompt_path: &str,
-        mcp_config_path: Option<&str>,
-    ) -> Result<String> {
-        let args = self.args(front_matter, extension_declarations)?;
-        self.invocation_with_args(&front_matter.engine, prompt_path, mcp_config_path, &args)
+        invocation: CopilotInvocationContext<'_>,
+    ) -> Result<CopilotInvocationDocument> {
+        self.invocation_document_with_config(
+            &front_matter.engine,
+            front_matter,
+            extension_declarations,
+            invocation,
+        )
     }
 
-    /// Generate a Detection-job invocation using an explicit engine configuration.
-    pub fn detection_invocation_with_config(
+    pub(crate) fn invocation_document_with_config(
         &self,
         engine_config: &EngineConfig,
         front_matter: &FrontMatter,
         extension_declarations: &[Declarations],
-        prompt_path: &str,
-        mcp_config_path: Option<&str>,
-    ) -> Result<String> {
+        invocation: CopilotInvocationContext<'_>,
+    ) -> Result<CopilotInvocationDocument> {
         let args = self.args_with_config(engine_config, front_matter, extension_declarations)?;
-        self.invocation_with_args(engine_config, prompt_path, mcp_config_path, &args)
-    }
-
-    fn invocation_with_args(
-        &self,
-        engine_config: &EngineConfig,
-        prompt_path: &str,
-        mcp_config_path: Option<&str>,
-        args: &str,
-    ) -> Result<String> {
         match self {
             Engine::Copilot => {
                 let command_path = match engine_config.command() {
                     Some(cmd) => {
                         if !is_valid_command_path(cmd) {
                             anyhow::bail!(
-                                "engine.command '{}' contains invalid characters. \
-                                 Only ASCII alphanumerics, '.', '_', '/', and '-' are allowed.",
+                                "engine.command '{}' is invalid. Use a bare executable name or an \
+                                 absolute container path with ASCII alphanumerics, '.', '_', '/', \
+                                 and '-' and no dot, empty, or traversal segments.",
                                 cmd
                             );
                         }
@@ -493,12 +520,19 @@ impl Engine {
                     }
                     None => "/tmp/awf-tools/copilot".to_string(),
                 };
-                Ok(copilot_invocation(
-                    &command_path,
-                    prompt_path,
-                    mcp_config_path,
+                if let Some(model) = engine_config.model() {
+                    validate_model_name(model)?;
+                }
+                Ok(CopilotInvocationDocument {
+                    schema_version: 1,
+                    role: invocation.role,
+                    command: command_path,
+                    prompt_path: invocation.prompt_path.to_string(),
+                    mcp_config_path: invocation.mcp_config_path.map(str::to_string),
                     args,
-                ))
+                    explicit_model: engine_config.model().map(str::to_string),
+                    result_path: invocation.result_path.to_string(),
+                })
             }
         }
     }
@@ -653,7 +687,7 @@ fn copilot_args(
     engine_config: &EngineConfig,
     front_matter: &FrontMatter,
     extension_declarations: &[Declarations],
-) -> Result<String> {
+) -> Result<Vec<String>> {
     // Check if bash triggers --allow-all-tools. This happens when:
     // 1. Bash has an explicit wildcard entry (":*" or "*"), OR
     // 2. Bash is not specified at all (None) — ado-aw agents always run in AWF sandbox,
@@ -709,7 +743,8 @@ fn copilot_args(
                 agent
             );
         }
-        params.push(format!("--agent {}", agent));
+        params.push("--agent".to_string());
+        params.push(agent.to_string());
     }
 
     // Wire engine.api-target — sets the GHES/GHEC API endpoint hostname
@@ -721,7 +756,8 @@ fn copilot_args(
                 api_target
             );
         }
-        params.push(format!("--api-target {}", api_target));
+        params.push("--api-target".to_string());
+        params.push(api_target.to_string());
     }
 
     params.push("--disable-builtin-mcps".to_string());
@@ -732,13 +768,8 @@ fn copilot_args(
     }
 
     for tool in allowed_tools {
-        if tool.contains('(') || tool.contains(')') || tool.contains(' ') {
-            // Use double quotes - the copilot_params are embedded inside a single-quoted
-            // bash string in the AWF command, so single quotes would break quoting.
-            params.push(format!("--allow-tool \"{}\"", tool));
-        } else {
-            params.push(format!("--allow-tool {}", tool));
-        }
+        params.push("--allow-tool".to_string());
+        params.push(tool);
     }
 
     // --allow-all-paths when edit is enabled — lets the agent write to any file path.
@@ -754,13 +785,13 @@ fn copilot_args(
         params.push(arg.to_string());
     }
 
-    Ok(params.join(" "))
+    Ok(params)
 }
 
 fn validate_model_name(model: &str) -> Result<()> {
-    // Validate model names before they become task environment values or
+    // Validate model names before they become invocation-document values or
     // runtime-selected COPILOT_MODEL values. Keep this character set in sync
-    // with runtime_model_preamble.
+    // with the Copilot invoker.
     if model.is_empty()
         || !model
             .chars()
@@ -872,7 +903,6 @@ fn copilot_env(engine_config: &EngineConfig) -> Result<String> {
     ];
     if let Some(model) = engine_config.model() {
         validate_model_name(model)?;
-        lines.push(format!("{COPILOT_MODEL}: \"{model}\""));
     } else {
         add_runtime_model_env_lines(&mut lines, RuntimeModelRole::Agent);
     }
@@ -988,7 +1018,6 @@ pub fn copilot_detection_env(engine_config: &EngineConfig) -> Result<Vec<(String
     }
     if let Some(model) = engine_config.model() {
         validate_model_name(model)?;
-        pairs.push((COPILOT_MODEL.to_string(), model.to_string()));
     } else {
         add_runtime_model_env_pairs(&mut pairs, RuntimeModelRole::Detection);
     }
@@ -1408,76 +1437,19 @@ chmod +x /tmp/awf-tools/copilot
     }
 }
 
-/// Build the full AWF `--` command string for the Copilot CLI.
-///
-/// The returned string goes inside `-- '...'` in the pipeline YAML.
-fn copilot_invocation(
-    command_path: &str,
-    prompt_path: &str,
-    mcp_config_path: Option<&str>,
-    args: &str,
-) -> String {
-    let mut parts = vec![
-        command_path.to_string(),
-        format!("--prompt=\"$(cat {prompt_path})\""),
-    ];
-
-    if let Some(mcp_path) = mcp_config_path {
-        parts.push(format!("--additional-mcp-config @{mcp_path}"));
-    }
-    if !args.is_empty() {
-        parts.push(args.to_string());
-    }
-    parts.join(" ")
-}
-
-pub(crate) fn runtime_model_preamble(role: RuntimeModelRole) -> String {
-    let specific = role.specific_var();
-    format!(
-        r#"ADO_AW_EFFECTIVE_MODEL=""
-ADO_AW_MACRO_PREFIX='$'
-ADO_AW_UNRESOLVED_SPECIFIC_MODEL="${{ADO_AW_MACRO_PREFIX}}({specific})"
-ADO_AW_UNRESOLVED_DEFAULT_MODEL="${{ADO_AW_MACRO_PREFIX}}({ADO_AW_DEFAULT_MODEL_COPILOT})"
-for ADO_AW_CANDIDATE_MODEL in "${{{specific}:-}}" "${{{ADO_AW_DEFAULT_MODEL_COPILOT}:-}}"; do
-  # Azure DevOps leaves an undefined macro as the literal $(VAR); treat that as unset.
-  if [ -z "$ADO_AW_CANDIDATE_MODEL" ] || [ "$ADO_AW_CANDIDATE_MODEL" = "$ADO_AW_UNRESOLVED_SPECIFIC_MODEL" ] || [ "$ADO_AW_CANDIDATE_MODEL" = "$ADO_AW_UNRESOLVED_DEFAULT_MODEL" ]; then
-    continue
-  fi
-  case "$ADO_AW_CANDIDATE_MODEL" in
-    # Keep this character set in sync with validate_model_name and EMIT_AW_INFO.
-    *[!A-Za-z0-9._:-]*)
-      echo "ERROR: runtime Copilot model from {specific}/{ADO_AW_DEFAULT_MODEL_COPILOT} contains invalid characters. Only ASCII alphanumerics, ., _, :, and - are allowed." >&2
-      exit 1
-      ;;
-  esac
-  ADO_AW_EFFECTIVE_MODEL="$ADO_AW_CANDIDATE_MODEL"
-  break
-done
-if [ -n "$ADO_AW_EFFECTIVE_MODEL" ]; then
-  export COPILOT_MODEL="$ADO_AW_EFFECTIVE_MODEL"
-else
-  unset COPILOT_MODEL
-fi"#
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         ADO_AW_DEFAULT_MODEL_COPILOT, ADO_AW_MODEL_AGENT_COPILOT, ADO_AW_MODEL_DETECTION_COPILOT,
-        COPILOT_MODEL, Engine, GITHUB_APP_TOKEN_VAR, copilot_byom_active,
-        copilot_byom_credential_keys, copilot_detection_env, copilot_provider_env, get_engine,
-        github_app_token_secrecy_advisory, github_token_source_var, normalize_version_tag,
-        validate_engine_feature_support,
+        COPILOT_MODEL, CopilotInvocationContext, Engine, GITHUB_APP_TOKEN_VAR, RuntimeModelRole,
+        copilot_byom_active, copilot_byom_credential_keys, copilot_detection_env,
+        copilot_provider_env, get_engine, github_app_token_secrecy_advisory,
+        github_token_source_var, normalize_version_tag, validate_engine_feature_support,
     };
-    #[cfg(unix)]
-    use super::{RuntimeModelRole, runtime_model_preamble};
     use crate::compile::{
         extensions::{CompileContext, CompilerExtension, Declarations, collect_extensions},
         parse_markdown,
     };
-    #[cfg(unix)]
-    use std::process::Command;
 
     fn declarations_for(fm: &crate::compile::types::FrontMatter) -> Vec<Declarations> {
         let extensions = collect_extensions(fm);
@@ -1486,23 +1458,6 @@ mod tests {
             .iter()
             .map(|ext| ext.declarations(&ctx).unwrap())
             .collect()
-    }
-
-    #[cfg(unix)]
-    fn run_runtime_model_preamble(
-        role: RuntimeModelRole,
-        envs: &[(&str, &str)],
-    ) -> std::process::Output {
-        let script = format!(
-            "{}\nprintf '%s' \"$ADO_AW_EFFECTIVE_MODEL\"",
-            runtime_model_preamble(role)
-        );
-        let mut command = Command::new("bash");
-        command.arg("-c").arg(script).env_clear();
-        for (key, value) in envs {
-            command.env(key, value);
-        }
-        command.output().expect("bash should run")
     }
 
     #[test]
@@ -1533,67 +1488,92 @@ mod tests {
             .unwrap();
         assert!(!params.contains("--model"));
         let env = Engine::Copilot.env(&front_matter.engine).unwrap();
-        assert!(env.contains("COPILOT_MODEL: \"gpt-5\""), "{env}");
+        assert!(!env.contains(COPILOT_MODEL), "{env}");
+        let invocation = Engine::Copilot
+            .invocation_document(
+                &front_matter,
+                &declarations_for(&front_matter),
+                CopilotInvocationContext::new(
+                    RuntimeModelRole::Agent,
+                    "/tmp/prompt.md",
+                    None,
+                    "/tmp/result.json",
+                ),
+            )
+            .unwrap();
+        assert_eq!(invocation.explicit_model.as_deref(), Some("gpt-5"));
     }
 
     #[test]
-    fn copilot_invocation_does_not_embed_runtime_model_resolution() {
+    fn copilot_invocation_document_defers_runtime_model_resolution() {
         let (front_matter, _) =
             parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let invocation = Engine::Copilot
-            .invocation(
+            .invocation_document(
                 &front_matter,
                 &declarations_for(&front_matter),
-                "/tmp/prompt.md",
-                Some("/tmp/mcp.json"),
+                CopilotInvocationContext::new(
+                    RuntimeModelRole::Agent,
+                    "/tmp/prompt.md",
+                    Some("/tmp/mcp.json"),
+                    "/tmp/result.json",
+                ),
             )
             .unwrap();
 
-        assert!(!invocation.contains("ADO_AW_MODEL_AGENT_COPILOT"));
-        assert!(!invocation.contains("ADO_AW_DEFAULT_MODEL_COPILOT"));
-        assert!(!invocation.contains("--model"));
-        assert!(!invocation.contains("$(ADO_AW_MODEL_AGENT_COPILOT)"));
-        assert!(!invocation.contains("$(ADO_AW_DEFAULT_MODEL_COPILOT)"));
+        assert_eq!(invocation.role, RuntimeModelRole::Agent);
+        assert_eq!(invocation.explicit_model, None);
+        assert_eq!(
+            invocation.mcp_config_path.as_deref(),
+            Some("/tmp/mcp.json")
+        );
+        assert!(!invocation.args.iter().any(|arg| arg.starts_with("--model")));
     }
 
     #[test]
-    fn copilot_invocation_keeps_explicit_model_static() {
+    fn copilot_invocation_document_keeps_explicit_model_static() {
         let (front_matter, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  model: gpt-5\n---\n",
         )
         .unwrap();
         let invocation = Engine::Copilot
-            .invocation(
+            .invocation_document(
                 &front_matter,
                 &declarations_for(&front_matter),
-                "/tmp/prompt.md",
-                None,
+                CopilotInvocationContext::new(
+                    RuntimeModelRole::Agent,
+                    "/tmp/prompt.md",
+                    None,
+                    "/tmp/result.json",
+                ),
             )
             .unwrap();
 
-        assert!(!invocation.contains("--model"));
-        assert!(!invocation.contains("ADO_AW_MODEL_AGENT_COPILOT"));
-        assert!(!invocation.contains("ADO_AW_EFFECTIVE_MODEL"));
+        assert_eq!(invocation.explicit_model.as_deref(), Some("gpt-5"));
+        assert!(!invocation.args.iter().any(|arg| arg.starts_with("--model")));
     }
 
     #[test]
-    fn copilot_detection_invocation_uses_independent_runtime_model() {
+    fn copilot_detection_invocation_document_uses_independent_runtime_model() {
         let (front_matter, _) =
             parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let invocation = Engine::Copilot
-            .detection_invocation_with_config(
+            .invocation_document_with_config(
                 &front_matter.engine,
                 &front_matter,
                 &declarations_for(&front_matter),
-                "/tmp/threat.md",
-                None,
+                CopilotInvocationContext::new(
+                    RuntimeModelRole::Detection,
+                    "/tmp/threat.md",
+                    None,
+                    "/tmp/result.json",
+                ),
             )
             .unwrap();
 
-        assert!(!invocation.contains("ADO_AW_MODEL_DETECTION_COPILOT"));
-        assert!(!invocation.contains("ADO_AW_DEFAULT_MODEL_COPILOT"));
-        assert!(!invocation.contains("ADO_AW_MODEL_AGENT_COPILOT"));
-        assert!(!invocation.contains("--model"));
+        assert_eq!(invocation.role, RuntimeModelRole::Detection);
+        assert_eq!(invocation.explicit_model, None);
+        assert!(!invocation.args.iter().any(|arg| arg.starts_with("--model")));
         let env = copilot_detection_env(&front_matter.engine).unwrap();
         assert!(
             env.iter()
@@ -1603,61 +1583,6 @@ mod tests {
             env.iter()
                 .any(|(key, _)| key == ADO_AW_DEFAULT_MODEL_COPILOT)
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn runtime_model_preamble_uses_role_specific_before_default() {
-        let output = run_runtime_model_preamble(
-            RuntimeModelRole::Agent,
-            &[
-                (ADO_AW_MODEL_AGENT_COPILOT, "agent-model"),
-                (ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
-            ],
-        );
-
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), "agent-model");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn runtime_model_preamble_uses_default_when_role_specific_missing() {
-        let output = run_runtime_model_preamble(
-            RuntimeModelRole::Detection,
-            &[(ADO_AW_DEFAULT_MODEL_COPILOT, "default-model")],
-        );
-
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), "default-model");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn runtime_model_preamble_treats_unexpanded_ado_macro_as_missing() {
-        let output = run_runtime_model_preamble(
-            RuntimeModelRole::Agent,
-            &[
-                (ADO_AW_MODEL_AGENT_COPILOT, "$(ADO_AW_MODEL_AGENT_COPILOT)"),
-                (ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
-            ],
-        );
-
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), "default-model");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn runtime_model_preamble_rejects_invalid_runtime_model() {
-        let output = run_runtime_model_preamble(
-            RuntimeModelRole::Detection,
-            &[(ADO_AW_MODEL_DETECTION_COPILOT, "gpt-5 && curl evil.example")],
-        );
-
-        assert!(!output.status.success(), "{output:?}");
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("invalid characters"), "{stderr}");
     }
 
     #[test]
@@ -1887,29 +1812,36 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: /usr/local/bin/my-copilot\n---\n",
         ).unwrap();
         let result = Engine::Copilot
-            .invocation(
+            .invocation_document(
                 &fm,
                 &declarations_for(&fm),
-                "/tmp/prompt.md",
-                Some("/tmp/mcp.json"),
+                CopilotInvocationContext::new(
+                    RuntimeModelRole::Agent,
+                    "/tmp/prompt.md",
+                    Some("/tmp/mcp.json"),
+                    "/tmp/result.json",
+                ),
             )
             .unwrap();
-        assert_eq!(result.matches("/usr/local/bin/my-copilot ").count(), 1);
-        assert!(!result.contains("/tmp/awf-tools/copilot"));
+        assert_eq!(result.command, "/usr/local/bin/my-copilot");
     }
 
     #[test]
     fn engine_command_default_uses_awf_path() {
         let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let result = Engine::Copilot
-            .invocation(
+            .invocation_document(
                 &fm,
                 &declarations_for(&fm),
-                "/tmp/prompt.md",
-                Some("/tmp/mcp.json"),
+                CopilotInvocationContext::new(
+                    RuntimeModelRole::Agent,
+                    "/tmp/prompt.md",
+                    Some("/tmp/mcp.json"),
+                    "/tmp/result.json",
+                ),
             )
             .unwrap();
-        assert_eq!(result.matches("/tmp/awf-tools/copilot ").count(), 1);
+        assert_eq!(result.command, "/tmp/awf-tools/copilot");
     }
 
     #[test]
@@ -1917,14 +1849,22 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/tmp/copilot; rm -rf /\"\n---\n",
         ).unwrap();
-        let result =
-            Engine::Copilot.invocation(&fm, &declarations_for(&fm), "/tmp/prompt.md", None);
+        let result = Engine::Copilot.invocation_document(
+            &fm,
+            &declarations_for(&fm),
+            CopilotInvocationContext::new(
+                RuntimeModelRole::Agent,
+                "/tmp/prompt.md",
+                None,
+                "/tmp/result.json",
+            ),
+        );
         assert!(result.is_err());
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("invalid characters")
+                .contains("is invalid")
         );
     }
 
@@ -1933,8 +1873,16 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/tmp/co'pilot\"\n---\n",
         ).unwrap();
-        let result =
-            Engine::Copilot.invocation(&fm, &declarations_for(&fm), "/tmp/prompt.md", None);
+        let result = Engine::Copilot.invocation_document(
+            &fm,
+            &declarations_for(&fm),
+            CopilotInvocationContext::new(
+                RuntimeModelRole::Agent,
+                "/tmp/prompt.md",
+                None,
+                "/tmp/result.json",
+            ),
+        );
         assert!(result.is_err());
     }
 

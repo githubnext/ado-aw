@@ -42,12 +42,24 @@ pub fn is_safe_path_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Characters allowed in engine.command paths (absolute path chars only).
-/// Prevents shell injection when the path is embedded in AWF single-quoted commands.
+/// Validate an engine command as either a bare executable name or an absolute
+/// container path with no empty, dot, or traversal segments.
 pub fn is_valid_command_path(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
+    if s.is_empty()
+        || !s
+            .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+    {
+        return false;
+    }
+    if !s.contains('/') {
+        return s != "." && s != "..";
+    }
+    s.starts_with('/')
+        && !s.ends_with('/')
+        && s[1..]
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 /// Characters allowed in engine.agent and engine.model identifiers.
@@ -1003,6 +1015,12 @@ mod tests {
         assert!(is_valid_command_path("/tmp/awf-tools/copilot"));
         assert!(is_valid_command_path("copilot"));
         assert!(is_valid_command_path("/usr/local/bin/my-tool_v2"));
+        assert!(!is_valid_command_path("bin/copilot"));
+        assert!(!is_valid_command_path("."));
+        assert!(!is_valid_command_path(".."));
+        assert!(!is_valid_command_path("/tmp/../copilot"));
+        assert!(!is_valid_command_path("/tmp//copilot"));
+        assert!(!is_valid_command_path("/tmp/copilot/"));
         assert!(!is_valid_command_path(""));
         assert!(!is_valid_command_path("/tmp/copilot; rm -rf /"));
         assert!(!is_valid_command_path("/tmp/copilot'"));

@@ -2049,33 +2049,31 @@ Call the noop tool exactly once.
     let detection = extract_job_block(&compiled, "Detection").expect("Detection job should exist");
 
     assert!(
-        agent.contains(
-            "/tmp/awf-tools/copilot --prompt=\"$(cat /tmp/awf-tools/agent-prompt.md)\" \
-             --additional-mcp-config @/tmp/awf-tools/mcp-config.json"
-        ),
-        "agent job should pass compiler-emitted MCP config to Copilot CLI: {agent}"
+        agent.contains(r#""prompt_path":"/tmp/awf-tools/agent-prompt.md""#)
+            && agent.contains(r#""mcp_config_path":"/tmp/awf-tools/mcp-config.json""#),
+        "agent invocation document should reference the prompt and MCP config: {agent}"
     );
     assert!(
-        !agent.contains("--prompt \"$(cat "),
-        "agent job should not pass prompt as a separate option value: {agent}"
+        agent.contains("copilot-invoker.js run")
+            && !agent.contains("/tmp/awf-tools/copilot --prompt"),
+        "agent job should execute only the fixed invoker command: {agent}"
     );
     assert!(
-        detection.contains(
-            "/tmp/awf-tools/copilot --prompt=\"$(cat \
-             /tmp/awf-tools/threat-analysis-prompt.md)\""
-        ),
-        "detection job should pass prompt using attached form: {detection}"
+        detection.contains(r#""prompt_path":"/tmp/awf-tools/threat-analysis-prompt.md""#),
+        "detection invocation document should reference the threat prompt: {detection}"
     );
     assert!(
-        !detection.contains("--prompt \"$(cat "),
-        "detection job should not pass prompt as a separate option value: {detection}"
+        detection.contains("copilot-invoker.js run")
+            && !detection.contains("/tmp/awf-tools/copilot --prompt"),
+        "detection job should execute only the fixed invoker command: {detection}"
     );
     assert!(
         agent.contains("--allow-all-tools"),
         "default unrestricted tools path should emit --allow-all-tools: {agent}"
     );
     assert!(
-        !detection.contains("--additional-mcp-config"),
+        detection.contains(r#""mcp_config_path":null"#)
+            && !detection.contains(r#""mcp_config_path":"/tmp/awf-tools/mcp-config.json""#),
         "detection job should not receive the SafeOutputs MCP config: {detection}"
     );
     assert!(
@@ -2119,19 +2117,17 @@ fn test_runtime_import_frontmatter_prompt_uses_attached_copilot_prompt_flag() {
         "agent prompt should runtime-import the full markdown fixture: {compiled}"
     );
     assert!(
-        agent.contains("/tmp/awf-tools/copilot --prompt=\"$(cat /tmp/awf-tools/agent-prompt.md)\""),
-        "agent job should pass prompt using attached form: {agent}"
+        agent.contains(r#""prompt_path":"/tmp/awf-tools/agent-prompt.md""#),
+        "agent invocation document should reference the resolved prompt file: {agent}"
     );
     assert!(
-        detection.contains(
-            "/tmp/awf-tools/copilot --prompt=\"$(cat \
-             /tmp/awf-tools/threat-analysis-prompt.md)\""
-        ),
-        "detection job should pass prompt using attached form: {detection}"
+        detection.contains(r#""prompt_path":"/tmp/awf-tools/threat-analysis-prompt.md""#),
+        "detection invocation document should reference the threat prompt: {detection}"
     );
     assert!(
-        !compiled.contains("--prompt \"$(cat "),
-        "compiled pipeline should not pass prompt as a separate option value: {compiled}"
+        compiled.contains("copilot-invoker.js run")
+            && !compiled.contains("/tmp/awf-tools/copilot --prompt"),
+        "compiled pipeline should use the fixed invoker command: {compiled}"
     );
 
     exercise_attached_prompt_with_pinned_copilot_cli(&fixture);
@@ -2171,19 +2167,19 @@ Call the noop tool exactly once.
         "restricted bash path should not emit --allow-all-tools: {agent}"
     );
     assert!(
-        agent.contains("--allow-tool safeoutputs"),
+        agent.contains(r#""--allow-tool","safeoutputs""#),
         "restricted bash path must explicitly allow the SafeOutputs MCP server: {agent}"
     );
     assert!(
-        agent.contains("--allow-tool \"shell(echo)\""),
+        agent.contains(r#""--allow-tool","shell(echo)""#),
         "restricted bash path must emit the configured bash allowlist: {agent}"
     );
     assert!(
-        agent.contains("--agent my-custom-agent"),
+        agent.contains(r#""--agent","my-custom-agent""#),
         "engine.agent should flow through the compiled Copilot CLI invocation: {agent}"
     );
     assert!(
-        agent.contains("--api-target api.example.com"),
+        agent.contains(r#""--api-target","api.example.com""#),
         "engine.api-target should flow through the compiled Copilot CLI invocation: {agent}"
     );
     assert!(
@@ -2191,7 +2187,7 @@ Call the noop tool exactly once.
         "engine.args should append additive Copilot CLI arguments: {agent}"
     );
     assert!(
-        agent.contains("--additional-mcp-config @/tmp/awf-tools/mcp-config.json"),
+        agent.contains(r#""mcp_config_path":"/tmp/awf-tools/mcp-config.json""#),
         "restricted tools path should still use the compiler-emitted MCP config: {agent}"
     );
 }
@@ -2279,7 +2275,7 @@ fn permissions_read_enables_proxy_and_wrapped_az_without_mcp() {
         "displayName: Install az wrapper (ado-proxy)",
         "displayName: Detect Azure CLI on host (for AWF mount)",
         "--topology-attach \"awmg-ado-proxy\"",
-        "--allow-tool \"shell(az)\"",
+        r#""--allow-tool","shell(az)""#,
     ] {
         assert!(
             compiled.contains(required),
@@ -2490,7 +2486,7 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should have entrypointArgs field"
     );
     assert!(
-        !compiled.contains("\"command\""),
+        !compiled.contains("\"command\": "),
         "MCPG config should NOT use command field"
     );
 
@@ -2604,7 +2600,7 @@ fn test_mcpg_config_container_based_mcp() {
     assert!(compiled.contains("/host/data:/app/data:ro"));
     assert!(compiled.contains("\"API_KEY\": \"test-key\""));
     assert!(compiled.contains("\"tool_a\""));
-    assert!(!compiled.contains("\"command\""));
+    assert!(!compiled.contains("\"command\": "));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2728,7 +2724,7 @@ fn test_mcpg_config_http_based_mcp() {
     assert!(compiled.contains("\"url\": \"https://mcp.dev.azure.com/myorg\""));
     assert!(compiled.contains("\"X-MCP-Toolsets\": \"repos,wit\""));
     assert!(compiled.contains("\"wit_get_work_item\""));
-    assert!(!compiled.contains("\"command\""));
+    assert!(!compiled.contains("\"command\": "));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -5310,8 +5306,8 @@ fn test_1es_compiled_output_is_valid_yaml() {
         "1ES output should contain SafeOutputs references"
     );
     assert!(
-        compiled.contains("copilot --prompt="),
-        "1ES output should contain copilot invocation (engine_run substituted)"
+        compiled.contains("copilot-invoker.js run"),
+        "1ES output should contain the fixed Copilot invoker command"
     );
     assert!(
         compiled.contains("threat-analysis"),
@@ -5849,11 +5845,10 @@ fn extract_job_block<'a>(yaml: &'a str, name: &str) -> Option<&'a str> {
     Some(&yaml[start..end])
 }
 
-/// Per-job download placement: gate-only pipeline must put the download in
-/// Setup and NOT in Agent. ADO jobs run on isolated VMs, so the gate's
-/// install/download has to land in the same job as the gate step.
+/// Gate-only pipelines stage the bundle in Setup for the gate and in both
+/// Copilot jobs for the invoker.
 #[test]
-fn test_gate_only_pipeline_downloads_bundle_in_setup_job_not_agent() {
+fn test_gate_only_pipeline_downloads_bundle_in_all_consuming_jobs() {
     let yaml = compile_fixture("dedupe_gate_only.md");
     let setup = extract_job_block(&yaml, "Setup").expect("Setup job should exist");
     let agent = extract_job_block(&yaml, "Agent").expect("Agent job should exist");
@@ -5862,9 +5857,8 @@ fn test_gate_only_pipeline_downloads_bundle_in_setup_job_not_agent() {
         "Setup job is missing the script bundle download (gate consumer lives here)"
     );
     assert!(
-        !agent.contains("Download ado-aw scripts"),
-        "Agent job should NOT have the script bundle download (gate-only, no runtime imports). \
-         Agent block contents: {}",
+        agent.contains("Download ado-aw scripts"),
+        "Agent job must stage the Copilot invoker bundle. Agent block contents: {}",
         agent
     );
 }
@@ -5890,9 +5884,8 @@ fn test_imports_only_pipeline_downloads_bundle_in_agent_job_not_setup() {
     }
 }
 
-/// Per-job download placement: when both gate and runtime imports are active,
-/// the bundle is downloaded twice — once per consuming job. ADO's VM
-/// isolation makes this correct architecture, not duplication waste.
+/// When both gate and runtime imports are active, each isolated consuming job
+/// stages the bundle: Setup, Agent, and Detection.
 #[test]
 fn test_both_features_active_downloads_bundle_in_both_jobs() {
     let yaml = compile_fixture("dedupe_both.md");
@@ -5908,23 +5901,19 @@ fn test_both_features_active_downloads_bundle_in_both_jobs() {
     );
     assert_eq!(
         yaml.matches("Download ado-aw scripts").count(),
-        2,
-        "Expected exactly two downloads — one per consuming job (Setup + Agent)"
+        3,
+        "Expected exactly three downloads — Setup, Agent, and Detection"
     );
 }
 
-/// Per-job download placement: with neither gate nor runtime imports active,
-/// no Node install or script-bundle download should appear anywhere.
+/// Even with no gate or runtime imports, Agent and Detection stage the invoker.
 #[test]
-fn test_neither_feature_active_emits_no_node_or_download_anywhere() {
+fn test_neither_feature_active_stages_invoker_in_copilot_jobs() {
     let yaml = compile_fixture("dedupe_neither.md");
-    assert!(
-        !yaml.contains("UseNode@1"),
-        "No UseNode@1 expected when neither gate nor runtime imports are active"
-    );
-    assert!(
-        !yaml.contains("Download ado-aw scripts"),
-        "No script bundle download expected when neither gate nor runtime imports are active"
+    assert_eq!(
+        yaml.matches("Download ado-aw scripts").count(),
+        2,
+        "Agent and Detection must each stage the invoker bundle"
     );
 }
 
@@ -5993,12 +5982,11 @@ fn test_node_runtime_install_orders_after_ado_script_so_user_version_wins() {
          ado-script idx = {ado_script_install_idx}, user idx = {user_runtime_install_idx}"
     );
 
-    // Both downloads of ado-script.zip remain unaffected (still exactly one
-    // in the Agent job in this fixture — no filters, so no Setup-side download).
+    // Agent and Detection each stage ado-script.zip; no Setup download exists.
     assert_eq!(
         yaml.matches("Download ado-aw scripts").count(),
-        1,
-        "Expected exactly one ado-script.zip download (Agent job only; no gate active)"
+        2,
+        "Expected exactly two ado-script.zip downloads (Agent + Detection)"
     );
 }
 
@@ -8175,14 +8163,20 @@ safe-outputs:
 
     let agent = job_block(&compiled, "Agent");
     let detection = job_block(&compiled, "Detection");
-    assert!(agent.contains("COPILOT_MODEL: agent-model"), "{agent}");
+    assert!(
+        agent.contains(r#""explicit_model":"agent-model""#),
+        "{agent}"
+    );
     assert!(agent.contains("--reasoning-effort=high"), "{agent}");
     assert!(!agent.contains("--model"), "{agent}");
-    assert!(!agent.contains("COPILOT_MODEL: detection-model"), "{agent}");
+    assert!(
+        !agent.contains(r#""explicit_model":"detection-model""#),
+        "{agent}"
+    );
     assert!(!agent.contains("DETECTION_ENV"), "{agent}");
 
     assert!(
-        detection.contains("COPILOT_MODEL: detection-model"),
+        detection.contains(r#""explicit_model":"detection-model""#),
         "{detection}"
     );
     assert!(!detection.contains("--model"), "{detection}");
@@ -8237,14 +8231,56 @@ fn runtime_model_controls_compile_across_all_targets() {
             "{target}: missing Detection runtime model env mapping"
         );
         assert!(
-            compiled.contains("export COPILOT_MODEL=\"$ADO_AW_EFFECTIVE_MODEL\""),
-            "{target}: runtime resolver must export COPILOT_MODEL"
+            compiled.contains("copilot-invoker.js run"),
+            "{target}: fixed Copilot invoker command must be emitted"
+        );
+        assert!(
+            compiled.contains(r#""role":"agent""#)
+                && compiled.contains(r#""role":"detection""#),
+            "{target}: Agent and Detection invocation documents must be emitted"
+        );
+        assert!(
+            !compiled.contains("ADO_AW_EFFECTIVE_MODEL"),
+            "{target}: runtime model shell resolver must be absent"
         );
         assert!(
             !compiled.contains("--model"),
             "{target}: compiler-generated model flags must be absent"
         );
     }
+}
+
+#[test]
+fn runtime_model_control_resolves_after_prior_agent_step() {
+    let source = r###"---
+name: Runtime Model Set Variable
+description: Runtime model task-scope resolution
+steps:
+  - bash: |
+      echo "##vso[task.setvariable variable=ADO_AW_MODEL_AGENT_COPILOT]gpt-runtime"
+safe-outputs:
+  threat-detection: false
+---
+
+## Agent
+"###;
+    let (ok, compiled, stderr) = compile_inline_source("runtime-model-set-variable", source);
+    assert!(ok, "pipeline should compile: {stderr}");
+    let agent = job_block(&compiled, "Agent");
+    let producer = agent
+        .find("task.setvariable variable=ADO_AW_MODEL_AGENT_COPILOT")
+        .expect("model variable producer should be emitted");
+    let consumer = agent
+        .find("Run copilot (AWF network isolated)")
+        .expect("Copilot invoker step should be emitted");
+    assert!(
+        producer < consumer,
+        "trusted variable producer must run before the invoker task: {agent}"
+    );
+    assert!(
+        agent.contains("ADO_AW_MODEL_AGENT_COPILOT: $(ADO_AW_MODEL_AGENT_COPILOT)"),
+        "invoker task must resolve the model through its typed env mapping: {agent}"
+    );
 }
 
 #[test]
@@ -10167,10 +10203,8 @@ fn test_github_app_token_hyphenated_private_key_variable() {
 
 /// When another ado-script bundle feature is active in the Agent job (here a
 /// safe-output activates the approval-summary bundle download), the mint step
-/// must NOT trigger a second bundle download in that job — it reuses the
-/// already-staged bundle. Proven by a delta: adding `github-app-token` to an
-/// otherwise-identical workflow adds exactly ONE bundle download (the
-/// Detection job, which has no extension-prepare phase), never two.
+/// must NOT trigger another bundle download in either Copilot job because both
+/// already stage the invoker bundle.
 #[test]
 fn test_github_app_token_reuses_staged_bundle_in_agent() {
     fn count_downloads(compiled: &str) -> usize {
@@ -10193,14 +10227,11 @@ fn test_github_app_token_reuses_staged_bundle_in_agent() {
     );
     assert_github_app_token_wiring(&with);
 
-    // Adding github-app-token stages the bundle only in Detection (Agent
-    // reuses its already-staged copy), so the download count grows by exactly 1.
+    // Adding github-app-token reuses the always-staged Agent and Detection bundles.
     assert_eq!(
         count_downloads(&with),
-        count_downloads(&without) + 1,
-        "github-app-token must add exactly one bundle download (Detection), \
-         proving the Agent job reuses its staged bundle rather than \
-         double-downloading. without={}, with={}",
+        count_downloads(&without),
+        "github-app-token must not add bundle downloads. without={}, with={}",
         count_downloads(&without),
         count_downloads(&with),
     );

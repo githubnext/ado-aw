@@ -260,6 +260,9 @@ printf '%s\\0' "$@" > '${capture}'
 
       const commandIndex = captured.indexOf("--");
       expect(commandIndex).toBeGreaterThan(0);
+      expect(captured[commandIndex + 1]).toContain(
+        "copilot-invoker.js run /tmp/awf-tools/copilot-invocation.json",
+      );
       const args: string[] = [];
       for (let i = 0; i < commandIndex; i++) {
         // This probe exercises filesystem/env isolation, not MCP networking:

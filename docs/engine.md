@@ -22,7 +22,7 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
-| `model` | string | *(none)* | AI model to use (e.g., `gpt-5-mini`). When set, the compiler passes the value directly to the Copilot CLI `--model` flag. When omitted, runtime model controls can select a model; if no runtime control is set, the compiler omits `--model` and the Copilot CLI chooses its own default. |
+| `model` | string | *(none)* | AI model to use (e.g., `gpt-5-mini`). When set, the compiler records it in the versioned Copilot invocation document and the invoker sets Copilot CLI's native `COPILOT_MODEL` environment variable. When omitted, runtime model controls can select a model; if no runtime control is set, `COPILOT_MODEL` remains unset and the Copilot CLI chooses its own default. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 | `version` | string | *(none)* | Engine CLI version to install (e.g., `"1.0.70"`, `"latest"`). Overrides the pinned `COPILOT_CLI_VERSION`. Set to `"latest"` to use the newest available version. |
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
@@ -62,19 +62,22 @@ variables are an operational escape hatch only for workflows that leave
 `engine.model` unset; changing a pinned frontmatter model still requires
 recompilation.
 
-Runtime values are passed through typed step environment mappings and validated
-for model-identifier characters at runtime. The task that starts Copilot exports
-the selected value through Copilot CLI's native `COPILOT_MODEL` environment
-variable. When no value resolves, the task leaves `COPILOT_MODEL` unset rather
-than supplying a compiler default. Raw `engine.args --model` and
+Runtime values are passed through typed step environment mappings, so Azure
+DevOps YAML variables, UI variables, variable groups, and variables set by an
+earlier trusted `##vso[task.setvariable]` step all resolve at task start. Inside
+AWF, the compiler-owned `copilot-invoker.js` validates the selected value and
+sets Copilot CLI's native `COPILOT_MODEL` only in the child process environment.
+When no value resolves, the invoker removes `COPILOT_MODEL` rather than
+supplying a compiler default. Raw `engine.args --model` and
 `engine.env.COPILOT_MODEL` are rejected so they cannot bypass this precedence.
 
-Agent resolves and records its requested session model in the actual Agent run
-task, after user-authored steps. A prior trusted step can therefore use
-`##vso[task.setvariable]` and both execution and metadata see the task-start
-value. Detection captures its requested model in the Detection run task and
+The invoker writes a strict result document before starting Copilot. The trusted
+Agent host task reads that result after AWF returns and records the requested
+session model in `aw_info.json`; Detection uses the same result contract and
 later enriches the copied metadata in `analyzed_outputs_<BuildId>` from its own
-job scope. `ado-aw audit` merges those job-owned fields.
+job scope. A prior trusted step can therefore set a variable and both execution
+and metadata see the same task-start value. `ado-aw audit` merges those
+job-owned fields.
 
 When `engine.agent` selects a custom agent whose definition declares `model` or
 `models`, Copilot CLI may use that agent-pinned model instead of the requested

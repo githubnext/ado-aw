@@ -319,6 +319,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── conclusion/ # Conclusion-job reporter source (bundled to conclusion.js)
 │           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           ├── github-app-token/ # GitHub App token minter (bundled to github-app-token.js; mints installation token in Agent + Detection when engine.github-app-token is set)
+│           ├── copilot-invoker/ # Sandboxed Copilot process harness (bundled to copilot-invoker.js): strict versioned invocation/result documents, runtime model resolution, typed argv, signal forwarding, exact exit propagation
 │           ├── executor-e2e/ # Stage 3 safe-output E2E test harness (not a bundle; runs deterministic scenarios against a real ADO project and files a GitHub issue on failure)
 │           ├── compiler-smoke-e2e/ # Smoke E2E orchestrator (not a bundle): stages each case in `tests/smoke/cases.json` to the fixed `.smoke/pipeline.yml` path on its own per-case `ado-aw-mirror` ref, queues it against its credential *lane* definition, and asserts they go green. Two modes via `SMOKE_COMPILER_SOURCE`: `candidate` (compiler built from this commit, pinned pipeline-artifact) and `released` (latest release asset, release URLs required). Built to `test-bin/` by `build:compiler-smoke-e2e`, listed in `NON_BUNDLE_DIRS`.
 │           ├── prepare-pr-base/ # create-pull-request preparer (bundled to prepare-pr-base.js): Agent mode uses ADO diff metadata + bounded fallback; SafeOutputs fetches the target tip; cross-org targets use isolated credentials + exact remote matching
@@ -463,7 +464,7 @@ index to jump to the right page.
   (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
   bundles, `conclusion.js`, `approval-summary.js`,
   `github-app-token.js`, `prepare-pr-base.js`, and
-  `azure-wif-refresh.js`), schemars-driven
+  `azure-wif-refresh.js`, `copilot-invoker.js`), schemars-driven
   type codegen, the A2 design decision, the bundle env contract
   modelled in `src/compile/ado_bundle.rs`, and the `trigger-e2e/`
   gate-spec drift guard (kept in sync via `export-fact-catalog`).
