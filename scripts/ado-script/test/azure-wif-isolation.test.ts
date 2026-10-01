@@ -209,10 +209,18 @@ describe.skipIf(!awfEnabled)("Azure WIF real AWF boundary", () => {
       const workspace = join(directory, "workspace");
       const temp = join(directory, "runner-temp");
       const tools = join(directory, "tools");
+      const awfTools = join(tools, "awf-tools");
+      const adoScripts = join(tools, "ado-aw-scripts");
       const home = join(directory, "home");
       const auth = join(temp, "ado-aw-azure-auth", "fixture");
       mkdirSync(workspace, { recursive: true });
       mkdirSync(home);
+      mkdirSync(awfTools, { recursive: true });
+      mkdirSync(join(adoScripts, "ado-script"), { recursive: true });
+      copyFileSync(
+        resolve(testDir, "../copilot-invoker.js"),
+        join(adoScripts, "ado-script/copilot-invoker.js"),
+      );
       mkdirSync(join(auth, "token.d"), { recursive: true });
       chmodSync(join(temp, "ado-aw-azure-auth"), 0o700);
       chmodSync(auth, 0o700);
@@ -224,15 +232,22 @@ describe.skipIf(!awfEnabled)("Azure WIF real AWF boundary", () => {
       const runStep = pipeline.jobs.find((job) => job.job === "Agent")?.steps
         .find((step) => step.bash?.includes("AWF_ARGS+=(--skip-pull --env-all)"));
       if (!runStep?.bash) throw new Error("compiled AWF invocation is missing");
+      expect(runStep.bash).toContain(
+        "copilot-invoker.js run /tmp/awf-tools/copilot-invocation.json",
+      );
       const capture = join(directory, "awf-args");
+      const invocationResult = join(awfTools, "copilot-invocation-result.json");
       writeFileSync(join(tools, "awf/awf"), `#!/bin/sh
 if [ "$1" = logs ]; then exit 0; fi
 printf '%s\\0' "$@" > '${capture}'
+printf '%s\\n' '{"schema_version":1,"role":"agent","requested_model":null}' > '${invocationResult}'
 `, { mode: 0o755 });
       const script = runStep.bash
         .replaceAll("$(Agent.TempDirectory)", temp)
         .replaceAll("$(Pipeline.Workspace)", tools)
-        .replaceAll("$(Build.SourcesDirectory)", workspace);
+        .replaceAll("$(Build.SourcesDirectory)", workspace)
+        .replaceAll("/tmp/awf-tools", awfTools)
+        .replaceAll("/tmp/ado-aw-scripts", adoScripts);
       const env: NodeJS.ProcessEnv = {
         PATH: process.env.PATH,
         HOME: home,
@@ -261,7 +276,7 @@ printf '%s\\0' "$@" > '${capture}'
       const commandIndex = captured.indexOf("--");
       expect(commandIndex).toBeGreaterThan(0);
       expect(captured[commandIndex + 1]).toContain(
-        "copilot-invoker.js run /tmp/awf-tools/copilot-invocation.json",
+        `copilot-invoker.js run ${join(awfTools, "copilot-invocation.json")}`,
       );
       const args: string[] = [];
       for (let i = 0; i < commandIndex; i++) {

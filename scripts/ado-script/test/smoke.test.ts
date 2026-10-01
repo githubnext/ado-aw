@@ -144,7 +144,7 @@ describe.skipIf(process.platform === "win32")("copilot-invoker.js smoke", () => 
       writeFileSync(
         command,
         `#!/bin/sh
-node -e 'require("node:fs").writeFileSync(process.env.CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(1), model: process.env.COPILOT_MODEL }))' "$@"
+node -e 'require("node:fs").writeFileSync(process.env.CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(1), model: process.env.COPILOT_MODEL }))' -- "$@"
 exit 7
 `,
       );
