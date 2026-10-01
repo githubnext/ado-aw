@@ -169,7 +169,6 @@ and the themes in a `<details>` block.
 ## agent: `rust-critic`
 ---
 description: Hostile first-pass Rust reviewer that mines merge-blocking defects from changed lines
-model: small
 ---
 You are a hostile senior Rust reviewer performing a first-pass audit.
 
