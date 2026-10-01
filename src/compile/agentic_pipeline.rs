@@ -4506,15 +4506,15 @@ set -e
 
 # The marker extension always creates this file for production compile contexts.
 ADO_AW_INFO_JSON="$AGENT_TEMP/staging/aw_info.json"
-if [ ! -f "$ADO_AW_INFO_JSON" ]; then
-  echo "ERROR: Agent could not find aw_info.json at $ADO_AW_INFO_JSON" >&2
-  exit 1
+if [ -f "$ADO_AW_INFO_JSON" ]; then
+  # ado-aw:fragment append_aw_info_field
+  ado_aw_append_info_field \
+    "model" \
+    "${COPILOT_MODEL:-}" \
+    "$ADO_AW_INFO_JSON"
+else
+  echo "Warning: Agent metadata file not found at $ADO_AW_INFO_JSON; model metadata was not recorded" >&2
 fi
-# ado-aw:fragment append_aw_info_field
-ado_aw_append_info_field \
-  "model" \
-  "${COPILOT_MODEL:-}" \
-  "$ADO_AW_INFO_JSON"
 set +e
 
 # AWF provides L7 domain whitelisting via a rootless Docker topology.
@@ -7881,6 +7881,27 @@ safe-outputs:
         assert!(!step.script.contains("$(ADO_AW_MODEL_AGENT_COPILOT)"));
         assert!(!step.script.contains("$(ADO_AW_DEFAULT_MODEL_COPILOT)"));
         assert!(!step.script.contains("--model"));
+    }
+
+    #[test]
+    fn missing_agent_metadata_does_not_block_agent_execution() {
+        let step = runtime_agent_step_for_test();
+        assert!(step
+            .script
+            .contains("if [ -f \"$ADO_AW_INFO_JSON\" ]; then"));
+        assert!(step.script.contains(
+            "Warning: Agent metadata file not found at $ADO_AW_INFO_JSON; model metadata was not recorded"
+        ));
+        assert!(!step
+            .script
+            .contains("ERROR: Agent could not find aw_info.json"));
+
+        let warning_index = step.script.find("model metadata was not recorded").unwrap();
+        let awf_index = step
+            .script
+            .find("\"$PIPELINE_WORKSPACE/awf/awf\"")
+            .expect("AWF invocation");
+        assert!(warning_index < awf_index);
     }
 
     #[test]
