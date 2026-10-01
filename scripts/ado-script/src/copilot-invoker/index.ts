@@ -244,6 +244,9 @@ export function buildCopilotArgs(
   document: InvocationDocument,
   prompt: string,
 ): string[] {
+  if (prompt.includes("\0")) {
+    throw new Error("prompt contains an invalid NUL byte");
+  }
   const args = [`--prompt=${prompt}`];
   if (document.mcp_config_path !== null) {
     args.push("--additional-mcp-config", `@${document.mcp_config_path}`);
@@ -256,6 +259,8 @@ export function buildChildEnvironment(
   env: NodeJS.ProcessEnv,
   requestedModel: string | null,
 ): NodeJS.ProcessEnv {
+  // AWF filters host-only credentials before launching the invoker. Preserve
+  // the remaining environment because Copilot providers and MCPs consume it.
   const childEnv = { ...env };
   if (requestedModel === null) {
     delete childEnv.COPILOT_MODEL;
@@ -338,7 +343,12 @@ export async function main(argv: string[]): Promise<number> {
           `invocation result role '${result.role}' does not match expected role '${argv[2]}'`,
         );
       }
-      process.stdout.write(result.requested_model ?? "");
+      await new Promise<void>((resolveWrite, rejectWrite) => {
+        process.stdout.write(result.requested_model ?? "", (error) => {
+          if (error) rejectWrite(error);
+          else resolveWrite();
+        });
+      });
       return 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";
@@ -364,7 +374,13 @@ export async function main(argv: string[]): Promise<number> {
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  void main(process.argv.slice(2)).then((code) => {
-    process.exitCode = code;
-  });
+  void main(process.argv.slice(2))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : "unknown error";
+      console.error(`copilot-invoker: unexpected failure: ${message}`);
+      process.exitCode = 1;
+    });
 }

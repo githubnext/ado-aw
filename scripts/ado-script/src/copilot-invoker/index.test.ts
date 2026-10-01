@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildChildEnvironment,
   buildCopilotArgs,
+  main,
   parseInvocationDocument,
   parseInvocationResult,
   resolveRequestedModel,
@@ -70,7 +71,10 @@ describe("copilot invoker document", () => {
     [{ ...document(), role: "other" }, "must be 'agent' or 'detection'"],
     [{ ...document(), command: "copilot;sh" }, "field 'command' is invalid"],
     [{ ...document(), command: ".." }, "field 'command' is invalid"],
+    [{ ...document(), command: "bin/copilot" }, "field 'command' is invalid"],
     [{ ...document(), command: "/tmp/../copilot" }, "field 'command' is invalid"],
+    [{ ...document(), command: "/tmp//copilot" }, "field 'command' is invalid"],
+    [{ ...document(), command: "/tmp/copilot/" }, "field 'command' is invalid"],
     [{ ...document(), prompt_path: "relative.md" }, "field 'prompt_path' is invalid"],
     [{ ...document(), prompt_path: "/tmp/../prompt.md" }, "field 'prompt_path' is invalid"],
     [{ ...document(), result_path: "/" }, "field 'result_path' is invalid"],
@@ -141,6 +145,12 @@ describe("argv and child environment", () => {
     ]);
   });
 
+  it("rejects NUL bytes in prompt content", () => {
+    expect(() => buildCopilotArgs(document(), "before\0after")).toThrow(
+      "prompt contains an invalid NUL byte",
+    );
+  });
+
   it("sets or removes only the child COPILOT_MODEL", () => {
     const original = { KEEP: "yes", COPILOT_MODEL: "old" };
     expect(buildChildEnvironment(original, "selected")).toEqual({
@@ -149,6 +159,86 @@ describe("argv and child environment", () => {
     });
     expect(buildChildEnvironment(original, null)).toEqual({ KEEP: "yes" });
     expect(original.COPILOT_MODEL).toBe("old");
+  });
+});
+
+describe("read-result command", () => {
+  it("writes the requested model after validating the result", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "copilot-invoker-result-"));
+    const resultPath = join(directory, "result.json");
+    writeFileSync(
+      resultPath,
+      JSON.stringify({
+        schema_version: 1,
+        role: "agent",
+        requested_model: "gpt-test",
+      }),
+    );
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(
+      ((_chunk: unknown, callback?: (error?: Error | null) => void) => {
+        callback?.();
+        return true;
+      }) as typeof process.stdout.write,
+    );
+
+    await expect(main(["read-result", resultPath, "agent"])).resolves.toBe(0);
+    expect(write).toHaveBeenCalledWith("gpt-test", expect.any(Function));
+    write.mockRestore();
+  });
+
+  it("rejects a result for the wrong role", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "copilot-invoker-result-"));
+    const resultPath = join(directory, "result.json");
+    writeFileSync(
+      resultPath,
+      JSON.stringify({
+        schema_version: 1,
+        role: "agent",
+        requested_model: "gpt-test",
+      }),
+    );
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(main(["read-result", resultPath, "detection"])).resolves.toBe(1);
+    expect(error).toHaveBeenCalledWith(
+      "copilot-invoker: invocation result role 'agent' does not match expected role 'detection'",
+    );
+    error.mockRestore();
+  });
+
+  it("reports a missing or malformed result", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "copilot-invoker-result-"));
+    const resultPath = join(directory, "missing.json");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(main(["read-result", resultPath, "agent"])).resolves.toBe(1);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("copilot-invoker:"));
+    error.mockRestore();
+  });
+
+  it("reports stdout write failures", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "copilot-invoker-result-"));
+    const resultPath = join(directory, "result.json");
+    writeFileSync(
+      resultPath,
+      JSON.stringify({
+        schema_version: 1,
+        role: "agent",
+        requested_model: "gpt-test",
+      }),
+    );
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(
+      ((_chunk: unknown, callback?: (error?: Error | null) => void) => {
+        callback?.(new Error("EPIPE"));
+        return false;
+      }) as typeof process.stdout.write,
+    );
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(main(["read-result", resultPath, "agent"])).resolves.toBe(1);
+    expect(error).toHaveBeenCalledWith("copilot-invoker: EPIPE");
+    write.mockRestore();
+    error.mockRestore();
   });
 });
 

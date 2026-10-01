@@ -348,25 +348,16 @@ pub fn get_engine(engine_id: &str) -> Result<Engine> {
 }
 
 impl Engine {
-    /// The default engine binary name (e.g., "copilot").
-    ///
-    /// Currently scaffolding — the pipeline templates hard-code the binary path
-    /// (`/tmp/awf-tools/copilot`). This will be wired into template substitution
-    /// when additional engines are added. Can be overridden per-agent via
-    /// `engine.command` in front matter.
-    #[allow(dead_code)]
+    /// Test-only legacy display of the default engine binary name.
+    #[cfg(test)]
     pub fn command(&self) -> &str {
         match self {
             Engine::Copilot => "copilot",
         }
     }
 
-    /// Generate the legacy display form of the Copilot CLI arguments.
-    ///
-    /// Runtime execution consumes [`Self::args_with_config`] as a typed argv
-    /// vector; this joined form remains useful for diagnostics and focused
-    /// validation tests.
-    #[allow(dead_code)]
+    /// Test-only legacy display form of the Copilot CLI arguments.
+    #[cfg(test)]
     pub fn args(
         &self,
         front_matter: &FrontMatter,
@@ -1458,23 +1449,6 @@ mod tests {
             .iter()
             .map(|ext| ext.declarations(&ctx).unwrap())
             .collect()
-    }
-
-    #[test]
-    fn copilot_engine_command() {
-        assert_eq!(Engine::Copilot.command(), "copilot");
-    }
-
-    #[test]
-    fn copilot_engine_args() {
-        let (front_matter, _) =
-            parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
-        let params = Engine::Copilot
-            .args(&front_matter, &declarations_for(&front_matter))
-            .unwrap();
-        // Default engine (copilot) lets the Copilot CLI choose its default model.
-        assert!(!params.contains("--model "));
-        assert!(params.contains("--disable-builtin-mcps"));
     }
 
     #[test]
