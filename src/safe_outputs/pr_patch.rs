@@ -853,6 +853,11 @@ impl PreparedPatch {
             )
             .await?;
             ensure!(read.status.success(), "Could not seed isolated PR index");
+            if self.exact {
+                for path in &self.paths {
+                    ensure_unfiltered(repo, Some(&index), path).await?;
+                }
+            }
             for batch in &self.batches {
                 for check in [true, false] {
                     let mut command = git_without_filters(repo).await?;
@@ -997,33 +1002,7 @@ impl PreparedPatch {
                     old_mode == mode || (old_mode == "000000" && mode == "100644"),
                     "PR push cannot represent file-mode changes"
                 );
-                let mut attrs = git_without_filters(repo).await?;
-                attrs.args([
-                    "--literal-pathspecs",
-                    "check-attr",
-                    "--cached",
-                    "-z",
-                    "filter",
-                    "--",
-                    path,
-                ]);
-                if let Some(index) = index {
-                    attrs.env("GIT_INDEX_FILE", index);
-                }
-                let checked = bounded_output(&mut attrs, MAX_SOURCE_BYTES, None).await?;
-                ensure!(
-                    checked.status.success(),
-                    "Could not inspect resulting file filters"
-                );
-                let values = checked
-                    .stdout
-                    .split(|byte| *byte == 0)
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>();
-                ensure!(
-                    values.len() == 3 && matches!(values[2], b"unspecified" | b"unset"),
-                    "PR pushes do not support LFS or custom-filtered file changes"
-                );
+                ensure_unfiltered(repo, index, path).await?;
             }
             validate_oid(fields[3])?;
             let metadata = git(repo, &["cat-file", "-s", fields[3]]).await?;
@@ -1087,6 +1066,37 @@ impl PreparedPatch {
             omitted: self.omitted.clone(),
         })
     }
+}
+
+async fn ensure_unfiltered(repo: &Path, index: Option<&Path>, path: &str) -> anyhow::Result<()> {
+    let mut attrs = git_without_filters(repo).await?;
+    attrs.args([
+        "--literal-pathspecs",
+        "check-attr",
+        "--cached",
+        "-z",
+        "filter",
+        "--",
+        path,
+    ]);
+    if let Some(index) = index {
+        attrs.env("GIT_INDEX_FILE", index);
+    }
+    let checked = bounded_output(&mut attrs, MAX_SOURCE_BYTES, None).await?;
+    ensure!(
+        checked.status.success(),
+        "Could not inspect PR file filters"
+    );
+    let values = checked
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    ensure!(
+        values.len() == 3 && matches!(values[2], b"unspecified" | b"unset"),
+        "PR pushes do not support LFS or custom-filtered file changes"
+    );
+    Ok(())
 }
 
 fn append_change(changes: &mut Vec<Value>, size: &mut usize, change: Value) -> anyhow::Result<()> {

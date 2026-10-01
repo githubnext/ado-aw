@@ -310,6 +310,35 @@ async fn configured_expansion_limit_is_exact_before_application() {
 }
 
 #[tokio::test]
+async fn pushes_reject_filtered_preimages_even_when_deleted_or_attributes_removed() {
+    for delete in [true, false] {
+        let (repo, base) = repository(&[
+            (".gitattributes", b"data.txt filter=fixture\n"),
+            ("data.txt", b"old\n"),
+        ]);
+        let text = if delete {
+            "diff --git a/data.txt b/data.txt\ndeleted file mode 100644\n--- a/data.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+        } else {
+            "diff --git a/.gitattributes b/.gitattributes\n--- a/.gitattributes\n+++ b/.gitattributes\n@@ -1 +0,0 @@\n-data.txt filter=fixture\n\
+diff --git a/data.txt b/data.txt\n--- a/data.txt\n+++ b/data.txt\n@@ -1 +1 @@\n-old\n+new\n"
+        };
+        let prepared = prepare(repo.path(), &base, text.as_bytes(), &policy(&[]))
+            .await
+            .unwrap();
+        let before = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+        let error = prepared
+            .apply_to_index(repo.path(), &base)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("custom-filtered"), "{error:#}");
+        assert_eq!(
+            std::fs::read(repo.path().join(".git").join("index")).unwrap(),
+            before
+        );
+    }
+}
+
+#[tokio::test]
 async fn raw_non_utf8_text_hunks_preserve_binary_bytes() {
     let (repo, base) = repository(&[("latin.txt", b"old\n")]);
     let mut bytes = b"diff --git a/latin.txt b/latin.txt\n--- a/latin.txt\n+++ b/latin.txt\n@@ -1 +1 @@\n-old\n+".to_vec();
