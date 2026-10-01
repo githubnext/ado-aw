@@ -220,6 +220,8 @@ node "$BUNDLE"
 
 pub(crate) const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
 pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
+pub(crate) const COPILOT_INVOKER_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/copilot-invoker.js";
 /// Path to the ado-proxy bundle inside the unpacked `ado-script.zip`.
 ///
 /// Unlike every other bundle this one is not executed by a pipeline step. It
@@ -308,83 +310,6 @@ pub struct AdoScriptExtension {
     pub pr_filters: Option<PrFilters>,
     pub pipeline_filters: Option<PipelineFilters>,
     pub inlined_imports: bool,
-    /// Whether the PR-context contributor will activate. When true,
-    /// the Agent-job install/download must fire even if
-    /// `runtime_imports_active()` is false (i.e. the user has
-    /// `inlined-imports: true` but a PR trigger configured), so that
-    /// `exec-context-pr.js` is present for the `pr.rs` invocation.
-    ///
-    /// Populated at construction by `collect_extensions` using the
-    /// shared `exec_context_pr_active` predicate so this stays in
-    /// lock-step with `ExecContextExtension`'s own activation gate.
-    pub exec_context_pr_active: bool,
-    /// Whether the Manual-context contributor (Stage 1 of the
-    /// exec-context contributor build-out — see plan.md) will
-    /// activate. When true, the Agent-job install/download must
-    /// fire so that `exec-context-manual.js` is present.
-    ///
-    /// Populated at construction by `collect_extensions` using the
-    /// shared `manual_contributor_will_activate` predicate so this
-    /// stays in lock-step with the contributor's `should_activate`.
-    pub exec_context_manual_active: bool,
-    /// Whether the Pipeline-context contributor (Stage 2 of the
-    /// exec-context contributor build-out — see plan.md) will
-    /// activate. When true, the Agent-job install/download must
-    /// fire so that `exec-context-pipeline.js` is present.
-    ///
-    /// Populated at construction by `collect_extensions` using the
-    /// shared `pipeline_contributor_will_activate` predicate so this
-    /// stays in lock-step with the contributor's `should_activate`.
-    pub exec_context_pipeline_active: bool,
-    /// Whether the CI-push-context contributor (Stage 3 of the
-    /// exec-context contributor build-out — see plan.md) will
-    /// activate. Default-off opt-in feature; when true the
-    /// install/download must fire so that
-    /// `exec-context-ci-push.js` is present.
-    pub exec_context_ci_push_active: bool,
-    /// Whether the Workitem-context contributor (Stage 4 of the
-    /// exec-context contributor build-out — see plan.md) will
-    /// activate. Activates whenever the PR contributor activates
-    /// unless explicitly disabled. **Crosses an untrusted-prose
-    /// boundary** — see workitem.rs.
-    pub exec_context_workitem_active: bool,
-    /// Whether the Schedule-context contributor (Stage 5 of the
-    /// exec-context contributor build-out — see plan.md) will
-    /// activate. Opt-in (default OFF).
-    pub exec_context_schedule_active: bool,
-    /// Whether the PR-checks extension (Stage 6 of the build-out —
-    /// see plan.md) will activate. Opt-in (default OFF) AND
-    /// requires the PR contributor to activate.
-    pub exec_context_pr_checks_active: bool,
-    /// Whether the Repo-context contributor (Stage 7 of the
-    /// build-out — see plan.md) will activate. Always-on capability,
-    /// default OFF (opt-in).
-    pub exec_context_repo_active: bool,
-    /// Whether the safe-outputs approval-summary step will run at the
-    /// end of the Agent job. True whenever the workflow enables any
-    /// safe-output tool. When true the Agent-job install/download must
-    /// fire so that `approval-summary.js` is present for the
-    /// end-of-job render step (emitted by `build_agent_job`).
-    pub safe_outputs_summary_active: bool,
-    /// Whether GitHub App-backed Copilot auth is configured
-    /// (`engine.github-app-token`, issue #1316). When true the Agent-job
-    /// install/download must fire so that `github-app-token.js` is present for
-    /// the mint (and revoke) steps that `build_agent_job` emits immediately
-    /// around the Copilot run. Mirrors `safe_outputs_summary_active`: the
-    /// consuming steps are emitted by `build_agent_job`, not this extension, so
-    /// the flag drives the shared bundle download — the builder never has to
-    /// inspect emitted steps to decide whether to download.
-    pub github_app_token_active: bool,
-    /// Whether `create-pull-request` is configured (issue #1413). When true the
-    /// Agent-job install/download must fire so that `prepare-pr-base.js` is
-    /// present for the base-ref prepare step that `build_agent_job` emits before
-    /// the Copilot run. Mirrors `github_app_token_active`: the consuming step is
-    /// emitted by `build_agent_job`, not this extension, so the flag drives the
-    /// shared bundle download.
-    pub prepare_pr_base_active: bool,
-    /// Whether any user-defined stdio MCP server configures `azure-auth`.
-    /// Drives Agent-job bundle delivery for `azure-wif-refresh.js`.
-    pub azure_mcp_auth_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -1156,25 +1081,9 @@ impl CompilerExtension for AdoScriptExtension {
         // ─── Agent job ─────────────────────────────────────────
         let mut agent_prepare_steps: Vec<Step> = Vec::new();
         let import_active = self.runtime_imports_active();
-        if import_active
-            || self.exec_context_pr_active
-            || self.exec_context_manual_active
-            || self.exec_context_pipeline_active
-            || self.exec_context_ci_push_active
-            || self.exec_context_workitem_active
-            || self.exec_context_schedule_active
-            || self.exec_context_pr_checks_active
-            || self.exec_context_repo_active
-            || self.safe_outputs_summary_active
-            || self.github_app_token_active
-            || self.prepare_pr_base_active
-            || self.azure_mcp_auth_active
-        {
-            agent_prepare_steps
-                .extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
-            if import_active {
-                agent_prepare_steps.push(resolver_step_typed());
-            }
+        agent_prepare_steps.extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
+        if import_active {
+            agent_prepare_steps.push(resolver_step_typed());
         }
 
         // ─── Agent-job condition contribution ──────────────────
@@ -1365,18 +1274,6 @@ mod tests {
             pr_filters: pr,
             pipeline_filters: pipeline,
             inlined_imports: inlined,
-            exec_context_pr_active: false,
-            exec_context_manual_active: false,
-            exec_context_pipeline_active: false,
-            exec_context_ci_push_active: false,
-            exec_context_workitem_active: false,
-            exec_context_schedule_active: false,
-            exec_context_pr_checks_active: false,
-            exec_context_repo_active: false,
-            safe_outputs_summary_active: false,
-            github_app_token_active: false,
-            prepare_pr_base_active: false,
-            azure_mcp_auth_active: false,
             pr_trigger_for_synth: None,
             supply_chain: None,
         }
@@ -1445,18 +1342,6 @@ mod tests {
             pr_filters: None,
             pipeline_filters: None,
             inlined_imports: true,
-            exec_context_pr_active: false,
-            exec_context_manual_active: false,
-            exec_context_pipeline_active: false,
-            exec_context_ci_push_active: false,
-            exec_context_workitem_active: false,
-            exec_context_schedule_active: false,
-            exec_context_pr_checks_active: false,
-            exec_context_repo_active: false,
-            safe_outputs_summary_active: false,
-            github_app_token_active: false,
-            prepare_pr_base_active: false,
-            azure_mcp_auth_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1505,18 +1390,6 @@ mod tests {
             pr_filters: Some(filters),
             pipeline_filters: None,
             inlined_imports: true,
-            exec_context_pr_active: false,
-            exec_context_manual_active: false,
-            exec_context_pipeline_active: false,
-            exec_context_ci_push_active: false,
-            exec_context_workitem_active: false,
-            exec_context_schedule_active: false,
-            exec_context_pr_checks_active: false,
-            exec_context_repo_active: false,
-            safe_outputs_summary_active: false,
-            github_app_token_active: false,
-            prepare_pr_base_active: false,
-            azure_mcp_auth_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -2090,14 +1963,13 @@ mod tests {
     }
 
     #[test]
-    fn declarations_agent_prepare_download_fires_when_only_prepare_pr_base_active() {
-        let mut ext = ext_with(None, None, true);
-        ext.prepare_pr_base_active = true;
+    fn declarations_agent_prepare_always_stages_bundle() {
+        let ext = ext_with(None, None, true);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
         let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
-        // Install + download fire (so prepare-pr-base.js is staged), but no
-        // runtime-import resolver (inlined_imports: true).
+        // The invoker is required by every Agent job, so install + download
+        // fire even when no other ado-script consumer is active.
         assert_eq!(steps.len(), 2, "install + download only");
         assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
         assert!(
@@ -2266,18 +2138,6 @@ mod tests {
             pr_filters: pr,
             pipeline_filters: pipeline,
             inlined_imports: true,
-            exec_context_pr_active: false,
-            exec_context_manual_active: false,
-            exec_context_pipeline_active: false,
-            exec_context_ci_push_active: false,
-            exec_context_workitem_active: false,
-            exec_context_schedule_active: false,
-            exec_context_pr_checks_active: false,
-            exec_context_repo_active: false,
-            safe_outputs_summary_active: false,
-            github_app_token_active: false,
-            prepare_pr_base_active: false,
-            azure_mcp_auth_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -2740,30 +2600,19 @@ mod tests {
 
     // ── Typed-IR declarations (port-ado-script) ─────────────────────
 
-    /// `declarations()` returns empty step lists when neither
-    /// runtime-import nor exec-context-pr nor any gate / synth path
-    /// is active.
+    /// Setup remains empty when no gate / synth path is active, while Agent
+    /// preparation always stages the Copilot invoker bundle.
     #[test]
-    fn declarations_empty_when_nothing_active() {
+    fn declarations_stages_agent_bundle_when_nothing_else_active() {
         let ext = ext_with(None, None, true);
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
         let decl = ext.declarations(&ctx).unwrap();
         assert!(decl.setup_steps.is_empty());
-        assert!(decl.agent_prepare_steps.is_empty());
-    }
-
-    #[test]
-    fn declarations_agent_prepare_download_fires_for_azure_mcp_auth() {
-        let mut ext = ext_with(None, None, true);
-        ext.azure_mcp_auth_active = true;
-        let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
-        let ctx = CompileContext::for_test(&fm);
-        let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
-        assert_eq!(steps.len(), 2, "install + download only");
-        assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
+        assert_eq!(decl.agent_prepare_steps.len(), 2, "install + download");
+        assert!(matches!(&decl.agent_prepare_steps[0], Step::Task(t) if t.task == "UseNode@1"));
         assert!(
-            matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Download ado-aw scripts"))
+            matches!(&decl.agent_prepare_steps[1], Step::Bash(b) if b.display_name.contains("Download ado-aw scripts"))
         );
     }
 
@@ -2816,18 +2665,6 @@ mod tests {
             pr_filters: None,
             pipeline_filters: None,
             inlined_imports: true,
-            exec_context_pr_active: false,
-            exec_context_manual_active: false,
-            exec_context_pipeline_active: false,
-            exec_context_ci_push_active: false,
-            exec_context_workitem_active: false,
-            exec_context_schedule_active: false,
-            exec_context_pr_checks_active: false,
-            exec_context_repo_active: false,
-            safe_outputs_summary_active: false,
-            github_app_token_active: false,
-            prepare_pr_base_active: false,
-            azure_mcp_auth_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

@@ -6,6 +6,7 @@ umask 077
 : "${ADO_AW_BIN:?ADO_AW_BIN is required}"
 : "${AWF_BIN:?AWF_BIN is required}"
 : "${COPILOT_BIN:?COPILOT_BIN is required}"
+: "${COPILOT_INVOKER_BUNDLE:?COPILOT_INVOKER_BUNDLE is required}"
 : "${AWF_VERSION:?AWF_VERSION is required}"
 : "${MCPG_VERSION:?MCPG_VERSION is required}"
 : "${ADO_AW_COPILOT_CLI_ARTIFACT_DIR:?ADO_AW_COPILOT_CLI_ARTIFACT_DIR is required}"
@@ -71,6 +72,10 @@ for binary in "${ADO_AW_BIN}" "${AWF_BIN}" "${COPILOT_BIN}"; do
     exit 1
   }
 done
+[[ -f "${COPILOT_INVOKER_BUNDLE}" ]] || {
+  echo "Copilot invoker bundle is missing: ${COPILOT_INVOKER_BUNDLE}" >&2
+  exit 1
+}
 
 MCP_GATEWAY_API_KEY="$(openssl rand -base64 45 | tr -d '/+=')"
 install -m 0755 "${ADO_AW_BIN}" "${TOOLS_DIR}/ado-aw"
@@ -223,15 +228,41 @@ jq \
 chmod 600 "${TOOLS_DIR}/mcp-config.json"
 
 install -m 0755 "${COPILOT_BIN}" "${TOOLS_DIR}/copilot"
+mkdir -p /tmp/ado-aw-scripts/ado-script
+install -m 0644 "${COPILOT_INVOKER_BUNDLE}" \
+  /tmp/ado-aw-scripts/ado-script/copilot-invoker.js
 cat >"${TOOLS_DIR}/agent-prompt.md" <<EOF
 Call the noop tool exactly once with context "${CONTRACT_CONTEXT}".
 Do not call any other tool. Stop immediately after the tool call.
 EOF
 chmod 600 "${TOOLS_DIR}/agent-prompt.md"
+jq -n \
+  --arg command "${TOOLS_DIR}/copilot" \
+  --arg prompt_path "${TOOLS_DIR}/agent-prompt.md" \
+  --arg mcp_config_path "${TOOLS_DIR}/mcp-config.json" \
+  --arg result_path "${TOOLS_DIR}/copilot-invocation-result.json" \
+  '{
+    schema_version: 1,
+    role: "agent",
+    command: $command,
+    prompt_path: $prompt_path,
+    mcp_config_path: $mcp_config_path,
+    args: [
+      "--disable-builtin-mcps",
+      "--no-ask-user",
+      "--allow-all-tools",
+      "--allow-tool",
+      "safeoutputs",
+      "--allow-all-paths"
+    ],
+    explicit_model: "gpt-5-mini",
+    result_path: $result_path
+  }' >"${TOOLS_DIR}/copilot-invocation.json"
+chmod 600 "${TOOLS_DIR}/copilot-invocation.json"
 
 readonly ALLOWED_DOMAINS="api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,github.com,telemetry.enterprise.githubcopilot.com,*.copilot.github.com,*.githubcopilot.com"
 # shellcheck disable=SC2016 # AWF expands the engine command inside the sandbox.
-readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt="$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model gpt-5-mini --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool safeoutputs --allow-all-paths'
+readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; exec node /tmp/ado-aw-scripts/ado-script/copilot-invoker.js run /tmp/awf-tools/copilot-invocation.json'
 
 set +e
 "${AWF_BIN}" \
@@ -253,6 +284,15 @@ if [[ "${AWF_STATUS}" -ne 0 ]]; then
   echo "AWF Copilot run failed with exit code ${AWF_STATUS}" >&2
   exit "${AWF_STATUS}"
 fi
+
+REQUESTED_MODEL="$(
+  node /tmp/ado-aw-scripts/ado-script/copilot-invoker.js \
+    read-result "${TOOLS_DIR}/copilot-invocation-result.json" agent
+)"
+[[ "${REQUESTED_MODEL}" == "gpt-5-mini" ]] || {
+  echo "Unexpected requested model from invoker: ${REQUESTED_MODEL}" >&2
+  exit 1
+}
 
 NDJSON_PATH="${SAFE_OUTPUTS_DIR}/safe_outputs.ndjson"
 for _ in $(seq 1 30); do

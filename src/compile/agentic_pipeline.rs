@@ -269,8 +269,8 @@ fn fanout_extension_declarations(
 /// function's cognitive complexity manageable — behaviour is unchanged.
 struct EngineSetup {
     compiler_version: String,
-    engine_run: String,
-    engine_run_detection: String,
+    agent_invocation_json: String,
+    detection_invocation_json: String,
     engine_install_steps_yaml: String,
     detection_engine_install_steps_yaml: String,
     engine_log_dir: String,
@@ -293,19 +293,31 @@ fn build_engine_setup(
     let compiler_version = env!("CARGO_PKG_VERSION").to_string();
     let detection_engine = crate::engine::get_engine(detection_engine_config.engine_id())?;
 
-    let engine_run = ctx.engine.invocation(
+    let agent_invocation = ctx.engine.invocation_document(
         ctx.front_matter,
         extension_declarations,
-        "/tmp/awf-tools/agent-prompt.md",
-        Some("/tmp/awf-tools/mcp-config.json"),
+        crate::engine::CopilotInvocationContext::new(
+            crate::engine::RuntimeModelRole::Agent,
+            "/tmp/awf-tools/agent-prompt.md",
+            Some("/tmp/awf-tools/mcp-config.json"),
+            "/tmp/awf-tools/copilot-invocation-result.json",
+        ),
     )?;
-    let engine_run_detection = detection_engine.invocation_with_config(
+    let detection_invocation = detection_engine.invocation_document_with_config(
         detection_engine_config,
         ctx.front_matter,
         extension_declarations,
-        "/tmp/awf-tools/threat-analysis-prompt.md",
-        None,
+        crate::engine::CopilotInvocationContext::new(
+            crate::engine::RuntimeModelRole::Detection,
+            "/tmp/awf-tools/threat-analysis-prompt.md",
+            None,
+            "/tmp/awf-tools/copilot-invocation-result.json",
+        ),
     )?;
+    let agent_invocation_json = serde_json::to_string(&agent_invocation)
+        .context("failed to serialize Agent Copilot invocation document")?;
+    let detection_invocation_json = serde_json::to_string(&detection_invocation)
+        .context("failed to serialize Detection Copilot invocation document")?;
     let engine_install_steps_yaml =
         ctx.engine
             .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
@@ -348,8 +360,8 @@ fn build_engine_setup(
 
     Ok(EngineSetup {
         compiler_version,
-        engine_run,
-        engine_run_detection,
+        agent_invocation_json,
+        detection_invocation_json,
         engine_install_steps_yaml,
         detection_engine_install_steps_yaml,
         engine_log_dir,
@@ -440,8 +452,8 @@ pub(crate) fn build_pipeline_context(
     )?;
     let EngineSetup {
         compiler_version,
-        engine_run,
-        engine_run_detection,
+        agent_invocation_json,
+        detection_invocation_json,
         engine_install_steps_yaml,
         detection_engine_install_steps_yaml,
         engine_log_dir,
@@ -573,8 +585,8 @@ pub(crate) fn build_pipeline_context(
         compiler_version: compiler_version.clone(),
         engine_install_steps_yaml,
         detection_engine_install_steps_yaml,
-        engine_run,
-        engine_run_detection,
+        agent_invocation_json,
+        detection_invocation_json,
         detection_engine_config,
         threat_detection,
         engine_env,
@@ -828,8 +840,8 @@ pub(crate) struct StandaloneCtx {
     /// to typed steps.
     pub(crate) engine_install_steps_yaml: String,
     pub(crate) detection_engine_install_steps_yaml: String,
-    pub(crate) engine_run: String,
-    pub(crate) engine_run_detection: String,
+    pub(crate) agent_invocation_json: String,
+    pub(crate) detection_invocation_json: String,
     pub(crate) detection_engine_config: EngineConfig,
     pub(crate) threat_detection: ThreatDetectionConfig,
     /// Composed engine env block — `KEY: VALUE` lines, one per line.
@@ -1328,8 +1340,7 @@ fn build_agent_job(
     //     `checkout: self` (step 1) so the clone exists, and before the Copilot
     //     run so the refs are present when the agent proposes a PR. The
     //     `prepare-pr-base.js` bundle is staged by the ado-script extension's
-    //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
-    //     extension's Agent-job download predicate), so it is guaranteed present.
+    //     always-on Agent preparation.
     if front_matter.create_pr_config().is_some() {
         // The prepare step deepens every checkout dir the SafeOutputs MCP server
         // may generate a patch from — see `create_pr_prepare_repos`. The
@@ -1364,11 +1375,7 @@ fn build_agent_job(
     //     step sets. Never runs for SafeOutputs/user steps.
     //
     //     The ado-script bundle is staged by the ado-script extension's
-    //     agent-prepare steps: `github_app_token_active` is OR'd into that
-    //     extension's Agent-job download predicate (mirroring
-    //     `safe_outputs_summary_active`), so the bundle is guaranteed present by
-    //     the time we reach this step — no need to inspect emitted steps or
-    //     re-download here.
+    //     always-on Agent preparation, so no feature-specific download is needed.
     if let Some(app_token) = front_matter.engine.github_app_token() {
         steps.push(super::extensions::ado_script::github_app_token_step_typed(
             app_token,
@@ -1389,7 +1396,7 @@ fn build_agent_job(
         &cfg.allowed_domains,
         &cfg.awf_mounts,
         &cfg.working_directory,
-        &cfg.engine_run,
+        &cfg.agent_invocation_json,
         &cfg.engine_env,
         &cfg.byom_exclude_keys,
         front_matter.supply_chain(),
@@ -1412,9 +1419,7 @@ fn build_agent_job(
     // emitted when any safe-output tool is enabled (transparency for every
     // run); when manual review is configured the reviewed proposals are listed
     // first. The ado-script bundle was delivered earlier in this job by the
-    // ado-script extension, gated on the SAME predicate
-    // (`has_any_safe_output_tool` → `safe_outputs_summary_active`), so the
-    // bundle is downloaded iff this step is emitted.
+    // ado-script extension's always-on Agent preparation.
     if front_matter.has_any_safe_output_tool() {
         let (_, reviewed_summary_tools) = front_matter.partition_safe_outputs_by_approval();
         steps.push(Step::Bash(safe_outputs_summary_step(
@@ -1546,17 +1551,6 @@ fn agent_job_variables_hoist(
 /// (see `AdoScriptExtension::build_agent_conditions` for today's
 /// only contributor — synth-PR-skip, PR-filter gate, pipeline-filter
 /// gate, and user `expression:` escape hatches).
-/// Whether the Detection job must stage the `ado-script` bundle. The Detection
-/// job has no extension-prepare phase (unlike the Agent job, whose bundle
-/// download is contributed by `AdoScriptExtension`), so it stages the bundle
-/// itself — but gated on this single predicate so exactly one download is
-/// emitted. Today only the GitHub App token step needs it; future
-/// detection-only bundle consumers should `||` their own condition in here
-/// rather than adding a second `install_and_download_steps_typed` call.
-fn detection_job_needs_ado_script_bundle(engine_config: &EngineConfig) -> bool {
-    engine_config.github_app_token().is_some()
-}
-
 fn build_detection_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -1612,15 +1606,14 @@ fn build_detection_job(
         )?));
         steps.push(Step::Bash(setup_compiler_step()));
 
-        // Stage auth support before custom pre-steps, but mint credentials only
-        // after them so trusted setup code receives the least privilege needed.
-        if detection_job_needs_ado_script_bundle(&cfg.detection_engine_config) {
-            steps.extend(
-                super::extensions::ado_script::install_and_download_steps_typed(
-                    front_matter.supply_chain(),
-                ),
-            );
-        }
+        // Detection always executes the Copilot invoker bundle. Stage it before
+        // custom pre-steps; mint optional credentials only after those steps so
+        // trusted setup code receives the least privilege needed.
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
         for user_step in &cfg.threat_detection.steps {
             steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
         }
@@ -1640,7 +1633,7 @@ fn build_detection_job(
         steps.push(Step::Bash(run_threat_analysis_step(
             &cfg.detection_allowed_domains,
             &cfg.working_directory,
-            &cfg.engine_run_detection,
+            &cfg.detection_invocation_json,
             &cfg.detection_byom_exclude_keys,
             &cfg.detection_engine_env,
             crate::engine::github_token_source_var(&cfg.detection_engine_config),
@@ -1657,6 +1650,9 @@ fn build_detection_job(
             steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
         }
         steps.push(Step::Bash(prepare_analyzed_outputs_step()));
+        if cfg.detection_engine_config.model().is_none() {
+            steps.push(Step::Bash(record_detection_runtime_model_step()));
+        }
         steps.push(Step::Bash(evaluate_threat_analysis_step()));
     } else {
         steps.push(Step::Bash(prepare_analyzed_outputs_passthrough_step()));
@@ -3623,7 +3619,7 @@ shell_script! {
         externals: [],
         fragments: [tail],
         body: r###"
-set -eo pipefail
+set -o pipefail
 mkdir -p "$DEST"
 
 locate_one() {
@@ -4456,22 +4452,41 @@ shell_script! {
     /// - `image_flags` — `--image-tag` plus optional `--image-registry`
     /// - `exclude_env` — provider credentials and internal MCP identity keys
     /// - `awf_mounts` — the compiler-supplied chain of `--mount "…"` args
-    /// - `routed_engine_run` — the single-quoted `NO_PROXY` prefix + engine
-    ///   command that AWF invokes inside the sandbox
+    /// - `routed_invoker` — the fixed single-quoted `NO_PROXY` prefix +
+    ///   compiler-owned invoker command that AWF runs inside the sandbox
     RUN_AGENT {
         interpreter: Bash,
-        bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, ALLOWED_DOMAINS],
+        bindings: [
+            AGENT_TEMP,
+            PIPELINE_WORKSPACE,
+            ALLOWED_DOMAINS,
+            INVOCATION_DOCUMENT,
+            INVOCATION_DOCUMENT_PATH,
+            INVOCATION_RESULT_PATH,
+            COPILOT_INVOKER_PATH
+        ],
         externals: [WORKING_DIRECTORY],
-        fragments: [topology_attach, image_flags, exclude_env, awf_mounts, routed_engine_run],
+        fragments: [
+            append_aw_info_field,
+            topology_attach,
+            image_flags,
+            exclude_env,
+            awf_mounts,
+            routed_invoker
+        ],
+        phases: [append_aw_info_field = super::extensions::APPEND_AW_INFO_FIELD],
         body: r###"
-set -o pipefail
+set -eo pipefail
 
 AGENT_OUTPUT_FILE="$AGENT_TEMP/staging/logs/agent-output.txt"
 mkdir -p "$AGENT_TEMP/staging/logs"
 AGENT_EXIT_CODE=0
+printf '%s\n' "$INVOCATION_DOCUMENT" > "$INVOCATION_DOCUMENT_PATH"
+rm -f "$INVOCATION_RESULT_PATH"
 
 echo "=== Running AI agent with AWF network isolation ==="
 echo "Allowed domains: $ALLOWED_DOMAINS"
+set +e
 
 # AWF provides L7 domain whitelisting via a rootless Docker topology.
 # The named MCPG container is attached to AWF's internal network as a
@@ -4495,7 +4510,7 @@ AWF_ARGS+=(
   --log-level info
   --proxy-logs-dir "$AGENT_TEMP/staging/logs/firewall"
 )
-# ado-aw:fragment routed_engine_run
+# ado-aw:fragment routed_invoker
 
 # Stream agent output in real-time while filtering VSO commands.
 # sed -u = unbuffered (line-by-line) so output appears immediately.
@@ -4506,6 +4521,27 @@ AWF_ARGS+=(
   | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
   | tee "$AGENT_OUTPUT_FILE" \
   || AGENT_EXIT_CODE=$?
+
+MODEL_RESULT_STATUS=0
+REQUESTED_MODEL=$(node "$COPILOT_INVOKER_PATH" read-result "$INVOCATION_RESULT_PATH" agent) \
+  || MODEL_RESULT_STATUS=$?
+if [ "$MODEL_RESULT_STATUS" -ne 0 ]; then
+  echo "ERROR: Agent Copilot invocation result is missing or malformed" >&2
+  if [ "$AGENT_EXIT_CODE" -eq 0 ]; then
+    AGENT_EXIT_CODE="$MODEL_RESULT_STATUS"
+  fi
+else
+  ADO_AW_INFO_JSON="$AGENT_TEMP/staging/aw_info.json"
+  if [ -f "$ADO_AW_INFO_JSON" ]; then
+    # ado-aw:fragment append_aw_info_field
+    ado_aw_append_info_field \
+      "model" \
+      "$REQUESTED_MODEL" \
+      "$ADO_AW_INFO_JSON"
+  else
+    echo "Warning: Agent metadata file not found at $ADO_AW_INFO_JSON; model metadata was not recorded" >&2
+  fi
+fi
 
 # Print firewall summary if available
 if [ -x "$PIPELINE_WORKSPACE/awf/awf" ]; then
@@ -4523,7 +4559,7 @@ fn run_agent_step(
     allowed_domains: &str,
     awf_mounts: &str,
     working_directory: &str,
-    engine_run: &str,
+    invocation_document: &str,
     engine_env: &str,
     byom_exclude_keys: &[String],
     supply_chain: Option<&SupplyChainConfig>,
@@ -4565,7 +4601,6 @@ fn run_agent_step(
     };
     let image_flags_block = awf_image_flags(supply_chain);
     let exclude_env_block = awf_exclude_env_flags(byom_exclude_keys);
-
     // AWF attaches externally-launched trusted containers to its internal
     // network by name. The flag is repeatable, which is what lets the policy
     // engine join alongside MCPG. Attaching also gives the agent an
@@ -4620,9 +4655,10 @@ fn run_agent_step(
     } else {
         MCPG_CONTAINER_NAME.to_string()
     };
-    let routed_engine_run = format!(
+    let routed_invoker = format!(
         "AWF_ARGS+=(-- 'export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{no_proxy_peers}\"; \
-         export no_proxy=\"$NO_PROXY\"; {engine_run}')"
+         export no_proxy=\"$NO_PROXY\"; exec node {} run /tmp/awf-tools/copilot-invocation.json')",
+        super::extensions::ado_script::COPILOT_INVOKER_PATH
     );
 
     let mut step = ShellScript::new(&RUN_AGENT)
@@ -4632,11 +4668,31 @@ fn run_agent_step(
             Binding::ado_macro("Pipeline.Workspace"),
         )
         .bind_text("ALLOWED_DOMAINS", allowed_domains)
+        .bind(
+            "INVOCATION_DOCUMENT",
+            Binding::document(invocation_document),
+        )
+        .bind_text(
+            "INVOCATION_DOCUMENT_PATH",
+            "/tmp/awf-tools/copilot-invocation.json",
+        )
+        .bind_text(
+            "INVOCATION_RESULT_PATH",
+            "/tmp/awf-tools/copilot-invocation-result.json",
+        )
+        .bind_text(
+            "COPILOT_INVOKER_PATH",
+            super::extensions::ado_script::COPILOT_INVOKER_PATH,
+        )
+        .fragment(
+            "append_aw_info_field",
+            phase_body(&super::extensions::APPEND_AW_INFO_FIELD),
+        )
         .fragment("topology_attach", topology_attach_block)
         .fragment("image_flags", image_flags_line)
         .fragment("exclude_env", exclude_env_line)
         .fragment("awf_mounts", awf_mounts_block)
-        .fragment("routed_engine_run", routed_engine_run)
+        .fragment("routed_invoker", routed_invoker)
         .into_step("Run copilot (AWF network isolated)");
     step.working_directory = Some(working_directory.to_string());
     // Engine env comes as a multi-line YAML env block — `KEY: VALUE` lines
@@ -4797,8 +4853,7 @@ node "$APPROVAL_SUMMARY_PATH" || echo "##vso[task.logissue type=warning]approval
 /// Emitted at the **end of the Agent job** (after `collect_safe_outputs_step`
 /// has staged `safe_outputs.ndjson`), never in the Detection/threat-analysis
 /// job. The ado-script bundle is delivered earlier in the same job by the
-/// ado-script extension's agent-prepare steps (gated on
-/// `safe_outputs_summary_active`).
+/// ado-script extension's always-on Agent preparation.
 ///
 /// `reviewed` is the compiler-resolved set of approval-gated tool names; when
 /// non-empty the bundle lists those proposals first under a "Pending approval"
@@ -6205,15 +6260,25 @@ shell_script! {
     /// verbatim.
     RUN_THREAT_ANALYSIS {
         interpreter: Bash,
-        bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, ALLOWED_DOMAINS],
+        bindings: [
+            AGENT_TEMP,
+            PIPELINE_WORKSPACE,
+            ALLOWED_DOMAINS,
+            INVOCATION_DOCUMENT,
+            INVOCATION_DOCUMENT_PATH,
+            INVOCATION_RESULT_PATH,
+            COPILOT_INVOKER_PATH
+        ],
         externals: [WORKING_DIRECTORY],
-        fragments: [image_flags, exclude_env, engine_run_detection],
+        fragments: [image_flags, exclude_env, run_invoker],
         body: r###"
 set -o pipefail
 
 # Run threat analysis with AWF network isolation
 THREAT_OUTPUT_FILE="$AGENT_TEMP/threat-analysis-output.txt"
 AGENT_EXIT_CODE=0
+printf '%s\n' "$INVOCATION_DOCUMENT" > "$INVOCATION_DOCUMENT_PATH"
+rm -f "$INVOCATION_RESULT_PATH"
 
 # The argument list is assembled into an array so runtime-supplied
 # fragments splice in as ordinary shell statements (`AWF_ARGS+=(...)`)
@@ -6230,7 +6295,7 @@ AWF_ARGS+=(
   --log-level info
   --proxy-logs-dir "$AGENT_TEMP/threat-analysis-logs/firewall"
 )
-# ado-aw:fragment engine_run_detection
+# ado-aw:fragment run_invoker
 
 # Stream threat analysis output in real-time with VSO command filtering
 # shellcheck disable=SC2016 # The single-quoted engine command inside AWF_ARGS is intentionally expanded by AWF inside the sandbox
@@ -6238,6 +6303,18 @@ AWF_ARGS+=(
   | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
   | tee "$THREAT_OUTPUT_FILE" \
   || AGENT_EXIT_CODE=$?
+
+MODEL_RESULT_STATUS=0
+REQUESTED_MODEL=$(node "$COPILOT_INVOKER_PATH" read-result "$INVOCATION_RESULT_PATH" detection) \
+  || MODEL_RESULT_STATUS=$?
+if [ "$MODEL_RESULT_STATUS" -ne 0 ]; then
+  echo "ERROR: Detection Copilot invocation result is missing or malformed" >&2
+  if [ "$AGENT_EXIT_CODE" -eq 0 ]; then
+    AGENT_EXIT_CODE="$MODEL_RESULT_STATUS"
+  fi
+else
+  printf '%s' "$REQUESTED_MODEL" > "$AGENT_TEMP/detection-runtime-model"
+fi
 
 exit "$AGENT_EXIT_CODE"
 "###,
@@ -6247,7 +6324,7 @@ exit "$AGENT_EXIT_CODE"
 fn run_threat_analysis_step(
     allowed_domains: &str,
     working_directory: &str,
-    engine_run_detection: &str,
+    invocation_document: &str,
     byom_exclude_keys: &[String],
     detection_engine_env: &[(String, String)],
     github_token_var: &str,
@@ -6283,7 +6360,10 @@ fn run_threat_analysis_step(
             format!("AWF_ARGS+=({})", parts.join(" "))
         }
     };
-    let engine_run_detection_line = format!("AWF_ARGS+=(-- '{engine_run_detection}')");
+    let run_invoker = format!(
+        "AWF_ARGS+=(-- 'exec node {} run /tmp/awf-tools/copilot-invocation.json')",
+        super::extensions::ado_script::COPILOT_INVOKER_PATH
+    );
 
     let mut step = ShellScript::new(&RUN_THREAT_ANALYSIS)
         .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
@@ -6292,9 +6372,25 @@ fn run_threat_analysis_step(
             Binding::ado_macro("Pipeline.Workspace"),
         )
         .bind_text("ALLOWED_DOMAINS", allowed_domains)
+        .bind(
+            "INVOCATION_DOCUMENT",
+            Binding::document(invocation_document),
+        )
+        .bind_text(
+            "INVOCATION_DOCUMENT_PATH",
+            "/tmp/awf-tools/copilot-invocation.json",
+        )
+        .bind_text(
+            "INVOCATION_RESULT_PATH",
+            "/tmp/awf-tools/copilot-invocation-result.json",
+        )
+        .bind_text(
+            "COPILOT_INVOKER_PATH",
+            super::extensions::ado_script::COPILOT_INVOKER_PATH,
+        )
         .fragment("image_flags", image_flags_line)
         .fragment("exclude_env", exclude_env_line)
-        .fragment("engine_run_detection", engine_run_detection_line)
+        .fragment("run_invoker", run_invoker)
         .into_step("Run threat analysis (AWF network isolated)");
     step.working_directory = Some(working_directory.to_string());
     // env block: GITHUB_TOKEN + GITHUB_READ_ONLY — emit the latter as
@@ -6371,6 +6467,48 @@ fn prepare_analyzed_outputs_step() -> BashStep {
         )
         .bind("BUILD_ID", Binding::ado_macro("Build.BuildId"))
         .into_step("Prepare analyzed outputs")
+        .with_condition(Condition::Always)
+}
+
+shell_script! {
+    /// Detection job: resolve the effective runtime model in Detection's own
+    /// variable scope and enrich the copied Agent metadata.
+    RECORD_DETECTION_RUNTIME_MODEL {
+        interpreter: Bash,
+        bindings: [AGENT_TEMP],
+        externals: [],
+        fragments: [append_aw_info_field],
+        phases: [append_aw_info_field = super::extensions::APPEND_AW_INFO_FIELD],
+        body: r###"
+set -eo pipefail
+
+ADO_AW_INFO_JSON="$AGENT_TEMP/analyzed_outputs/aw_info.json"
+ADO_AW_MODEL_FILE="$AGENT_TEMP/detection-runtime-model"
+if [ ! -f "$ADO_AW_INFO_JSON" ]; then
+  echo "ERROR: Detection could not find copied aw_info.json at $ADO_AW_INFO_JSON" >&2
+  exit 1
+fi
+if [ ! -f "$ADO_AW_MODEL_FILE" ]; then
+  exit 0
+fi
+
+# ado-aw:fragment append_aw_info_field
+ado_aw_append_info_field \
+  "detection_model" \
+  "$(cat "$ADO_AW_MODEL_FILE")" \
+  "$ADO_AW_INFO_JSON"
+"###,
+    }
+}
+
+fn record_detection_runtime_model_step() -> BashStep {
+    ShellScript::new(&RECORD_DETECTION_RUNTIME_MODEL)
+        .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+        .fragment(
+            "append_aw_info_field",
+            phase_body(&super::extensions::APPEND_AW_INFO_FIELD),
+        )
+        .into_step("Record Detection runtime model")
         .with_condition(Condition::Always)
 }
 
@@ -6964,6 +7102,8 @@ const _SUBMODULES_OPT_BIND: Option<SubmodulesOpt> = None;
 mod tests {
     use super::*;
     use crate::compile::mcpg::McpgLaunchEnvironment;
+    #[cfg(unix)]
+    use std::process::{Command, Output};
 
     fn test_front_matter(yaml: &str) -> FrontMatter {
         serde_yaml::from_str(yaml).expect("front matter should parse")
@@ -6989,8 +7129,8 @@ mod tests {
             compiler_version: "0.0.0-test".to_string(),
             engine_install_steps_yaml: String::new(),
             detection_engine_install_steps_yaml: String::new(),
-            engine_run: "echo agent".to_string(),
-            engine_run_detection: "echo detection".to_string(),
+            agent_invocation_json: "{}".to_string(),
+            detection_invocation_json: "{}".to_string(),
             detection_engine_config: EngineConfig::default(),
             threat_detection: ThreatDetectionConfig::default(),
             engine_env: "GITHUB_READ_ONLY: 1".to_string(),
@@ -7661,7 +7801,7 @@ safe-outputs:
             "example.com",
             "\\",
             "/work",
-            "copilot -p prompt",
+            r#"{"schema_version":1,"role":"agent"}"#,
             "FOO: bar",
             &[],
             None,
@@ -7669,6 +7809,20 @@ safe-outputs:
         )
         .expect("run_agent_step should build")
         .script
+    }
+
+    fn runtime_agent_step_for_test() -> BashStep {
+        run_agent_step(
+            "example.com",
+            "\\",
+            "/work",
+            r#"{"schema_version":1,"role":"agent"}"#,
+            "ADO_AW_MODEL_AGENT_COPILOT: $(ADO_AW_MODEL_AGENT_COPILOT)\nADO_AW_DEFAULT_MODEL_COPILOT: $(ADO_AW_DEFAULT_MODEL_COPILOT)",
+            &[],
+            None,
+            false,
+        )
+        .expect("run_agent_step should build")
     }
 
     #[test]
@@ -7704,6 +7858,81 @@ safe-outputs:
         assert!(enabled.contains(&format!(
             "NO_PROXY:+$NO_PROXY,}}{MCPG_CONTAINER_NAME},{ADO_PROXY_CONTAINER_NAME}"
         )));
+    }
+
+    #[test]
+    fn agent_runtime_model_is_delegated_to_invoker_and_recorded_after_awf() {
+        let step = runtime_agent_step_for_test();
+        assert!(matches!(
+            step.env
+                .get(crate::engine::ADO_AW_MODEL_AGENT_COPILOT),
+            Some(EnvValue::PipelineVar(name))
+                if name == crate::engine::ADO_AW_MODEL_AGENT_COPILOT
+        ));
+        assert!(matches!(
+            step.env
+                .get(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT),
+            Some(EnvValue::PipelineVar(name))
+                if name == crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT
+        ));
+        assert!(step.script.contains("copilot-invoker.js run"));
+        assert!(step
+            .script
+            .contains("node \"$COPILOT_INVOKER_PATH\" read-result"));
+        assert!(step.script.contains("\"model\""));
+        let metadata_index = step
+            .script
+            .rfind("ado_aw_append_info_field")
+            .expect("metadata append");
+        let awf_index = step
+            .script
+            .find("\"$PIPELINE_WORKSPACE/awf/awf\"")
+            .expect("AWF invocation");
+        assert!(awf_index < metadata_index);
+        assert!(!step.script.contains("$(ADO_AW_MODEL_AGENT_COPILOT)"));
+        assert!(!step.script.contains("$(ADO_AW_DEFAULT_MODEL_COPILOT)"));
+        assert!(!step.script.contains("ADO_AW_EFFECTIVE_MODEL"));
+        assert!(!step.script.contains("--model"));
+    }
+
+    #[test]
+    fn missing_agent_metadata_does_not_block_agent_execution() {
+        let step = runtime_agent_step_for_test();
+        assert!(step
+            .script
+            .contains("if [ -f \"$ADO_AW_INFO_JSON\" ]; then"));
+        assert!(step.script.contains(
+            "Warning: Agent metadata file not found at $ADO_AW_INFO_JSON; model metadata was not recorded"
+        ));
+        assert!(!step
+            .script
+            .contains("ERROR: Agent could not find aw_info.json"));
+
+        let warning_index = step.script.find("model metadata was not recorded").unwrap();
+        let awf_index = step
+            .script
+            .find("\"$PIPELINE_WORKSPACE/awf/awf\"")
+            .expect("AWF invocation");
+        assert!(awf_index < warning_index);
+    }
+
+    #[test]
+    fn prefixed_user_env_key_does_not_change_fixed_invoker_command() {
+        let step = run_agent_step(
+            "example.com",
+            "\\",
+            "/work",
+            r#"{"schema_version":1,"role":"agent","explicit_model":"static-model"}"#,
+            "ADO_AW_MODEL_AGENT_COPILOT_X: harmless",
+            &[],
+            None,
+            false,
+        )
+        .expect("run_agent_step should build");
+
+        assert!(!step.script.contains("ADO_AW_EFFECTIVE_MODEL"));
+        assert!(!step.script.contains("unset COPILOT_MODEL"));
+        assert!(step.script.contains("copilot-invoker.js run"));
     }
 
     #[test]
@@ -8217,6 +8446,8 @@ safe-outputs:
         let fm = parse_and_resolve(source);
         let threat_detection = fm.threat_detection_config().unwrap();
         let detection_engine_config = fm.effective_detection_engine(&threat_detection);
+        let detection_engine_env =
+            crate::engine::copilot_detection_env(&detection_engine_config).unwrap();
         let ctx = super::super::extensions::CompileContext::for_test(&fm);
         let extensions = super::super::extensions::collect_extensions(&fm);
         let decls: Vec<_> = extensions
@@ -8260,8 +8491,8 @@ safe-outputs:
             compiler_version: "0.0.0-test".to_string(),
             engine_install_steps_yaml: String::new(),
             detection_engine_install_steps_yaml: String::new(),
-            engine_run: String::new(),
-            engine_run_detection: String::new(),
+            agent_invocation_json: "{}".to_string(),
+            detection_invocation_json: "{}".to_string(),
             detection_engine_config,
             threat_detection,
             engine_env: "env:\n  GITHUB_TOKEN: $(GITHUB_TOKEN)\n".to_string(),
@@ -8284,7 +8515,7 @@ safe-outputs:
             debug_pipeline: false,
             byom_exclude_keys: vec![],
             detection_byom_exclude_keys: vec![],
-            detection_engine_env: vec![],
+            detection_engine_env,
         };
         build_canonical_jobs(
             &fm,
@@ -8300,6 +8531,68 @@ safe-outputs:
 
     fn job_pool_by_id<'a>(jobs: &'a [super::super::ir::job::Job], id: &str) -> Option<&'a Pool> {
         jobs.iter().find(|j| j.id.as_ref() == id).map(|j| &j.pool)
+    }
+
+    fn detection_runtime_model_step(jobs: &[Job]) -> Option<&BashStep> {
+        jobs.iter()
+            .find(|job| job.id.as_ref() == "Detection")
+            .and_then(|job| {
+                job.steps.iter().find_map(|step| match step {
+                    Step::Bash(step) if step.display_name == "Record Detection runtime model" => {
+                        Some(step)
+                    }
+                    _ => None,
+                })
+            })
+    }
+
+    fn detection_run_step(jobs: &[Job]) -> Option<&BashStep> {
+        jobs.iter()
+            .find(|job| job.id.as_ref() == "Detection")
+            .and_then(|job| {
+                job.steps.iter().find_map(|step| match step {
+                    Step::Bash(step)
+                        if step.display_name == "Run threat analysis (AWF network isolated)" =>
+                    {
+                        Some(step)
+                    }
+                    _ => None,
+                })
+            })
+    }
+
+    #[cfg(unix)]
+    fn run_detection_runtime_model_script(model: Option<&str>) -> (Output, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let analyzed_outputs = temp.path().join("analyzed_outputs");
+        std::fs::create_dir_all(&analyzed_outputs).expect("create analyzed outputs");
+        std::fs::write(
+            analyzed_outputs.join("aw_info.json"),
+            r#"{"schema":"ado-aw/aw_info/1"}"#,
+        )
+        .expect("write aw_info.json");
+        if let Some(model) = model {
+            std::fs::write(temp.path().join("detection-runtime-model"), model)
+                .expect("write runtime model");
+        }
+        let script = ShellScript::new(&RECORD_DETECTION_RUNTIME_MODEL)
+            .bind_text("AGENT_TEMP", temp.path().display().to_string())
+            .fragment(
+                "append_aw_info_field",
+                phase_body(&super::super::extensions::APPEND_AW_INFO_FIELD),
+            )
+            .render();
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(script).env_clear();
+        (command.output().expect("bash should run"), temp)
+    }
+
+    #[cfg(unix)]
+    fn read_detection_aw_info(temp: &tempfile::TempDir) -> serde_json::Value {
+        let contents =
+            std::fs::read_to_string(temp.path().join("analyzed_outputs/aw_info.json"))
+                .expect("read aw_info.json");
+        serde_json::from_str(&contents).expect("parse aw_info.json")
     }
 
     #[test]
@@ -8381,6 +8674,7 @@ safe-outputs:
                 assert_eq!(location.job, job("Detection"));
                 assert_eq!(&location.outputs, outputs);
             }
+
         }
 
         let disabled_detection = disabled_jobs
@@ -8416,6 +8710,117 @@ safe-outputs:
             })
             .unwrap();
         assert!(reviewed_index < copy_logs_index);
+    }
+
+    #[test]
+    fn detection_runtime_model_metadata_uses_detection_job_scope_only_when_enabled() {
+        let runtime = build_jobs(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  threat-detection: true\n---\nbody\n",
+        );
+        let disabled = build_jobs(
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  threat-detection: false\n---\nbody\n",
+        );
+        let static_model = build_jobs(
+            "---\nname: test\ndescription: test\nengine:\n  model: static-model\nsafe-outputs:\n  threat-detection: true\n---\nbody\n",
+        );
+
+        let step =
+            detection_runtime_model_step(&runtime).expect("runtime Detection emits metadata step");
+        assert!(matches!(step.condition, Some(Condition::Always)));
+        assert!(step.env.is_empty());
+        assert!(!step.script.contains("ADO_AW_MODEL_DETECTION_COPILOT"));
+        assert!(!step.script.contains("ADO_AW_DEFAULT_MODEL_COPILOT"));
+
+        let run_step = detection_run_step(&runtime).expect("enabled Detection runs analysis");
+        assert!(
+            run_step
+                .env
+                .contains_key(crate::engine::ADO_AW_MODEL_DETECTION_COPILOT)
+        );
+        assert!(
+            run_step
+                .env
+                .contains_key(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT)
+        );
+        assert!(matches!(
+            run_step
+                .env
+                .get(crate::engine::ADO_AW_MODEL_DETECTION_COPILOT),
+            Some(EnvValue::PipelineVar(name))
+                if name == crate::engine::ADO_AW_MODEL_DETECTION_COPILOT
+        ));
+        assert!(matches!(
+            run_step
+                .env
+                .get(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT),
+            Some(EnvValue::PipelineVar(name))
+                if name == crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT
+        ));
+        assert!(
+            run_step
+                .script
+                .contains("$AGENT_TEMP/detection-runtime-model")
+        );
+        assert!(run_step.script.contains("copilot-invoker.js run"));
+        assert!(run_step
+            .script
+            .contains("node \"$COPILOT_INVOKER_PATH\" read-result"));
+        assert!(!run_step.script.contains("ADO_AW_EFFECTIVE_MODEL"));
+        assert!(!run_step.script.contains("--model"));
+        assert!(
+            run_step
+                .script
+                .find("\"$PIPELINE_WORKSPACE/awf/awf\"")
+                .unwrap()
+                < run_step
+                    .script
+                    .find("$AGENT_TEMP/detection-runtime-model")
+                    .unwrap(),
+            "the trusted host must consume the invoker result after Detection runs"
+        );
+        assert!(
+            !run_step
+                .script
+                .contains("$(ADO_AW_MODEL_DETECTION_COPILOT)")
+        );
+        assert!(
+            !run_step
+                .script
+                .contains("$(ADO_AW_DEFAULT_MODEL_COPILOT)")
+        );
+
+        assert!(
+            detection_runtime_model_step(&disabled).is_none(),
+            "disabled Detection must not resolve or validate model variables"
+        );
+        assert!(
+            detection_runtime_model_step(&static_model).is_none(),
+            "static Detection models are already present in compile-time metadata"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detection_runtime_metadata_records_captured_model() {
+        let (output, temp) = run_detection_runtime_model_script(Some("detector-model"));
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            read_detection_aw_info(&temp)["detection_model"],
+            "detector-model"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detection_runtime_metadata_omits_missing_model() {
+        let (output, temp) = run_detection_runtime_model_script(None);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            read_detection_aw_info(&temp)
+                .get("detection_model")
+                .is_none()
+        );
     }
 
     #[test]

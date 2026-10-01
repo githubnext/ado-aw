@@ -368,7 +368,6 @@ recommendations visible; wrap verbose detail in
 ## agent: `pr-processor`
 ---
 description: Decides skip/nudge actions for a single pull request using a minimal number of API calls
-model: small
 ---
 You are given one PR number and its compact metadata. Decide what should happen
 to it, using as few tool calls as possible.

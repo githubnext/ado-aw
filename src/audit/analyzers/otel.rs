@@ -12,6 +12,7 @@ pub struct OtelAnalysis {
     pub engine_config: Option<AuditEngineConfig>,
     pub performance: Option<PerformanceMetrics>,
     pub aw_info: Option<AwInfo>,
+    pub observed_model: Option<String>,
     pub warnings: Vec<ErrorInfo>,
 }
 
@@ -36,6 +37,7 @@ pub async fn analyze_otel(agent_outputs_dir: &std::path::Path) -> anyhow::Result
         let stats = AgentStats::from_otel_file(&otel_path, "audit")
             .await
             .with_context(|| format!("Failed to analyze OTel file: {}", otel_path.display()))?;
+        analysis.observed_model = stats.model.clone();
 
         let total_tokens = stats.input_tokens + stats.output_tokens;
         analysis.metrics = MetricsData {
@@ -81,7 +83,10 @@ pub async fn analyze_otel(agent_outputs_dir: &std::path::Path) -> anyhow::Result
             Ok(aw_info) => {
                 analysis.engine_config = Some(AuditEngineConfig {
                     engine: aw_info.engine.clone().unwrap_or_default(),
-                    model: aw_info.model.clone(),
+                    model: analysis
+                        .observed_model
+                        .clone()
+                        .or_else(|| aw_info.model.clone()),
                     version: aw_info.compiler_version.clone(),
                     timeout_minutes: None,
                 });
@@ -176,6 +181,10 @@ mod tests {
 
         assert_eq!(analysis.metrics.token_usage, 33185);
         assert_eq!(analysis.metrics.turns, 2);
+        assert_eq!(
+            analysis.observed_model.as_deref(),
+            Some("claude-sonnet-4.5")
+        );
         assert!(analysis.engine_config.is_none());
         assert!(analysis.aw_info.is_none());
     }
@@ -199,6 +208,10 @@ mod tests {
             Some("claude-sonnet-4.5")
         );
         assert_eq!(
+            analysis.observed_model.as_deref(),
+            Some("claude-sonnet-4.5")
+        );
+        assert_eq!(
             analysis
                 .aw_info
                 .as_ref()
@@ -211,6 +224,35 @@ mod tests {
                 .as_ref()
                 .and_then(|performance| performance.tokens_per_minute)
                 .is_some_and(|value| value > 0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_otel_model_overrides_requested_model_in_engine_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let staging_dir = temp_dir.path().join("staging");
+        write_file(&staging_dir.join("otel.jsonl"), COPILOT_OTEL_FIXTURE).await;
+        write_file(
+            &staging_dir.join("aw_info.json"),
+            &AW_INFO_JSON.replace("claude-sonnet-4.5", "requested-session-model"),
+        )
+        .await;
+
+        let analysis = analyze_otel(temp_dir.path()).await.unwrap();
+
+        assert_eq!(
+            analysis
+                .aw_info
+                .as_ref()
+                .and_then(|info| info.model.as_deref()),
+            Some("requested-session-model")
+        );
+        assert_eq!(
+            analysis
+                .engine_config
+                .as_ref()
+                .and_then(|config| config.model.as_deref()),
+            Some("claude-sonnet-4.5")
         );
     }
 

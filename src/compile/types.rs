@@ -1626,15 +1626,6 @@ impl FrontMatter {
         servers
     }
 
-    pub fn has_azure_authenticated_mcp_servers(&self) -> bool {
-        self.mcp_servers.values().any(|config| {
-            matches!(
-                config,
-                McpConfig::WithOptions(options)
-                    if options.enabled.unwrap_or(true) && options.azure_auth.is_some()
-            )
-        })
-    }
 }
 
 /// Compile-time source for a remote reusable import.
@@ -2115,14 +2106,7 @@ impl FrontMatter {
 
     /// Whether the workflow enables **any** safe-output tool.
     ///
-    /// Single source of truth for the safe-outputs-summary feature gate: it
-    /// drives BOTH the ado-script bundle download
-    /// (`AdoScriptExtension::safe_outputs_summary_active`, set in
-    /// `collect_extensions`) and the end-of-Agent-job render step emission
-    /// (`build_agent_job`). Both call sites MUST go through this so the bundle
-    /// is downloaded iff the step that runs it is emitted — a drift between two
-    /// independent copies of this predicate would make the step invoke a bundle
-    /// that was never downloaded.
+    /// Single source of truth for the end-of-Agent-job summary step.
     pub fn has_any_safe_output_tool(&self) -> bool {
         self.safe_output_tool_names().next().is_some()
             || !self.custom_safe_output_tool_names().is_empty()
