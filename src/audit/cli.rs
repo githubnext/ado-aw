@@ -465,7 +465,10 @@ async fn run_analyzers(
             Ok(None) => {}
             Err(error) => {
                 log::warn!("{error:#}");
-                crate::audit::push_warning_once(audit, crate::audit::malformed_aw_info_warning());
+                crate::audit::push_warning_once(
+                    audit,
+                    crate::audit::malformed_detection_aw_info_warning(),
+                );
             }
         }
     }

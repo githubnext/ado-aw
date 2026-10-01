@@ -73,13 +73,21 @@ Agent `aw_info.json`, `otel.jsonl`, and `safe_outputs.ndjson` are searched in
 audit cleanly. When present, the Detection-enriched `aw_info.json` from
 `analyzed_outputs` overlays only Detection-owned runtime fields in the report.
 
+`overview.aw_info.model` is the model requested for the Agent's Copilot
+session. Copilot custom-agent definitions may pin a different model. When OTel
+contains `gen_ai.request.model`, `engine_config.model` is the model observed
+during execution; otherwise it falls back to the requested model. Console
+output shows `requested_model` and `observed_model` separately when they differ.
+`overview.aw_info.detection_model` is the requested Detection session model;
+Detection OTel is not currently included in the analyzed artifact.
+
 ## Report shape (`AuditData`)
 
 Current top-level keys include the following. Optional sections are omitted from `--json` when empty.
 
 | Key | Source |
 | --- | --- |
-| `overview` | ADO build metadata + `aw_info.json` (engine, model, optional threat-detection enabled/engine/model, agent name, source, target). |
+| `overview` | ADO build metadata + `aw_info.json` (engine, requested session model, optional threat-detection enabled/engine/requested model, agent name, source, target). |
 | `task_domain` | Audit heuristics over the run's prompts and outputs. |
 | `behavior_fingerprint` | Higher-level audit heuristics over the run's behavior. |
 | `agentic_assessments` | Higher-level audit assessments emitted by the analyzers. |
@@ -87,7 +95,7 @@ Current top-level keys include the following. Optional sections are omitted from
 | `key_findings` | Heuristic rules + analyzer-emitted findings (for example aggregate-gate rejection). |
 | `recommendations` | Follow-up actions derived from findings. |
 | `performance_metrics` | Derived from `metrics`, runtime duration, tool usage, and firewall counts. |
-| `engine_config` | Runtime engine configuration derived from `aw_info.json`. |
+| `engine_config` | Runtime engine configuration; the Agent model prefers the OTel-observed model and falls back to the requested `aw_info.json` model. |
 | `safe_output_summary` | Counts of proposed / executed / rejected / not processed items. |
 | `safe_output_execution` | Per-item trace joining proposal + detection + execution. |
 | `rejected_safe_outputs` | Rollup of rejections by reason / threat flag. |

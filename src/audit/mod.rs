@@ -27,9 +27,35 @@ pub(crate) fn malformed_aw_info_warning() -> model::ErrorInfo {
     }
 }
 
+pub(crate) fn malformed_detection_aw_info_warning() -> model::ErrorInfo {
+    model::ErrorInfo {
+        source: String::from("audit::detection_aw_info"),
+        message: String::from(
+            "Detection's analyzed aw_info.json could not be read or parsed; Detection runtime model enrichment is unavailable",
+        ),
+        timestamp: None,
+    }
+}
+
 pub(crate) fn push_warning_once(audit: &mut model::AuditData, warning: model::ErrorInfo) {
     if !audit.warnings.contains(&warning) {
         audit.warnings.push(warning);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn malformed_detection_metadata_warning_is_scoped_to_detection_enrichment() {
+        let warning = super::malformed_detection_aw_info_warning();
+
+        assert_eq!(warning.source, "audit::detection_aw_info");
+        assert!(
+            warning
+                .message
+                .contains("Detection runtime model enrichment")
+        );
+        assert!(!warning.message.contains("pipeline graph"));
     }
 }
 

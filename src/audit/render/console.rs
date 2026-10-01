@@ -87,14 +87,23 @@ fn render_overview_section(
                 .filter(|config| !config.engine.is_empty())
                 .map(|config| config.engine.clone())
         });
-    let model = aw_info
+    let requested_model = aw_info
         .and_then(|info| info.model.as_deref())
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| engine_config.and_then(|config| config.model.clone()));
+        .map(str::to_string);
+    let observed_model = engine_config
+        .and_then(|config| config.model.as_deref())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     push_opt_owned_row(&mut rows, "engine", engine);
-    push_opt_owned_row(&mut rows, "model", model);
+    match (&requested_model, &observed_model) {
+        (Some(requested), Some(observed)) if requested != observed => {
+            push_opt_owned_row(&mut rows, "requested_model", requested_model);
+            push_opt_owned_row(&mut rows, "observed_model", observed_model);
+        }
+        _ => push_opt_owned_row(&mut rows, "model", observed_model.or(requested_model)),
+    }
     if let Some(enabled) = aw_info.and_then(|info| info.threat_detection_enabled) {
         rows.push(("threat_detection_enabled".to_string(), enabled.to_string()));
     }
@@ -1233,6 +1242,35 @@ mod tests {
         assert!(out.contains("## Overview"));
         assert!(out.contains("## Metrics"));
         assert_eq!(headings, vec!["## Overview", "## Metrics"]);
+    }
+
+    #[test]
+    fn overview_distinguishes_requested_and_observed_models() {
+        let audit = AuditData {
+            overview: crate::audit::model::OverviewData {
+                aw_info: Some(AwInfo {
+                    engine: Some("copilot".to_string()),
+                    model: Some("requested-model".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            engine_config: Some(AuditEngineConfig {
+                engine: "copilot".to_string(),
+                model: Some("observed-model".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let out = render_console(&audit);
+
+        assert!(out.contains("- requested_model: requested-model"), "{out}");
+        assert!(out.contains("- observed_model:  observed-model"), "{out}");
+        assert!(
+            !out.contains("- model:            requested-model"),
+            "{out}"
+        );
     }
 
     #[test]

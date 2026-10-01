@@ -27,8 +27,8 @@ engine:
 | `version` | string | *(none)* | Engine CLI version to install (e.g., `"1.0.70"`, `"latest"`). Overrides the pinned `COPILOT_CLI_VERSION`. Set to `"latest"` to use the newest available version. |
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
 | `api-target` | string | *(none)* | Custom API endpoint hostname for GHES/GHEC (e.g., `"api.acme.ghe.com"`). Adds `--api-target <hostname>` to the CLI invocation and adds the hostname to the AWF network allowlist. |
-| `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (`--prompt`, `--additional-mcp-config`, `--allow-tool`, `--allow-all-tools`, `--allow-all-paths`, `--disable-builtin-mcps`, `--no-ask-user`, `--ask-user`). |
-| `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names. Values are literal-only and must not contain ADO expressions (`$(`, `${{`, `$[`) or pipeline command injection (`##vso[`), **except** the Copilot provider keys (`COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API`), which may carry an ADO macro (`$(...)`) expression. Prefer the typed [`provider`](#copilot-model-provider-byok-configuration) block over raw provider env keys. Compiler-controlled keys (`GITHUB_TOKEN`, `PATH`, `BASH_ENV`, etc.) are blocked. |
+| `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (`--prompt`, `--model`, `--additional-mcp-config`, `--allow-tool`, `--allow-all-tools`, `--allow-all-paths`, `--disable-builtin-mcps`, `--no-ask-user`, `--ask-user`). Use `engine.model` or the runtime variables below instead of a raw `--model` argument. |
+| `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names. Values are literal-only and must not contain ADO expressions (`$(`, `${{`, `$[`) or pipeline command injection (`##vso[`), **except** the Copilot provider keys (`COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API`), which may carry an ADO macro (`$(...)`) expression. Prefer the typed [`provider`](#copilot-model-provider-byok-configuration) block over raw provider env keys. Compiler-controlled keys (`GITHUB_TOKEN`, `COPILOT_MODEL`, `PATH`, `BASH_ENV`, etc.) are blocked. |
 | `provider` | map | *(none)* | Copilot external model-provider (BYOK) configuration: `base-url`, `type`, `wire-api`, `token` (compiler-minted bearer via a service connection), `api-key`. Maps to the `COPILOT_PROVIDER_*` env vars. See [Copilot model provider (BYOK) configuration](#copilot-model-provider-byok-configuration). |
 | `command` | string | *(none)* | Custom engine executable path (skips the default engine binary installation — NuGet for `target: 1es`, GitHub Releases for all other targets). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
 | `github-app-token` | map | *(none)* | GitHub App-backed Copilot engine authentication. When set, the compiler mints (and, by default, revokes) a GitHub App installation token in the Agent and Detection jobs and sources `GITHUB_TOKEN` from it (for Copilot only). See [GitHub App-backed Copilot engine auth](#github-app-backed-copilot-engine-auth). |
@@ -52,17 +52,36 @@ Precedence is:
 2. Role-specific runtime variable (`ADO_AW_MODEL_AGENT_COPILOT` or
    `ADO_AW_MODEL_DETECTION_COPILOT`).
 3. Shared runtime variable (`ADO_AW_DEFAULT_MODEL_COPILOT`).
-4. Existing default behavior (no `--model`; the Copilot CLI chooses).
+4. Existing default behavior (`COPILOT_MODEL` is unset; the Copilot CLI
+   chooses).
 
 Detection uses its effective engine config after applying
 `safe-outputs.threat-detection.engine`, so an inherited or nested explicit model
-still wins over runtime variables. Runtime values are passed through typed step
-environment mappings, validated for model-identifier characters at runtime, and
-then supplied to Copilot as a quoted `--model` argument. The emitted
-`aw_info.json` run metadata records the effective runtime-selected model when a
-runtime variable is used. Agent resolves its field in the Agent job; Detection
-enriches the copied metadata in `analyzed_outputs_<BuildId>` from the Detection
-job's own variable scope. `ado-aw audit` merges those job-owned fields.
+still wins over runtime variables. This mirrors gh-aw and means the runtime
+variables are an operational escape hatch only for workflows that leave
+`engine.model` unset; changing a pinned frontmatter model still requires
+recompilation.
+
+Runtime values are passed through typed step environment mappings and validated
+for model-identifier characters at runtime. The task that starts Copilot exports
+the selected value through Copilot CLI's native `COPILOT_MODEL` environment
+variable. When no value resolves, the task leaves `COPILOT_MODEL` unset rather
+than supplying a compiler default. Raw `engine.args --model` and
+`engine.env.COPILOT_MODEL` are rejected so they cannot bypass this precedence.
+
+Agent resolves and records its requested session model in the actual Agent run
+task, after user-authored steps. A prior trusted step can therefore use
+`##vso[task.setvariable]` and both execution and metadata see the task-start
+value. Detection captures its requested model in the Detection run task and
+later enriches the copied metadata in `analyzed_outputs_<BuildId>` from its own
+job scope. `ado-aw audit` merges those job-owned fields.
+
+When `engine.agent` selects a custom agent whose definition declares `model` or
+`models`, Copilot CLI may use that agent-pinned model instead of the requested
+session model. `aw_info.json` records the requested session model; when Copilot
+OTel is present, `ado-aw audit` reports the observed Agent model separately.
+Detection metadata is requested-model-only because the analyzed artifact does
+not currently include Detection OTel.
 
 ### `timeout-minutes`
 

@@ -169,7 +169,10 @@ pub struct AwInfo {
     /// Configured engine name for the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
-    /// Model identifier used by the agent runtime.
+    /// Model identifier requested for the Agent's Copilot session.
+    ///
+    /// A selected custom agent may pin a different model. When Copilot OTel is
+    /// available, `AuditData.engine_config.model` reports the observed model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Whether AI threat detection was enabled for this workflow.
@@ -178,7 +181,7 @@ pub struct AwInfo {
     /// Engine identifier used by the Detection job when explicitly configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detection_engine: Option<String>,
-    /// Effective model selected by the Detection job, when available.
+    /// Model requested for the Detection Copilot session, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detection_model: Option<String>,
     /// Agent name emitted by the compiled workflow metadata.

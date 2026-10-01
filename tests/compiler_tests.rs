@@ -8175,12 +8175,17 @@ safe-outputs:
 
     let agent = job_block(&compiled, "Agent");
     let detection = job_block(&compiled, "Detection");
-    assert!(agent.contains("--model agent-model"), "{agent}");
+    assert!(agent.contains("COPILOT_MODEL: agent-model"), "{agent}");
     assert!(agent.contains("--reasoning-effort=high"), "{agent}");
-    assert!(!agent.contains("--model detection-model"), "{agent}");
+    assert!(!agent.contains("--model"), "{agent}");
+    assert!(!agent.contains("COPILOT_MODEL: detection-model"), "{agent}");
     assert!(!agent.contains("DETECTION_ENV"), "{agent}");
 
-    assert!(detection.contains("--model detection-model"), "{detection}");
+    assert!(
+        detection.contains("COPILOT_MODEL: detection-model"),
+        "{detection}"
+    );
+    assert!(!detection.contains("--model"), "{detection}");
     assert!(detection.contains("--reasoning-effort=low"), "{detection}");
     assert!(
         !detection.contains("--reasoning-effort=high"),
@@ -8202,6 +8207,44 @@ safe-outputs:
     let post = detection.find("Detection custom post").unwrap();
     assert!(pre < run && run < post, "{detection}");
     assert!(detection.contains("2.0.2"), "{detection}");
+}
+
+#[test]
+fn runtime_model_controls_compile_across_all_targets() {
+    for target in ["standalone", "1es", "job", "stage"] {
+        let target_field = if target == "standalone" {
+            String::new()
+        } else {
+            format!("target: {target}\n")
+        };
+        let source = format!(
+            "---\nname: Runtime Model {target}\ndescription: Runtime model target coverage\n\
+             {target_field}safe-outputs:\n  noop: {{}}\n  threat-detection: true\n---\n\n## Agent\n"
+        );
+        let (ok, compiled, stderr) =
+            compile_inline_source(&format!("runtime-model-{target}"), &source);
+        assert!(ok, "{target} should compile: {stderr}");
+        assert!(
+            compiled.contains(
+                "ADO_AW_MODEL_AGENT_COPILOT: $(ADO_AW_MODEL_AGENT_COPILOT)"
+            ),
+            "{target}: missing Agent runtime model env mapping"
+        );
+        assert!(
+            compiled.contains(
+                "ADO_AW_MODEL_DETECTION_COPILOT: $(ADO_AW_MODEL_DETECTION_COPILOT)"
+            ),
+            "{target}: missing Detection runtime model env mapping"
+        );
+        assert!(
+            compiled.contains("export COPILOT_MODEL=\"$ADO_AW_EFFECTIVE_MODEL\""),
+            "{target}: runtime resolver must export COPILOT_MODEL"
+        );
+        assert!(
+            !compiled.contains("--model"),
+            "{target}: compiler-generated model flags must be absent"
+        );
+    }
 }
 
 #[test]

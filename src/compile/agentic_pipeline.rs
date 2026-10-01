@@ -1391,6 +1391,7 @@ fn build_agent_job(
         &cfg.working_directory,
         &cfg.engine_run,
         &cfg.engine_env,
+        front_matter.engine.model().is_none(),
         &cfg.byom_exclude_keys,
         front_matter.supply_chain(),
         ado_proxy_enabled,
@@ -3626,7 +3627,7 @@ shell_script! {
         externals: [],
         fragments: [tail],
         body: r###"
-set -eo pipefail
+set -o pipefail
 mkdir -p "$DEST"
 
 locate_one() {
@@ -4464,10 +4465,33 @@ shell_script! {
     RUN_AGENT {
         interpreter: Bash,
         bindings: [AGENT_TEMP, PIPELINE_WORKSPACE, ALLOWED_DOMAINS],
-        externals: [WORKING_DIRECTORY],
-        fragments: [topology_attach, image_flags, exclude_env, awf_mounts, routed_engine_run],
+        externals: [
+            WORKING_DIRECTORY,
+            ADO_AW_MODEL_AGENT_COPILOT,
+            ADO_AW_DEFAULT_MODEL_COPILOT,
+            ADO_AW_EFFECTIVE_MODEL,
+            COPILOT_MODEL
+        ],
+        fragments: [
+            resolve_runtime_model,
+            append_aw_info_field,
+            topology_attach,
+            image_flags,
+            exclude_env,
+            awf_mounts,
+            routed_engine_run
+        ],
+        phases: [append_aw_info_field = super::extensions::APPEND_AW_INFO_FIELD],
+        fragment_uses: [
+            resolve_runtime_model => [
+                ADO_AW_MODEL_AGENT_COPILOT,
+                ADO_AW_DEFAULT_MODEL_COPILOT,
+                ADO_AW_EFFECTIVE_MODEL,
+                COPILOT_MODEL,
+            ],
+        ],
         body: r###"
-set -o pipefail
+set -eo pipefail
 
 AGENT_OUTPUT_FILE="$AGENT_TEMP/staging/logs/agent-output.txt"
 mkdir -p "$AGENT_TEMP/staging/logs"
@@ -4475,6 +4499,23 @@ AGENT_EXIT_CODE=0
 
 echo "=== Running AI agent with AWF network isolation ==="
 echo "Allowed domains: $ALLOWED_DOMAINS"
+
+# Resolve the task-scoped runtime model after all user-authored Agent steps.
+set -e
+# ado-aw:fragment resolve_runtime_model
+
+# The marker extension always creates this file for production compile contexts.
+ADO_AW_INFO_JSON="$AGENT_TEMP/staging/aw_info.json"
+if [ ! -f "$ADO_AW_INFO_JSON" ]; then
+  echo "ERROR: Agent could not find aw_info.json at $ADO_AW_INFO_JSON" >&2
+  exit 1
+fi
+# ado-aw:fragment append_aw_info_field
+ado_aw_append_info_field \
+  "model" \
+  "${COPILOT_MODEL:-}" \
+  "$ADO_AW_INFO_JSON"
+set +e
 
 # AWF provides L7 domain whitelisting via a rootless Docker topology.
 # The named MCPG container is attached to AWF's internal network as a
@@ -4528,6 +4569,7 @@ fn run_agent_step(
     working_directory: &str,
     engine_run: &str,
     engine_env: &str,
+    runtime_model_enabled: bool,
     byom_exclude_keys: &[String],
     supply_chain: Option<&SupplyChainConfig>,
     ado_proxy_enabled: bool,
@@ -4568,6 +4610,11 @@ fn run_agent_step(
     };
     let image_flags_block = awf_image_flags(supply_chain);
     let exclude_env_block = awf_exclude_env_flags(byom_exclude_keys);
+    let resolve_runtime_model = if runtime_model_enabled {
+        crate::engine::runtime_model_preamble(crate::engine::RuntimeModelRole::Agent)
+    } else {
+        ":".to_string()
+    };
 
     // AWF attaches externally-launched trusted containers to its internal
     // network by name. The flag is repeatable, which is what lets the policy
@@ -4635,6 +4682,11 @@ fn run_agent_step(
             Binding::ado_macro("Pipeline.Workspace"),
         )
         .bind_text("ALLOWED_DOMAINS", allowed_domains)
+        .fragment("resolve_runtime_model", resolve_runtime_model)
+        .fragment(
+            "append_aw_info_field",
+            phase_body(&super::extensions::APPEND_AW_INFO_FIELD),
+        )
         .fragment("topology_attach", topology_attach_block)
         .fragment("image_flags", image_flags_line)
         .fragment("exclude_env", exclude_env_line)
@@ -6213,7 +6265,8 @@ shell_script! {
             WORKING_DIRECTORY,
             ADO_AW_MODEL_DETECTION_COPILOT,
             ADO_AW_DEFAULT_MODEL_COPILOT,
-            ADO_AW_EFFECTIVE_MODEL
+            ADO_AW_EFFECTIVE_MODEL,
+            COPILOT_MODEL
         ],
         fragments: [capture_runtime_model, image_flags, exclude_env, engine_run_detection],
         fragment_uses: [
@@ -6221,6 +6274,7 @@ shell_script! {
                 ADO_AW_MODEL_DETECTION_COPILOT,
                 ADO_AW_DEFAULT_MODEL_COPILOT,
                 ADO_AW_EFFECTIVE_MODEL,
+                COPILOT_MODEL,
             ],
         ],
         body: r###"
@@ -6308,7 +6362,7 @@ fn run_threat_analysis_step(
         .any(|(key, _)| key == crate::engine::ADO_AW_MODEL_DETECTION_COPILOT);
     let capture_runtime_model = if runtime_model_enabled {
         format!(
-            "{}\nprintf '%s' \"$ADO_AW_EFFECTIVE_MODEL\" > \"$AGENT_TEMP/detection-runtime-model\"",
+            "{}\nprintf '%s' \"${{COPILOT_MODEL:-}}\" > \"$AGENT_TEMP/detection-runtime-model\"",
             crate::engine::runtime_model_preamble(crate::engine::RuntimeModelRole::Detection)
         )
     } else {
@@ -7738,12 +7792,28 @@ safe-outputs:
             "/work",
             "copilot -p prompt",
             "FOO: bar",
+            false,
             &[],
             None,
             ado_proxy_enabled,
         )
         .expect("run_agent_step should build")
         .script
+    }
+
+    fn runtime_agent_step_for_test() -> BashStep {
+        run_agent_step(
+            "example.com",
+            "\\",
+            "/work",
+            "copilot -p prompt",
+            "ADO_AW_MODEL_AGENT_COPILOT: $(ADO_AW_MODEL_AGENT_COPILOT)\nADO_AW_DEFAULT_MODEL_COPILOT: $(ADO_AW_DEFAULT_MODEL_COPILOT)",
+            true,
+            &[],
+            None,
+            false,
+        )
+        .expect("run_agent_step should build")
     }
 
     #[test]
@@ -7779,6 +7849,61 @@ safe-outputs:
         assert!(enabled.contains(&format!(
             "NO_PROXY:+$NO_PROXY,}}{MCPG_CONTAINER_NAME},{ADO_PROXY_CONTAINER_NAME}"
         )));
+    }
+
+    #[test]
+    fn agent_runtime_model_is_resolved_recorded_and_exported_in_run_task() {
+        let step = runtime_agent_step_for_test();
+        assert!(matches!(
+            step.env
+                .get(crate::engine::ADO_AW_MODEL_AGENT_COPILOT),
+            Some(EnvValue::PipelineVar(name))
+                if name == crate::engine::ADO_AW_MODEL_AGENT_COPILOT
+        ));
+        assert!(matches!(
+            step.env
+                .get(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT),
+            Some(EnvValue::PipelineVar(name))
+                if name == crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT
+        ));
+        assert!(step.script.contains("export COPILOT_MODEL=\"$ADO_AW_EFFECTIVE_MODEL\""));
+        assert!(step.script.contains("\"model\""));
+        assert!(step.script.contains("\"${COPILOT_MODEL:-}\""));
+        let metadata_index = step
+            .script
+            .find("ado_aw_append_info_field")
+            .expect("metadata append");
+        let awf_index = step
+            .script
+            .find("\"$PIPELINE_WORKSPACE/awf/awf\"")
+            .expect("AWF invocation");
+        assert!(metadata_index < awf_index);
+        assert!(!step.script.contains("$(ADO_AW_MODEL_AGENT_COPILOT)"));
+        assert!(!step.script.contains("$(ADO_AW_DEFAULT_MODEL_COPILOT)"));
+        assert!(!step.script.contains("--model"));
+    }
+
+    #[test]
+    fn prefixed_user_env_key_does_not_unset_static_model() {
+        let step = run_agent_step(
+            "example.com",
+            "\\",
+            "/work",
+            "copilot -p prompt",
+            "COPILOT_MODEL: static-model\nADO_AW_MODEL_AGENT_COPILOT_X: harmless",
+            false,
+            &[],
+            None,
+            false,
+        )
+        .expect("run_agent_step should build");
+
+        assert!(matches!(
+            step.env.get(crate::engine::COPILOT_MODEL),
+            Some(EnvValue::Literal(value)) if value == "static-model"
+        ));
+        assert!(!step.script.contains("ADO_AW_EFFECTIVE_MODEL"));
+        assert!(!step.script.contains("unset COPILOT_MODEL"));
     }
 
     #[test]
@@ -8607,6 +8732,12 @@ safe-outputs:
                 .script
                 .contains("$AGENT_TEMP/detection-runtime-model")
         );
+        assert!(
+            run_step
+                .script
+                .contains("export COPILOT_MODEL=\"$ADO_AW_EFFECTIVE_MODEL\"")
+        );
+        assert!(!run_step.script.contains("--model"));
         assert!(
             run_step
                 .script

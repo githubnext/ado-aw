@@ -24,7 +24,6 @@
 
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::condition::Condition;
-use crate::compile::ir::env::EnvValue;
 use crate::compile::ir::step::{BashStep, Step};
 use crate::compile::shell::{Binding, ShellScript};
 use crate::shell_script;
@@ -63,7 +62,7 @@ ado_aw_append_info_field() {
   local field="$1"
   local value="$2"
   local file="$3"
-  if [ -z "$value" ] || grep -q "\"$field\"" "$file"; then
+  if [ -z "$value" ] || grep -Eq "\"${field}\"[[:space:]]*:" "$file"; then
     return 0
   fi
   local json
@@ -99,34 +98,15 @@ shell_script! {
     EMIT_AW_INFO {
         interpreter: Bash,
         bindings: [AGENT_TEMP],
-        externals: [ADO_AW_MODEL_AGENT_COPILOT, ADO_AW_DEFAULT_MODEL_COPILOT, ADO_AW_EFFECTIVE_MODEL],
-        fragments: [append_aw_info_field, aw_info_json, runtime_model_resolution],
-        phases: [append_aw_info_field = APPEND_AW_INFO_FIELD],
-        fragment_uses: [
-            runtime_model_resolution => [
-                ADO_AW_MODEL_AGENT_COPILOT,
-                ADO_AW_DEFAULT_MODEL_COPILOT,
-                ADO_AW_EFFECTIVE_MODEL,
-            ],
-        ],
+        externals: [],
+        fragments: [aw_info_json],
         body: r#"
 set -eo pipefail
-
-# ado-aw:fragment append_aw_info_field
 
 mkdir -p "$AGENT_TEMP/staging"
 cat >"$AGENT_TEMP/staging/aw_info.json" <<'AW_INFO_EOF'
 # ado-aw:fragment aw_info_json
 AW_INFO_EOF
-
-ADO_AW_INFO_JSON="$AGENT_TEMP/staging/aw_info.json"
-if ! grep -q '"model"' "$ADO_AW_INFO_JSON"; then
-  # ado-aw:fragment runtime_model_resolution
-  ado_aw_append_info_field \
-    "model" \
-    "$ADO_AW_EFFECTIVE_MODEL" \
-    "$ADO_AW_INFO_JSON"
-fi
 "#,
     }
 }
@@ -270,24 +250,8 @@ fn marker_bash_step(metadata: &CompileMetadata) -> BashStep {
 fn aw_info_bash_step(metadata: &CompileMetadata) -> BashStep {
     ShellScript::new(&EMIT_AW_INFO)
         .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
-        .fragment(
-            "append_aw_info_field",
-            APPEND_AW_INFO_FIELD.body.trim().to_string(),
-        )
         .fragment("aw_info_json", metadata.aw_info_json())
-        .fragment(
-            "runtime_model_resolution",
-            crate::engine::runtime_model_preamble(crate::engine::RuntimeModelRole::Agent),
-        )
         .into_step("Emit aw_info.json")
-        .with_env(
-            crate::engine::ADO_AW_MODEL_AGENT_COPILOT,
-            EnvValue::pipeline_var(crate::engine::ADO_AW_MODEL_AGENT_COPILOT),
-        )
-        .with_env(
-            crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT,
-            EnvValue::pipeline_var(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT),
-        )
         .with_condition(Condition::Always)
 }
 
@@ -534,8 +498,6 @@ fn bash_single_quote_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::compile::extensions::CompileContext;
-    #[cfg(unix)]
-    use crate::compile::shell::ShellScript;
     use crate::compile::types::FrontMatter;
     use std::path::Path;
     #[cfg(unix)]
@@ -560,31 +522,32 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn run_aw_info_script(envs: &[(&str, &str)], aw_info_json: &str) -> (Output, tempfile::TempDir) {
+    fn run_append_aw_info_field(
+        field: &str,
+        value: &str,
+        aw_info_json: &str,
+    ) -> (Output, tempfile::TempDir) {
         let temp = tempfile::tempdir().expect("temp dir");
-        let script = ShellScript::new(&EMIT_AW_INFO)
-            .bind_text("AGENT_TEMP", temp.path().display().to_string())
-            .fragment(
-                "append_aw_info_field",
-                APPEND_AW_INFO_FIELD.body.trim().to_string(),
-            )
-            .fragment("aw_info_json", aw_info_json.to_string())
-            .fragment(
-                "runtime_model_resolution",
-                crate::engine::runtime_model_preamble(crate::engine::RuntimeModelRole::Agent),
-            )
-            .render();
+        let path = temp.path().join("aw_info.json");
+        std::fs::write(&path, aw_info_json).expect("write aw_info.json");
+        let script = format!(
+            "{}\nado_aw_append_info_field \"$FIELD\" \"$VALUE\" \"$FILE\"",
+            APPEND_AW_INFO_FIELD.body.trim()
+        );
         let mut command = Command::new("bash");
-        command.arg("-c").arg(script).env_clear();
-        for (key, value) in envs {
-            command.env(key, value);
-        }
+        command
+            .arg("-c")
+            .arg(script)
+            .env_clear()
+            .env("FIELD", field)
+            .env("VALUE", value)
+            .env("FILE", &path);
         (command.output().expect("bash should run"), temp)
     }
 
     #[cfg(unix)]
     fn read_aw_info_json(temp: &tempfile::TempDir) -> serde_json::Value {
-        let path = temp.path().join("staging/aw_info.json");
+        let path = temp.path().join("aw_info.json");
         let contents = std::fs::read_to_string(path).expect("aw_info.json should be written");
         serde_json::from_str(&contents).expect("aw_info.json should parse")
     }
@@ -736,22 +699,19 @@ mod tests {
         );
         assert!(!step.script.contains("\"threat_detection_enabled\""));
         assert!(
-            step.env
-                .contains_key(crate::engine::ADO_AW_MODEL_AGENT_COPILOT)
-        );
-        assert!(
             !step
                 .env
                 .contains_key(crate::engine::ADO_AW_MODEL_DETECTION_COPILOT)
         );
         assert!(
-            step.env
-                .contains_key(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT)
+            !step
+                .env
+                .contains_key(crate::engine::ADO_AW_MODEL_AGENT_COPILOT)
         );
         assert!(
-            !step.script.contains("$(ADO_AW_MODEL_AGENT_COPILOT)"),
-            "runtime model macros must only appear in env mappings:\n{}",
-            step.script
+            !step
+                .env
+                .contains_key(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT)
         );
         assert!(
             !step.script.contains("$(ADO_AW_MODEL_DETECTION_COPILOT)"),
@@ -767,55 +727,46 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn aw_info_runtime_model_prefers_role_specific_over_default() {
-        let (output, temp) = run_aw_info_script(
-            &[
-                (crate::engine::ADO_AW_MODEL_AGENT_COPILOT, "agent-model"),
-                (crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
-            ],
-            r#"{"schema":"ado-aw/aw_info/1"}"#,
+    fn append_aw_info_field_does_not_confuse_value_with_model_key() {
+        let (output, temp) = run_append_aw_info_field(
+            "model",
+            "gpt-5",
+            r#"{"agent_name":"model","schema":"ado-aw/aw_info/1"}"#,
         );
 
         assert!(output.status.success(), "{output:?}");
         let value = read_aw_info_json(&temp);
-        assert_eq!(value["model"], "agent-model");
-        assert!(value.get("detection_model").is_none());
+        assert_eq!(value["agent_name"], "model");
+        assert_eq!(value["model"], "gpt-5");
     }
 
     #[test]
     #[cfg(unix)]
-    fn aw_info_runtime_model_uses_default_when_specific_missing_or_unexpanded() {
-        let (output, temp) = run_aw_info_script(
-            &[
-                (
-                    crate::engine::ADO_AW_MODEL_AGENT_COPILOT,
-                    "$(ADO_AW_MODEL_AGENT_COPILOT)",
-                ),
-                (crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT, "default-model"),
-            ],
-            r#"{"schema":"ado-aw/aw_info/1"}"#,
+    fn append_aw_info_field_does_not_confuse_value_with_detection_model_key() {
+        let (output, temp) = run_append_aw_info_field(
+            "detection_model",
+            "gpt-5-mini",
+            r#"{"agent_name":"detection_model","schema":"ado-aw/aw_info/1"}"#,
         );
 
         assert!(output.status.success(), "{output:?}");
         let value = read_aw_info_json(&temp);
-        assert_eq!(value["model"], "default-model");
-        assert!(value.get("detection_model").is_none());
+        assert_eq!(value["agent_name"], "detection_model");
+        assert_eq!(value["detection_model"], "gpt-5-mini");
     }
 
     #[test]
     #[cfg(unix)]
-    fn aw_info_runtime_model_rejects_invalid_value() {
-        let (output, _temp) = run_aw_info_script(
-            &[(
-                crate::engine::ADO_AW_MODEL_AGENT_COPILOT,
-                "gpt-5 && curl evil.example",
-            )],
-            r#"{"schema":"ado-aw/aw_info/1"}"#,
+    fn append_aw_info_field_preserves_existing_key_with_whitespace() {
+        let (output, temp) = run_append_aw_info_field(
+            "model",
+            "replacement",
+            r#"{"model" : "original","schema":"ado-aw/aw_info/1"}"#,
         );
 
-        assert!(!output.status.success(), "{output:?}");
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("invalid characters"), "{stderr}");
+        assert!(output.status.success(), "{output:?}");
+        let value = read_aw_info_json(&temp);
+        assert_eq!(value["model"], "original");
     }
 
     #[test]
