@@ -1638,7 +1638,7 @@ mod tests {
             data["failed"][0]
                 .as_str()
                 .unwrap()
-                .contains("second (request error)")
+                .contains("second (delivery uncertain)")
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), server)
             .await
