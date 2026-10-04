@@ -44,13 +44,13 @@ async function json(
   return object(await response.json(), suffix);
 }
 
-function scenario(id: string, probe: (ctx: ScenarioContext, state: PrState) => Promise<void>): Scenario<PrState> {
+function scenario(id: string, probe: (ctx: ScenarioContext, state: PrState) => Promise<void>, draft = true): Scenario<PrState> {
   return {
     id,
     tool: "noop",
     targetsAdoRepo: true,
     config: () => ({}),
-    setup: (ctx) => setupPr(ctx, id, false, true),
+    setup: (ctx) => setupPr(ctx, id, false, draft),
     ndjson: async () => ({ context: `${id}: live API prerequisite check, not executor feature coverage` }),
     assert: async (ctx, state) => probe(ctx, state),
     cleanup: teardownPr,
@@ -209,6 +209,6 @@ const reviewerAddition = scenario("pr-api-reviewer-additive-state", async (ctx, 
       required((before[flag] === true) === (after[flag] === true), `Identity-only addition changed ${flag}`);
     }
   }
-});
+}, false);
 
 export const prApiContractScenarios: Scenario<unknown>[] = [draft, labels, comments, push, reviewerAddition] as Scenario<unknown>[];

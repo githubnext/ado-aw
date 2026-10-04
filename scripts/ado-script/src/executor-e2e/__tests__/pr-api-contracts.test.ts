@@ -3,7 +3,7 @@ import { AdoRest } from "../ado-rest.js";
 import type { ScenarioContext } from "../scenario.js";
 import { prApiContractScenarios } from "../scenarios/pr-api-contracts.js";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 function context(): ScenarioContext {
   return {
@@ -31,6 +31,16 @@ function json(body: unknown, status = 200): Response {
 }
 
 describe("PR API contract probes", () => {
+  it("uses a non-draft PR for the vote-preservation probe", async () => {
+    const ctx = context();
+    vi.spyOn(ctx.rest, "getRepository").mockResolvedValue({ id: "repo", defaultBranch: "refs/heads/main" });
+    vi.spyOn(ctx.rest, "getRefObjectId").mockResolvedValue("a".repeat(40));
+    vi.spyOn(ctx.rest, "pushAddFileBranch").mockResolvedValue("b".repeat(40));
+    const create = vi.spyOn(ctx.rest, "createPullRequest").mockResolvedValue({ pullRequestId: 42 });
+    await probe("pr-api-reviewer-additive-state").setup(ctx);
+    expect(create.mock.calls[0]?.[5]).toBe(false);
+  });
+
   it("identifies prerequisite checks separately from executor feature coverage", () => {
     expect(prApiContractScenarios.map((s) => s.id)).toEqual([
       "pr-api-draft-publication", "pr-api-label-replacement", "pr-api-owned-comments", "pr-api-push-concurrency",
