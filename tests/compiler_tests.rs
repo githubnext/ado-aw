@@ -2054,18 +2054,18 @@ Call the noop tool exactly once.
         "agent invocation document should reference the prompt and MCP config: {agent}"
     );
     assert!(
-        agent.contains("copilot-invoker.js run")
+        agent.contains("copilot-runner.js run")
             && !agent.contains("/tmp/awf-tools/copilot --prompt"),
-        "agent job should execute only the fixed invoker command: {agent}"
+        "agent job should execute only the fixed sandbox runner command: {agent}"
     );
     assert!(
         detection.contains(r#""prompt_path":"/tmp/awf-tools/threat-analysis-prompt.md""#),
         "detection invocation document should reference the threat prompt: {detection}"
     );
     assert!(
-        detection.contains("copilot-invoker.js run")
+        detection.contains("copilot-runner.js run")
             && !detection.contains("/tmp/awf-tools/copilot --prompt"),
-        "detection job should execute only the fixed invoker command: {detection}"
+        "detection job should execute only the fixed sandbox runner command: {detection}"
     );
     assert!(
         agent.contains("--allow-all-tools"),
@@ -2125,9 +2125,9 @@ fn test_runtime_import_frontmatter_prompt_uses_attached_copilot_prompt_flag() {
         "detection invocation document should reference the threat prompt: {detection}"
     );
     assert!(
-        compiled.contains("copilot-invoker.js run")
+        compiled.contains("copilot-runner.js run")
             && !compiled.contains("/tmp/awf-tools/copilot --prompt"),
-        "compiled pipeline should use the fixed invoker command: {compiled}"
+        "compiled pipeline should use the fixed sandbox runner command: {compiled}"
     );
 
     exercise_attached_prompt_with_pinned_copilot_cli(&fixture);
@@ -5306,8 +5306,8 @@ fn test_1es_compiled_output_is_valid_yaml() {
         "1ES output should contain SafeOutputs references"
     );
     assert!(
-        compiled.contains("copilot-invoker.js run"),
-        "1ES output should contain the fixed Copilot invoker command"
+        compiled.contains("copilot-runner.js run"),
+        "1ES output should contain the fixed Copilot runner command"
     );
     assert!(
         compiled.contains("threat-analysis"),
@@ -5846,7 +5846,7 @@ fn extract_job_block<'a>(yaml: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Gate-only pipelines stage the bundle in Setup for the gate and in both
-/// Copilot jobs for the invoker.
+/// Copilot jobs for the controller and runner.
 #[test]
 fn test_gate_only_pipeline_downloads_bundle_in_all_consuming_jobs() {
     let yaml = compile_fixture("dedupe_gate_only.md");
@@ -5858,7 +5858,7 @@ fn test_gate_only_pipeline_downloads_bundle_in_all_consuming_jobs() {
     );
     assert!(
         agent.contains("Download ado-aw scripts"),
-        "Agent job must stage the Copilot invoker bundle. Agent block contents: {}",
+        "Agent job must stage the Copilot controller/runner bundles. Agent block contents: {}",
         agent
     );
 }
@@ -5906,14 +5906,15 @@ fn test_both_features_active_downloads_bundle_in_both_jobs() {
     );
 }
 
-/// Even with no gate or runtime imports, Agent and Detection stage the invoker.
+/// Even with no gate or runtime imports, Agent and Detection stage the
+/// controller and runner.
 #[test]
-fn test_neither_feature_active_stages_invoker_in_copilot_jobs() {
+fn test_neither_feature_active_stages_copilot_bundles_in_copilot_jobs() {
     let yaml = compile_fixture("dedupe_neither.md");
     assert_eq!(
         yaml.matches("Download ado-aw scripts").count(),
         2,
-        "Agent and Detection must each stage the invoker bundle"
+        "Agent and Detection must each stage the controller/runner bundles"
     );
 }
 
@@ -8231,13 +8232,34 @@ fn runtime_model_controls_compile_across_all_targets() {
             "{target}: missing Detection runtime model env mapping"
         );
         assert!(
-            compiled.contains("copilot-invoker.js run"),
-            "{target}: fixed Copilot invoker command must be emitted"
+            compiled.contains("copilot-runner.js run"),
+            "{target}: fixed sandbox runner command must be emitted"
         );
         assert!(
-            compiled.contains(r#""role":"agent""#)
-                && compiled.contains(r#""role":"detection""#),
-            "{target}: Agent and Detection invocation documents must be emitted"
+            compiled.contains(r#""schema_version":2,"document_kind":"request","role":"agent""#)
+                && compiled.contains(
+                    r#""schema_version":2,"document_kind":"request","role":"detection""#
+                ),
+            "{target}: Agent and Detection schema-v2 requests must be emitted"
+        );
+        assert!(
+            compiled.contains(
+                r#"TRUSTED_CONTROLLER_DIR="$AGENT_TEMP/ado-aw-copilot-controller""#
+            ) && compiled.contains(r#"node "$TRUSTED_CONTROLLER_PATH" prepare"#)
+                && compiled.contains(r#"node "$TRUSTED_CONTROLLER_PATH" read-result"#),
+            "{target}: trusted controller preparation and result validation must use the host-private directory"
+        );
+        assert!(
+            compiled.contains(r#"rm -f "$COPILOT_CONTROLLER_SOURCE_PATH""#),
+            "{target}: sandbox-visible controller source must be removed before AWF"
+        );
+        assert!(
+            !compiled.contains(r#""result_path""#)
+                && !compiled.contains(
+                    "/tmp/awf-tools/copilot-invocation-result.json"
+                )
+                && !compiled.contains("copilot-controller.js run"),
+            "{target}: sandbox-visible requests and commands must not carry authoritative result/controller capabilities"
         );
         assert!(
             !compiled.contains("ADO_AW_EFFECTIVE_MODEL"),
@@ -8272,14 +8294,14 @@ safe-outputs:
         .expect("model variable producer should be emitted");
     let consumer = agent
         .find("Run copilot (AWF network isolated)")
-        .expect("Copilot invoker step should be emitted");
+        .expect("Copilot controller/runner step should be emitted");
     assert!(
         producer < consumer,
-        "trusted variable producer must run before the invoker task: {agent}"
+        "trusted variable producer must run before the controller/runner task: {agent}"
     );
     assert!(
         agent.contains("ADO_AW_MODEL_AGENT_COPILOT: $(ADO_AW_MODEL_AGENT_COPILOT)"),
-        "invoker task must resolve the model through its typed env mapping: {agent}"
+        "controller task must resolve the model through its typed env mapping: {agent}"
     );
 }
 
@@ -10204,7 +10226,7 @@ fn test_github_app_token_hyphenated_private_key_variable() {
 /// When another ado-script bundle feature is active in the Agent job (here a
 /// safe-output activates the approval-summary bundle download), the mint step
 /// must NOT trigger another bundle download in either Copilot job because both
-/// already stage the invoker bundle.
+/// already stage the controller/runner bundles.
 #[test]
 fn test_github_app_token_reuses_staged_bundle_in_agent() {
     fn count_downloads(compiled: &str) -> usize {

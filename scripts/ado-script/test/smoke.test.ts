@@ -28,7 +28,8 @@ const gateBundlePath = resolve(__dirname, "../gate.js");
 const importBundlePath = resolve(__dirname, "../import.js");
 const execContextPrBundlePath = resolve(__dirname, "../exec-context-pr.js");
 const preparePrBaseBundlePath = resolve(__dirname, "../prepare-pr-base.js");
-const copilotInvokerBundlePath = resolve(__dirname, "../copilot-invoker.js");
+const copilotControllerBundlePath = resolve(__dirname, "../copilot-controller.js");
+const copilotRunnerBundlePath = resolve(__dirname, "../copilot-runner.js");
 const gateFixturePath = resolve(
   __dirname,
   "fixtures/gate-spec-pr-title-match.json",
@@ -133,14 +134,17 @@ describe("import.js smoke", () => {
   }, 20000);
 });
 
-describe.skipIf(process.platform === "win32")("copilot-invoker.js smoke", () => {
-  it("runs a fake Copilot child and publishes the requested model", () => {
-    withSmokeScratchDir("copilot-invoker", (dir) => {
+describe.skipIf(process.platform === "win32")("Copilot controller/runner smoke", () => {
+  it("prepares, runs, self-removes, and preserves trusted model metadata", () => {
+    withSmokeScratchDir("copilot-runner", (dir) => {
       const command = resolve(dir, "fake-copilot");
       const promptPath = resolve(dir, "prompt.md");
       const resultPath = resolve(dir, "result.json");
       const capturePath = resolve(dir, "capture.json");
-      const documentPath = resolve(dir, "invocation.json");
+      const requestPath = resolve(dir, "request.json");
+      const preparedPath = resolve(dir, "prepared.json");
+      const runnerPath = resolve(dir, "copilot-runner.js");
+      copyFileSync(copilotRunnerBundlePath, runnerPath);
       writeFileSync(
         command,
         `#!/bin/sh
@@ -151,22 +155,34 @@ exit 7
       chmodSync(command, 0o755);
       writeFileSync(promptPath, "smoke prompt\n");
       writeFileSync(
-        documentPath,
+        requestPath,
         JSON.stringify({
-          schema_version: 1,
+          schema_version: 2,
+          document_kind: "request",
           role: "agent",
           command,
           prompt_path: promptPath,
           mcp_config_path: null,
           args: ["--no-ask-user"],
           explicit_model: "gpt-smoke",
-          result_path: resultPath,
         }),
       );
 
+      const prepare = spawnSync(
+        process.execPath,
+        [
+          copilotControllerBundlePath,
+          "prepare",
+          requestPath,
+          preparedPath,
+          resultPath,
+        ],
+        { env: { ...process.env }, encoding: "utf8" },
+      );
+      expect(prepare.status).toBe(0);
       const run = spawnSync(
         process.execPath,
-        [copilotInvokerBundlePath, "run", documentPath],
+        [runnerPath, "run", preparedPath],
         {
           env: { ...process.env, CAPTURE_PATH: capturePath },
           encoding: "utf8",
@@ -175,12 +191,15 @@ exit 7
       expect(run.status).toBe(7);
       expect(run.stdout).toBe("");
       expect(run.stderr).toBe("");
+      expect(existsSync(runnerPath)).toBe(false);
+      expect(existsSync(preparedPath)).toBe(false);
       expect(JSON.parse(readFileSync(capturePath, "utf8"))).toEqual({
         argv: ["--prompt=smoke prompt\n", "--no-ask-user"],
         model: "gpt-smoke",
       });
       expect(JSON.parse(readFileSync(resultPath, "utf8"))).toEqual({
-        schema_version: 1,
+        schema_version: 2,
+        document_kind: "result",
         role: "agent",
         requested_model: "gpt-smoke",
       });

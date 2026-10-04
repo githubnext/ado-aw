@@ -6,10 +6,12 @@ umask 077
 : "${ADO_AW_BIN:?ADO_AW_BIN is required}"
 : "${AWF_BIN:?AWF_BIN is required}"
 : "${COPILOT_BIN:?COPILOT_BIN is required}"
-: "${COPILOT_INVOKER_BUNDLE:?COPILOT_INVOKER_BUNDLE is required}"
+: "${COPILOT_CONTROLLER_BUNDLE:?COPILOT_CONTROLLER_BUNDLE is required}"
+: "${COPILOT_RUNNER_BUNDLE:?COPILOT_RUNNER_BUNDLE is required}"
 : "${AWF_VERSION:?AWF_VERSION is required}"
 : "${MCPG_VERSION:?MCPG_VERSION is required}"
 : "${ADO_AW_COPILOT_CLI_ARTIFACT_DIR:?ADO_AW_COPILOT_CLI_ARTIFACT_DIR is required}"
+: "${ADO_AW_COPILOT_CLI_CONTROL_DIR:?ADO_AW_COPILOT_CLI_CONTROL_DIR is required}"
 : "${COPILOT_GITHUB_TOKEN:?COPILOT_GITHUB_TOKEN is required}"
 
 readonly CONTRACT_CONTEXT="awf-copilot-safeoutputs-contract"
@@ -18,6 +20,7 @@ readonly MCP_GATEWAY_CONTAINER="awmg-mcpg"
 readonly MCPG_IMAGE="ghcr.io/github/gh-aw-mcpg:v${MCPG_VERSION}"
 readonly SAFEOUTPUTS_IMAGE="ghcr.io/github/gh-aw-firewall/agent:${AWF_VERSION}"
 readonly ARTIFACT_DIR="${ADO_AW_COPILOT_CLI_ARTIFACT_DIR}"
+readonly CONTROL_DIR="${ADO_AW_COPILOT_CLI_CONTROL_DIR}"
 
 RUNTIME_DIR="$(mktemp -d /tmp/ado-aw-awf-contract.XXXXXX)"
 SAFE_OUTPUTS_DIR="$(mktemp -d /tmp/ado-aw-safeoutputs.XXXXXX)"
@@ -25,6 +28,7 @@ TOOLS_DIR="/tmp/awf-tools"
 MCPG_PID=""
 
 mkdir -p "${ARTIFACT_DIR}" "${SAFE_OUTPUTS_DIR}" "${TOOLS_DIR}"
+install -d -m 0700 "${CONTROL_DIR}"
 
 cleanup() {
   local status=$?
@@ -38,7 +42,7 @@ cleanup() {
   if [[ -f "${SAFE_OUTPUTS_DIR}/safe_outputs.ndjson" ]]; then
     cp "${SAFE_OUTPUTS_DIR}/safe_outputs.ndjson" "${ARTIFACT_DIR}/safe_outputs.ndjson"
   fi
-  rm -rf "${RUNTIME_DIR}" "${SAFE_OUTPUTS_DIR}"
+  rm -rf "${RUNTIME_DIR}" "${SAFE_OUTPUTS_DIR}" "${CONTROL_DIR}"
   return "${status}"
 }
 trap cleanup EXIT
@@ -72,8 +76,12 @@ for binary in "${ADO_AW_BIN}" "${AWF_BIN}" "${COPILOT_BIN}"; do
     exit 1
   }
 done
-[[ -f "${COPILOT_INVOKER_BUNDLE}" ]] || {
-  echo "Copilot invoker bundle is missing: ${COPILOT_INVOKER_BUNDLE}" >&2
+[[ -f "${COPILOT_CONTROLLER_BUNDLE}" ]] || {
+  echo "Copilot controller bundle is missing: ${COPILOT_CONTROLLER_BUNDLE}" >&2
+  exit 1
+}
+[[ -f "${COPILOT_RUNNER_BUNDLE}" ]] || {
+  echo "Copilot runner bundle is missing: ${COPILOT_RUNNER_BUNDLE}" >&2
   exit 1
 }
 
@@ -229,8 +237,10 @@ chmod 600 "${TOOLS_DIR}/mcp-config.json"
 
 install -m 0755 "${COPILOT_BIN}" "${TOOLS_DIR}/copilot"
 mkdir -p /tmp/ado-aw-scripts/ado-script
-install -m 0644 "${COPILOT_INVOKER_BUNDLE}" \
-  /tmp/ado-aw-scripts/ado-script/copilot-invoker.js
+install -m 0644 "${COPILOT_RUNNER_BUNDLE}" \
+  /tmp/ado-aw-scripts/ado-script/copilot-runner.js
+install -m 0500 "${COPILOT_CONTROLLER_BUNDLE}" \
+  "${CONTROL_DIR}/copilot-controller.js"
 cat >"${TOOLS_DIR}/agent-prompt.md" <<EOF
 Call the noop tool exactly once with context "${CONTRACT_CONTEXT}".
 Do not call any other tool. Stop immediately after the tool call.
@@ -240,9 +250,9 @@ jq -n \
   --arg command "${TOOLS_DIR}/copilot" \
   --arg prompt_path "${TOOLS_DIR}/agent-prompt.md" \
   --arg mcp_config_path "${TOOLS_DIR}/mcp-config.json" \
-  --arg result_path "${TOOLS_DIR}/copilot-invocation-result.json" \
   '{
-    schema_version: 1,
+    schema_version: 2,
+    document_kind: "request",
     role: "agent",
     command: $command,
     prompt_path: $prompt_path,
@@ -255,14 +265,17 @@ jq -n \
       "safeoutputs",
       "--allow-all-paths"
     ],
-    explicit_model: "gpt-5-mini",
-    result_path: $result_path
-  }' >"${TOOLS_DIR}/copilot-invocation.json"
-chmod 600 "${TOOLS_DIR}/copilot-invocation.json"
+    explicit_model: "gpt-5-mini"
+  }' >"${CONTROL_DIR}/invocation-request.json"
+chmod 600 "${CONTROL_DIR}/invocation-request.json"
+node "${CONTROL_DIR}/copilot-controller.js" prepare \
+  "${CONTROL_DIR}/invocation-request.json" \
+  "${TOOLS_DIR}/copilot-invocation.json" \
+  "${CONTROL_DIR}/invocation-result.json"
 
 readonly ALLOWED_DOMAINS="api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,github.com,telemetry.enterprise.githubcopilot.com,*.copilot.github.com,*.githubcopilot.com"
 # shellcheck disable=SC2016 # AWF expands the engine command inside the sandbox.
-readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; exec node /tmp/ado-aw-scripts/ado-script/copilot-invoker.js run /tmp/awf-tools/copilot-invocation.json'
+readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; exec node /tmp/ado-aw-scripts/ado-script/copilot-runner.js run /tmp/awf-tools/copilot-invocation.json'
 
 set +e
 "${AWF_BIN}" \
@@ -286,11 +299,19 @@ if [[ "${AWF_STATUS}" -ne 0 ]]; then
 fi
 
 REQUESTED_MODEL="$(
-  node /tmp/ado-aw-scripts/ado-script/copilot-invoker.js \
-    read-result "${TOOLS_DIR}/copilot-invocation-result.json" agent
+  node "${CONTROL_DIR}/copilot-controller.js" \
+    read-result "${CONTROL_DIR}/invocation-result.json" agent
 )"
 [[ "${REQUESTED_MODEL}" == "gpt-5-mini" ]] || {
-  echo "Unexpected requested model from invoker: ${REQUESTED_MODEL}" >&2
+  echo "Unexpected requested model from controller: ${REQUESTED_MODEL}" >&2
+  exit 1
+}
+[[ ! -e /tmp/ado-aw-scripts/ado-script/copilot-runner.js ]] || {
+  echo "Copilot runner did not remove itself before child execution" >&2
+  exit 1
+}
+[[ ! -e "${TOOLS_DIR}/copilot-invocation.json" ]] || {
+  echo "Prepared invocation document was not removed before child execution" >&2
   exit 1
 }
 

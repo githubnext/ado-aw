@@ -293,17 +293,16 @@ fn build_engine_setup(
     let compiler_version = env!("CARGO_PKG_VERSION").to_string();
     let detection_engine = crate::engine::get_engine(detection_engine_config.engine_id())?;
 
-    let agent_invocation = ctx.engine.invocation_document(
+    let agent_invocation = ctx.engine.invocation_request(
         ctx.front_matter,
         extension_declarations,
         crate::engine::CopilotInvocationContext::new(
             crate::engine::RuntimeModelRole::Agent,
             "/tmp/awf-tools/agent-prompt.md",
             Some("/tmp/awf-tools/mcp-config.json"),
-            "/tmp/awf-tools/copilot-invocation-result.json",
         ),
     )?;
-    let detection_invocation = detection_engine.invocation_document_with_config(
+    let detection_invocation = detection_engine.invocation_request_with_config(
         detection_engine_config,
         ctx.front_matter,
         extension_declarations,
@@ -311,13 +310,12 @@ fn build_engine_setup(
             crate::engine::RuntimeModelRole::Detection,
             "/tmp/awf-tools/threat-analysis-prompt.md",
             None,
-            "/tmp/awf-tools/copilot-invocation-result.json",
         ),
     )?;
     let agent_invocation_json = serde_json::to_string(&agent_invocation)
-        .context("failed to serialize Agent Copilot invocation document")?;
+        .context("failed to serialize Agent Copilot invocation request")?;
     let detection_invocation_json = serde_json::to_string(&detection_invocation)
-        .context("failed to serialize Detection Copilot invocation document")?;
+        .context("failed to serialize Detection Copilot invocation request")?;
     let engine_install_steps_yaml =
         ctx.engine
             .install_steps(&front_matter.engine, &front_matter.target, ctx.ado_org())?;
@@ -1606,9 +1604,10 @@ fn build_detection_job(
         )?));
         steps.push(Step::Bash(setup_compiler_step()));
 
-        // Detection always executes the Copilot invoker bundle. Stage it before
-        // custom pre-steps; mint optional credentials only after those steps so
-        // trusted setup code receives the least privilege needed.
+        // Detection always executes the Copilot controller/runner bundles.
+        // Stage them before custom pre-steps; mint optional credentials only
+        // after those steps so trusted setup code receives the least privilege
+        // needed.
         steps.extend(
             super::extensions::ado_script::install_and_download_steps_typed(
                 front_matter.supply_chain(),
@@ -4440,6 +4439,21 @@ fn awf_exclude_env_flags(exclude_keys: &[String]) -> String {
     block
 }
 
+const COPILOT_TRUSTED_PREFLIGHT: &str = r#"TRUSTED_CONTROLLER_DIR="$AGENT_TEMP/ado-aw-copilot-controller"
+TRUSTED_CONTROLLER_PATH="$TRUSTED_CONTROLLER_DIR/copilot-controller.js"
+TRUSTED_REQUEST_PATH="$TRUSTED_CONTROLLER_DIR/invocation-request.json"
+TRUSTED_RESULT_PATH="$TRUSTED_CONTROLLER_DIR/invocation-result.json"
+install -d -m 0700 "$TRUSTED_CONTROLLER_DIR"
+install -m 0500 "$COPILOT_CONTROLLER_SOURCE_PATH" "$TRUSTED_CONTROLLER_PATH"
+printf '%s\n' "$INVOCATION_REQUEST" > "$TRUSTED_REQUEST_PATH"
+chmod 0600 "$TRUSTED_REQUEST_PATH"
+rm -f "$SANDBOX_INVOCATION_PATH" "$TRUSTED_RESULT_PATH"
+node "$TRUSTED_CONTROLLER_PATH" prepare \
+  "$TRUSTED_REQUEST_PATH" \
+  "$SANDBOX_INVOCATION_PATH" \
+  "$TRUSTED_RESULT_PATH"
+rm -f "$COPILOT_CONTROLLER_SOURCE_PATH""#;
+
 shell_script! {
     /// Invoke the AI agent inside AWF's network-isolated Docker topology.
     ///
@@ -4452,37 +4466,47 @@ shell_script! {
     /// - `image_flags` — `--image-tag` plus optional `--image-registry`
     /// - `exclude_env` — provider credentials and internal MCP identity keys
     /// - `awf_mounts` — the compiler-supplied chain of `--mount "…"` args
-    /// - `routed_invoker` — the fixed single-quoted `NO_PROXY` prefix +
-    ///   compiler-owned invoker command that AWF runs inside the sandbox
+    /// - `routed_runner` — the fixed single-quoted `NO_PROXY` prefix +
+    ///   compiler-owned runner command that AWF runs inside the sandbox
     RUN_AGENT {
         interpreter: Bash,
         bindings: [
             AGENT_TEMP,
             PIPELINE_WORKSPACE,
             ALLOWED_DOMAINS,
-            INVOCATION_DOCUMENT,
-            INVOCATION_DOCUMENT_PATH,
-            INVOCATION_RESULT_PATH,
-            COPILOT_INVOKER_PATH
+            INVOCATION_REQUEST,
+            SANDBOX_INVOCATION_PATH,
+            COPILOT_CONTROLLER_SOURCE_PATH
         ],
-        externals: [WORKING_DIRECTORY],
+        externals: [
+            WORKING_DIRECTORY,
+            TRUSTED_CONTROLLER_PATH,
+            TRUSTED_RESULT_PATH
+        ],
         fragments: [
+            trusted_preflight,
             append_aw_info_field,
             topology_attach,
             image_flags,
             exclude_env,
             awf_mounts,
-            routed_invoker
+            routed_runner
         ],
         phases: [append_aw_info_field = super::extensions::APPEND_AW_INFO_FIELD],
+        fragment_uses: [
+            trusted_preflight => [
+                INVOCATION_REQUEST,
+                SANDBOX_INVOCATION_PATH,
+                COPILOT_CONTROLLER_SOURCE_PATH
+            ],
+        ],
         body: r###"
 set -eo pipefail
 
 AGENT_OUTPUT_FILE="$AGENT_TEMP/staging/logs/agent-output.txt"
 mkdir -p "$AGENT_TEMP/staging/logs"
 AGENT_EXIT_CODE=0
-printf '%s\n' "$INVOCATION_DOCUMENT" > "$INVOCATION_DOCUMENT_PATH"
-rm -f "$INVOCATION_RESULT_PATH"
+# ado-aw:fragment trusted_preflight
 
 echo "=== Running AI agent with AWF network isolation ==="
 echo "Allowed domains: $ALLOWED_DOMAINS"
@@ -4510,7 +4534,7 @@ AWF_ARGS+=(
   --log-level info
   --proxy-logs-dir "$AGENT_TEMP/staging/logs/firewall"
 )
-# ado-aw:fragment routed_invoker
+# ado-aw:fragment routed_runner
 
 # Stream agent output in real-time while filtering VSO commands.
 # sed -u = unbuffered (line-by-line) so output appears immediately.
@@ -4523,7 +4547,7 @@ AWF_ARGS+=(
   || AGENT_EXIT_CODE=$?
 
 MODEL_RESULT_STATUS=0
-REQUESTED_MODEL=$(node "$COPILOT_INVOKER_PATH" read-result "$INVOCATION_RESULT_PATH" agent) \
+REQUESTED_MODEL=$(node "$TRUSTED_CONTROLLER_PATH" read-result "$TRUSTED_RESULT_PATH" agent) \
   || MODEL_RESULT_STATUS=$?
 if [ "$MODEL_RESULT_STATUS" -ne 0 ]; then
   echo "ERROR: Agent Copilot invocation result is missing or malformed" >&2
@@ -4559,7 +4583,7 @@ fn run_agent_step(
     allowed_domains: &str,
     awf_mounts: &str,
     working_directory: &str,
-    invocation_document: &str,
+    invocation_request: &str,
     engine_env: &str,
     byom_exclude_keys: &[String],
     supply_chain: Option<&SupplyChainConfig>,
@@ -4655,10 +4679,10 @@ fn run_agent_step(
     } else {
         MCPG_CONTAINER_NAME.to_string()
     };
-    let routed_invoker = format!(
+    let routed_runner = format!(
         "AWF_ARGS+=(-- 'export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{no_proxy_peers}\"; \
          export no_proxy=\"$NO_PROXY\"; exec node {} run /tmp/awf-tools/copilot-invocation.json')",
-        super::extensions::ado_script::COPILOT_INVOKER_PATH
+        super::extensions::ado_script::COPILOT_RUNNER_PATH
     );
 
     let mut step = ShellScript::new(&RUN_AGENT)
@@ -4669,21 +4693,18 @@ fn run_agent_step(
         )
         .bind_text("ALLOWED_DOMAINS", allowed_domains)
         .bind(
-            "INVOCATION_DOCUMENT",
-            Binding::document(invocation_document),
+            "INVOCATION_REQUEST",
+            Binding::document(invocation_request),
         )
         .bind_text(
-            "INVOCATION_DOCUMENT_PATH",
+            "SANDBOX_INVOCATION_PATH",
             "/tmp/awf-tools/copilot-invocation.json",
         )
         .bind_text(
-            "INVOCATION_RESULT_PATH",
-            "/tmp/awf-tools/copilot-invocation-result.json",
+            "COPILOT_CONTROLLER_SOURCE_PATH",
+            super::extensions::ado_script::COPILOT_CONTROLLER_PATH,
         )
-        .bind_text(
-            "COPILOT_INVOKER_PATH",
-            super::extensions::ado_script::COPILOT_INVOKER_PATH,
-        )
+        .fragment("trusted_preflight", COPILOT_TRUSTED_PREFLIGHT)
         .fragment(
             "append_aw_info_field",
             phase_body(&super::extensions::APPEND_AW_INFO_FIELD),
@@ -4692,7 +4713,7 @@ fn run_agent_step(
         .fragment("image_flags", image_flags_line)
         .fragment("exclude_env", exclude_env_line)
         .fragment("awf_mounts", awf_mounts_block)
-        .fragment("routed_invoker", routed_invoker)
+        .fragment("routed_runner", routed_runner)
         .into_step("Run copilot (AWF network isolated)");
     step.working_directory = Some(working_directory.to_string());
     // Engine env comes as a multi-line YAML env block — `KEY: VALUE` lines
@@ -6264,21 +6285,30 @@ shell_script! {
             AGENT_TEMP,
             PIPELINE_WORKSPACE,
             ALLOWED_DOMAINS,
-            INVOCATION_DOCUMENT,
-            INVOCATION_DOCUMENT_PATH,
-            INVOCATION_RESULT_PATH,
-            COPILOT_INVOKER_PATH
+            INVOCATION_REQUEST,
+            SANDBOX_INVOCATION_PATH,
+            COPILOT_CONTROLLER_SOURCE_PATH
         ],
-        externals: [WORKING_DIRECTORY],
-        fragments: [image_flags, exclude_env, run_invoker],
+        externals: [
+            WORKING_DIRECTORY,
+            TRUSTED_CONTROLLER_PATH,
+            TRUSTED_RESULT_PATH
+        ],
+        fragments: [trusted_preflight, image_flags, exclude_env, run_runner],
+        fragment_uses: [
+            trusted_preflight => [
+                INVOCATION_REQUEST,
+                SANDBOX_INVOCATION_PATH,
+                COPILOT_CONTROLLER_SOURCE_PATH
+            ],
+        ],
         body: r###"
-set -o pipefail
+set -eo pipefail
 
 # Run threat analysis with AWF network isolation
 THREAT_OUTPUT_FILE="$AGENT_TEMP/threat-analysis-output.txt"
 AGENT_EXIT_CODE=0
-printf '%s\n' "$INVOCATION_DOCUMENT" > "$INVOCATION_DOCUMENT_PATH"
-rm -f "$INVOCATION_RESULT_PATH"
+# ado-aw:fragment trusted_preflight
 
 # The argument list is assembled into an array so runtime-supplied
 # fragments splice in as ordinary shell statements (`AWF_ARGS+=(...)`)
@@ -6295,17 +6325,18 @@ AWF_ARGS+=(
   --log-level info
   --proxy-logs-dir "$AGENT_TEMP/threat-analysis-logs/firewall"
 )
-# ado-aw:fragment run_invoker
+# ado-aw:fragment run_runner
 
 # Stream threat analysis output in real-time with VSO command filtering
 # shellcheck disable=SC2016 # The single-quoted engine command inside AWF_ARGS is intentionally expanded by AWF inside the sandbox
+set +e
 "$PIPELINE_WORKSPACE/awf/awf" "${AWF_ARGS[@]}" 2>&1 \
   | sed -u 's/##vso\[/[VSO-FILTERED] vso[/g; s/##\[/[VSO-FILTERED] [/g' \
   | tee "$THREAT_OUTPUT_FILE" \
   || AGENT_EXIT_CODE=$?
 
 MODEL_RESULT_STATUS=0
-REQUESTED_MODEL=$(node "$COPILOT_INVOKER_PATH" read-result "$INVOCATION_RESULT_PATH" detection) \
+REQUESTED_MODEL=$(node "$TRUSTED_CONTROLLER_PATH" read-result "$TRUSTED_RESULT_PATH" detection) \
   || MODEL_RESULT_STATUS=$?
 if [ "$MODEL_RESULT_STATUS" -ne 0 ]; then
   echo "ERROR: Detection Copilot invocation result is missing or malformed" >&2
@@ -6324,7 +6355,7 @@ exit "$AGENT_EXIT_CODE"
 fn run_threat_analysis_step(
     allowed_domains: &str,
     working_directory: &str,
-    invocation_document: &str,
+    invocation_request: &str,
     byom_exclude_keys: &[String],
     detection_engine_env: &[(String, String)],
     github_token_var: &str,
@@ -6360,9 +6391,9 @@ fn run_threat_analysis_step(
             format!("AWF_ARGS+=({})", parts.join(" "))
         }
     };
-    let run_invoker = format!(
+    let run_runner = format!(
         "AWF_ARGS+=(-- 'exec node {} run /tmp/awf-tools/copilot-invocation.json')",
-        super::extensions::ado_script::COPILOT_INVOKER_PATH
+        super::extensions::ado_script::COPILOT_RUNNER_PATH
     );
 
     let mut step = ShellScript::new(&RUN_THREAT_ANALYSIS)
@@ -6373,24 +6404,21 @@ fn run_threat_analysis_step(
         )
         .bind_text("ALLOWED_DOMAINS", allowed_domains)
         .bind(
-            "INVOCATION_DOCUMENT",
-            Binding::document(invocation_document),
+            "INVOCATION_REQUEST",
+            Binding::document(invocation_request),
         )
         .bind_text(
-            "INVOCATION_DOCUMENT_PATH",
+            "SANDBOX_INVOCATION_PATH",
             "/tmp/awf-tools/copilot-invocation.json",
         )
         .bind_text(
-            "INVOCATION_RESULT_PATH",
-            "/tmp/awf-tools/copilot-invocation-result.json",
+            "COPILOT_CONTROLLER_SOURCE_PATH",
+            super::extensions::ado_script::COPILOT_CONTROLLER_PATH,
         )
-        .bind_text(
-            "COPILOT_INVOKER_PATH",
-            super::extensions::ado_script::COPILOT_INVOKER_PATH,
-        )
+        .fragment("trusted_preflight", COPILOT_TRUSTED_PREFLIGHT)
         .fragment("image_flags", image_flags_line)
         .fragment("exclude_env", exclude_env_line)
-        .fragment("run_invoker", run_invoker)
+        .fragment("run_runner", run_runner)
         .into_step("Run threat analysis (AWF network isolated)");
     step.working_directory = Some(working_directory.to_string());
     // env block: GITHUB_TOKEN + GITHUB_READ_ONLY — emit the latter as
@@ -7801,7 +7829,7 @@ safe-outputs:
             "example.com",
             "\\",
             "/work",
-            r#"{"schema_version":1,"role":"agent"}"#,
+            r#"{"schema_version":2,"document_kind":"request","role":"agent"}"#,
             "FOO: bar",
             &[],
             None,
@@ -7816,7 +7844,7 @@ safe-outputs:
             "example.com",
             "\\",
             "/work",
-            r#"{"schema_version":1,"role":"agent"}"#,
+            r#"{"schema_version":2,"document_kind":"request","role":"agent"}"#,
             "ADO_AW_MODEL_AGENT_COPILOT: $(ADO_AW_MODEL_AGENT_COPILOT)\nADO_AW_DEFAULT_MODEL_COPILOT: $(ADO_AW_DEFAULT_MODEL_COPILOT)",
             &[],
             None,
@@ -7861,7 +7889,7 @@ safe-outputs:
     }
 
     #[test]
-    fn agent_runtime_model_is_delegated_to_invoker_and_recorded_after_awf() {
+    fn agent_runtime_model_is_prepared_by_controller_and_recorded_after_awf() {
         let step = runtime_agent_step_for_test();
         assert!(matches!(
             step.env
@@ -7875,10 +7903,16 @@ safe-outputs:
             Some(EnvValue::PipelineVar(name))
                 if name == crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT
         ));
-        assert!(step.script.contains("copilot-invoker.js run"));
+        assert!(step.script.contains("copilot-runner.js run"));
         assert!(step
             .script
-            .contains("node \"$COPILOT_INVOKER_PATH\" read-result"));
+            .contains("node \"$TRUSTED_CONTROLLER_PATH\" prepare"));
+        assert!(step
+            .script
+            .contains("node \"$TRUSTED_CONTROLLER_PATH\" read-result"));
+        assert!(!step
+            .script
+            .contains("node \"$COPILOT_CONTROLLER_SOURCE_PATH\" read-result"));
         assert!(step.script.contains("\"model\""));
         let metadata_index = step
             .script
@@ -7917,12 +7951,12 @@ safe-outputs:
     }
 
     #[test]
-    fn prefixed_user_env_key_does_not_change_fixed_invoker_command() {
+    fn prefixed_user_env_key_does_not_change_fixed_runner_command() {
         let step = run_agent_step(
             "example.com",
             "\\",
             "/work",
-            r#"{"schema_version":1,"role":"agent","explicit_model":"static-model"}"#,
+            r#"{"schema_version":2,"document_kind":"request","role":"agent","explicit_model":"static-model"}"#,
             "ADO_AW_MODEL_AGENT_COPILOT_X: harmless",
             &[],
             None,
@@ -7932,7 +7966,7 @@ safe-outputs:
 
         assert!(!step.script.contains("ADO_AW_EFFECTIVE_MODEL"));
         assert!(!step.script.contains("unset COPILOT_MODEL"));
-        assert!(step.script.contains("copilot-invoker.js run"));
+        assert!(step.script.contains("copilot-runner.js run"));
     }
 
     #[test]
@@ -8761,10 +8795,27 @@ safe-outputs:
                 .script
                 .contains("$AGENT_TEMP/detection-runtime-model")
         );
-        assert!(run_step.script.contains("copilot-invoker.js run"));
+        assert!(run_step.script.contains("copilot-runner.js run"));
         assert!(run_step
             .script
-            .contains("node \"$COPILOT_INVOKER_PATH\" read-result"));
+            .contains("node \"$TRUSTED_CONTROLLER_PATH\" prepare"));
+        assert!(run_step
+            .script
+            .contains("node \"$TRUSTED_CONTROLLER_PATH\" read-result"));
+        let prepare = run_step
+            .script
+            .find("node \"$TRUSTED_CONTROLLER_PATH\" prepare")
+            .unwrap();
+        let disable_errexit = run_step.script.find("set +e").unwrap();
+        let awf = run_step
+            .script
+            .find("\"$PIPELINE_WORKSPACE/awf/awf\"")
+            .unwrap();
+        assert!(run_step.script.contains("set -eo pipefail"));
+        assert!(
+            prepare < disable_errexit && disable_errexit < awf,
+            "Detection preflight must fail closed before AWF exit capture begins"
+        );
         assert!(!run_step.script.contains("ADO_AW_EFFECTIVE_MODEL"));
         assert!(!run_step.script.contains("--model"));
         assert!(
@@ -8776,7 +8827,7 @@ safe-outputs:
                     .script
                     .find("$AGENT_TEMP/detection-runtime-model")
                     .unwrap(),
-            "the trusted host must consume the invoker result after Detection runs"
+            "the trusted host must consume the controller result after Detection runs"
         );
         assert!(
             !run_step

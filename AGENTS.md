@@ -319,7 +319,9 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │           ├── conclusion/ # Conclusion-job reporter source (bundled to conclusion.js)
 │           ├── approval-summary/ # Safe-outputs summary renderer (bundled to approval-summary.js; end-of-Agent-job summary tab)
 │           ├── github-app-token/ # GitHub App token minter (bundled to github-app-token.js; mints installation token in Agent + Detection when engine.github-app-token is set)
-│           ├── copilot-invoker/ # Sandboxed Copilot process harness (bundled to copilot-invoker.js): strict versioned invocation/result documents, runtime model resolution, typed argv, signal forwarding, exact exit propagation
+│           ├── copilot-shared/ # Strict schema-v2 request/prepared/result protocol, model resolution, typed argv/env, atomic writes shared by the controller and runner
+│           ├── copilot-controller/ # Trusted host control plane (bundled to copilot-controller.js): prepare + read-result only; never mounted into AWF
+│           ├── copilot-runner/ # Sandbox-only process harness (bundled to copilot-runner.js): run only, self-removal, typed argv, signal forwarding, exact exit propagation
 │           ├── executor-e2e/ # Stage 3 safe-output E2E test harness (not a bundle; runs deterministic scenarios against a real ADO project and files a GitHub issue on failure)
 │           ├── compiler-smoke-e2e/ # Smoke E2E orchestrator (not a bundle): stages each case in `tests/smoke/cases.json` to the fixed `.smoke/pipeline.yml` path on its own per-case `ado-aw-mirror` ref, queues it against its credential *lane* definition, and asserts they go green. Two modes via `SMOKE_COMPILER_SOURCE`: `candidate` (compiler built from this commit, pinned pipeline-artifact) and `released` (latest release asset, release URLs required). Built to `test-bin/` by `build:compiler-smoke-e2e`, listed in `NON_BUNDLE_DIRS`.
 │           ├── prepare-pr-base/ # create-pull-request preparer (bundled to prepare-pr-base.js): Agent mode uses ADO diff metadata + bounded fallback; SafeOutputs fetches the target tip; cross-org targets use isolated credentials + exact remote matching
@@ -464,7 +466,8 @@ index to jump to the right page.
   (`gate.js`, `import.js`, the execution-context `exec-context-*.js`
   bundles, `conclusion.js`, `approval-summary.js`,
   `github-app-token.js`, `prepare-pr-base.js`, and
-  `azure-wif-refresh.js`, `copilot-invoker.js`), schemars-driven
+  `azure-wif-refresh.js`, `copilot-controller.js`, `copilot-runner.js`),
+  schemars-driven
   type codegen, the A2 design decision, the bundle env contract
   modelled in `src/compile/ado_bundle.rs`, and the `trigger-e2e/`
   gate-spec drift guard (kept in sync via `export-fact-catalog`).
@@ -534,7 +537,11 @@ Following the gh-aw security model:
    assume deletion will make the exchange safe. This trap has caused repeated
    incorrect designs in credential-bearing work. Stream private material over
    stdin or use a container-private volume; publish only intentionally public
-   files (for example the interception CA certificate) under `/tmp`.
+   files (for example the interception CA certificate) under `/tmp`. The same
+   boundary applies to integrity, not only secrecy: after AWF starts, never
+   execute host-side code from `/tmp` or treat `/tmp` metadata as authoritative.
+   Copy trusted executables and results beneath `$(Agent.TempDirectory)` before
+   AWF and consume only those private copies afterward.
 3. **Tool Allow-listing**: Agents have access to a limited, controlled set of
    tools — see [`docs/tools.md`](docs/tools.md) and
    [`docs/mcp.md`](docs/mcp.md).

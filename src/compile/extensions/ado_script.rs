@@ -220,8 +220,13 @@ node "$BUNDLE"
 
 pub(crate) const GATE_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/gate.js";
 pub(crate) const IMPORT_EVAL_PATH: &str = "/tmp/ado-aw-scripts/ado-script/import.js";
-pub(crate) const COPILOT_INVOKER_PATH: &str =
-    "/tmp/ado-aw-scripts/ado-script/copilot-invoker.js";
+/// Sandbox-visible controller source. The Agent/Detection step copies this to
+/// `$(Agent.TempDirectory)` and removes this copy before AWF starts.
+pub(crate) const COPILOT_CONTROLLER_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/copilot-controller.js";
+/// Untrusted run-only bundle executed as AWF's initial Copilot command.
+pub(crate) const COPILOT_RUNNER_PATH: &str =
+    "/tmp/ado-aw-scripts/ado-script/copilot-runner.js";
 /// Path to the ado-proxy bundle inside the unpacked `ado-script.zip`.
 ///
 /// Unlike every other bundle this one is not executed by a pipeline step. It
@@ -1968,8 +1973,9 @@ mod tests {
         let fm: FrontMatter = serde_yaml::from_str("name: t\ndescription: t").unwrap();
         let ctx = CompileContext::for_test(&fm);
         let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
-        // The invoker is required by every Agent job, so install + download
-        // fire even when no other ado-script consumer is active.
+        // The controller and runner are required by every Agent job, so
+        // install + download fire even when no other ado-script consumer is
+        // active.
         assert_eq!(steps.len(), 2, "install + download only");
         assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
         assert!(
@@ -2601,7 +2607,7 @@ mod tests {
     // ── Typed-IR declarations (port-ado-script) ─────────────────────
 
     /// Setup remains empty when no gate / synth path is active, while Agent
-    /// preparation always stages the Copilot invoker bundle.
+    /// preparation always stages the Copilot controller/runner bundles.
     #[test]
     fn declarations_stages_agent_bundle_when_nothing_else_active() {
         let ext = ext_with(None, None, true);

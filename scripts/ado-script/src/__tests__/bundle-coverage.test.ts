@@ -44,6 +44,7 @@ const packageJsonPath = join(here, "..", "..", "package.json");
  */
 const NON_BUNDLE_DIRS = new Set([
   "shared",
+  "copilot-shared",
   "__tests__",
   "executor-e2e",
   "trigger-e2e",

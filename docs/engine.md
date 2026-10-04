@@ -22,7 +22,7 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
-| `model` | string | *(none)* | AI model to use (e.g., `gpt-5-mini`). When set, the compiler records it in the versioned Copilot invocation document and the invoker sets Copilot CLI's native `COPILOT_MODEL` environment variable. When omitted, runtime model controls can select a model; if no runtime control is set, `COPILOT_MODEL` remains unset and the Copilot CLI chooses its own default. |
+| `model` | string | *(none)* | AI model to use (e.g., `gpt-5-mini`). When set, the compiler records it in the versioned Copilot request; the trusted controller preserves it in the prepared invocation, and the sandbox runner sets Copilot CLI's native `COPILOT_MODEL` environment variable. When omitted, runtime model controls can select a model; if no runtime control is set, `COPILOT_MODEL` remains unset and the Copilot CLI chooses its own default. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 | `version` | string | *(none)* | Engine CLI version to install (e.g., `"1.0.70"`, `"latest"`). Overrides the pinned `COPILOT_CLI_VERSION`. Set to `"latest"` to use the newest available version. |
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
@@ -65,19 +65,25 @@ recompilation.
 Runtime values are passed through typed step environment mappings, so Azure
 DevOps YAML variables, UI variables, variable groups, and variables set by an
 earlier trusted `##vso[task.setvariable]` step all resolve at task start. Inside
-AWF, the compiler-owned `copilot-invoker.js` validates the selected value and
-sets Copilot CLI's native `COPILOT_MODEL` only in the child process environment.
-When no value resolves, the invoker removes `COPILOT_MODEL` rather than
-supplying a compiler default. Raw `engine.args --model` and
+the trusted host task, `copilot-controller.js` validates and resolves the
+selected value before AWF starts. It writes both a host-private result and a
+prepared sandbox invocation containing that same model decision. Inside AWF,
+the run-only `copilot-runner.js` sets Copilot CLI's native `COPILOT_MODEL` only
+in the child process environment. When no value resolves, the runner removes
+`COPILOT_MODEL` rather than supplying a compiler default. Raw
+`engine.args --model` and
 `engine.env.COPILOT_MODEL` are rejected so they cannot bypass this precedence.
 
-The invoker writes a strict result document before starting Copilot. The trusted
-Agent host task reads that result after AWF returns and records the requested
-session model in `aw_info.json`; Detection uses the same result contract and
-later enriches the copied metadata in `analyzed_outputs_<BuildId>` from its own
-job scope. A prior trusted step can therefore set a variable and both execution
-and metadata see the same task-start value. `ado-aw audit` merges those
-job-owned fields.
+The authoritative result and controller copy live beneath
+`$(Agent.TempDirectory)`, outside AWF's automatic host `/tmp` mount. After AWF
+returns, the host validates that private result with the private controller and
+records the requested session model in `aw_info.json`; Detection uses the same
+contract and later enriches the copied metadata in
+`analyzed_outputs_<BuildId>` from its own job scope. No JavaScript or result
+file exposed through sandbox-writable `/tmp` is executed or trusted afterward.
+A prior trusted step can therefore set a variable and both execution and
+metadata see the same task-start value. `ado-aw audit` merges those job-owned
+fields.
 
 When `engine.agent` selects a custom agent whose definition declares `model` or
 `models`, Copilot CLI may use that agent-pinned model instead of the requested

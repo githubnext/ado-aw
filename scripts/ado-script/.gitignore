@@ -17,7 +17,8 @@ github-app-token.js
 prepare-pr-base.js
 ado-proxy.js
 azure-wif-refresh.js
-copilot-invoker.js
+copilot-controller.js
+copilot-runner.js
 schema
 *.tsbuildinfo
 test-bin

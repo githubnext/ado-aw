@@ -106,15 +106,15 @@ impl RuntimeModelRole {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CopilotInvocationDocument {
+pub(crate) struct CopilotInvocationRequest {
     pub(crate) schema_version: u32,
+    pub(crate) document_kind: &'static str,
     pub(crate) role: RuntimeModelRole,
     pub(crate) command: String,
     pub(crate) prompt_path: String,
     pub(crate) mcp_config_path: Option<String>,
     pub(crate) args: Vec<String>,
     pub(crate) explicit_model: Option<String>,
-    pub(crate) result_path: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -122,7 +122,6 @@ pub(crate) struct CopilotInvocationContext<'a> {
     role: RuntimeModelRole,
     prompt_path: &'a str,
     mcp_config_path: Option<&'a str>,
-    result_path: &'a str,
 }
 
 impl<'a> CopilotInvocationContext<'a> {
@@ -130,13 +129,11 @@ impl<'a> CopilotInvocationContext<'a> {
         role: RuntimeModelRole,
         prompt_path: &'a str,
         mcp_config_path: Option<&'a str>,
-        result_path: &'a str,
     ) -> Self {
         Self {
             role,
             prompt_path,
             mcp_config_path,
-            result_path,
         }
     }
 }
@@ -473,13 +470,13 @@ impl Engine {
         }
     }
 
-    pub(crate) fn invocation_document(
+    pub(crate) fn invocation_request(
         &self,
         front_matter: &FrontMatter,
         extension_declarations: &[Declarations],
         invocation: CopilotInvocationContext<'_>,
-    ) -> Result<CopilotInvocationDocument> {
-        self.invocation_document_with_config(
+    ) -> Result<CopilotInvocationRequest> {
+        self.invocation_request_with_config(
             &front_matter.engine,
             front_matter,
             extension_declarations,
@@ -487,13 +484,13 @@ impl Engine {
         )
     }
 
-    pub(crate) fn invocation_document_with_config(
+    pub(crate) fn invocation_request_with_config(
         &self,
         engine_config: &EngineConfig,
         front_matter: &FrontMatter,
         extension_declarations: &[Declarations],
         invocation: CopilotInvocationContext<'_>,
-    ) -> Result<CopilotInvocationDocument> {
+    ) -> Result<CopilotInvocationRequest> {
         let args = self.args_with_config(engine_config, front_matter, extension_declarations)?;
         match self {
             Engine::Copilot => {
@@ -514,15 +511,15 @@ impl Engine {
                 if let Some(model) = engine_config.model() {
                     validate_model_name(model)?;
                 }
-                Ok(CopilotInvocationDocument {
-                    schema_version: 1,
+                Ok(CopilotInvocationRequest {
+                    schema_version: 2,
+                    document_kind: "request",
                     role: invocation.role,
                     command: command_path,
                     prompt_path: invocation.prompt_path.to_string(),
                     mcp_config_path: invocation.mcp_config_path.map(str::to_string),
                     args,
                     explicit_model: engine_config.model().map(str::to_string),
-                    result_path: invocation.result_path.to_string(),
                 })
             }
         }
@@ -782,7 +779,7 @@ fn copilot_args(
 fn validate_model_name(model: &str) -> Result<()> {
     // Validate model names before they become invocation-document values or
     // runtime-selected COPILOT_MODEL values. Keep this character set in sync
-    // with the Copilot invoker.
+    // with the Copilot controller/runner protocol.
     if model.is_empty()
         || !model
             .chars()
@@ -1464,14 +1461,13 @@ mod tests {
         let env = Engine::Copilot.env(&front_matter.engine).unwrap();
         assert!(!env.contains(COPILOT_MODEL), "{env}");
         let invocation = Engine::Copilot
-            .invocation_document(
+            .invocation_request(
                 &front_matter,
                 &declarations_for(&front_matter),
                 CopilotInvocationContext::new(
                     RuntimeModelRole::Agent,
                     "/tmp/prompt.md",
                     None,
-                    "/tmp/result.json",
                 ),
             )
             .unwrap();
@@ -1479,23 +1475,24 @@ mod tests {
     }
 
     #[test]
-    fn copilot_invocation_document_defers_runtime_model_resolution() {
+    fn copilot_invocation_request_defers_runtime_model_resolution() {
         let (front_matter, _) =
             parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let invocation = Engine::Copilot
-            .invocation_document(
+            .invocation_request(
                 &front_matter,
                 &declarations_for(&front_matter),
                 CopilotInvocationContext::new(
                     RuntimeModelRole::Agent,
                     "/tmp/prompt.md",
                     Some("/tmp/mcp.json"),
-                    "/tmp/result.json",
                 ),
             )
             .unwrap();
 
         assert_eq!(invocation.role, RuntimeModelRole::Agent);
+        assert_eq!(invocation.schema_version, 2);
+        assert_eq!(invocation.document_kind, "request");
         assert_eq!(invocation.explicit_model, None);
         assert_eq!(
             invocation.mcp_config_path.as_deref(),
@@ -1505,20 +1502,19 @@ mod tests {
     }
 
     #[test]
-    fn copilot_invocation_document_keeps_explicit_model_static() {
+    fn copilot_invocation_request_keeps_explicit_model_static() {
         let (front_matter, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  model: gpt-5\n---\n",
         )
         .unwrap();
         let invocation = Engine::Copilot
-            .invocation_document(
+            .invocation_request(
                 &front_matter,
                 &declarations_for(&front_matter),
                 CopilotInvocationContext::new(
                     RuntimeModelRole::Agent,
                     "/tmp/prompt.md",
                     None,
-                    "/tmp/result.json",
                 ),
             )
             .unwrap();
@@ -1528,11 +1524,11 @@ mod tests {
     }
 
     #[test]
-    fn copilot_detection_invocation_document_uses_independent_runtime_model() {
+    fn copilot_detection_invocation_request_uses_independent_runtime_model() {
         let (front_matter, _) =
             parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let invocation = Engine::Copilot
-            .invocation_document_with_config(
+            .invocation_request_with_config(
                 &front_matter.engine,
                 &front_matter,
                 &declarations_for(&front_matter),
@@ -1540,7 +1536,6 @@ mod tests {
                     RuntimeModelRole::Detection,
                     "/tmp/threat.md",
                     None,
-                    "/tmp/result.json",
                 ),
             )
             .unwrap();
@@ -1786,14 +1781,13 @@ mod tests {
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: /usr/local/bin/my-copilot\n---\n",
         ).unwrap();
         let result = Engine::Copilot
-            .invocation_document(
+            .invocation_request(
                 &fm,
                 &declarations_for(&fm),
                 CopilotInvocationContext::new(
                     RuntimeModelRole::Agent,
                     "/tmp/prompt.md",
                     Some("/tmp/mcp.json"),
-                    "/tmp/result.json",
                 ),
             )
             .unwrap();
@@ -1804,14 +1798,13 @@ mod tests {
     fn engine_command_default_uses_awf_path() {
         let (fm, _) = parse_markdown("---\nname: test\ndescription: test\n---\n").unwrap();
         let result = Engine::Copilot
-            .invocation_document(
+            .invocation_request(
                 &fm,
                 &declarations_for(&fm),
                 CopilotInvocationContext::new(
                     RuntimeModelRole::Agent,
                     "/tmp/prompt.md",
                     Some("/tmp/mcp.json"),
-                    "/tmp/result.json",
                 ),
             )
             .unwrap();
@@ -1823,14 +1816,13 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/tmp/copilot; rm -rf /\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.invocation_document(
+        let result = Engine::Copilot.invocation_request(
             &fm,
             &declarations_for(&fm),
             CopilotInvocationContext::new(
                 RuntimeModelRole::Agent,
                 "/tmp/prompt.md",
                 None,
-                "/tmp/result.json",
             ),
         );
         assert!(result.is_err());
@@ -1847,14 +1839,13 @@ mod tests {
         let (fm, _) = parse_markdown(
             "---\nname: test\ndescription: test\nengine:\n  id: copilot\n  command: \"/tmp/co'pilot\"\n---\n",
         ).unwrap();
-        let result = Engine::Copilot.invocation_document(
+        let result = Engine::Copilot.invocation_request(
             &fm,
             &declarations_for(&fm),
             CopilotInvocationContext::new(
                 RuntimeModelRole::Agent,
                 "/tmp/prompt.md",
                 None,
-                "/tmp/result.json",
             ),
         );
         assert!(result.is_err());
