@@ -48,7 +48,9 @@ describe("PR API contract probes", () => {
       if (pathname.endsWith("/pullRequests/1")) return json({ createdBy: { id: actor } });
       if (init?.method === "DELETE") { reviewer = undefined; return new Response(null, { status: 204 }); }
       if (init?.method === "PUT") {
-        reviewer = { id: actor, ...JSON.parse(String(init.body)) };
+        const seed = JSON.parse(String(init.body));
+        expect(seed.id).toBe(actor);
+        reviewer = { ...seed };
         return json(reviewer);
       }
       if (init?.method === "POST") {

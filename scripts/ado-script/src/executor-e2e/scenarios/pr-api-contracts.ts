@@ -38,7 +38,9 @@ async function json(
   ctx: ScenarioContext, state: PrState, suffix: string, method = "GET", body?: unknown,
 ): Promise<Record<string, unknown>> {
   const response = await request(ctx, state, suffix, method, body);
-  if (!response.ok) throw new Error(`PR API contract ${method} ${suffix}: HTTP ${response.status}`);
+  if (!response.ok) {
+    throw new Error(`PR API contract ${method} ${suffix}: HTTP ${response.status}: ${(await response.text()).slice(0, 2048)}`);
+  }
   return object(await response.json(), suffix);
 }
 
@@ -197,7 +199,7 @@ const reviewerAddition = scenario("pr-api-reviewer-additive-state", async (ctx, 
   await remove();
   // The caller observed absence; another request now adds and votes before its POST.
   for (const vote of [-10, 5]) {
-    await json(ctx, state, reviewer, "PUT", { vote, isRequired: true });
+    await json(ctx, state, reviewer, "PUT", { id: actor, vote, isRequired: true });
     const before = await membership();
     required(before?.vote === vote && before.isRequired === true, "Seeded reviewer state was not persisted");
     await add();
