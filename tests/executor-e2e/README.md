@@ -157,6 +157,11 @@ stale source-head push without changing the branch.
 The reviewer probe checks ID-only addition of missing and existing membership,
 including an absent-snapshot/add-and-vote interleaving. It requires preservation
 of the existing actor's nonzero vote, required status and reviewer flags.
+`pr-api-reviewer-id-only-put` tests omission of mutable fields on the individual
+reviewer endpoint. `pr-api-reviewer-conditional-create` additionally requires
+`If-None-Match: *` to reject existing membership with HTTP 412 while preserving
+state. These are capability investigations, not assumptions that the server
+supports either contract.
 
 The PR matrix also registers Unicode boundary/composed-body rejection cases
 and optional cross-organization variants of content editing, reviewers, labels,

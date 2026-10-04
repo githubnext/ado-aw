@@ -18,7 +18,7 @@ function required(value: boolean, message: string): asserts value {
 
 async function request(
   ctx: ScenarioContext, state: PrState, suffix: string,
-  method = "GET", body?: unknown,
+  method = "GET", body?: unknown, extraHeaders?: Record<string, string>,
 ): Promise<Response> {
   required(state.branch.startsWith(ctx.prefix("")), "API probe must own the source branch");
   const base = `${ctx.orgUrl.replace(/\/+$/, "")}/${encodeURIComponent(ctx.project)}`
@@ -26,6 +26,7 @@ async function request(
   return fetch(`${base}/${suffix}?api-version=7.1`, {
     method,
     headers: {
+      ...extraHeaders,
       Authorization: `Basic ${Buffer.from(`:${ctx.token}`).toString("base64")}`,
       "Content-Type": "application/json",
     },
@@ -169,7 +170,8 @@ const push = scenario("pr-api-push-concurrency", async (ctx, state) => {
     "Rejected stale push changed source head");
 });
 
-const reviewerAddition = scenario("pr-api-reviewer-additive-state", async (ctx, state) => {
+function reviewerProbe(id: string, strategy: "post" | "put" | "conditional-put"): Scenario<PrState> {
+  return scenario(id, async (ctx, state) => {
   const pr = await json(ctx, state, `pullRequests/${state.prId}`);
   const actor = object(pr.createdBy, "PR creator").id;
   required(typeof actor === "string" && /^[a-f0-9-]{36}$/i.test(actor), "Probe actor identity unavailable");
@@ -190,25 +192,46 @@ const reviewerAddition = scenario("pr-api-reviewer-additive-state", async (ctx, 
     required(!await membership(), "Probe membership was not removed");
   };
   const add = async () => {
-    const response = await request(ctx, state, collection, "POST", [{ id: actor }]);
-    required(response.ok, `Identity-only addition failed: HTTP ${response.status}`);
+    return request(ctx, state, strategy === "post" ? collection : reviewer,
+      strategy === "post" ? "POST" : "PUT",
+      strategy === "post" ? [{ id: actor }] : { id: actor },
+      strategy === "conditional-put" ? { "If-None-Match": "*" } : undefined);
   };
   await remove();
-  await add();
+  const created = await add();
+  required(created.ok, `Identity-only addition failed: HTTP ${created.status}: ${(await created.text()).slice(0, 2048)}`);
   required((await membership())?.vote === 0, "Identity-only addition did not establish membership");
   await remove();
-  // The caller observed absence; another request now adds and votes before its POST.
-  for (const vote of [-10, 5]) {
-    await json(ctx, state, reviewer, "PUT", { id: actor, vote, isRequired: true });
+  // Model stale absence before another actor establishes membership and state.
+  for (const seed of [
+    { vote: -10, isRequired: true, isFlagged: true, hasDeclined: false },
+    { vote: 5, isRequired: true, isFlagged: false, hasDeclined: false },
+    { vote: 0, isRequired: false, isFlagged: true, hasDeclined: true },
+  ]) {
+    await json(ctx, state, reviewer, "PUT", { id: actor, vote: seed.vote, isRequired: seed.isRequired });
+    await json(ctx, state, reviewer, "PATCH", { isFlagged: seed.isFlagged, hasDeclined: seed.hasDeclined });
     const before = await membership();
-    required(before?.vote === vote && before.isRequired === true, "Seeded reviewer state was not persisted");
-    await add();
+    required(before?.vote === seed.vote && (before.isRequired === true) === seed.isRequired &&
+      (before.isFlagged === true) === seed.isFlagged && (before.hasDeclined === true) === seed.hasDeclined,
+    "Seeded reviewer state was not persisted");
+    const response = await add();
     const after = await membership();
-    required(after?.vote === vote && after.isRequired === true, "Identity-only addition overwrote reviewer state");
-    for (const flag of ["hasDeclined", "isFlagged"]) {
-      required((before[flag] === true) === (after[flag] === true), `Identity-only addition changed ${flag}`);
-    }
+    const snapshot = (entry: Record<string, unknown> | undefined) => ({
+      vote: entry?.vote, required: entry?.isRequired === true,
+      flagged: entry?.isFlagged === true, declined: entry?.hasDeclined === true,
+    });
+    ctx.log(`[${id}] HTTP ${response.status}; before=${JSON.stringify(snapshot(before))}; after=${JSON.stringify(snapshot(after))}`);
+    required(JSON.stringify(snapshot(before)) === JSON.stringify(snapshot(after)),
+      "Identity-only addition overwrote reviewer state");
+    required(strategy === "conditional-put" ? response.status === 412 : response.ok,
+      `Reviewer operation did not honor its contract: HTTP ${response.status}`);
   }
-}, false);
+  }, false);
+}
 
-export const prApiContractScenarios: Scenario<unknown>[] = [draft, labels, comments, push, reviewerAddition] as Scenario<unknown>[];
+export const prApiContractScenarios: Scenario<unknown>[] = [
+  draft, labels, comments, push,
+  reviewerProbe("pr-api-reviewer-additive-state", "post"),
+  reviewerProbe("pr-api-reviewer-id-only-put", "put"),
+  reviewerProbe("pr-api-reviewer-conditional-create", "conditional-put"),
+] as Scenario<unknown>[];

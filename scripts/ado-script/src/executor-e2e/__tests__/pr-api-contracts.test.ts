@@ -45,38 +45,52 @@ describe("PR API contract probes", () => {
     expect(prApiContractScenarios.map((s) => s.id)).toEqual([
       "pr-api-draft-publication", "pr-api-label-replacement", "pr-api-owned-comments", "pr-api-push-concurrency",
       "pr-api-reviewer-additive-state",
+      "pr-api-reviewer-id-only-put", "pr-api-reviewer-conditional-create",
     ]);
     expect(prApiContractScenarios.every((s) => s.tool === "noop")).toBe(true);
   });
 
-  it.each([true, false])("requires additive reviewer state preservation (preserved=%s)", async (preserved) => {
+  it.each([
+    ["pr-api-reviewer-additive-state", true], ["pr-api-reviewer-additive-state", false],
+    ["pr-api-reviewer-id-only-put", true], ["pr-api-reviewer-id-only-put", false],
+    ["pr-api-reviewer-conditional-create", true], ["pr-api-reviewer-conditional-create", false],
+  ] as const)("requires reviewer state preservation: %s, preserved=%s", async (id, preserved) => {
     const actor = "01234567-89ab-cdef-0123-456789abcdef";
-    let reviewer: { id: string; vote: number; isRequired: boolean } | undefined;
+    let reviewer: { id: string; vote: number; isRequired: boolean; isFlagged?: boolean; hasDeclined?: boolean } | undefined;
     const additions: unknown[] = [];
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url, init) => {
       const pathname = new URL(String(url)).pathname;
       if (pathname.endsWith("/pullRequests/1")) return json({ createdBy: { id: actor } });
       if (init?.method === "DELETE") { reviewer = undefined; return new Response(null, { status: 204 }); }
-      if (init?.method === "PUT") {
+      if (init?.method === "PUT" && Object.hasOwn(JSON.parse(String(init.body)), "vote")) {
         const seed = JSON.parse(String(init.body));
         expect(seed.id).toBe(actor);
         reviewer = { ...seed };
         return json(reviewer);
       }
-      if (init?.method === "POST") {
+      if (init?.method === "PATCH") {
+        expect(reviewer).toBeDefined();
+        Object.assign(reviewer!, JSON.parse(String(init.body)));
+        return json(reviewer);
+      }
+      if (init?.method === "POST" || init?.method === "PUT") {
         additions.push(JSON.parse(String(init.body)));
+        const conditional = new Headers(init.headers).get("If-None-Match") === "*";
+        if (conditional && preserved && reviewer) return json({ message: "precondition failed" }, 412);
         if (!reviewer || !preserved) reviewer = { id: actor, vote: 0, isRequired: false };
         return json([reviewer]);
       }
       return json({ value: reviewer ? [reviewer] : [] });
     }));
     const ctx = context();
-    const promise = probe("pr-api-reviewer-additive-state").assert(ctx,
+    const promise = probe(id).assert(ctx,
       { repo: "repo", prId: 1, branch: ctx.prefix("probe") }, { name: "noop", status: "succeeded" }, []);
     if (preserved) await expect(promise).resolves.toBeUndefined();
     else await expect(promise).rejects.toThrow("overwrote reviewer state");
     expect(additions.length).toBeGreaterThanOrEqual(2);
-    expect(additions.every((body) => JSON.stringify(body) === JSON.stringify([{ id: actor }]))).toBe(true);
+    expect(additions.every((body) => JSON.stringify(body) === JSON.stringify(
+      id === "pr-api-reviewer-additive-state" ? [{ id: actor }] : { id: actor },
+    ))).toBe(true);
   });
 
   it.each([false, true])("requires persisted draft publication, not HTTP success (persisted=%s)", async (persisted) => {
