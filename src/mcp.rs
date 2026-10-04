@@ -541,11 +541,11 @@ impl SafeOutputs {
             let original = git(&git_dir, &["rev-parse", "--verify", "HEAD^{commit}"]).await?;
             anyhow::ensure!(original.status.success(), "Could not resolve capture HEAD");
             let head = crate::secure::CommitSha::parse(std::str::from_utf8(&original.stdout)?.trim())?;
-            for args in [vec!["read-tree", head.as_str()], vec!["add", "-A"]] {
-                let output = bounded_output(git_without_filters(&git_dir).await?.args(args)
-                    .env("GIT_INDEX_FILE", &index), crate::safe_outputs::pr_patch::MAX_SOURCE_BYTES, None).await?;
-                anyhow::ensure!(output.status.success(), "Could not capture changes in a private Git index");
-            }
+            crate::safe_outputs::pr_patch::seed_capture_index(&git_dir, &index, head.as_str()).await?;
+            let output = bounded_output(git_without_filters(&git_dir).await?
+                .args(["-c", "core.splitIndex=false", "add", "-A"])
+                .env("GIT_INDEX_FILE", &index), crate::safe_outputs::pr_patch::MAX_SOURCE_BYTES, None).await?;
+            anyhow::ensure!(output.status.success(), "Could not capture changes in a private Git index");
             let tree = bounded_output(git_without_filters(&git_dir).await?.arg("write-tree")
                 .env("GIT_INDEX_FILE", &index), 1024, None).await?;
             anyhow::ensure!(tree.status.success(), "Could not write captured Git tree");
@@ -2125,6 +2125,62 @@ mod tests {
             assert_eq!(std::fs::read(repo.path().join("file.txt")).unwrap(), b"unstaged version\n");
             assert_eq!(std::fs::read(repo.path().join("untracked.txt")).unwrap().len(), 4096);
             assert!(service.read_safe_output_file().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn review3_capture_preserves_explicit_staged_mode_intent() {
+        for push in [false, true] {
+            let repo = tempdir().unwrap();
+            let out = tempdir().unwrap();
+            initialize_git_repo_with_change(repo.path());
+            std::fs::write(repo.path().join("file.txt"), "before\n").unwrap();
+            let command = crate::safe_outputs::pr_patch::tests::command;
+            command(repo.path(), &["config", "core.filemode", "false"]);
+            command(repo.path(), &["update-index", "--chmod=+x", "file.txt"]);
+            let index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let head = crate::secure::CommitSha::parse(command(repo.path(), &["rev-parse", "HEAD"])).unwrap();
+            let bytes = if push {
+                crate::safe_outputs::push_to_pull_request_branch::capture_patch(repo.path(), &head, Default::default()).await.unwrap()
+            } else {
+                SafeOutputs::new(repo.path(), out.path(), None, None).await.unwrap().generate_patch(None).await.unwrap().0
+            };
+            assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), index);
+            assert_eq!(command(repo.path(), &["rev-parse", "HEAD"]), head.as_str());
+            let patch = String::from_utf8(bytes).unwrap();
+            assert!(patch.contains("old mode 100644") && patch.contains("new mode 100755"), "push={push}: staged chmod disappeared: {patch}");
+        }
+    }
+
+    #[tokio::test]
+    async fn review3_both_mcp_tools_queue_native_spaced_path_artifacts() {
+        for push in [false, true] {
+            let (repo, head) = crate::safe_outputs::pr_patch::tests::repository(&[
+                ("space dir/user guide.md", b"before\n"),
+            ]);
+            let out = tempdir().unwrap();
+            std::fs::write(repo.path().join("space dir").join("user guide.md"), b"after\n").unwrap();
+            let original_index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let service = SafeOutputs::new(repo.path(), out.path(), None, None).await.unwrap();
+            if push {
+                service.push_pr_branch(Parameters(PushToPullRequestBranchParams {
+                    pull_request_id: Some(crate::safe_outputs::pr_common::PullRequestReference::Number(42)),
+                    repository: crate::secure::RelativeSafePath::parse("self").unwrap(),
+                    expected_head_sha: head,
+                })).await.unwrap();
+            } else {
+                service.create_pr(Parameters(CreatePrParams {
+                    title: "Update spaced path".into(),
+                    description: "Update the guide using the native Git patch format.".into(),
+                    repository: None, labels: vec![],
+                })).await.unwrap();
+            }
+            let proposals = service.read_safe_output_file().await.unwrap();
+            assert_eq!(proposals.len(), 1);
+            let bytes = std::fs::read(out.path().join(proposals[0]["patch_file"].as_str().unwrap())).unwrap();
+            assert_eq!(proposals[0]["patch_sha256"], crate::hash::sha256_hex(&bytes));
+            assert!(crate::safe_outputs::pr_patch::inspected_paths(&bytes).unwrap().contains("space dir/user guide.md"));
+            assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), original_index);
         }
     }
 

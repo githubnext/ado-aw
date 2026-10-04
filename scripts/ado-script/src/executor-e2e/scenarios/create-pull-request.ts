@@ -45,6 +45,7 @@ interface CreatePrState {
   ownedTarget?: string;
   expectedFile?: string;
   expectedBlob?: string;
+  expectedMode?: string;
   originalFile?: string;
   omittedCopy?: string;
   repo: string;
@@ -71,7 +72,8 @@ interface CreatePrScenarioOptions {
   readonly repositorySelector: "named" | "self" | "cross-org";
   readonly patchRelPath: string;
   readonly changedFileSuffix?: string;
-  readonly patchMode?: "native-copy" | "native-rename" | "excluded-copy" | "crlf" | "binary" | "expansion-denied";
+  readonly patchMode?: "native-copy" | "native-rename" | "excluded-copy" | "crlf" | "binary" | "expansion-denied"
+    | "space-edit" | "space-rename-edit" | "mode-up-denied" | "mode-down-denied" | "mode-new-denied" | "mode-rename-denied" | "mode-edit";
 }
 
 const CREATE_PR_TEMPORARY_ID = "#aw_prcreate";
@@ -171,6 +173,34 @@ export async function git(
   return res.stdout;
 }
 
+export async function seedExecutableFixture(
+  ctx: ScenarioContext, repo: string, branch: string, checkout: string, path: string,
+  head: string, header: string, scenarioId: string,
+): Promise<string> {
+  if (repo !== ctx.adoRepo || !branch.startsWith(ctx.prefix("")) ||
+    await ctx.rest.getRefObjectId(repo, `heads/${branch}`) !== head) {
+    throw new Error("Executable fixture must use its unchanged owned branch");
+  }
+  await git(ctx, ["config", "core.filemode", "false"], checkout, header, scenarioId);
+  await git(ctx, ["update-index", "--chmod=+x", "--", path], checkout, header, scenarioId);
+  const tree = (await git(ctx, ["write-tree"], checkout, header, scenarioId)).trim();
+  const commit = (await git(ctx, ["-c", "user.name=ADO Fixture", "-c", "user.email=fixture@ado-aw",
+    "-c", "commit.gpgSign=false", "commit-tree", tree, "-p", head, "-m", "Disposable executable fixture"],
+    checkout, header, scenarioId)).trim();
+  await git(ctx, ["-c", "core.hooksPath=/dev/null", "-c", "http.followRedirects=false",
+    "-c", "push.followTags=false", "push", "--porcelain", "origin", `${commit}:refs/heads/${branch}`],
+    checkout, header, scenarioId);
+  if (await ctx.rest.getRefObjectId(repo, `heads/${branch}`) !== commit) {
+    throw new Error("Executable fixture push was not confirmed");
+  }
+  await git(ctx, ["update-ref", "HEAD", commit, head], checkout, header, scenarioId);
+  return commit;
+}
+
+function fixturePath(ctx: ScenarioContext, options: CreatePrScenarioOptions): string {
+  return `ado-aw-det/${ctx.buildId}/${options.patchMode?.startsWith("space-") ? "space dir/" : ""}${options.id}-seed.txt`;
+}
+
 async function setupCreatePullRequest(
   ctx: ScenarioContext,
   options: CreatePrScenarioOptions,
@@ -184,10 +214,11 @@ async function setupCreatePullRequest(
   const branch = await defaultBranchShortName(ctx, ctx.adoRepo);
   const sha = await ctx.rest.getRefObjectId(ctx.adoRepo, `heads/${branch}`);
   if (!sha) throw new Error("Patch fixture base is unavailable");
-  const original = `ado-aw-det/${ctx.buildId}/${options.id}-seed.txt`;
+  const original = fixturePath(ctx, options);
   try {
     await ctx.rest.pushAddFileBranch(ctx.adoRepo, target, sha, `/${original}`,
-      options.patchMode === "expansion-denied" ? "x".repeat(429_575) : `${detBody(ctx, options.id)} seed\n`,
+      options.patchMode === "expansion-denied" ? "x".repeat(429_575) :
+        `${detBody(ctx, options.id)} seed\n`.repeat(options.patchMode?.startsWith("space-") ? 20 : 1),
       "Disposable native patch target");
   } catch (error) {
     throw new Error(`Target creation could not be confirmed; inspect owned ref refs/heads/${target}`, { cause: error });
@@ -256,7 +287,7 @@ async function setupCreatePullRequestCheckout(
   } catch {
     ctx.log(`[${options.id}] origin/HEAD symref not set; defaulting target branch to 'main'`);
   }
-  const baseCommit = (
+  let baseCommit = (
     await git(ctx, ["rev-parse", "HEAD"], checkoutDir, authHeader, options.id)
   ).trim();
 
@@ -265,12 +296,17 @@ async function setupCreatePullRequestCheckout(
   // The buildId-scoped path is assumed untracked: `git add -N` on an
   // already-tracked path is a no-op, so `git diff` would be empty and setup
   // would (cleanly) fail with "generated patch is empty".
-  const relFile = `ado-aw-det/${ctx.buildId}${options.changedFileSuffix ?? ""}.md`;
+  const originalFile = options.patchMode ? fixturePath(ctx, options) : undefined;
+  if (originalFile && ["mode-down-denied", "mode-rename-denied", "mode-edit"].includes(options.patchMode ?? "")) {
+    baseCommit = await seedExecutableFixture(ctx, repo, targetBranch, checkoutDir, originalFile, baseCommit, authHeader, options.id);
+  }
+  const relFile = originalFile && ["space-edit", "mode-up-denied", "mode-down-denied", "mode-edit"].includes(options.patchMode ?? "")
+    ? originalFile : `ado-aw-det/${ctx.buildId}${options.changedFileSuffix ?? ""}${options.patchMode === "space-rename-edit" ? " renamed guide" : ""}.md`;
   const absFile = join(checkoutDir, relFile);
   await mkdir(join(absFile, ".."), { recursive: true });
-  const originalFile = options.patchMode ? `ado-aw-det/${ctx.buildId}/${options.id}-seed.txt` : undefined;
   let omittedCopy: string | undefined;
   let expectedBlob: string | undefined;
+  let expectedMode: string | undefined;
   let patchContent: string;
   if (options.patchMode === "expansion-denied") {
     patchContent = Array.from({ length: 99 }, (_, index) =>
@@ -279,9 +315,14 @@ async function setupCreatePullRequestCheckout(
     if (!originalFile) throw new Error("Native fixture source is missing");
     if (options.patchMode === "crlf") await git(ctx, ["config", "core.autocrlf", "true"], checkoutDir, authHeader, options.id);
     if (options.patchMode === "native-copy") await copyFile(join(checkoutDir, originalFile), absFile);
-    else if (options.patchMode === "native-rename") await rename(join(checkoutDir, originalFile), absFile);
+    else if (["native-rename", "space-rename-edit", "mode-rename-denied"].includes(options.patchMode)) {
+      await rename(join(checkoutDir, originalFile), absFile);
+      if (options.patchMode === "space-rename-edit") {
+        await writeFile(absFile, `${`${detBody(ctx, options.id)} seed\n`.repeat(20)}additional line\n`);
+      }
+    }
     else if (options.patchMode === "binary") await writeFile(absFile, Buffer.from([0, 255, 128, 10]));
-    else await writeFile(absFile, options.patchMode === "excluded-copy"
+    else if (!["mode-up-denied", "mode-down-denied"].includes(options.patchMode)) await writeFile(absFile, options.patchMode === "excluded-copy"
       ? "Independent retained content, not derived from the excluded seed.\n".repeat(20)
       : `${detBody(ctx, options.id)}\n`, "utf8");
     if (options.patchMode === "excluded-copy") {
@@ -289,13 +330,18 @@ async function setupCreatePullRequestCheckout(
       await copyFile(join(checkoutDir, originalFile), join(checkoutDir, omittedCopy));
     }
     await git(ctx, ["add", "-A"], checkoutDir, authHeader, options.id);
+    if (options.patchMode.startsWith("mode-") && options.patchMode !== "mode-edit") {
+      await git(ctx, ["update-index", options.patchMode === "mode-down-denied" ? "--chmod=-x" : "--chmod=+x", "--", relFile],
+        checkoutDir, authHeader, options.id);
+    }
     expectedBlob = (await git(ctx, ["rev-parse", `:${relFile}`], checkoutDir, authHeader, options.id)).trim();
+    expectedMode = (await git(ctx, ["--literal-pathspecs", "ls-files", "--stage", "--", relFile], checkoutDir, authHeader, options.id)).split(" ")[0];
     patchContent = await git(ctx, ["diff", "--cached", "--binary", "--full-index", "--find-renames",
       "--find-copies", "--find-copies-harder", baseCommit, "--"], checkoutDir, authHeader, options.id);
     if ((options.patchMode === "native-copy" || options.patchMode === "excluded-copy") && !patchContent.includes("copy from ")) {
       throw new Error("Native create fixture did not contain copy metadata");
     }
-    if (options.patchMode === "native-rename" && !patchContent.includes("rename from ")) {
+    if (["native-rename", "space-rename-edit"].includes(options.patchMode) && !patchContent.includes("rename from ")) {
       throw new Error("Native create fixture did not contain rename metadata");
     }
   } else {
@@ -312,6 +358,7 @@ async function setupCreatePullRequestCheckout(
   return {
     expectedFile: options.patchMode ? relFile : undefined,
     expectedBlob,
+    expectedMode,
     originalFile,
     omittedCopy,
     repo,
@@ -348,8 +395,8 @@ function createPullRequestScenario(
       ...(options.patchMode === "excluded-copy" ? { "excluded-files": [`${options.id}-seed.txt`] } : {}),
     }),
     setup: (ctx) => setupCreatePullRequest(ctx, options),
-    ...(options.patchMode === "expansion-denied" ? {
-      expectedFailure: { error: /pre-application expansion/ },
+    ...(options.patchMode?.endsWith("-denied") ? {
+      expectedFailure: { error: options.patchMode === "expansion-denied" ? /pre-application expansion/ : /file-mode change/ },
     } : {}),
     assertFailure: async (_ctx, state) => {
       if (await state.rest.getRefObjectId(state.repo, `heads/${state.sourceBranch}`) ||
@@ -410,10 +457,13 @@ function createPullRequestScenario(
         await git(ctx, ["fetch", "origin", state.sourceBranch], state.checkoutDir, header, options.id);
         const blob = (await git(ctx, ["rev-parse", `FETCH_HEAD:${state.expectedFile}`], state.checkoutDir, header, options.id)).trim();
         if (blob !== state.expectedBlob) throw new Error("Created PR does not preserve exact proposed Git blob bytes");
+        const mode = (await git(ctx, ["--literal-pathspecs", "ls-tree", "FETCH_HEAD", "--", state.expectedFile],
+          state.checkoutDir, header, options.id)).split(" ")[0];
+        if (mode !== state.expectedMode) throw new Error("Created PR does not preserve the expected tree-entry mode");
         const parent = (await git(ctx, ["rev-parse", "FETCH_HEAD^"], state.checkoutDir, header, options.id)).trim();
         if (parent !== state.baseCommit) throw new Error("Created PR uses a different parent from its validated patch base");
         const files = (await git(ctx, ["ls-tree", "-r", "--name-only", "FETCH_HEAD"], state.checkoutDir, header, options.id)).trim().split("\n");
-        if (options.patchMode === "native-rename" && state.originalFile && files.includes(state.originalFile)) {
+        if (["native-rename", "space-rename-edit"].includes(options.patchMode ?? "") && state.originalFile && files.includes(state.originalFile)) {
           throw new Error("Created PR retained a renamed source");
         }
         if (state.omittedCopy && (files.includes(state.omittedCopy) || !Array.isArray(record.result?.omitted_operations)
@@ -788,7 +838,8 @@ export const createPullRequestAddReviewersGeneral =
 
 export const createPullRequestScenarios: Scenario<unknown>[] = [
   createPullRequest,
-  ...(["native-copy", "native-rename", "excluded-copy", "crlf", "binary", "expansion-denied"] as const).map((patchMode) =>
+  ...(["native-copy", "native-rename", "excluded-copy", "crlf", "binary", "expansion-denied",
+    "space-edit", "space-rename-edit", "mode-up-denied", "mode-down-denied", "mode-new-denied", "mode-rename-denied", "mode-edit"] as const).map((patchMode) =>
     createPullRequestScenario({
       id: `create-pull-request-${patchMode}`,
       repositorySelector: "named",

@@ -50,6 +50,303 @@ pub(crate) fn movement(kind: &str, source: &str, destination: &str) -> String {
     )
 }
 
+#[tokio::test]
+async fn review3_native_git_space_headers_are_accepted() {
+    let (repo, base) = repository(&[("space dir/user guide.md", b"old\n")]);
+    std::fs::write(
+        repo.path().join("space dir").join("user guide.md"),
+        b"new\n",
+    )
+    .unwrap();
+    let bytes = git(repo.path(), &["diff", "--binary", "--full-index"])
+        .await
+        .unwrap()
+        .stdout;
+    assert!(
+        bytes.windows(2).any(|window| window == b"\t\n"),
+        "fixture must retain Git's header delimiter"
+    );
+    let prepared = prepare(repo.path(), &base, &bytes, &policy(&[]))
+        .await
+        .unwrap();
+    let result = prepared.apply_to_index(repo.path(), &base).await.unwrap();
+    assert_eq!(
+        result.changes[0]["item"]["path"],
+        "/space dir/user guide.md"
+    );
+    assert_eq!(result.changes[0]["newContent"]["content"], "new\n");
+}
+
+#[tokio::test]
+async fn review3_creation_rejects_mode_only_loss() {
+    let (repo, base) = repository(&[("script.sh", b"echo hello\n")]);
+    command(repo.path(), &["config", "core.filemode", "false"]);
+    command(repo.path(), &["update-index", "--chmod=+x", "script.sh"]);
+    let bytes = git(
+        repo.path(),
+        &["diff", "--cached", "--binary", "--full-index"],
+    )
+    .await
+    .unwrap()
+    .stdout;
+    let mut config = policy(&[]);
+    config.exact = false;
+    let prepared = prepare(repo.path(), &base, &bytes, &config).await.unwrap();
+    let result = prepared.apply_to_index(repo.path(), &base).await;
+    assert!(
+        result.is_err(),
+        "Creation must not silently replace a mode-only change with a content-only edit"
+    );
+}
+
+#[tokio::test]
+async fn review3_generated_path_headers_round_trip_raw_and_mailbox_patches() {
+    let names = if cfg!(windows) {
+        vec![
+            "space dir/user guide.md",
+            "\u{e9} [guide].md",
+            " leading name.md",
+        ]
+    } else {
+        vec![
+            "space dir/user guide.md",
+            "\u{e9} [guide].md",
+            " leading name.md",
+            "trailing name.md ",
+        ]
+    };
+    for name in names {
+        for mailbox in [false, true] {
+            for renamed in [false, true] {
+                let original = "unchanged context line\n".repeat(20);
+                let edited = format!("{original}new content\n");
+                let (repo, base) = repository(&[(name, original.as_bytes())]);
+                let destination = if renamed {
+                    format!("renamed {name}")
+                } else {
+                    name.into()
+                };
+                let file = repo.path().join(&destination);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                if renamed {
+                    std::fs::rename(repo.path().join(name), &file).unwrap();
+                }
+                std::fs::write(&file, &edited).unwrap();
+                command(repo.path(), &["add", "-A"]);
+                let bytes = if mailbox {
+                    command(repo.path(), &["commit", "--quiet", "-m", "update"]);
+                    git(
+                        repo.path(),
+                        &[
+                            "format-patch",
+                            "--stdout",
+                            "--binary",
+                            "--full-index",
+                            "-M",
+                            &format!("{base}..HEAD"),
+                        ],
+                    )
+                    .await
+                    .unwrap()
+                    .stdout
+                } else {
+                    git(
+                        repo.path(),
+                        &["diff", "--cached", "--binary", "--full-index", "-M"],
+                    )
+                    .await
+                    .unwrap()
+                    .stdout
+                };
+                if renamed {
+                    assert!(
+                        String::from_utf8_lossy(&bytes).contains("rename from "),
+                        "must exercise native rename-with-edit"
+                    );
+                }
+                let prepared = prepare(repo.path(), &base, &bytes, &policy(&[]))
+                    .await
+                    .unwrap();
+                let result = prepared.apply_to_index(repo.path(), &base).await.unwrap();
+                let output = result
+                    .changes
+                    .iter()
+                    .find(|change| change["item"]["path"] == format!("/{destination}"))
+                    .unwrap();
+                assert_eq!(output["newContent"]["content"], edited);
+            }
+        }
+    }
+}
+
+#[test]
+fn review3_header_delimiters_do_not_relax_path_validation() {
+    for header in [
+        "--- a/file\tjunk\n+++ b/file\n",
+        "--- a/file\t\t\n+++ b/file\n",
+        "--- \"a/file\\t\"\n+++ b/file\n",
+        "--- a/../file\t\n+++ b/file\n",
+        "--- a/.git/file\t\n+++ b/file\n",
+        "--- a/file\t\n+++ b/other\t\n",
+    ] {
+        let patch = format!("diff --git a/file b/file\n{header}@@ -1 +1 @@\n-old\n+new\n");
+        assert!(inspected_paths(patch.as_bytes()).is_err(), "{header}");
+    }
+}
+
+#[tokio::test]
+async fn review3_rest_modes_use_actual_tree_entries_for_both_tools() {
+    for exact in [false, true] {
+        for (case, executable, allowed) in [
+            ("chmod-up", false, false),
+            ("chmod-down", true, false),
+            ("add-executable", false, false),
+            ("rename-executable", true, false),
+            ("copy-executable", true, false),
+            ("rename-to-regular", true, true),
+            ("edit-executable", true, true),
+            ("delete-executable", true, true),
+        ] {
+            let (repo, mut base) = repository(&[("script.sh", b"old\n")]);
+            command(repo.path(), &["config", "core.filemode", "false"]);
+            if executable {
+                command(repo.path(), &["update-index", "--chmod=+x", "script.sh"]);
+                command(repo.path(), &["commit", "--quiet", "-m", "executable base"]);
+                base = CommitSha::parse(command(repo.path(), &["rev-parse", "HEAD"])).unwrap();
+            }
+            match case {
+                "chmod-up" => {
+                    command(repo.path(), &["update-index", "--chmod=+x", "script.sh"]);
+                }
+                "chmod-down" => {
+                    command(repo.path(), &["update-index", "--chmod=-x", "script.sh"]);
+                }
+                _ => {
+                    if case.starts_with("rename") {
+                        std::fs::rename(repo.path().join("script.sh"), repo.path().join("new.sh"))
+                            .unwrap();
+                    } else if case == "copy-executable" {
+                        std::fs::copy(repo.path().join("script.sh"), repo.path().join("new.sh"))
+                            .unwrap();
+                    } else if case == "add-executable" {
+                        std::fs::write(repo.path().join("new.sh"), b"new\n").unwrap();
+                    } else if case == "delete-executable" {
+                        std::fs::remove_file(repo.path().join("script.sh")).unwrap();
+                    } else {
+                        std::fs::write(repo.path().join("script.sh"), b"new\n").unwrap();
+                    }
+                    command(repo.path(), &["add", "-A"]);
+                    if matches!(
+                        case,
+                        "add-executable" | "rename-executable" | "copy-executable"
+                    ) {
+                        command(repo.path(), &["update-index", "--chmod=+x", "new.sh"]);
+                    }
+                }
+            }
+            let bytes = git(
+                repo.path(),
+                &[
+                    "diff",
+                    "--cached",
+                    "--binary",
+                    "--full-index",
+                    "-M",
+                    "-C",
+                    "--find-copies-harder",
+                ],
+            )
+            .await
+            .unwrap()
+            .stdout;
+            let mut config = policy(&[]);
+            config.exact = exact;
+            let index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let prepared = prepare(repo.path(), &base, &bytes, &config).await.unwrap();
+            let result = prepared.apply_to_index(repo.path(), &base).await;
+            if allowed {
+                assert!(result.is_ok(), "{case}, exact={exact}: {result:?}");
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.to_string().contains("file-mode change"),
+                    "{case}: {error:#}"
+                );
+            }
+            assert_eq!(
+                std::fs::read(repo.path().join(".git").join("index")).unwrap(),
+                index
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn review3_private_capture_handles_split_missing_and_conflicted_indexes() {
+    for case in ["split", "missing", "conflict"] {
+        let (repo, base) = repository(&[("file.txt", b"before\n")]);
+        command(repo.path(), &["config", "core.filemode", "false"]);
+        let original_index = repo.path().join(".git").join("index");
+        if case == "split" {
+            command(repo.path(), &["update-index", "--chmod=+x", "file.txt"]);
+            command(repo.path(), &["update-index", "--split-index"]);
+        } else if case == "missing" {
+            std::fs::remove_file(&original_index).unwrap();
+        } else {
+            let oid = command(repo.path(), &["rev-parse", "HEAD:file.txt"]);
+            let input = format!(
+                "0 {}\\tfile.txt\n100644 {oid} 1\\tfile.txt\n100644 {oid} 2\\tfile.txt\n",
+                "0".repeat(40)
+            )
+            .replace("\\t", "\t");
+            let output = bounded_output(
+                git_command(repo.path()).args(["update-index", "--index-info"]),
+                MAX_SOURCE_BYTES,
+                Some(input.as_bytes()),
+            )
+            .await
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let before = std::fs::read(&original_index).ok();
+        let scratch = tempfile::tempdir().unwrap();
+        let private = scratch.path().join("index");
+        let result = seed_capture_index(repo.path(), &private, base.as_str()).await;
+        if case == "conflict" {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unresolved conflicts")
+            );
+        } else {
+            result.unwrap();
+            let entries = bounded_output(
+                git_command(repo.path())
+                    .args(["ls-files", "--stage"])
+                    .env("GIT_INDEX_FILE", &private),
+                MAX_SOURCE_BYTES,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(entries.status.success());
+            assert!(
+                String::from_utf8_lossy(&entries.stdout).starts_with(if case == "split" {
+                    "100755 "
+                } else {
+                    "100644 "
+                })
+            );
+        }
+        assert_eq!(std::fs::read(&original_index).ok(), before);
+    }
+}
+
 #[test]
 fn size_configuration_is_shared_strict_and_measured_in_kib() {
     assert_eq!(PatchSizeKiB::default().bytes(), 4 * 1024 * 1024);

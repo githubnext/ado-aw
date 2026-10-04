@@ -187,6 +187,8 @@ pub(crate) fn git_command(repo: &Path) -> Command {
             "-c",
             "submodule.recurse=false",
             "-c",
+            "core.splitIndex=false",
+            "-c",
             "apply.ignoreWhitespace=false",
         ])
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -237,6 +239,76 @@ pub(crate) async fn git(repo: &Path, args: &[&str]) -> anyhow::Result<Output> {
         None,
     )
     .await
+}
+
+pub(crate) async fn seed_capture_index(
+    repo: &Path,
+    index: &Path,
+    head: &str,
+) -> anyhow::Result<()> {
+    let location = git(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    )
+    .await?;
+    ensure!(
+        location.status.success(),
+        "Could not locate the source Git index"
+    );
+    let source = Path::new(std::str::from_utf8(&location.stdout)?.trim());
+    match tokio::fs::copy(source, index).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            log::debug!("Source Git index is absent; seeding capture from {head}");
+            let output = bounded_output(
+                git_without_filters(repo)
+                    .await?
+                    .args(["read-tree", head])
+                    .env("GIT_INDEX_FILE", index),
+                MAX_SOURCE_BYTES,
+                None,
+            )
+            .await?;
+            ensure!(
+                output.status.success(),
+                "Could not seed a missing capture index"
+            );
+        }
+        Err(error) => return Err(error).context("Could not snapshot the source Git index"),
+    }
+    // Materialize split-index entries in the private copy; never rewrite the real index.
+    let expanded = bounded_output(
+        git_without_filters(repo)
+            .await?
+            .args([
+                "-c",
+                "core.splitIndex=false",
+                "update-index",
+                "--no-split-index",
+            ])
+            .env("GIT_INDEX_FILE", index),
+        MAX_SOURCE_BYTES,
+        None,
+    )
+    .await?;
+    ensure!(
+        expanded.status.success(),
+        "Could not materialize the private Git index"
+    );
+    let conflicts = bounded_output(
+        git_without_filters(repo)
+            .await?
+            .args(["ls-files", "--unmerged", "-z"])
+            .env("GIT_INDEX_FILE", index),
+        MAX_SOURCE_BYTES,
+        None,
+    )
+    .await?;
+    ensure!(
+        conflicts.status.success() && conflicts.stdout.is_empty(),
+        "PR capture requires a readable index without unresolved conflicts"
+    );
+    Ok(())
 }
 
 pub(crate) async fn read_patch(path: &Path, limit: PatchSizeKiB) -> anyhow::Result<Vec<u8>> {
@@ -970,11 +1042,11 @@ impl PreparedPatch {
                 matches!(mode, "100644" | "100755"),
                 "PR output is not a regular file"
             );
+            ensure!(
+                old_mode == mode || (old_mode == "000000" && mode == "100644"),
+                "PR REST transport cannot represent file-mode change for '{path}' ({old_mode} -> {mode})"
+            );
             if self.exact {
-                ensure!(
-                    old_mode == mode || (old_mode == "000000" && mode == "100644"),
-                    "PR push cannot represent file-mode changes"
-                );
                 ensure_unfiltered(repo, index, path).await?;
             }
             validate_oid(fields[3])?;

@@ -3,7 +3,8 @@ import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promis
 import { dirname, join } from "node:path";
 import type { Scenario, ScenarioContext } from "../scenario.js";
 import { setupPr, teardownPr, type PrState } from "./pr.js";
-import { git } from "./create-pull-request.js";
+import { git, seedExecutableFixture } from "./create-pull-request.js";
+import { Teardown } from "./common.js";
 
 interface State extends PrState {
   head: string;
@@ -14,22 +15,29 @@ interface State extends PrState {
   original: string;
   expected?: string;
   expectedBlob?: string;
+  expectedMode?: string;
   omittedCopy?: string;
 }
 
 type Mode = "success" | "stale" | "blocked-branch" | "protected" | "bad-hash" | "empty"
-  | "native-copy" | "native-rename" | "excluded-native-copy" | "crlf" | "binary" | "expansion-denied";
+  | "native-copy" | "native-rename" | "excluded-native-copy" | "crlf" | "binary" | "expansion-denied"
+  | "space-edit" | "space-rename-edit" | "mode-up-denied" | "mode-down-denied" | "mode-new-denied" | "mode-rename-denied" | "mode-edit";
 
 const failures: Partial<Record<Mode, RegExp>> = {
   stale: /source head changed/, "blocked-branch": /allowed-branches/,
   protected: /protected files/, "bad-hash": /SHA-256 mismatch/,
   "expansion-denied": /pre-application expansion/,
+  "mode-up-denied": /file-mode change/, "mode-down-denied": /file-mode change/,
+  "mode-new-denied": /file-mode change/, "mode-rename-denied": /file-mode change/,
 };
 
 async function setup(ctx: ScenarioContext, mode: Mode): Promise<State> {
   const id = `pr-push-${mode}`;
+  const original = `ado-aw-det/${ctx.buildId}/${mode.startsWith("space-") ? "space dir/" : ""}${id}.md`;
   const pr = await setupPr(ctx, id, false, true,
-    mode === "expansion-denied" ? "x".repeat(429_575) : undefined);
+    mode === "expansion-denied" ? "x".repeat(429_575) :
+      mode.startsWith("space-") ? `Original PR fixture for build ${ctx.buildId}.\n`.repeat(20) : undefined,
+    `/${original}`);
   const sources = join(ctx.workDir, id, "source-checkouts");
   const checkout = join(sources, pr.repo);
   try {
@@ -37,18 +45,27 @@ async function setup(ctx: ScenarioContext, mode: Mode): Promise<State> {
     const header = "Basic " + Buffer.from(`:${ctx.token}`).toString("base64");
     const remote = `${ctx.orgUrl.replace(/\/+$/, "")}/${encodeURIComponent(ctx.project)}/_git/${encodeURIComponent(pr.repo)}`;
     await git(ctx, ["clone", "--depth=1", "--branch", pr.branch, remote, checkout], sources, header, id);
-    const head = (await git(ctx, ["rev-parse", "HEAD"], checkout, header, id)).trim();
-    const path = mode === "protected" ? "package.json" : `ado-aw-det/${ctx.buildId}/${id}-applied.txt`;
-    const original = `ado-aw-det/${ctx.buildId}/${id}.md`;
+    let head = (await git(ctx, ["rev-parse", "HEAD"], checkout, header, id)).trim();
+    if (["mode-down-denied", "mode-rename-denied", "mode-edit"].includes(mode)) {
+      head = await seedExecutableFixture(ctx, pr.repo, pr.branch, checkout, original, head, header, id);
+    }
+    const path = mode === "protected" ? "package.json" :
+      ["space-edit", "mode-up-denied", "mode-down-denied", "mode-edit"].includes(mode) ? original :
+        `ado-aw-det/${ctx.buildId}/${id}${mode === "space-rename-edit" ? " renamed guide" : "-applied"}.txt`;
     let expected: string | undefined = `Applied PR source delta for ${ctx.buildId}.\n`;
     let expectedBlob: string | undefined;
+    let expectedMode: string | undefined;
     let omittedCopy: string | undefined;
     if (mode === "crlf") await git(ctx, ["config", "core.autocrlf", "true"], checkout, header, id);
-    if (mode === "native-copy" || mode === "native-rename") {
+    if (["native-copy", "native-rename", "space-rename-edit", "mode-rename-denied"].includes(mode)) {
       expected = await readFile(join(checkout, original), "utf8");
       if (mode === "native-copy") await copyFile(join(checkout, original), join(checkout, path));
       else await rename(join(checkout, original), join(checkout, path));
-    } else if (mode !== "empty" && mode !== "expansion-denied") {
+      if (mode === "space-rename-edit") {
+        expected += "Additional content.\n";
+        await writeFile(join(checkout, path), expected, "utf8");
+      }
+    } else if (!["empty", "expansion-denied", "mode-up-denied", "mode-down-denied"].includes(mode)) {
       await mkdir(dirname(join(checkout, path)), { recursive: true });
       if (mode === "binary") {
         await writeFile(join(checkout, path), Buffer.from([0, 255, 128, 10]));
@@ -67,26 +84,35 @@ async function setup(ctx: ScenarioContext, mode: Mode): Promise<State> {
         `diff --git a/${original} b/expanded-${index}.txt\nsimilarity index 100%\ncopy from ${original}\ncopy to expanded-${index}.txt\n`).join("");
     } else {
       await git(ctx, ["add", "-A"], checkout, header, id);
+      if (mode.startsWith("mode-") && mode !== "mode-edit") {
+        await git(ctx, ["update-index", mode === "mode-down-denied" ? "--chmod=-x" : "--chmod=+x", "--", path], checkout, header, id);
+      }
       if (mode !== "empty") expectedBlob = (await git(ctx, ["rev-parse", `:${path}`], checkout, header, id)).trim();
+      if (mode !== "empty") expectedMode = (await git(ctx, ["--literal-pathspecs", "ls-files", "--stage", "--", path], checkout, header, id)).split(" ")[0];
       patch = await git(ctx, ["diff", "--cached", "--binary", "--full-index",
         "--find-renames", "--find-copies", "--find-copies-harder", head, "--"], checkout, header, id);
     }
     if ((mode === "native-copy" || mode === "excluded-native-copy") && !patch.includes("copy from ")) {
       throw new Error("Native copy fixture did not contain native copy metadata");
     }
-    if (mode === "native-rename" && !patch.includes("rename from ")) {
+    if (["native-rename", "space-rename-edit"].includes(mode) && !patch.includes("rename from ")) {
       throw new Error("Native rename fixture did not contain native rename metadata");
     }
-    return { ...pr, head, sources, checkout, patch, path, original, expected, expectedBlob, omittedCopy };
+    return { ...pr, head, sources, checkout, patch, path, original, expected, expectedBlob, expectedMode, omittedCopy };
   } catch (error) {
-    await teardownPr(ctx, pr);
-    await rm(sources, { recursive: true, force: true });
+    try {
+      await new Teardown().add("clean PR", () => teardownPr(ctx, pr))
+        .add("remove checkout", () => rm(sources, { recursive: true, force: true })).run();
+    } catch (cleanup) {
+      throw new AggregateError([error, cleanup], "PR patch setup and cleanup failed");
+    }
     throw error;
   }
 }
 
 const cases = (["success", "stale", "blocked-branch", "protected", "bad-hash", "empty",
-  "native-copy", "native-rename", "excluded-native-copy", "crlf", "binary", "expansion-denied"] as const)
+  "native-copy", "native-rename", "excluded-native-copy", "crlf", "binary", "expansion-denied",
+  "space-edit", "space-rename-edit", "mode-up-denied", "mode-down-denied", "mode-new-denied", "mode-rename-denied", "mode-edit"] as const)
   .map((mode): Scenario<State> => ({
     id: `pr-push-${mode}`,
     tool: "push-to-pull-request-branch",
@@ -130,15 +156,18 @@ const cases = (["success", "stale", "blocked-branch", "protected", "bad-hash", "
       await git(ctx, ["fetch", "--depth=2", "origin", state.branch], state.checkout, header, `pr-push-${mode}`);
       const blob = (await git(ctx, ["rev-parse", `FETCH_HEAD:${state.path}`], state.checkout, header, `pr-push-${mode}`)).trim();
       if (blob !== state.expectedBlob) throw new Error("Applied Git blob differs from the proposed exact bytes");
+      const treeMode = (await git(ctx, ["--literal-pathspecs", "ls-tree", "FETCH_HEAD", "--", state.path],
+        state.checkout, header, `pr-push-${mode}`)).split(" ")[0];
+      if (treeMode !== state.expectedMode) throw new Error("Applied tree-entry mode differs");
       if (state.expected !== undefined) {
         const applied = await git(ctx, ["show", `FETCH_HEAD:${state.path}`], state.checkout, header, `pr-push-${mode}`);
         if (applied !== state.expected) throw new Error("Applied file content differs");
       }
       const files = (await git(ctx, ["ls-tree", "-r", "--name-only", "FETCH_HEAD"], state.checkout, header, `pr-push-${mode}`))
         .trim().split("\n");
-      if (mode === "native-rename") {
+      if (["native-rename", "space-rename-edit"].includes(mode)) {
         if (files.includes(state.original)) throw new Error("Native rename retained the source path");
-      } else {
+      } else if (state.path !== state.original) {
         const original = await git(ctx, ["show", `FETCH_HEAD:${state.original}`], state.checkout, header, `pr-push-${mode}`);
         if (!original.includes(`build ${ctx.buildId}`)) throw new Error("Push lost the PR's pre-existing change");
       }

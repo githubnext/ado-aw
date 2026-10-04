@@ -128,6 +128,15 @@ checkout text. Negative expansion cases use 99 compact native copies of a
 429,575-byte source and require unchanged remote refs, not just an expected
 error message.
 
+Both families also register `space-edit`, `space-rename-edit`, `mode-up-denied`,
+`mode-down-denied`, `mode-new-denied`, `mode-rename-denied`, and `mode-edit`.
+These use actual Git-generated headers and index modes; successful read-back
+checks tree-entry modes as well as blobs. Rejected mode changes must leave
+remote refs unchanged. Existing-executable fixtures are seeded with an ordinary,
+single-ref fast-forward Git push on the unchanged, harness-owned branch; no
+force push is used. This is test setup only, not a production publication
+transport or a fallback for unsupported safe-output mode changes.
+
 Native creation fixtures use separately seeded disposable targets. Cleanup
 requires exact PR source/target/title ownership and confirmed abandonment
 before either ref is deleted. An unconfirmed creation retains and reports both

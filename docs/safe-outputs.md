@@ -1194,6 +1194,19 @@ rejected before Git application: it expands to over 40 MiB. Raising
 `max-patch-size` cannot bypass the source-processing or encoded-request bounds.
 Blob content comes from Git objects, not checkout files; `core.autocrlf`, EOL
 attributes and filesystem conversions do not change the bytes sent to ADO.
+Git-generated text patches with spaces in filenames are supported, including
+the terminal tab delimiter in old/new path headers. That syntactic delimiter
+does not authorize literal control characters in filenames.
+
+**Executable modes:** a blob hash proves content, not a file's executable bit.
+Both tools reject retained mode changes the content-only REST transport cannot
+represent, before creating or updating a remote branch. This includes in-place
+chmod changes, new executable files, and copies/moves that require an executable
+destination to be added. Existing executable files can be edited without
+changing their mode or deleted. Unrelated executable files do not block a patch.
+Capture retains explicitly staged mode intent, including with
+`core.filemode=false`; it does not silently turn staged chmod into an empty
+patch. No mode-loss override or native Git publication fallback is provided.
 
 **Intentional tightening:** the previous 5 MiB patch default becomes 4 MiB;
 creation also gains expanded-content and encoded-payload bounds. Authors who

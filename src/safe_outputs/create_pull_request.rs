@@ -1824,8 +1824,8 @@ mod tests {
         use crate::safe_outputs::pr_patch::tests::{command, movement, repository};
         use std::sync::{Arc, Mutex};
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, query_param}};
-        for case in ["copy", "rename-edit", "crlf", "excluded-copy", "series", "filtered-series", "base-drift", "unrelated-base", "prefix-ref"] {
-            let (repo, base) = repository(&[("old.txt", b"base\n"), ("nested/secret.txt", b"excluded\n"), ("keep.txt", b"old\n")]);
+        for case in ["copy", "rename-edit", "crlf", "excluded-copy", "series", "filtered-series", "base-drift", "unrelated-base", "prefix-ref", "space-header", "mode-up"] {
+            let (repo, base) = repository(&[("old.txt", b"base\n"), ("nested/secret.txt", b"excluded\n"), ("keep.txt", b"old\n"), ("space dir/user guide.md", b"old\n")]);
             let mut current = base.clone();
             let mut text = match case {
                 "copy" => movement("copy", "old.txt", "new.txt"),
@@ -1836,6 +1836,15 @@ mod tests {
                 _ => "diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ b/old.txt\n@@ -1 +1 @@\n-base\n+changed\n".into(),
             };
             if case == "crlf" { command(repo.path(), &["config", "core.autocrlf", "true"]); }
+            if case == "space-header" {
+                std::fs::write(repo.path().join("space dir").join("user guide.md"), "changed\n").unwrap();
+                text = String::from_utf8(super::super::pr_patch::git(repo.path(), &["diff", "--binary", "--full-index"]).await.unwrap().stdout).unwrap();
+            }
+            if case == "mode-up" {
+                command(repo.path(), &["config", "core.filemode", "false"]);
+                command(repo.path(), &["update-index", "--chmod=+x", "old.txt"]);
+                text = String::from_utf8(super::super::pr_patch::git(repo.path(), &["diff", "--cached", "--binary", "--full-index"]).await.unwrap().stdout).unwrap();
+            }
             if case == "series" || case == "filtered-series" {
                 for content in ["first\n", "changed\n"] {
                     std::fs::write(repo.path().join("old.txt"), content).unwrap();
@@ -1909,8 +1918,11 @@ mod tests {
             assert_eq!(command(repo.path(), &["show-ref"]), original_refs, "{case}");
             assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), original_index, "{case}");
             assert_eq!(command(repo.path(), &["status", "--porcelain"]), original_status, "{case}");
-            if case == "unrelated-base" {
+            if matches!(case, "unrelated-base" | "mode-up") {
                 assert!(result.is_err());
+                if case == "mode-up" {
+                    assert!(result.unwrap_err().to_string().contains("file-mode change"));
+                }
                 assert!(pushes.lock().unwrap().is_empty());
                 assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() == "GET"));
                 continue;

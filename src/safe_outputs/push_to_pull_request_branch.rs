@@ -556,18 +556,16 @@ pub(crate) async fn capture_patch(repo: &Path, head: &CommitSha, limit: PatchSiz
     );
     let scratch = tempfile::tempdir()?;
     let index = scratch.path().join("index");
+    let captured = async {
+    super::pr_patch::seed_capture_index(repo, &index, "HEAD").await?;
     for args in [
-        vec!["read-tree", "HEAD"],
-        vec!["add", "-A", "--", ".", ":(top,exclude)aw-context"],
+        vec!["-c", "core.splitIndex=false", "add", "-A", "--", ".", ":(top,exclude)aw-context"],
         vec!["reset", "--quiet", head.as_str(), "--", "aw-context"],
     ] {
-        let output = git_without_filters(repo)
-            .await?
-            .args(args)
+        let output = super::pr_patch::bounded_output(git_without_filters(repo)
+            .await?.args(args)
             .env("GIT_INDEX_FILE", &index)
-            .current_dir(repo)
-            .output()
-            .await?;
+            .current_dir(repo), super::pr_patch::MAX_SOURCE_BYTES, None).await?;
         ensure!(
             output.status.success(),
             "Could not capture PR changes in an isolated index"
@@ -581,6 +579,8 @@ pub(crate) async fn capture_patch(repo: &Path, head: &CommitSha, limit: PatchSiz
         .with_context(|| format!("PR patch capture failed within max-patch-size ({limit} KiB)"))?;
     ensure!(output.status.success(), "Could not capture a PR source-head delta");
     Ok(output.stdout)
+    }.await;
+    super::pr_patch::finish_scratch(scratch, captured)
 }
 
 fn empty_patch(config: &PushToPullRequestBranchConfig) -> ExecutionResult {

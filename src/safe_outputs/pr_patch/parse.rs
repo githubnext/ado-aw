@@ -607,6 +607,7 @@ fn hunk_counts(value: &str) -> anyhow::Result<(usize, usize)> {
 }
 
 fn patch_path(value: &str, prefix: &str) -> anyhow::Result<Option<String>> {
+    let value = value.strip_suffix('\t').unwrap_or(value);
     if value == "/dev/null" {
         return Ok(None);
     }
