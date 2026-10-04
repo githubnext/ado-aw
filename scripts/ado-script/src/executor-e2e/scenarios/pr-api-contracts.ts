@@ -167,4 +167,46 @@ const push = scenario("pr-api-push-concurrency", async (ctx, state) => {
     "Rejected stale push changed source head");
 });
 
-export const prApiContractScenarios: Scenario<unknown>[] = [draft, labels, comments, push] as Scenario<unknown>[];
+const reviewerAddition = scenario("pr-api-reviewer-additive-state", async (ctx, state) => {
+  const pr = await json(ctx, state, `pullRequests/${state.prId}`);
+  const actor = object(pr.createdBy, "PR creator").id;
+  required(typeof actor === "string" && /^[a-f0-9-]{36}$/i.test(actor), "Probe actor identity unavailable");
+  const collection = `pullRequests/${state.prId}/reviewers`;
+  const reviewer = `${collection}/${actor}`;
+  const membership = async () => {
+    const response = await json(ctx, state, collection);
+    required(Array.isArray(response.value), "Reviewer list is incomplete");
+    const matches = response.value.map((entry) => object(entry, "reviewer"))
+      .filter((entry) => entry.id === actor);
+    required(matches.length <= 1, "Reviewer identity is ambiguous");
+    return matches[0];
+  };
+  const remove = async () => {
+    if (await membership()) {
+      required((await request(ctx, state, reviewer, "DELETE")).ok, "Could not reset owned probe membership");
+    }
+    required(!await membership(), "Probe membership was not removed");
+  };
+  const add = async () => {
+    const response = await request(ctx, state, collection, "POST", [{ id: actor }]);
+    required(response.ok, `Identity-only addition failed: HTTP ${response.status}`);
+  };
+  await remove();
+  await add();
+  required((await membership())?.vote === 0, "Identity-only addition did not establish membership");
+  await remove();
+  // The caller observed absence; another request now adds and votes before its POST.
+  for (const vote of [-10, 5]) {
+    await json(ctx, state, reviewer, "PUT", { vote, isRequired: true });
+    const before = await membership();
+    required(before?.vote === vote && before.isRequired === true, "Seeded reviewer state was not persisted");
+    await add();
+    const after = await membership();
+    required(after?.vote === vote && after.isRequired === true, "Identity-only addition overwrote reviewer state");
+    for (const flag of ["hasDeclined", "isFlagged"]) {
+      required((before[flag] === true) === (after[flag] === true), `Identity-only addition changed ${flag}`);
+    }
+  }
+});
+
+export const prApiContractScenarios: Scenario<unknown>[] = [draft, labels, comments, push, reviewerAddition] as Scenario<unknown>[];

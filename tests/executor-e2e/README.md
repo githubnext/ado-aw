@@ -138,12 +138,16 @@ uncertain deletions are never blindly replayed. These rules are test-harness
 behavior, not production safe-output cleanup.
 
 The `pr-api-draft-publication`, `pr-api-owned-comments`,
-`pr-api-label-replacement` and `pr-api-push-concurrency` scenarios probe ADO
+`pr-api-label-replacement`, `pr-api-push-concurrency` and
+`pr-api-reviewer-additive-state` scenarios probe ADO
 platform prerequisites directly on harness-owned disposable PRs. They use a
 `noop` executor record and are **not** evidence that a corresponding safe-output
 executor has been implemented. Their assertions require persisted read-back,
 round-tripped thread ownership/iteration context, and rejection of an exact
 stale source-head push without changing the branch.
+The reviewer probe checks ID-only addition of missing and existing membership,
+including an absent-snapshot/add-and-vote interleaving. It requires preservation
+of the existing actor's nonzero vote, required status and reviewer flags.
 
 The PR matrix also registers Unicode boundary/composed-body rejection cases
 and optional cross-organization variants of content editing, reviewers, labels,
