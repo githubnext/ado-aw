@@ -566,3 +566,90 @@ fn whatif_unknown_fail_id_errors() {
         "expected unknown-id error message, got:\n{stderr}"
     );
 }
+
+/// `ado-aw catalog` with no `--kind` filter emits every category in the
+/// human-readable text renderer, proving the CLI wiring (`Commands::Catalog`
+/// → `inspect::dispatch_catalog` → `catalog::render_text`) end-to-end. This
+/// command takes no source file, unlike every other `inspect`-group command,
+/// so it previously had zero process-level coverage anywhere in the suite.
+#[test]
+fn catalog_text_emits_every_category_unfiltered() {
+    let out = Command::new(binary_path())
+        .arg("catalog")
+        .output()
+        .expect("run ado-aw catalog");
+    assert!(
+        out.status.success(),
+        "catalog exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for heading in [
+        "Safe outputs",
+        "Runtimes",
+        "Tools",
+        "Engines",
+        "Models",
+        "Versions",
+        "Azure DevOps proxy",
+    ] {
+        assert!(
+            stdout.contains(heading),
+            "expected '{heading}' section in catalog output, got:\n{stdout}"
+        );
+    }
+}
+
+/// `ado-aw catalog --kind versions --json` must restrict the JSON payload to
+/// only the requested category, proving the `--kind`/`--json` flags are both
+/// threaded through `CatalogOptions` and `catalog_kind` correctly rather than
+/// always returning the full unfiltered catalog.
+#[test]
+fn catalog_json_kind_filter_restricts_to_requested_category() {
+    let out = Command::new(binary_path())
+        .arg("catalog")
+        .arg("--kind")
+        .arg("versions")
+        .arg("--json")
+        .output()
+        .expect("run ado-aw catalog --kind versions --json");
+    assert!(
+        out.status.success(),
+        "catalog --kind versions --json exited non-zero. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("catalog --json must emit valid JSON");
+    assert!(
+        value.get("versions").is_some(),
+        "expected 'versions' key in filtered catalog JSON, got:\n{value}"
+    );
+    for absent in ["safe_outputs", "runtimes", "tools", "engines", "models"] {
+        assert!(
+            value.get(absent).is_none(),
+            "expected '{absent}' to be absent from --kind versions output, got:\n{value}"
+        );
+    }
+}
+
+/// `ado-aw catalog --kind <unknown>` must fail with a clear, non-panicking
+/// error naming the unrecognized kind rather than silently falling back to
+/// the unfiltered catalog.
+#[test]
+fn catalog_unknown_kind_errors() {
+    let out = Command::new(binary_path())
+        .arg("catalog")
+        .arg("--kind")
+        .arg("nonexistent-kind")
+        .output()
+        .expect("run ado-aw catalog with unknown --kind");
+    assert!(
+        !out.status.success(),
+        "catalog must fail for an unknown --kind value"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown --kind 'nonexistent-kind'"),
+        "expected unknown-kind error message, got:\n{stderr}"
+    );
+}
