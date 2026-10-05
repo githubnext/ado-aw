@@ -8,6 +8,21 @@ fn compiled_has_enabled_tool(compiled: &str, tool: &str) -> bool {
     })
 }
 
+fn extract_mcpg_config(compiled: &str) -> &str {
+    let marker = "cat > \"$AGENT_TEMP/staging/mcpg-config.json\" << '";
+    let tail = compiled
+        .split_once(marker)
+        .map(|(_, tail)| tail)
+        .expect("compiled pipeline must stage an MCPG config");
+    let (sentinel, payload) = tail
+        .split_once("'\n")
+        .expect("MCPG config heredoc must have a quoted sentinel");
+    payload
+        .split_once(sentinel)
+        .map(|(config, _)| config)
+        .expect("MCPG config heredoc must terminate")
+}
+
 // `assert_required_markers`, `assert_pool_config`, `assert_compiler_download`,
 // `assert_awf_download`, `assert_mcpg_integration`, and `test_compiled_yaml_structure`
 // validated the legacy `src/data/base.yml` template. The standalone target
@@ -2419,6 +2434,7 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
     );
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled output");
+    let mcpg_config = extract_mcpg_config(&compiled);
 
     // The policy document is now carried by the `POLICY` binding, which
     // `Binding::document` renders as a quoted heredoc in the generated
@@ -2486,7 +2502,7 @@ fn test_fixture_azure_devops_mcp_compiled_output() {
         "MCPG config should have entrypointArgs field"
     );
     assert!(
-        !compiled.contains("\"command\": "),
+        !mcpg_config.contains("\"command\""),
         "MCPG config should NOT use command field"
     );
 
@@ -2592,6 +2608,7 @@ fn test_mcpg_config_container_based_mcp() {
     );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
+    let mcpg_config = extract_mcpg_config(&compiled);
 
     assert!(compiled.contains("\"container\": \"ghcr.io/example/my-tool:latest\""));
     assert!(compiled.contains("\"entrypoint\": \"my-tool\""));
@@ -2600,7 +2617,7 @@ fn test_mcpg_config_container_based_mcp() {
     assert!(compiled.contains("/host/data:/app/data:ro"));
     assert!(compiled.contains("\"API_KEY\": \"test-key\""));
     assert!(compiled.contains("\"tool_a\""));
-    assert!(!compiled.contains("\"command\": "));
+    assert!(!mcpg_config.contains("\"command\""));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2720,11 +2737,12 @@ fn test_mcpg_config_http_based_mcp() {
     );
 
     let compiled = fs::read_to_string(&output_path).unwrap();
+    let mcpg_config = extract_mcpg_config(&compiled);
 
     assert!(compiled.contains("\"url\": \"https://mcp.dev.azure.com/myorg\""));
     assert!(compiled.contains("\"X-MCP-Toolsets\": \"repos,wit\""));
     assert!(compiled.contains("\"wit_get_work_item\""));
-    assert!(!compiled.contains("\"command\": "));
+    assert!(!mcpg_config.contains("\"command\""));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
