@@ -409,7 +409,7 @@ function reviewerSnapshot(entry: { vote: number; isRequired?: boolean; isFlagged
 const existingReviewers: Scenario<ReviewerState>[] = ([
   { name: "required-negative", vote: -10, isRequired: true, isFlagged: true, hasDeclined: false },
   { name: "required-positive", vote: 5, isRequired: true, isFlagged: false, hasDeclined: false },
-  { name: "optional", vote: 0, isRequired: false, isFlagged: true, hasDeclined: true },
+  { name: "optional", vote: 0, isRequired: false, isFlagged: true, hasDeclined: false },
 ] as const).map((seed) => {
   const id = `pr-reviewer-existing-${seed.name}`;
   return {

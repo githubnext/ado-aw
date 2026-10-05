@@ -27,7 +27,7 @@ describe("existing reviewer executor evidence", () => {
   it.each([
     { name: "required-negative", vote: -10, isRequired: true, isFlagged: true, hasDeclined: false },
     { name: "required-positive", vote: 5, isRequired: true, isFlagged: false, hasDeclined: false },
-    { name: "optional", vote: 0, isRequired: false, isFlagged: true, hasDeclined: true },
+    { name: "optional", vote: 0, isRequired: false, isFlagged: true, hasDeclined: false },
   ])("requires persisted $name state and truthful no-op reporting", async (seed) => {
     const scenario = prScenarios.find((candidate) => candidate.id === `pr-reviewer-existing-${seed.name}`)!;
     expect(scenario.tool).toBe("add-pull-request-reviewers");
@@ -44,5 +44,24 @@ describe("existing reviewer executor evidence", () => {
       await expect(scenario.assert(ctx, state, record, [])).rejects.toThrow("changed vote");
     }
     expect(scenario.config(ctx, state)).not.toHaveProperty("allowed-events");
+  });
+
+  it("does not seed an impossible declined-review state for the PR creator", async () => {
+    const scenario = prScenarios.find((candidate) => candidate.id === "pr-reviewer-existing-optional")!;
+    const ctx = context();
+    vi.spyOn(ctx.rest, "getRepository").mockResolvedValue({ id: "repo", defaultBranch: "refs/heads/main" });
+    vi.spyOn(ctx.rest, "getRefObjectId").mockResolvedValue("a".repeat(40));
+    vi.spyOn(ctx.rest, "pushAddFileBranch").mockResolvedValue("b".repeat(40));
+    vi.spyOn(ctx.rest, "createPullRequest").mockResolvedValue({ pullRequestId: 42 });
+    vi.spyOn(ctx.rest, "getPullRequest").mockResolvedValue({
+      pullRequestId: 42, title: "owned fixture", status: "active", createdBy: { id: reviewer },
+    });
+    const seed = vi.spyOn(ctx.rest, "seedReviewerState").mockResolvedValue(undefined);
+    vi.spyOn(ctx.rest, "listReviewers").mockResolvedValue([{
+      id: reviewer, vote: 0, isRequired: false, isFlagged: true, hasDeclined: false,
+    }]);
+    await scenario.setup(ctx);
+    expect(seed).toHaveBeenCalledWith("repo", 42, reviewer,
+      expect.objectContaining({ vote: 0, isRequired: false, isFlagged: true, hasDeclined: false }));
   });
 });

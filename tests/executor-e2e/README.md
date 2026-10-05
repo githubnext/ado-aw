@@ -163,6 +163,10 @@ required status when membership already existed; individual PUT, with or without
 and `pr-reviewer-existing-optional` seed the executor actor's real vote/required/
 flag state on non-draft, owned PRs. The production add-reviewers tool must leave
 that state unchanged and report `already_present`, with no newly added identity.
+The actor is also the fixture PR creator, so live setup keeps `hasDeclined=false`:
+ADO rejects a creator declining their own PR. The live assertion still checks
+that flag remains unchanged; preservation of an already-declined reviewer is
+covered by deterministic no-write tests, not claimed as live evidence.
 `create-pull-request-configured-reviewers` covers configured creation followed by
 repeated membership through the focused tool. This proves the ordinary
 read-before-add/no-op contract, **not** atomic preservation of a reviewer added
