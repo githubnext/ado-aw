@@ -62,10 +62,11 @@ ado_aw_append_info_field() {
   local field="$1"
   local value="$2"
   local file="$3"
-  if [ -z "$value" ] || grep -Eq "\"${field}\"[[:space:]]*:" "$file"; then
+  if [ -z "$value" ]; then
     return 0
   fi
   local json
+  local compact_json
   local tmp
   local separator=","
   json="$(cat "$file")"
@@ -76,9 +77,13 @@ ado_aw_append_info_field() {
       \{*\}) ;;
       *)
         echo "ERROR: aw_info.json is not a single-line JSON object" >&2
-        exit 1
+        return 1
         ;;
     esac
+  fi
+  compact_json="$(printf '%s' "$json" | tr -d '[:space:]')"
+  if printf '%s' "$compact_json" | grep -Fq "\"${field}\":"; then
+    return 0
   fi
   tmp="$(mktemp)"
   printf '%s%s"%s":"%s"}' "${json%?}" "$separator" "$field" "$value" > "$tmp"
@@ -767,6 +772,30 @@ mod tests {
         assert!(output.status.success(), "{output:?}");
         let value = read_aw_info_json(&temp);
         assert_eq!(value["model"], "original");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn append_aw_info_field_returns_failure_without_exiting_its_caller() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("aw_info.json");
+        std::fs::write(&path, "not-json").expect("write aw_info.json");
+        let script = format!(
+            "{}\nstatus=0\nado_aw_append_info_field model gpt-5 \"$FILE\" || status=$?\nprintf 'after:%s' \"$status\"",
+            APPEND_AW_INFO_FIELD.body.trim()
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env_clear()
+            .env("FILE", path)
+            .output()
+            .expect("bash should run");
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "after:1");
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("aw_info.json is not a single-line JSON object"));
     }
 
     #[test]

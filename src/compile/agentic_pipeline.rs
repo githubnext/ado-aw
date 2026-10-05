@@ -4551,9 +4551,6 @@ REQUESTED_MODEL=$(node "$TRUSTED_CONTROLLER_PATH" read-result "$TRUSTED_RESULT_P
   || MODEL_RESULT_STATUS=$?
 if [ "$MODEL_RESULT_STATUS" -ne 0 ]; then
   echo "ERROR: Agent Copilot invocation result is missing or malformed" >&2
-  if [ "$AGENT_EXIT_CODE" -eq 0 ]; then
-    AGENT_EXIT_CODE="$MODEL_RESULT_STATUS"
-  fi
 else
   ADO_AW_INFO_JSON="$AGENT_TEMP/staging/aw_info.json"
   if [ -f "$ADO_AW_INFO_JSON" ]; then
@@ -4561,7 +4558,8 @@ else
     ado_aw_append_info_field \
       "model" \
       "$REQUESTED_MODEL" \
-      "$ADO_AW_INFO_JSON"
+      "$ADO_AW_INFO_JSON" \
+      || MODEL_RESULT_STATUS=$?
   else
     echo "Warning: Agent metadata file not found at $ADO_AW_INFO_JSON; model metadata was not recorded" >&2
   fi
@@ -4573,7 +4571,10 @@ if [ -x "$PIPELINE_WORKSPACE/awf/awf" ]; then
   "$PIPELINE_WORKSPACE/awf/awf" logs summary --source "$AGENT_TEMP/staging/logs/firewall" 2>/dev/null || true
 fi
 
-exit "$AGENT_EXIT_CODE"
+if [ "$AGENT_EXIT_CODE" -ne 0 ]; then
+  exit "$AGENT_EXIT_CODE"
+fi
+exit "$MODEL_RESULT_STATUS"
 "###,
     }
 }
@@ -6340,14 +6341,14 @@ REQUESTED_MODEL=$(node "$TRUSTED_CONTROLLER_PATH" read-result "$TRUSTED_RESULT_P
   || MODEL_RESULT_STATUS=$?
 if [ "$MODEL_RESULT_STATUS" -ne 0 ]; then
   echo "ERROR: Detection Copilot invocation result is missing or malformed" >&2
-  if [ "$AGENT_EXIT_CODE" -eq 0 ]; then
-    AGENT_EXIT_CODE="$MODEL_RESULT_STATUS"
-  fi
 else
   printf '%s' "$REQUESTED_MODEL" > "$AGENT_TEMP/detection-runtime-model"
 fi
 
-exit "$AGENT_EXIT_CODE"
+if [ "$AGENT_EXIT_CODE" -ne 0 ]; then
+  exit "$AGENT_EXIT_CODE"
+fi
+exit "$MODEL_RESULT_STATUS"
 "###,
     }
 }
@@ -6513,8 +6514,8 @@ set -eo pipefail
 ADO_AW_INFO_JSON="$AGENT_TEMP/analyzed_outputs/aw_info.json"
 ADO_AW_MODEL_FILE="$AGENT_TEMP/detection-runtime-model"
 if [ ! -f "$ADO_AW_INFO_JSON" ]; then
-  echo "ERROR: Detection could not find copied aw_info.json at $ADO_AW_INFO_JSON" >&2
-  exit 1
+  echo "Warning: Detection metadata file not found at $ADO_AW_INFO_JSON; model metadata was not recorded" >&2
+  exit 0
 fi
 if [ ! -f "$ADO_AW_MODEL_FILE" ]; then
   exit 0
@@ -7923,6 +7924,12 @@ safe-outputs:
             .contains("node \"$TRUSTED_CONTROLLER_PATH\" read-result"));
         assert!(!step
             .script
+            .contains("AGENT_EXIT_CODE=\"$MODEL_RESULT_STATUS\""));
+        assert!(step.script.contains(
+            "if [ \"$AGENT_EXIT_CODE\" -ne 0 ]; then\n  exit \"$AGENT_EXIT_CODE\"\nfi\nexit \"$MODEL_RESULT_STATUS\""
+        ));
+        assert!(!step
+            .script
             .contains("node \"$COPILOT_CONTROLLER_SOURCE_PATH\" read-result"));
         assert!(step.script.contains("\"model\""));
         let metadata_index = step
@@ -8607,15 +8614,17 @@ safe-outputs:
     }
 
     #[cfg(unix)]
-    fn run_detection_runtime_model_script(model: Option<&str>) -> (Output, tempfile::TempDir) {
+    fn run_detection_runtime_model_script_with_aw_info(
+        model: Option<&str>,
+        aw_info: Option<&str>,
+    ) -> (Output, tempfile::TempDir) {
         let temp = tempfile::tempdir().expect("temp dir");
         let analyzed_outputs = temp.path().join("analyzed_outputs");
         std::fs::create_dir_all(&analyzed_outputs).expect("create analyzed outputs");
-        std::fs::write(
-            analyzed_outputs.join("aw_info.json"),
-            r#"{"schema":"ado-aw/aw_info/1"}"#,
-        )
-        .expect("write aw_info.json");
+        if let Some(aw_info) = aw_info {
+            std::fs::write(analyzed_outputs.join("aw_info.json"), aw_info)
+                .expect("write aw_info.json");
+        }
         if let Some(model) = model {
             std::fs::write(temp.path().join("detection-runtime-model"), model)
                 .expect("write runtime model");
@@ -8630,6 +8639,14 @@ safe-outputs:
         let mut command = Command::new("bash");
         command.arg("-c").arg(script).env_clear();
         (command.output().expect("bash should run"), temp)
+    }
+
+    #[cfg(unix)]
+    fn run_detection_runtime_model_script(model: Option<&str>) -> (Output, tempfile::TempDir) {
+        run_detection_runtime_model_script_with_aw_info(
+            model,
+            Some(r#"{"schema":"ado-aw/aw_info/1"}"#),
+        )
     }
 
     #[cfg(unix)]
@@ -8813,6 +8830,12 @@ safe-outputs:
         assert!(run_step
             .script
             .contains("node \"$TRUSTED_CONTROLLER_PATH\" read-result"));
+        assert!(!run_step
+            .script
+            .contains("AGENT_EXIT_CODE=\"$MODEL_RESULT_STATUS\""));
+        assert!(run_step.script.contains(
+            "if [ \"$AGENT_EXIT_CODE\" -ne 0 ]; then\n  exit \"$AGENT_EXIT_CODE\"\nfi\nexit \"$MODEL_RESULT_STATUS\""
+        ));
         let prepare = run_step
             .script
             .find("node \"$TRUSTED_CONTROLLER_PATH\" prepare")
@@ -8883,6 +8906,31 @@ safe-outputs:
                 .get("detection_model")
                 .is_none()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn missing_detection_metadata_does_not_mask_the_detection_result() {
+        let (output, _) =
+            run_detection_runtime_model_script_with_aw_info(Some("detector-model"), None);
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains(
+            "Warning: Detection metadata file not found"
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn malformed_detection_metadata_fails_enrichment() {
+        let (output, _) = run_detection_runtime_model_script_with_aw_info(
+            Some("detector-model"),
+            Some("not-json"),
+        );
+
+        assert!(!output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("aw_info.json is not a single-line JSON object"));
     }
 
     #[test]
