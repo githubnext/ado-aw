@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { CATALOG_SCHEMA_VERSION, OPERATIONS } from "./catalog.js";
 import type { ProxyPolicy } from "./config.js";
 import { filterResponse, isProtectedLocation, rewriteLocationUrl } from "./response.js";
+import { ScopeIndex } from "./scope.js";
 import type { Operation } from "../shared/ado-proxy-catalog.types.gen.js";
 
 const POLICY: ProxyPolicy = {
@@ -12,10 +13,23 @@ const POLICY: ProxyPolicy = {
   project_id: "11111111-1111-1111-1111-111111111111",
   repository: "widget-api",
   repository_id: "22222222-2222-2222-2222-222222222222",
+  additional_scopes: [
+    {
+      organization: "fabrikam",
+      projects: [
+        {
+          project: "Shared",
+          project_scoped: false,
+          repositories: ["shared-api"],
+        },
+      ],
+    },
+  ],
   capabilities: ["discovery", "core", "repos", "pipelines", "boards"],
   protected_hosts: ["dev.azure.com", "app.vssps.visualstudio.com"],
   allowed_resource_areas: [],
 };
+const SCOPES = ScopeIndex.from(POLICY);
 
 /** The real catalog entry, so these tests break if a response policy moves. */
 function operation(id: string): Operation {
@@ -116,6 +130,44 @@ describe("filterResponse — resource areas", () => {
     expect(body.value[0]?.locationUrl).toBe("https://dev.azure.com/contoso/sub/path");
   });
 
+  it("canonicalizes legacy organization-host locations", () => {
+    const outcome = apply("discovery.resource-areas", {
+      count: 3,
+      value: [
+        { id: "root", locationUrl: "https://contoso.visualstudio.com/" },
+        {
+          id: "collection",
+          locationUrl:
+            "https://contoso.visualstudio.com/DefaultCollection/git/path?x=1#area",
+        },
+        { id: "cross-org", locationUrl: "https://fabrikam.visualstudio.com/" },
+      ],
+    });
+    expect(forwarded(outcome)).toEqual({
+      count: 3,
+      value: [
+        { id: "root", locationUrl: "https://dev.azure.com/contoso/" },
+        {
+          id: "collection",
+          locationUrl: "https://dev.azure.com/contoso/git/path?x=1#area",
+        },
+        { id: "cross-org", locationUrl: "https://dev.azure.com/fabrikam/" },
+      ],
+    });
+  });
+
+  it("drops locations for organizations outside the policy", () => {
+    const outcome = apply("discovery.resource-areas", {
+      count: 3,
+      value: [
+        { id: "legacy", locationUrl: "https://adatum.visualstudio.com/" },
+        { id: "modern", locationUrl: "https://dev.azure.com/adatum/" },
+        { id: "organization-less", locationUrl: "https://vsrm.dev.azure.com/" },
+      ],
+    });
+    expect(forwarded(outcome)).toEqual({ count: 0, value: [] });
+  });
+
   it("drops only entries whose locationUrl cannot be rewritten", () => {
     const outcome = apply("discovery.resource-areas", {
       count: 3,
@@ -132,15 +184,19 @@ describe("filterResponse — resource areas", () => {
 
 describe("rewriteLocationUrl", () => {
   it("replaces scheme and host, keeps the path", () => {
-    expect(rewriteLocationUrl("https://vsrm.dev.azure.com/org/", "https://proxy:8443")).toBe(
-      "https://proxy:8443/org/",
-    );
+    expect(
+      rewriteLocationUrl(
+        "https://vsrm.dev.azure.com/contoso/",
+        "https://proxy:8443",
+        SCOPES,
+      ),
+    ).toBe("https://proxy:8443/contoso/");
   });
 
   it("returns undefined for unusable input", () => {
-    expect(rewriteLocationUrl("nonsense", "https://proxy")).toBeUndefined();
-    expect(rewriteLocationUrl(undefined, "https://proxy")).toBeUndefined();
-    expect(rewriteLocationUrl(42, "https://proxy")).toBeUndefined();
+    expect(rewriteLocationUrl("nonsense", "https://proxy", SCOPES)).toBeUndefined();
+    expect(rewriteLocationUrl(undefined, "https://proxy", SCOPES)).toBeUndefined();
+    expect(rewriteLocationUrl(42, "https://proxy", SCOPES)).toBeUndefined();
   });
 });
 

@@ -5,6 +5,11 @@ export interface AdoRepoIdentity {
   repository: string;
 }
 
+export interface AdoOrganizationLocation {
+  organization: string;
+  canonicalUrl: string;
+}
+
 function decodeSegment(value: string): string | null {
   try {
     const decoded = decodeURIComponent(value);
@@ -12,6 +17,14 @@ function decodeSegment(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+function legacyOrganizationFromHost(host: string): string | null {
+  if (!host.endsWith(".visualstudio.com")) return null;
+  const organization = host.slice(0, -".visualstudio.com".length);
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(organization)
+    ? organization.toLowerCase()
+    : null;
 }
 
 /**
@@ -66,6 +79,53 @@ export function parseAdoRepoUrl(raw: string): AdoRepoIdentity | null {
   const repository = decodeSegment(repoPart);
   if (!project || !repository) return null;
   return { collectionUri, organization, project, repository };
+}
+
+/**
+ * Normalize an Azure DevOps organization URL to the modern organization-path
+ * form while preserving the meaningful suffix, query, and fragment.
+ */
+export function normalizeAdoOrganizationUrl(
+  raw: string | undefined,
+): AdoOrganizationLocation | null {
+  if (!raw) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:") return null;
+
+  const host = url.hostname.toLowerCase();
+  if (host === "dev.azure.com") {
+    const encodedOrganization = url.pathname
+      .split("/")
+      .find((part) => part.length > 0);
+    const organization = decodeSegment(encodedOrganization ?? "");
+    if (!organization) return null;
+    return {
+      organization: organization.toLowerCase(),
+      canonicalUrl: url.toString(),
+    };
+  }
+
+  const organization = legacyOrganizationFromHost(host);
+  if (organization === null) return null;
+
+  const defaultCollection = url.pathname.match(/^\/defaultcollection(?=\/|$)/i);
+  const suffix =
+    defaultCollection === null
+      ? url.pathname
+      : url.pathname.slice(defaultCollection[0].length);
+  url.hostname = "dev.azure.com";
+  url.pathname = `/${encodeURIComponent(organization)}${
+    suffix === "" ? "/" : suffix
+  }`;
+  return {
+    organization,
+    canonicalUrl: url.toString(),
+  };
 }
 
 export function adoOrganizationFromCollectionUri(raw: string | undefined): string | null {
