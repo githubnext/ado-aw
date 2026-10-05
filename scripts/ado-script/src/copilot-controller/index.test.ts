@@ -54,6 +54,25 @@ describe("copilot controller", () => {
     });
   });
 
+  it("commits the trusted result before exposing a prepared sandbox document", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "copilot-controller-"));
+    const requestPath = writeRequest(directory);
+    const preparedPath = join(directory, "missing", "prepared.json");
+    const resultPath = join(directory, "result.json");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      main(["prepare", requestPath, preparedPath, resultPath]),
+    ).resolves.toBe(1);
+    expect(JSON.parse(readFileSync(resultPath, "utf8"))).toMatchObject({
+      document_kind: "result",
+      role: "agent",
+    });
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining("copilot-controller:"),
+    );
+  });
+
   it("reads only a matching strict result", async () => {
     const directory = mkdtempSync(join(tmpdir(), "copilot-controller-"));
     const resultPath = join(directory, "result.json");

@@ -23,8 +23,8 @@ export async function main(argv: string[]): Promise<number> {
     try {
       const request = parseInvocationRequest(readFileSync(argv[1]!, "utf8"));
       const { prepared, result } = prepareInvocation(request, process.env);
-      writeJsonAtomic(argv[2]!, prepared);
       writeJsonAtomic(argv[3]!, result);
+      writeJsonAtomic(argv[2]!, prepared);
       return 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";

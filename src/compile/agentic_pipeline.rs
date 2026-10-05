@@ -3618,7 +3618,7 @@ shell_script! {
         externals: [],
         fragments: [tail],
         body: r###"
-set -o pipefail
+set -eo pipefail
 mkdir -p "$DEST"
 
 locate_one() {
@@ -7135,6 +7135,17 @@ mod tests {
 
     fn test_front_matter(yaml: &str) -> FrontMatter {
         serde_yaml::from_str(yaml).expect("front matter should parse")
+    }
+
+    #[test]
+    fn candidate_artifact_staging_keeps_fail_fast_verification() {
+        assert!(
+            STAGE_CANDIDATE_ARTIFACT_PAYLOAD
+                .body
+                .trim_start()
+                .starts_with("set -eo pipefail"),
+            "candidate checksum and provenance verification must abort on the first failure"
+        );
     }
 
     fn test_ctx() -> StandaloneCtx {

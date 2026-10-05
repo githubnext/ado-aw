@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -80,6 +80,10 @@ describe("Copilot invocation protocol", () => {
     [{ ...request(), command: "/tmp//copilot" }, "field 'command' is invalid"],
     [{ ...request(), command: "/tmp/copilot/" }, "field 'command' is invalid"],
     [{ ...request(), prompt_path: "relative.md" }, "field 'prompt_path' is invalid"],
+    [
+      { ...request(), mcp_config_path: "/tmp/../mcp.json" },
+      "field 'mcp_config_path' is invalid",
+    ],
     [{ ...request(), args: [1] }, "field 'args' must be an array of strings"],
     [{ ...request(), explicit_model: "bad model" }, "field 'explicit_model' is invalid"],
   ])("rejects malformed requests %#", (value, message) => {
@@ -151,6 +155,9 @@ describe("Copilot invocation protocol", () => {
       role: "agent",
     });
     expect(readdirSync(directory)).toEqual(["result.json"]);
+    if (process.platform !== "win32") {
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    }
   });
 });
 
@@ -223,6 +230,28 @@ describe("argv and child environment", () => {
     ]);
   });
 
+  it("keeps option-looking prompt text inside the attached prompt argument", () => {
+    expect(buildCopilotArgs(prepared(), "--model=attacker")).toEqual([
+      "--prompt=--model=attacker",
+      "--additional-mcp-config",
+      "@/tmp/awf-tools/mcp-config.json",
+      "--disable-builtin-mcps",
+      "--allow-tool",
+      "shell(cat *)",
+    ]);
+  });
+
+  it("omits MCP arguments when no MCP config is prepared", () => {
+    expect(
+      buildCopilotArgs(prepared({ mcp_config_path: null }), "prompt"),
+    ).toEqual([
+      "--prompt=prompt",
+      "--disable-builtin-mcps",
+      "--allow-tool",
+      "shell(cat *)",
+    ]);
+  });
+
   it("rejects NUL bytes in prompt content", () => {
     expect(() => buildCopilotArgs(prepared(), "before\0after")).toThrow(
       "prompt contains an invalid NUL byte",
@@ -241,5 +270,26 @@ describe("argv and child environment", () => {
       COPILOT_MODEL: "selected",
     });
     expect(original.COPILOT_MODEL).toBe("old");
+  });
+
+  it("removes a stale Copilot model when no model was prepared", () => {
+    expect(
+      buildChildEnvironment(
+        {
+          KEEP: "yes",
+          COPILOT_MODEL: "stale",
+          ADO_AW_MODEL_DETECTION_COPILOT: "conflicting",
+        },
+        null,
+      ),
+    ).toEqual({ KEEP: "yes" });
+  });
+
+  it("accepts a validated bare executable command", () => {
+    expect(
+      parsePreparedInvocation(
+        JSON.stringify(prepared({ command: "copilot" })),
+      ).command,
+    ).toBe("copilot");
   });
 });

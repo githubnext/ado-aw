@@ -118,6 +118,7 @@ describe("copilot runner", () => {
     error.mockRestore();
 
     const signaledChild = childProcess();
+    const listenersBefore = process.listenerCount("SIGTERM");
     signaledChild.kill = vi.fn((signal: NodeJS.Signals) => {
       queueMicrotask(() => signaledChild.emit("close", null, signal));
       return true;
@@ -136,6 +137,7 @@ describe("copilot runner", () => {
     process.emit("SIGTERM", "SIGTERM");
     await expect(signaled).resolves.toBe(143);
     expect(signaledChild.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(process.listenerCount("SIGTERM")).toBe(listenersBefore);
   });
 
   it("does not expose controller modes", async () => {

@@ -77,7 +77,8 @@ export async function runInvocation(
       process.on(signal, handlers[signal]);
     }
     child.once("error", (error) => {
-      console.error(`copilot-runner: failed to start Copilot: ${error.message}`);
+      const message = error instanceof Error ? error.message : "unknown error";
+      console.error(`copilot-runner: failed to start Copilot: ${message}`);
       settle(1);
     });
     child.once("close", (code, signal) => {
