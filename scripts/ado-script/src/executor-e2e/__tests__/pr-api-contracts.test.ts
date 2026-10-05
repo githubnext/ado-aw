@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AdoRest } from "../ado-rest.js";
 import type { ScenarioContext } from "../scenario.js";
-import { prApiContractScenarios } from "../scenarios/pr-api-contracts.js";
+import { prApiContractScenarios, prReviewerApiExperiments } from "../scenarios/pr-api-contracts.js";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -21,7 +21,7 @@ function context(): ScenarioContext {
 }
 
 function probe(id: string) {
-  const scenario = prApiContractScenarios.find((value) => value.id === id);
+  const scenario = [...prApiContractScenarios, ...prReviewerApiExperiments].find((value) => value.id === id);
   if (!scenario) throw new Error(`missing scenario ${id}`);
   return scenario;
 }
@@ -44,10 +44,11 @@ describe("PR API contract probes", () => {
   it("identifies prerequisite checks separately from executor feature coverage", () => {
     expect(prApiContractScenarios.map((s) => s.id)).toEqual([
       "pr-api-draft-publication", "pr-api-label-replacement", "pr-api-owned-comments", "pr-api-push-concurrency",
-      "pr-api-reviewer-additive-state",
-      "pr-api-reviewer-id-only-put", "pr-api-reviewer-conditional-create",
     ]);
     expect(prApiContractScenarios.every((s) => s.tool === "noop")).toBe(true);
+    expect(prReviewerApiExperiments.map((s) => s.id)).toEqual([
+      "pr-api-reviewer-additive-state", "pr-api-reviewer-id-only-put", "pr-api-reviewer-conditional-create",
+    ]);
   });
 
   it.each([

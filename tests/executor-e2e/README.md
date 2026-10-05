@@ -147,21 +147,27 @@ uncertain deletions are never blindly replayed. These rules are test-harness
 behavior, not production safe-output cleanup.
 
 The `pr-api-draft-publication`, `pr-api-owned-comments`,
-`pr-api-label-replacement`, `pr-api-push-concurrency` and
-`pr-api-reviewer-additive-state` scenarios probe ADO
+`pr-api-label-replacement` and `pr-api-push-concurrency` scenarios probe ADO
 platform prerequisites directly on harness-owned disposable PRs. They use a
 `noop` executor record and are **not** evidence that a corresponding safe-output
 executor has been implemented. Their assertions require persisted read-back,
 round-tripped thread ownership/iteration context, and rejection of an exact
 stale source-head push without changing the branch.
-The reviewer probe checks ID-only addition of missing and existing membership,
-including an absent-snapshot/add-and-vote interleaving. It requires preservation
-of the existing actor's nonzero vote, required status and reviewer flags.
-`pr-api-reviewer-id-only-put` tests omission of mutable fields on the individual
-reviewer endpoint. `pr-api-reviewer-conditional-create` additionally requires
-`If-None-Match: *` to reject existing membership with HTTP 412 while preserving
-state. These are capability investigations, not assumptions that the server
-supports either contract.
+Historical reviewer capability experiments remain in `prReviewerApiExperiments`
+for local contract tests, but are **not registered production-success scenarios**
+or runnable selections. The ID-only collection POST preserved votes but cleared
+required status when membership already existed; individual PUT, with or without
+`If-None-Match: *`, reset both. Those failed hypotheses are not counted as passes.
+
+`pr-reviewer-existing-required-negative`, `pr-reviewer-existing-required-positive`
+and `pr-reviewer-existing-optional` seed the executor actor's real vote/required/
+flag state on non-draft, owned PRs. The production add-reviewers tool must leave
+that state unchanged and report `already_present`, with no newly added identity.
+`create-pull-request-configured-reviewers` covers configured creation followed by
+repeated membership through the focused tool. This proves the ordinary
+read-before-add/no-op contract, **not** atomic preservation of a reviewer added
+and marked required concurrently after the read. That residual race is documented
+in the safe-output reference.
 
 The PR matrix also registers Unicode boundary/composed-body rejection cases
 and optional cross-organization variants of content editing, reviewers, labels,

@@ -503,6 +503,7 @@ export class AdoRest {
   ): Promise<{
     pullRequestId: number; status: string; title: string; description?: string; isDraft?: boolean;
     sourceRefName?: string; targetRefName?: string;
+    createdBy?: { id: string };
     labels?: { name: string }[]; autoCompleteSetBy?: { id?: string };
   }> {
     const path = this.projPath(
@@ -516,6 +517,7 @@ export class AdoRest {
       isDraft?: boolean;
       sourceRefName?: string;
       targetRefName?: string;
+      createdBy?: { id: string };
       labels?: { name: string }[];
       autoCompleteSetBy?: { id?: string };
     }>(path);
@@ -573,14 +575,27 @@ export class AdoRest {
   async listReviewers(
     repo: string,
     prId: number,
-  ): Promise<{ id: string; vote: number; displayName?: string }[]> {
+  ): Promise<{ id: string; vote: number; displayName?: string; isRequired?: boolean; isFlagged?: boolean; hasDeclined?: boolean }[]> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/reviewers?api-version=7.1`,
     );
     const res = await this.request<{
-      value?: { id: string; vote: number; displayName?: string }[];
+      value?: { id: string; vote: number; displayName?: string; isRequired?: boolean; isFlagged?: boolean; hasDeclined?: boolean }[];
     }>(path);
-    return res?.value ?? [];
+    if (!Array.isArray(res?.value) || res.value.some((entry) => !entry || typeof entry.id !== "string" ||
+      typeof entry.vote !== "number")) throw new Error("Reviewer read-back is malformed");
+    return res.value;
+  }
+
+  async seedReviewerState(
+    repo: string, prId: number, reviewer: string,
+    state: { vote: number; isRequired: boolean; isFlagged: boolean; hasDeclined: boolean },
+  ): Promise<void> {
+    const path = this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/reviewers/${AdoRest.seg(reviewer)}?api-version=7.1`,
+    );
+    await this.request(path, { method: "PUT", body: { id: reviewer, vote: state.vote, isRequired: state.isRequired } });
+    await this.request(path, { method: "PATCH", body: { isFlagged: state.isFlagged, hasDeclined: state.hasDeclined } });
   }
 
   async listPullRequestLabels(repo: string, prId: number): Promise<{ name: string }[]> {

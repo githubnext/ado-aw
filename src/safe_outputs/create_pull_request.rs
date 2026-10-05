@@ -1149,7 +1149,7 @@ impl Executor for CreatePrResult {
             ));
         }
         set_pr_completion_options(&pr_ctx, pr_data["createdBy"]["id"].as_str()).await;
-        add_reviewers_to_pr(&pr_ctx).await;
+        let reviewer_changes = add_reviewers_to_pr(&pr_ctx).await;
 
         info!(
             "PR #{} created successfully: {} -> {}{}",
@@ -1159,18 +1159,25 @@ impl Executor for CreatePrResult {
             if config.draft { " (draft)" } else { "" }
         );
 
-        Ok(ExecutionResult::success_with_data(
-            format!("Created pull request #{}: {}", pr_id, effective_title),
-            serde_json::json!({
-                "pull_request_id": pr_id,
-                "url": pr_web_url,
-                "source_branch": source_branch,
-                "target_branch": target_branch,
-                "draft": config.draft,
-                "temporary_id": self.temporary_id.canonical(),
-                "omitted_operations": omitted_paths,
-            }),
-        ))
+        let mut message = format!("Created pull request #{}: {}", pr_id, effective_title);
+        let mut data = serde_json::json!({
+            "pull_request_id": pr_id,
+            "url": pr_web_url,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "draft": config.draft,
+            "temporary_id": self.temporary_id.canonical(),
+            "omitted_operations": omitted_paths,
+        });
+        if !config.reviewers.is_empty() {
+            data["reviewers"] = serde_json::to_value(&reviewer_changes)?;
+        }
+        if reviewer_changes.failed.is_empty() {
+            Ok(ExecutionResult::success_with_data(message, data))
+        } else {
+            message.push_str(&format!("; reviewer additions were not all confirmed: {}", reviewer_changes.failed.join(", ")));
+            Ok(ExecutionResult::warning_with_data(message, data))
+        }
     }
 }
 
@@ -1608,12 +1615,9 @@ async fn set_pr_completion_options(ctx: &PrContext<'_>, pr_created_by_id: Option
 /// Add configured reviewers to a pull request.
 ///
 /// Resolves each reviewer's identity (email/display-name → ADO identity ID) and
-/// issues a `PUT` for each one. Logs a warning if a reviewer cannot be resolved or
-/// if the API call fails; does not abort the overall PR creation.
-async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
-    if ctx.reviewers.is_empty() {
-        return;
-    }
+/// preserves existing membership with the same helper as the focused tool.
+async fn add_reviewers_to_pr(ctx: &PrContext<'_>) -> super::pr_mutations::ReviewerChanges {
+    let mut changes = super::pr_mutations::ReviewerChanges::default();
     debug!("Adding {} reviewers", ctx.reviewers.len());
     for reviewer in ctx.reviewers {
         debug!("Adding reviewer: {}", reviewer);
@@ -1630,50 +1634,17 @@ async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
         {
             Some(id) => id,
             None => {
-                warn!(
-                    "Could not resolve reviewer '{}' to an identity ID, skipping",
-                    reviewer
-                );
+                changes.record(reviewer, super::pr_mutations::ReviewerAddResult::Failed("identity not found".into()));
                 continue;
             }
         };
 
-        let reviewer_url = format!(
-            "{}/pullrequests/{}/reviewers/{}?api-version=7.1",
-            repository_api_base(ctx.target),
-            ctx.pr_id,
-            reviewer_id
-        );
-        let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
-
-        match crate::safe_outputs::authenticate_ado_request(
-            ctx.client.put(&reviewer_url),
-            ctx.token,
-            ctx.connection_type,
-        )
-        .json(&reviewer_body)
-        .send()
-        .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                debug!(
-                    "Reviewer '{}' (ID: {}) added successfully",
-                    reviewer, reviewer_id
-                );
-            }
-            Ok(resp) => {
-                warn!(
-                    "Failed to add reviewer '{}' (ID: {}): {}",
-                    reviewer,
-                    reviewer_id,
-                    resp.status()
-                );
-            }
-            Err(e) => {
-                warn!("Failed to add reviewer '{}': {}", reviewer, e);
-            }
-        }
+        let result = super::pr_mutations::add_reviewer_to_pr(ctx.client,
+            &repository_api_base(ctx.target), ctx.pr_id, &reviewer_id,
+            reviewer, ctx.token, ctx.connection_type).await;
+        changes.record(reviewer, result);
     }
+    changes
 }
 
 /// If any symlinks were skipped during PR file collection, append a clearly
@@ -1824,7 +1795,7 @@ mod tests {
         use crate::safe_outputs::pr_patch::tests::{command, movement, repository};
         use std::sync::{Arc, Mutex};
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, query_param}};
-        for case in ["copy", "rename-edit", "crlf", "excluded-copy", "series", "filtered-series", "base-drift", "unrelated-base", "prefix-ref", "space-header", "mode-up"] {
+        for case in ["copy", "rename-edit", "crlf", "excluded-copy", "series", "filtered-series", "base-drift", "unrelated-base", "prefix-ref", "space-header", "mode-up", "reviewer-existing", "reviewer-missing", "reviewer-read-failure"] {
             let (repo, base) = repository(&[("old.txt", b"base\n"), ("nested/secret.txt", b"excluded\n"), ("keep.txt", b"old\n"), ("space dir/user guide.md", b"old\n")]);
             let mut current = base.clone();
             let mut text = match case {
@@ -1897,6 +1868,25 @@ mod tests {
                 .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                     "pullRequestId":7,"url":"https://example.test/pr/7"
                 }))).mount(&server).await;
+            let reviewer = "01234567-89ab-cdef-0123-456789abcdef";
+            let present = Arc::new(std::sync::atomic::AtomicBool::new(case == "reviewer-existing"));
+            let observed_present = present.clone();
+            Mock::given(method("GET")).and(path(format!("{api}/pullRequests/7/reviewers")))
+                .respond_with(move |_: &wiremock::Request| {
+                    if case == "reviewer-read-failure" { return ResponseTemplate::new(403); }
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"value":
+                        if observed_present.load(std::sync::atomic::Ordering::SeqCst) {
+                            vec![serde_json::json!({"id":reviewer,"vote":-10,"isRequired":true})]
+                        } else { vec![] }
+                    }))
+                }).expect(if case == "reviewer-missing" {2} else if case.starts_with("reviewer-") {1} else {0})
+                .mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("{api}/pullRequests/7/reviewers")))
+                .and(wiremock::matchers::body_json(serde_json::json!([{"id":reviewer}])))
+                .respond_with(move |_: &wiremock::Request| {
+                    present.store(true, std::sync::atomic::Ordering::SeqCst);
+                    ResponseTemplate::new(200)
+                }).expect(usize::from(case == "reviewer-missing") as u64).mount(&server).await;
             let output = tempfile::tempdir().unwrap();
             std::fs::write(output.path().join("changes.patch"), &text).unwrap();
             let mut ctx = ExecutionContext {
@@ -1909,6 +1899,9 @@ mod tests {
             ctx.tool_configs.insert("create-pull-request".into(), serde_json::json!({
                 "include-stats":false, "excluded-files":if case == "excluded-copy" || case == "filtered-series" { vec!["secret.txt"] } else { vec![] }
             }));
+            if case.starts_with("reviewer-") {
+                ctx.tool_configs.get_mut("create-pull-request").unwrap()["reviewers"] = serde_json::json!([reviewer]);
+            }
             let result = crate::execute::execute_safe_output(&serde_json::json!({
                 "name":"create-pull-request", "title":"Patch fixture", "description":"A validated code change.",
                 "source_branch":format!("agent/{case}"), "repository":"self", "temporary_id":"#aw_fixture",
@@ -1929,6 +1922,15 @@ mod tests {
             }
             let (_, result) = result.unwrap();
             assert!(result.success, "{case}: {}", result.message);
+            assert_eq!(result.is_warning(), case == "reviewer-read-failure", "{case}");
+            if case.starts_with("reviewer-") {
+                let data = result.data.as_ref().unwrap();
+                let key = match case {
+                    "reviewer-existing" => "already_present", "reviewer-missing" => "added", _ => "failed",
+                };
+                assert_eq!(data["reviewers"][key].as_array().unwrap().len(), 1);
+                assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() != "PUT"));
+            }
             let pushes = pushes.lock().unwrap();
             assert_eq!(pushes.len(), 1, "{case}");
             assert_eq!(pushes[0]["refUpdates"][0]["name"], format!("refs/heads/agent/{case}"));

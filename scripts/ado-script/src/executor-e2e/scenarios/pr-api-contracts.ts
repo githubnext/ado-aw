@@ -229,9 +229,11 @@ function reviewerProbe(id: string, strategy: "post" | "put" | "conditional-put")
   }, false);
 }
 
-export const prApiContractScenarios: Scenario<unknown>[] = [
-  draft, labels, comments, push,
+// Historical capability experiments are not default green-path assertions.
+export const prReviewerApiExperiments: Scenario<unknown>[] = [
   reviewerProbe("pr-api-reviewer-additive-state", "post"),
   reviewerProbe("pr-api-reviewer-id-only-put", "put"),
   reviewerProbe("pr-api-reviewer-conditional-create", "conditional-put"),
 ] as Scenario<unknown>[];
+
+export const prApiContractScenarios: Scenario<unknown>[] = [draft, labels, comments, push] as Scenario<unknown>[];

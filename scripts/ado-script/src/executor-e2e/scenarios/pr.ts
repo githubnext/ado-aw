@@ -402,6 +402,54 @@ export const addPrReviewers: Scenario<ReviewerState> = {
   cleanup: teardownPr,
 };
 
+function reviewerSnapshot(entry: { vote: number; isRequired?: boolean; isFlagged?: boolean; hasDeclined?: boolean }) {
+  return { vote: entry.vote, isRequired: entry.isRequired === true, isFlagged: entry.isFlagged === true, hasDeclined: entry.hasDeclined === true };
+}
+
+const existingReviewers: Scenario<ReviewerState>[] = ([
+  { name: "required-negative", vote: -10, isRequired: true, isFlagged: true, hasDeclined: false },
+  { name: "required-positive", vote: 5, isRequired: true, isFlagged: false, hasDeclined: false },
+  { name: "optional", vote: 0, isRequired: false, isFlagged: true, hasDeclined: true },
+] as const).map((seed) => {
+  const id = `pr-reviewer-existing-${seed.name}`;
+  return {
+    id, tool: "add-pull-request-reviewers", targetsAdoRepo: true,
+    config: (ctx, state) => ({
+      target: "*", "allowed-repositories": [ctx.adoRepo], "allowed-reviewers": [state.reviewer], "max-reviewers": 1,
+    }),
+    setup: async (ctx) => {
+      const state = await setupPr(ctx, id, false, false);
+      try {
+        const pr = await ctx.rest.getPullRequest(state.repo, state.prId);
+        const reviewer = pr.createdBy?.id;
+        if (!reviewer) throw new Error("Owned PR actor identity unavailable");
+        await ctx.rest.seedReviewerState(state.repo, state.prId, reviewer, seed);
+        const before = (await ctx.rest.listReviewers(state.repo, state.prId)).find((entry) => entry.id === reviewer);
+        if (!before || JSON.stringify(reviewerSnapshot(before)) !== JSON.stringify(reviewerSnapshot(seed))) {
+          throw new Error("Existing reviewer fixture state was not persisted");
+        }
+        return { ...state, reviewer };
+      } catch (error) {
+        try { await teardownPr(ctx, state); }
+        catch (cleanup) { throw new AggregateError([error, cleanup], "Reviewer fixture setup and cleanup failed"); }
+        throw error;
+      }
+    },
+    ndjson: async (_ctx, state) => ({ pull_request_id: state.prId, repository: state.repo, reviewers: [state.reviewer] }),
+    assert: async (ctx, state, record) => {
+      const after = (await ctx.rest.listReviewers(state.repo, state.prId)).find((entry) => entry.id === state.reviewer);
+      if (!after || JSON.stringify(reviewerSnapshot(after)) !== JSON.stringify(reviewerSnapshot(seed))) {
+        throw new Error("Adding an existing reviewer changed vote, required status or flags");
+      }
+      if (JSON.stringify(record.result?.already_present) !== JSON.stringify([state.reviewer]) ||
+        JSON.stringify(record.result?.added) !== "[]" || JSON.stringify(record.result?.failed) !== "[]") {
+        throw new Error("Existing reviewer addition was not reported as an unchanged no-op");
+      }
+    },
+    cleanup: teardownPr,
+  };
+});
+
 export const addPrLabels: Scenario<PrState> = {
   tool: "add-pull-request-labels",
   targetsAdoRepo: true,
@@ -645,6 +693,7 @@ export const prScenarios: Scenario<unknown>[] = [
   updatePullRequestUnicodeOversized,
   updatePullRequestComposedOversized,
   addPrReviewers,
+  ...existingReviewers,
   addPrLabels,
   ...labelLifecycleScenarios,
   ...labelPolicyScenarios,

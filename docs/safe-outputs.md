@@ -1536,8 +1536,30 @@ reviewers using case-insensitive exact matching; `["*"]` is an explicit
 unrestricted form. Non-GUID reviewer values must also exactly match an Azure
 DevOps identity email, account name, or display name; fuzzy Identity Picker
 results are not selected. Reviewer identity or API failures return a warning
-with structured `added` and `failed` arrays. Invalid configuration, disallowed
+with structured `added`, `already_present` and `failed` arrays. Invalid configuration, disallowed
 reviewers, and unresolved PR references fail before reviewer writes begin.
+
+Immediately before each addition, Stage 3 reads complete reviewer membership.
+An identity already present is a **no-write no-op**: its vote, required status
+and flags are left untouched. Missing identities are added with an ID-only
+collection POST, never an individual reviewer PUT or explicit vote/required
+fields. Successful requests are followed by a membership read-back; failed or
+unconfirmed delivery is reported without automatic retries. `already_present`
+does not count as a newly added reviewer, but proposal budgets are still charged.
+
+**Concurrency limitation:** this is read-before-add, not an atomic conditional
+creation. If another actor adds the same reviewer and marks them required after
+the membership read but before the POST, ADO can clear that required status.
+The ID-only POST preserved votes in the platform probe; it is not a general
+guarantee that concurrent reviewer state is preserved. Read-back confirms
+membership, not absence of this race, and the executor never restores a stale
+vote/flag snapshot. Explicit voting and reset remain separate review operations.
+
+Creation's configured `reviewers` follow-ups use the same membership helper.
+When configured, its result includes a `reviewers` object containing `added`,
+`already_present` and `failed`. A reviewer failure produces a warning while
+retaining the successfully created PR ID and temporary-reference mapping; it
+does not roll back the PR or hide the partial result.
 
 Temporary PR references are resolved in safe-output proposal order, so
 `create-pull-request` must appear before its temporary-reference consumers. They are

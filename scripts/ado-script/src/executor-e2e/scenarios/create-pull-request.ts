@@ -92,6 +92,7 @@ interface AddReviewersScenarioOptions {
   readonly patchRelPath: string;
   readonly changedFileSuffix: string;
   readonly submit: "configured-reviewer" | "resolved-id";
+  readonly configureOnCreate?: boolean;
 }
 
 export function resolveExecutorE2eReviewer(
@@ -733,6 +734,7 @@ function createPullRequestAddReviewersScenario(
           "delete-source-branch": true,
           "if-no-changes": "error",
           "include-stats": false,
+          ...(options.configureOnCreate ? { reviewers: [state.reviewerId, state.reviewerId.toUpperCase()] } : {}),
         },
         entry: {
           title: `${ctx.prefix(options.id)} (do not merge)`,
@@ -781,7 +783,7 @@ function createPullRequestAddReviewersScenario(
         throw new Error(`add-reviewers reported failures: ${failed.join(", ")}`);
       }
       const expectedAdded = submittedReviewer(state);
-      const added = stringArrayResult(record, "added");
+      const added = stringArrayResult(record, options.configureOnCreate ? "already_present" : "added");
       if (
         !added.some(
           (reviewer) =>
@@ -791,6 +793,18 @@ function createPullRequestAddReviewersScenario(
         throw new Error(
           `add-reviewers result did not include submitted identity '${expectedAdded}'`,
         );
+      }
+      if (options.configureOnCreate) {
+        const changes = created.result?.reviewers;
+        if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
+          throw new Error("Creation did not report configured reviewer changes");
+        }
+        const summary = changes as Record<string, unknown>;
+        if (JSON.stringify(summary.added) !== JSON.stringify([state.reviewerId]) ||
+          JSON.stringify(summary.already_present) !== JSON.stringify([state.reviewerId.toUpperCase()]) ||
+          JSON.stringify(summary.failed) !== "[]" || JSON.stringify(record.result?.added) !== "[]") {
+          throw new Error("Creation/follow-up did not report repeated configured membership correctly");
+        }
       }
 
       const reviewers = await state.rest.listReviewers(state.repo, createdPrId);
@@ -853,4 +867,12 @@ export const createPullRequestScenarios: Scenario<unknown>[] = [
   createPullRequestTemporaryIdHandoff,
   createPullRequestAddReviewers,
   createPullRequestAddReviewersGeneral,
+  createPullRequestAddReviewersScenario({
+    id: "create-pull-request-configured-reviewers",
+    temporaryId: "#aw_prconfig",
+    patchRelPath: "create-pr-configured-reviewers.patch",
+    changedFileSuffix: "-configured-reviewers",
+    submit: "resolved-id",
+    configureOnCreate: true,
+  }),
 ];

@@ -131,17 +131,44 @@ impl UpdatePrContext<'_> {
 }
 
 /// Outcome of a single reviewer resolution + add attempt.
-enum ReviewerAddResult {
+#[derive(Debug)]
+pub(crate) enum ReviewerAddResult {
     Added,
+    AlreadyPresent,
     Failed(String),
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct ReviewerChanges {
+    pub added: Vec<String>,
+    pub already_present: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+impl ReviewerChanges {
+    pub(crate) fn record(&mut self, reviewer: &str, result: ReviewerAddResult) {
+        match result {
+            ReviewerAddResult::Added => self.added.push(reviewer.into()),
+            ReviewerAddResult::AlreadyPresent => self.already_present.push(reviewer.into()),
+            ReviewerAddResult::Failed(reason) => {
+                warn!("Reviewer '{}' was not confirmed: {}", reviewer, reason);
+                self.failed.push(format!("{reviewer} ({reason})"));
+            }
+        }
+    }
 }
 
 fn reviewer_execution_result(
     pr_id: u64,
     added: Vec<String>,
+    already_present: Vec<String>,
     failed: Vec<String>,
 ) -> ExecutionResult {
-    let mut message = format!("Added {} reviewer(s) to PR #{}", added.len(), pr_id);
+    let mut message = if added.is_empty() && !already_present.is_empty() {
+        format!("{} reviewer(s) already present on PR #{}", already_present.len(), pr_id)
+    } else {
+        format!("Added {} reviewer(s) to PR #{}; {} already present", added.len(), pr_id, already_present.len())
+    };
     if !failed.is_empty() {
         message.push_str(&format!(
             " ({} failed: {})",
@@ -154,6 +181,7 @@ fn reviewer_execution_result(
         "pull_request_id": pr_id,
         "operation": "add-reviewers",
         "added": added,
+        "already_present": already_present,
         "failed": failed,
     });
     if has_failures {
@@ -317,8 +345,7 @@ pub(crate) async fn execute_set_auto_complete(
 
 /// Add reviewers to a pull request.
 ///
-/// Resolves and verifies each reviewer identity via VSSPS, then PUTs to the
-/// reviewers endpoint with vote 0.
+/// Resolves each identity, skips existing membership, and adds missing reviewers.
 pub(crate) async fn execute_add_reviewers(
     operation_ctx: &UpdatePrContext<'_>,
     config: &UpdatePrConfig,
@@ -329,8 +356,7 @@ pub(crate) async fn execute_add_reviewers(
         Err(failure) => return Ok(failure),
     };
 
-    let mut added = Vec::new();
-    let mut failed = Vec::new();
+    let mut changes = ReviewerChanges::default();
 
     // Derive VSSPS base URL once, before the loop.
     let trimmed_org = operation_ctx.target.organization_url.trim_end_matches('/');
@@ -346,7 +372,7 @@ pub(crate) async fn execute_add_reviewers(
     }
 
     for reviewer in &reviewers {
-        match resolve_and_add_reviewer(
+        let result = resolve_and_add_reviewer(
             operation_ctx.client,
             &vssps_base,
             &operation_ctx.repository_api_base(),
@@ -355,19 +381,15 @@ pub(crate) async fn execute_add_reviewers(
             operation_ctx.token,
             operation_ctx.connection_type,
         )
-        .await
-        {
-            ReviewerAddResult::Added => added.push(reviewer.clone()),
-            ReviewerAddResult::Failed(reason) => {
-                failed.push(format!("{} ({})", reviewer, reason));
-            }
-        }
+        .await;
+        changes.record(reviewer, result);
     }
 
     Ok(reviewer_execution_result(
         operation_ctx.pr_id,
-        added,
-        failed,
+        changes.added,
+        changes.already_present,
+        changes.failed,
     ))
 }
 
@@ -667,10 +689,42 @@ async fn lookup_reviewer_id(
     }
 }
 
-/// PUT `reviewer_id` as a reviewer onto `pr_id`. Returns
-/// [`ReviewerAddResult::Added`] on success or [`ReviewerAddResult::Failed`]
-/// with a short reason string on any HTTP or transport error.
-async fn add_reviewer_to_pr(
+#[derive(Deserialize)]
+struct ReviewerIdentity {
+    id: Guid,
+}
+
+#[derive(Deserialize)]
+struct ReviewerList {
+    value: Vec<ReviewerIdentity>,
+    count: Option<usize>,
+}
+
+async fn reviewer_membership(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    let response = crate::safe_outputs::authenticate_ado_request(
+        client.get(url), token, connection_type,
+    ).send().await.context("Reviewer membership read failed")?;
+    ensure!(response.status().is_success(),
+        "Reviewer membership read failed (HTTP {})", response.status());
+    let list: ReviewerList = response.bounded_json().await?;
+    ensure!(list.count.is_none_or(|count| count == list.value.len()),
+        "Reviewer membership count is incomplete");
+    let mut ids = std::collections::HashSet::new();
+    for reviewer in list.value {
+        ensure!(ids.insert(reviewer.id.as_str().to_ascii_lowercase()),
+            "Reviewer membership contains duplicate identities");
+    }
+    Ok(ids)
+}
+
+/// This read-before-add preserves observed reviewer state, not concurrent additions.
+/// ADO's ID-only POST can clear required status on a reviewer added after the read.
+pub(crate) async fn add_reviewer_to_pr(
     client: &reqwest::Client,
     repository_api_base: &str,
     pr_id: u64,
@@ -679,27 +733,40 @@ async fn add_reviewer_to_pr(
     token: &str,
     connection_type: Option<crate::compile::types::WriteConnectionType>,
 ) -> ReviewerAddResult {
-    let reviewer_url = format!(
-        "{}/pullRequests/{}/reviewers/{}?api-version=7.1",
-        repository_api_base, pr_id, reviewer_id,
-    );
-    let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
+    let reviewer_id = match Guid::parse(reviewer_id) {
+        Ok(id) => id.as_str().to_ascii_lowercase(),
+        Err(error) => return ReviewerAddResult::Failed(format!("invalid reviewer identity: {error}")),
+    };
+    let reviewer_url = format!("{repository_api_base}/pullRequests/{pr_id}/reviewers?api-version=7.1");
+    let members = match reviewer_membership(client, &reviewer_url, token, connection_type).await {
+        Ok(members) => members,
+        Err(error) => return ReviewerAddResult::Failed(format!("membership not checked: {error:#}")),
+    };
+    if members.contains(&reviewer_id) {
+        return ReviewerAddResult::AlreadyPresent;
+    }
 
     debug!("Adding reviewer '{}' to PR #{}", reviewer, pr_id);
     let response = crate::safe_outputs::authenticate_ado_request(
-        client.put(&reviewer_url),
+        client.post(&reviewer_url),
         token,
         connection_type,
     )
     .header("Content-Type", "application/json")
-    .json(&reviewer_body)
+    .json(&serde_json::json!([{ "id": reviewer_id }]))
     .send()
     .await;
 
     match response {
         Ok(resp) if resp.status().is_success() => {
-            info!("Added reviewer '{}' to PR #{}", reviewer, pr_id);
-            ReviewerAddResult::Added
+            match reviewer_membership(client, &reviewer_url, token, connection_type).await {
+                Ok(members) if members.contains(&reviewer_id) => {
+                    info!("Added reviewer '{}' to PR #{}", reviewer, pr_id);
+                    ReviewerAddResult::Added
+                }
+                Ok(_) => ReviewerAddResult::Failed("addition accepted but membership is unconfirmed; no retry".into()),
+                Err(error) => ReviewerAddResult::Failed(format!("addition accepted but membership is unconfirmed; no retry: {error:#}")),
+            }
         }
         Ok(resp) => {
             let status = resp.status();
@@ -724,8 +791,7 @@ async fn add_reviewer_to_pr(
 }
 
 /// Resolve an ADO identity for `reviewer` via the VSSPS identities API, then
-/// PUT the reviewer onto the PR. Returns [`ReviewerAddResult::Added`] on success
-/// or [`ReviewerAddResult::Failed`] with a short reason string on any failure.
+/// check current membership and add the reviewer only if absent.
 async fn resolve_and_add_reviewer(
     client: &reqwest::Client,
     vssps_base: &str,
@@ -756,6 +822,174 @@ async fn resolve_and_add_reviewer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn review3_existing_reviewer_is_not_mutated() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+        let server = MockServer::start().await;
+        let actor = "01234567-89ab-cdef-0123-456789abcdef";
+        Mock::given(method("GET")).and(path("/pullRequests/42/reviewers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value":[{"id":actor,"vote":-10,"isRequired":true}]
+            }))).mount(&server).await;
+        Mock::given(method("PUT")).respond_with(ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"id":actor,"vote":0,"isRequired":false}))).mount(&server).await;
+        let result = add_reviewer_to_pr(&super::super::pr_http::client().unwrap(),
+            &server.uri(), 42, actor, actor, "test-token", None).await;
+        assert!(matches!(result, ReviewerAddResult::AlreadyPresent));
+        assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() == "GET"),
+            "An already-present reviewer must not receive a state-resetting write");
+    }
+
+    #[tokio::test]
+    async fn reviewer_addition_uses_fresh_membership_and_identity_only_post() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, body_json, header}};
+        let actor = "01234567-89ab-cdef-0123-456789abcdef";
+        for bearer in [false, true] {
+            let server = MockServer::start().await;
+            let present = Arc::new(AtomicBool::new(false));
+            let read = present.clone();
+            Mock::given(method("GET")).and(path("/pullRequests/42/reviewers"))
+                .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": if read.load(Ordering::SeqCst) { vec![serde_json::json!({"id":actor.to_uppercase(),"vote":-10,"isRequired":true})] } else {vec![]}
+                }))).expect(5).mount(&server).await;
+            let write = present.clone();
+            Mock::given(method("POST")).and(path("/pullRequests/42/reviewers"))
+                .and(body_json(serde_json::json!([{"id":actor}])))
+                .and(header("authorization", if bearer { "Bearer test-token" } else { "Basic OnRlc3QtdG9rZW4=" }))
+                .respond_with(move |_: &wiremock::Request| {
+                    write.store(true, Ordering::SeqCst);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!([{"id":actor}]))
+                }).expect(2).mount(&server).await;
+            let client = super::super::pr_http::client().unwrap();
+            let auth = bearer.then_some(crate::compile::types::WriteConnectionType::AzureDevOps);
+            let first = add_reviewer_to_pr(&client, &server.uri(), 42, actor, "first spelling", "test-token", auth).await;
+            assert!(matches!(first, ReviewerAddResult::Added), "{first:?}");
+            let duplicate = add_reviewer_to_pr(&client, &server.uri(), 42, &actor.to_uppercase(), "second spelling", "test-token", auth).await;
+            assert!(matches!(duplicate, ReviewerAddResult::AlreadyPresent));
+            // A later operation must read membership again, not reuse a cached authorization.
+            present.store(false, Ordering::SeqCst);
+            let later = add_reviewer_to_pr(&client, &server.uri(), 42, actor, "third spelling", "test-token", auth).await;
+            assert!(matches!(later, ReviewerAddResult::Added));
+        }
+    }
+
+    #[tokio::test]
+    async fn focused_reviewer_execution_resolves_aliases_without_duplicate_writes() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, body_json}};
+        let server = MockServer::start().await;
+        let actor = "01234567-89ab-cdef-0123-456789abcdef";
+        Mock::given(method("GET")).and(path("/org/_apis/identities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value":[{"id":actor,"displayName":"Owner"}]
+            }))).expect(2).mount(&server).await;
+        let present = Arc::new(AtomicBool::new(false));
+        let read = present.clone();
+        Mock::given(method("GET")).and(path("/org/P/_apis/git/repositories/repo/pullRequests/42/reviewers"))
+            .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value":if read.load(Ordering::SeqCst) {vec![serde_json::json!({"id":actor})]} else {vec![]}
+            }))).expect(3).mount(&server).await;
+        Mock::given(method("POST")).and(path("/org/P/_apis/git/repositories/repo/pullRequests/42/reviewers"))
+            .and(body_json(serde_json::json!([{"id":actor}])))
+            .respond_with(move |_: &wiremock::Request| {
+                present.store(true, Ordering::SeqCst);
+                ResponseTemplate::new(200)
+            }).expect(1).mount(&server).await;
+        let client = reqwest::Client::builder().no_proxy()
+            .resolve("dev.azure.com", *server.address())
+            .resolve("vssps.dev.azure.com", *server.address())
+            .timeout(std::time::Duration::from_secs(2)).build().unwrap();
+        let operation = UpdatePrContext {
+            client: &client,
+            target: AdoRepositoryTarget {
+                alias: "self".into(), organization: "org".into(), organization_url: "http://dev.azure.com/org".into(),
+                project: "P".into(), repository: "repo".into(), repository_id: None, cross_organization: false,
+            },
+            pr_id: 42, token: "test-token", connection_type: None,
+        };
+        let result = execute_add_reviewers(&operation, &UpdatePrConfig::default(), &[actor.into(), "Owner".into()]).await.unwrap();
+        assert!(result.success && !result.is_warning(), "{}", result.message);
+        let data = result.data.unwrap();
+        assert_eq!(data["added"], serde_json::json!([actor]));
+        assert_eq!(data["already_present"], serde_json::json!(["Owner"]));
+        assert_eq!(data["failed"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn existing_reviewer_votes_and_flags_need_no_state_bearing_request() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let actor = "01234567-89ab-cdef-0123-456789abcdef";
+        for vote in [-10, -5, 0, 5, 10] {
+            for required in [false, true] {
+                let server = MockServer::start().await;
+                Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "count":1,"value":[{"id":actor.to_uppercase(),"vote":vote,"isRequired":required,"isFlagged":true,"hasDeclined":true}]
+                }))).expect(1).mount(&server).await;
+                let result = add_reviewer_to_pr(&super::super::pr_http::client().unwrap(),
+                    &server.uri(), 42, actor, actor, "test-token", None).await;
+                assert!(matches!(result, ReviewerAddResult::AlreadyPresent));
+                assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_or_failed_reviewer_reads_never_authorize_addition() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let actor = "01234567-89ab-cdef-0123-456789abcdef";
+        let bodies = vec![
+            serde_json::json!({}), serde_json::json!({"value":null}),
+            serde_json::json!({"value":[{}]}), serde_json::json!({"value":[{"id":"invalid"}]}),
+            serde_json::json!({"value":[{"id":actor},{"id":actor.to_uppercase()}]}),
+            serde_json::json!({"count":1,"value":[]}),
+        ];
+        let responses = bodies.into_iter().map(|body| ResponseTemplate::new(200).set_body_json(body))
+            .chain([
+                ResponseTemplate::new(401), ResponseTemplate::new(403),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"value":[]}))
+                    .insert_header("x-ms-continuationtoken", "more"),
+                ResponseTemplate::new(200).set_body_string("not JSON"),
+            ]);
+        for response in responses {
+            let server = MockServer::start().await;
+            Mock::given(method("GET")).respond_with(response).expect(1).mount(&server).await;
+            let result = add_reviewer_to_pr(&super::super::pr_http::client().unwrap(),
+                &server.uri(), 42, actor, actor, "test-token", None).await;
+            assert!(matches!(result, ReviewerAddResult::Failed(_)), "{result:?}");
+            assert!(server.received_requests().await.unwrap().iter().all(|r| r.method.as_str() == "GET"));
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewer_writes_are_not_replayed_on_errors_or_unconfirmed_membership() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let actor = "01234567-89ab-cdef-0123-456789abcdef";
+        for mode in ["forbidden", "missing", "invalid-readback", "timeout"] {
+            let server = MockServer::start().await;
+            let reads = Arc::new(AtomicUsize::new(0));
+            let observed = reads.clone();
+            Mock::given(method("GET")).respond_with(move |_: &wiremock::Request| {
+                let count = observed.fetch_add(1, Ordering::SeqCst);
+                if mode == "invalid-readback" && count > 0 {
+                    ResponseTemplate::new(200).set_body_string("invalid")
+                } else { ResponseTemplate::new(200).set_body_json(serde_json::json!({"value":[]})) }
+            }).mount(&server).await;
+            let response = match mode {
+                "forbidden" => ResponseTemplate::new(403),
+                "timeout" => ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(2)),
+                _ => ResponseTemplate::new(200).set_body_json(serde_json::json!([{"id":actor}])),
+            };
+            Mock::given(method("POST")).respond_with(response).expect(1).mount(&server).await;
+            let client = reqwest::Client::builder().timeout(std::time::Duration::from_millis(300)).build().unwrap();
+            let result = add_reviewer_to_pr(&client, &server.uri(), 42, actor, actor, "test-token", None).await;
+            let ReviewerAddResult::Failed(reason) = result else { panic!("unexpected {result:?}") };
+            assert!(reason.contains(match mode { "timeout" => "uncertain", "forbidden" => "403", _ => "unconfirmed" }), "{reason}");
+            assert_eq!(reads.load(Ordering::SeqCst), if matches!(mode, "timeout" | "forbidden") {1} else {2});
+        }
+    }
 
     #[test]
     fn pull_request_reference_accepts_quoted_numbers_and_temporary_ids() {
@@ -847,6 +1081,7 @@ mod tests {
         let partial = reviewer_execution_result(
             42,
             vec!["added@example.com".to_string()],
+            vec!["existing@example.com".to_string()],
             vec!["failed@example.com (HTTP 403)".to_string()],
         );
         assert!(partial.success);
@@ -858,6 +1093,7 @@ mod tests {
 
         let total = reviewer_execution_result(
             42,
+            Vec::new(),
             Vec::new(),
             vec!["failed@example.com (identity not found)".to_string()],
         );
@@ -872,9 +1108,13 @@ mod tests {
         );
 
         let success =
-            reviewer_execution_result(42, vec!["added@example.com".to_string()], Vec::new());
+            reviewer_execution_result(42, vec!["added@example.com".to_string()], Vec::new(), Vec::new());
         assert!(success.success);
         assert!(!success.is_warning());
+        let noop = reviewer_execution_result(42, vec![], vec!["existing".into()], vec![]);
+        assert!(noop.success && !noop.is_warning());
+        assert!(!noop.message.contains("Added"));
+        assert_eq!(noop.data.unwrap()["already_present"], serde_json::json!(["existing"]));
     }
 
     #[test]

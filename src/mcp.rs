@@ -1325,7 +1325,7 @@ pull request. The branch will be created during safe output processing."
 
     #[tool(
         name = "add-pull-request-reviewers",
-        description = "Add policy-permitted reviewers to an Azure DevOps PR. Accepts a numeric or same-run temporary PR ID."
+        description = "Add missing policy-permitted reviewers to an Azure DevOps PR. Existing reviewers are no-write no-ops; this tool does not intentionally vote or change required status. Accepts a numeric or same-run temporary PR ID. Concurrent reviewer additions are not atomic."
     )]
     async fn add_pr_reviewers(
         &self,
