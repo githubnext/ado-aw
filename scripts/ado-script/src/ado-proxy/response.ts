@@ -13,6 +13,10 @@
 import { PROTECTED_HOSTS } from "./catalog.js";
 import type { ProxyPolicy } from "./config.js";
 import { ScopeIndex } from "./scope.js";
+import {
+  decodeAdoUrlSegment,
+  normalizeAdoOrganizationUrl,
+} from "../shared/ado-remote.js";
 import type { Operation, ResponsePolicy } from "../shared/ado-proxy-catalog.types.gen.js";
 
 export type FilterOutcome =
@@ -168,7 +172,7 @@ export function filterResponse(
       for (const value of values) {
         const area = asRecord(value);
         if (area === undefined) continue;
-        const rewritten = rewriteLocationUrl(area.locationUrl, selfOrigin);
+        const rewritten = rewriteLocationUrl(area.locationUrl, selfOrigin, scopes);
         if (rewritten === undefined) continue;
         kept.push({ ...area, locationUrl: rewritten });
       }
@@ -232,16 +236,22 @@ export function filterResponse(
 }
 
 /**
- * Point a service `locationUrl` back at the proxy, preserving its path.
+ * Point a service `locationUrl` back at the proxy, preserving its scoped
+ * organization, path, query, and fragment.
  *
  * Azure DevOps returns absolute URLs like
  * `https://dev.azure.com/contoso/` — the host must become the origin the client
- * is already using, or the client's next request leaves the policed path.
- * Returns `undefined` for anything unparseable, which the caller drops.
+ * is already using, or the client's next request leaves the policed path. The
+ * legacy `https://contoso.visualstudio.com/` form carries its organization in
+ * the hostname, so it is canonicalized before the origin is replaced.
+ *
+ * Returns `undefined` for anything unparseable or out of scope, which the
+ * caller drops.
  */
 export function rewriteLocationUrl(
   locationUrl: unknown,
   selfOrigin: string,
+  scopes: ScopeIndex,
 ): string | undefined {
   if (typeof locationUrl !== "string") return undefined;
   let parsed: URL;
@@ -252,6 +262,21 @@ export function rewriteLocationUrl(
   } catch {
     return undefined;
   }
+
+  const normalized = normalizeAdoOrganizationUrl(parsed);
+  if (normalized !== null) {
+    parsed = normalized.canonicalUrl;
+  }
+  const encodedOrganization = parsed.pathname
+    .split("/")
+    .find((part) => part.length > 0);
+  const organization =
+    normalized?.organization ??
+    (encodedOrganization === undefined
+      ? undefined
+      : decodeAdoUrlSegment(encodedOrganization) ?? undefined);
+  if (!scopes.hasOrganization(organization)) return undefined;
+
   parsed.protocol = origin.protocol;
   parsed.host = origin.host;
   return parsed.toString();

@@ -5,13 +5,26 @@ export interface AdoRepoIdentity {
   repository: string;
 }
 
-function decodeSegment(value: string): string | null {
+export interface AdoOrganizationLocation {
+  organization: string;
+  canonicalUrl: URL;
+}
+
+export function decodeAdoUrlSegment(value: string): string | null {
   try {
     const decoded = decodeURIComponent(value);
     return decoded.length > 0 && !/[\/\\\u0000-\u001f\u007f]/.test(decoded) ? decoded : null;
   } catch {
     return null;
   }
+}
+
+function legacyOrganizationFromHost(host: string): string | null {
+  if (!host.endsWith(".visualstudio.com")) return null;
+  const organization = host.slice(0, -".visualstudio.com".length);
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(organization)
+    ? organization.toLowerCase()
+    : null;
 }
 
 /**
@@ -38,7 +51,7 @@ export function parseAdoRepoUrl(raw: string): AdoRepoIdentity | null {
 
   if (host === "dev.azure.com") {
     if (parts.length !== 4 || parts[2] !== "_git") return null;
-    const orgPart = decodeSegment(parts[0] ?? "");
+    const orgPart = decodeAdoUrlSegment(parts[0] ?? "");
     if (!orgPart) return null;
     organization = orgPart.toLowerCase();
     projectPart = parts[1] ?? "";
@@ -63,10 +76,61 @@ export function parseAdoRepoUrl(raw: string): AdoRepoIdentity | null {
     return null;
   }
 
-  const project = decodeSegment(projectPart);
-  const repository = decodeSegment(repoPart);
+  const project = decodeAdoUrlSegment(projectPart);
+  const repository = decodeAdoUrlSegment(repoPart);
   if (!project || !repository) return null;
   return { collectionUri, organization, project, repository };
+}
+
+/**
+ * Normalize an Azure DevOps organization URL to the modern organization-path
+ * form while preserving the meaningful suffix, query, and fragment.
+ */
+export function normalizeAdoOrganizationUrl(
+  raw: string | URL | undefined,
+): AdoOrganizationLocation | null {
+  if (!raw) return null;
+  let url: URL;
+  if (raw instanceof URL) {
+    url = raw;
+  } else {
+    try {
+      url = new URL(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (url.protocol !== "https:") return null;
+
+  const host = url.hostname.toLowerCase();
+  if (host === "dev.azure.com") {
+    const encodedOrganization = url.pathname
+      .split("/")
+      .find((part) => part.length > 0);
+    const organization = decodeAdoUrlSegment(encodedOrganization ?? "");
+    if (!organization) return null;
+    return {
+      organization: organization.toLowerCase(),
+      canonicalUrl: url,
+    };
+  }
+
+  const organization = legacyOrganizationFromHost(host);
+  if (organization === null) return null;
+
+  const defaultCollection = url.pathname.match(/^\/defaultcollection(?=\/|$)/i);
+  const suffix =
+    defaultCollection === null
+      ? url.pathname
+      : url.pathname.slice(defaultCollection[0].length);
+  url.hostname = "dev.azure.com";
+  url.pathname = `/${encodeURIComponent(organization)}${
+    suffix === "" ? "/" : suffix
+  }`;
+  return {
+    organization,
+    canonicalUrl: url,
+  };
 }
 
 export function adoOrganizationFromCollectionUri(raw: string | undefined): string | null {
@@ -83,7 +147,7 @@ export function adoOrganizationFromCollectionUri(raw: string | undefined): strin
     const parts = url.pathname.split("/").filter((part) => part.length > 0);
     if (parts.length !== 1) return null;
     const org = parts[0];
-    return org ? decodeSegment(org)?.toLowerCase() ?? null : null;
+    return org ? decodeAdoUrlSegment(org)?.toLowerCase() ?? null : null;
   }
   if (host.endsWith(".visualstudio.com")) {
     const org = host.slice(0, -".visualstudio.com".length);
