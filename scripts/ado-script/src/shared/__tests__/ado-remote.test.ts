@@ -84,46 +84,41 @@ describe("ADO collection matching", () => {
 
 describe("normalizeAdoOrganizationUrl", () => {
   it("preserves modern organization URLs", () => {
-    expect(
-      normalizeAdoOrganizationUrl(
-        "https://dev.azure.com/My%20Org/sub/path?api-version=7.1#area",
-      ),
-    ).toEqual({
-      organization: "my org",
-      canonicalUrl:
-        "https://dev.azure.com/My%20Org/sub/path?api-version=7.1#area",
-    });
+    const normalized = normalizeAdoOrganizationUrl(
+      "https://dev.azure.com/My%20Org/sub/path?api-version=7.1#area",
+    );
+    expect(normalized?.organization).toBe("my org");
+    expect(normalized?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/My%20Org/sub/path?api-version=7.1#area",
+    );
   });
 
   it("moves a legacy hostname organization into the canonical path", () => {
-    expect(
-      normalizeAdoOrganizationUrl(
-        "https://Contoso.visualstudio.com/service/path?x=1#fragment",
-      ),
-    ).toEqual({
-      organization: "contoso",
-      canonicalUrl:
-        "https://dev.azure.com/contoso/service/path?x=1#fragment",
-    });
+    const normalized = normalizeAdoOrganizationUrl(
+      "https://Contoso.visualstudio.com/service/path?x=1#fragment",
+    );
+    expect(normalized?.organization).toBe("contoso");
+    expect(normalized?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/contoso/service/path?x=1#fragment",
+    );
   });
 
   it("removes exactly one legacy DefaultCollection segment", () => {
-    expect(
-      normalizeAdoOrganizationUrl(
-        "https://contoso.visualstudio.com/DEFAULTCOLLECTION/service/path",
-      ),
-    ).toEqual({
-      organization: "contoso",
-      canonicalUrl: "https://dev.azure.com/contoso/service/path",
-    });
-    expect(
-      normalizeAdoOrganizationUrl(
-        "https://contoso.visualstudio.com/DefaultCollection/",
-      ),
-    ).toEqual({
-      organization: "contoso",
-      canonicalUrl: "https://dev.azure.com/contoso/",
-    });
+    const nested = normalizeAdoOrganizationUrl(
+      "https://contoso.visualstudio.com/DEFAULTCOLLECTION/service/path",
+    );
+    expect(nested?.organization).toBe("contoso");
+    expect(nested?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/contoso/service/path",
+    );
+
+    const root = normalizeAdoOrganizationUrl(
+      "https://contoso.visualstudio.com/DefaultCollection/",
+    );
+    expect(root?.organization).toBe("contoso");
+    expect(root?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/contoso/",
+    );
   });
 
   it("rejects unrelated, insecure, organization-less, and malformed URLs", () => {

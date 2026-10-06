@@ -13,7 +13,10 @@
 import { PROTECTED_HOSTS } from "./catalog.js";
 import type { ProxyPolicy } from "./config.js";
 import { ScopeIndex } from "./scope.js";
-import { normalizeAdoOrganizationUrl } from "../shared/ado-remote.js";
+import {
+  decodeAdoUrlSegment,
+  normalizeAdoOrganizationUrl,
+} from "../shared/ado-remote.js";
 import type { Operation, ResponsePolicy } from "../shared/ado-proxy-catalog.types.gen.js";
 
 export type FilterOutcome =
@@ -260,23 +263,18 @@ export function rewriteLocationUrl(
     return undefined;
   }
 
-  const normalized = normalizeAdoOrganizationUrl(locationUrl);
+  const normalized = normalizeAdoOrganizationUrl(parsed);
   if (normalized !== null) {
-    parsed = new URL(normalized.canonicalUrl);
+    parsed = normalized.canonicalUrl;
   }
   const encodedOrganization = parsed.pathname
     .split("/")
     .find((part) => part.length > 0);
-  let organization: string | undefined;
-  try {
-    organization =
-      normalized?.organization ??
-      (encodedOrganization === undefined
-        ? undefined
-        : decodeURIComponent(encodedOrganization));
-  } catch {
-    return undefined;
-  }
+  const organization =
+    normalized?.organization ??
+    (encodedOrganization === undefined
+      ? undefined
+      : decodeAdoUrlSegment(encodedOrganization) ?? undefined);
   if (!scopes.hasOrganization(organization)) return undefined;
 
   parsed.protocol = origin.protocol;

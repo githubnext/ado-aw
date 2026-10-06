@@ -195,6 +195,13 @@ describe("rewriteLocationUrl", () => {
 
   it("returns undefined for unusable input", () => {
     expect(rewriteLocationUrl("nonsense", "https://proxy", SCOPES)).toBeUndefined();
+    expect(
+      rewriteLocationUrl(
+        "https://vsrm.dev.azure.com/%ZZ/",
+        "https://proxy",
+        SCOPES,
+      ),
+    ).toBeUndefined();
     expect(rewriteLocationUrl(undefined, "https://proxy", SCOPES)).toBeUndefined();
     expect(rewriteLocationUrl(42, "https://proxy", SCOPES)).toBeUndefined();
   });

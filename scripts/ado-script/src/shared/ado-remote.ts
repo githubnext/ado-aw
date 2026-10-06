@@ -7,10 +7,10 @@ export interface AdoRepoIdentity {
 
 export interface AdoOrganizationLocation {
   organization: string;
-  canonicalUrl: string;
+  canonicalUrl: URL;
 }
 
-function decodeSegment(value: string): string | null {
+export function decodeAdoUrlSegment(value: string): string | null {
   try {
     const decoded = decodeURIComponent(value);
     return decoded.length > 0 ? decoded : null;
@@ -50,7 +50,7 @@ export function parseAdoRepoUrl(raw: string): AdoRepoIdentity | null {
 
   if (host === "dev.azure.com") {
     if (parts.length !== 4 || parts[2]?.toLowerCase() !== "_git") return null;
-    const orgPart = decodeSegment(parts[0] ?? "");
+    const orgPart = decodeAdoUrlSegment(parts[0] ?? "");
     if (!orgPart) return null;
     organization = orgPart.toLowerCase();
     projectPart = parts[1] ?? "";
@@ -75,8 +75,8 @@ export function parseAdoRepoUrl(raw: string): AdoRepoIdentity | null {
     return null;
   }
 
-  const project = decodeSegment(projectPart);
-  const repository = decodeSegment(repoPart);
+  const project = decodeAdoUrlSegment(projectPart);
+  const repository = decodeAdoUrlSegment(repoPart);
   if (!project || !repository) return null;
   return { collectionUri, organization, project, repository };
 }
@@ -86,14 +86,18 @@ export function parseAdoRepoUrl(raw: string): AdoRepoIdentity | null {
  * form while preserving the meaningful suffix, query, and fragment.
  */
 export function normalizeAdoOrganizationUrl(
-  raw: string | undefined,
+  raw: string | URL | undefined,
 ): AdoOrganizationLocation | null {
   if (!raw) return null;
   let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return null;
+  if (raw instanceof URL) {
+    url = raw;
+  } else {
+    try {
+      url = new URL(raw);
+    } catch {
+      return null;
+    }
   }
   if (url.protocol !== "https:") return null;
 
@@ -102,11 +106,11 @@ export function normalizeAdoOrganizationUrl(
     const encodedOrganization = url.pathname
       .split("/")
       .find((part) => part.length > 0);
-    const organization = decodeSegment(encodedOrganization ?? "");
+    const organization = decodeAdoUrlSegment(encodedOrganization ?? "");
     if (!organization) return null;
     return {
       organization: organization.toLowerCase(),
-      canonicalUrl: url.toString(),
+      canonicalUrl: url,
     };
   }
 
@@ -124,7 +128,7 @@ export function normalizeAdoOrganizationUrl(
   }`;
   return {
     organization,
-    canonicalUrl: url.toString(),
+    canonicalUrl: url,
   };
 }
 
@@ -139,7 +143,7 @@ export function adoOrganizationFromCollectionUri(raw: string | undefined): strin
   const host = url.hostname.toLowerCase();
   if (host === "dev.azure.com") {
     const org = url.pathname.split("/").find((part) => part.length > 0);
-    return org ? decodeSegment(org)?.toLowerCase() ?? null : null;
+    return org ? decodeAdoUrlSegment(org)?.toLowerCase() ?? null : null;
   }
   if (host.endsWith(".visualstudio.com")) {
     const org = host.slice(0, -".visualstudio.com".length);
