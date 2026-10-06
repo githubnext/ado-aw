@@ -5,7 +5,6 @@ import { scanStaleRefs, type StaleScanBuild, type StaleScanClient } from "../sta
 
 const NOW = new Date("2024-06-01T00:00:00Z").getTime();
 const HOUR = 3_600_000;
-const CHILD_DEFINITION_IDS = [901, 902, 903];
 
 function ref(buildId: number): RemoteRef {
   return { ref: `refs/heads/ado-aw-smoke-candidate/${buildId}/canary`, sha: `sha-${buildId}` };
@@ -25,11 +24,15 @@ function client(builds: Record<number, StaleScanBuild>, opts: ClientOpts = {}): 
       if (!b) throw new Error(`no such build ${buildId}`);
       return b;
     },
-    async listBuildsForDefinitionBranch(definitionId, branch) {
-      if (opts.childLookupErrorFor === definitionId) {
-        throw new Error(`child lookup failed for definition ${definitionId}`);
+    async listBuildsForBranch(branch) {
+      if (opts.childLookupErrorFor !== undefined) {
+        throw new Error(`child lookup failed for definition ${opts.childLookupErrorFor}`);
       }
-      return opts.childBuilds?.[`${definitionId}:${branch}`] ?? [];
+      return Object.entries(opts.childBuilds ?? {})
+        .filter(([key]) => key.endsWith(`:${branch}`))
+        .flatMap(([key, builds]) => builds.map((build) => ({
+          ...build, definition: { id: Number(key.split(":")[0]) },
+        })));
     },
   };
 }
@@ -38,11 +41,66 @@ const baseOpts = {
   baseRef: "refs/heads/main",
   ownRef: "refs/heads/ado-aw-smoke-candidate/999/canary",
   definitionId: 42,
-  laneDefinitionIds: CHILD_DEFINITION_IDS,
   staleRefHours: 24,
 };
 
 describe("scanStaleRefs", () => {
+  it.each(["notStarted", "inProgress", "completed"])("uses the source child's %s state for new targets", async (status) => {
+    const source = ref(8);
+    const target = { ref: "refs/heads/ado-aw-smoke-boundary-target/8/canary", sha: "target-sha" };
+    const decisions = await scanStaleRefs({
+      ...baseOpts, refs: [source, target],
+      client: client({
+        8: { status: "completed", definition: { id: 42 }, finishTime: new Date(NOW - 48 * HOUR).toISOString() },
+      }, { childBuilds: { [`902:${source.ref}`]: [{ status }] } }),
+      now: () => NOW,
+    });
+    expect(decisions.map((decision) => decision.sourceRef)).toEqual([source.ref, source.ref]);
+    expect(decisions.map((decision) => decision.outcome)).toEqual(status === "completed"
+      ? ["eligible", "eligible"] : ["active", "active"]);
+  });
+
+  it("requires legacy PR corroboration and then checks source-child state", async () => {
+    const source = ref(8);
+    const target = { ref: `${source.ref}-target`, sha: "target-sha" };
+    const decisions = await scanStaleRefs({
+      ...baseOpts, refs: [target],
+      client: client({
+        8: { status: "completed", definition: { id: 42 }, finishTime: new Date(NOW - 48 * HOUR).toISOString() },
+      }, { childBuilds: { [`902:${source.ref}`]: [{ status: "notStarted" }] } }),
+      boundaryPrForSource: async (ref) => ref === source.ref ? { targetRefName: target.ref } : undefined,
+      now: () => NOW,
+    });
+    expect(decisions[0]).toMatchObject({ sourceRef: source.ref, outcome: "active" });
+  });
+
+  it("does not mistake an explicit new-namespace source ending in -target for a legacy target", async () => {
+    const source = { ref: `${ref(8).ref}-target`, sha: "source-sha" };
+    const target = { ref: "refs/heads/ado-aw-smoke-boundary-target/8/canary-target", sha: "target-sha" };
+    const decisions = await scanStaleRefs({
+      ...baseOpts, refs: [source, target],
+      client: client({
+        8: { status: "completed", definition: { id: 42 }, finishTime: new Date(NOW - 48 * HOUR).toISOString() },
+      }),
+      now: () => NOW,
+    });
+    expect(decisions.every((decision) => decision.sourceRef === source.ref && decision.outcome === "eligible")).toBe(true);
+  });
+
+  it("never deletes a legacy boundary target while its source child is queued", async () => {
+    const source = ref(8);
+    const decisions = await scanStaleRefs({
+      ...baseOpts,
+      refs: [source, { ref: `${source.ref}-target`, sha: "target-sha" }],
+      client: client({
+        8: { status: "completed", definition: { id: 42 }, finishTime: new Date(NOW - 48 * HOUR).toISOString() },
+      }, { childBuilds: { [`902:${source.ref}`]: [{ status: "notStarted" }] } }),
+      now: () => NOW,
+    });
+    expect(decisions).toHaveLength(2);
+    expect(decisions.every((decision) => decision.outcome !== "eligible")).toBe(true);
+  });
+
   it("marks a completed, own-definition, old-enough build as eligible when no child builds are found", async () => {
     const decisions = await scanStaleRefs({
       ...baseOpts,
@@ -99,7 +157,7 @@ describe("scanStaleRefs", () => {
         getBuild: async () => {
           throw new Error("network error");
         },
-        listBuildsForDefinitionBranch: async () => [],
+        listBuildsForBranch: async () => [],
       },
       now: () => NOW,
     });

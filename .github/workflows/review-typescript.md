@@ -16,6 +16,7 @@ on:
     strategy: centralized
     name: review
     events: [pull_request_comment, pull_request_review_comment]
+if: github.event.pull_request.number || github.event.issue.pull_request || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request'
 permissions:
   contents: read
   pull-requests: read
@@ -93,6 +94,8 @@ Sub-agent contract:
 
 - Start `ts-critic` exactly once, immediately, and let it work while you do your
   own pass in Step 2.
+- Do not specify a model or model alias when launching the sub-agent. Omit the
+  model parameter so it inherits the parent/runtime model selection.
 - It must return strict JSONL, one finding per line.
 - Collect its output before Step 3, and **wait for it** rather than polling: make
   a single blocking read that waits for the sub-agent to finish. Only give up
@@ -171,7 +174,6 @@ wrong output; otherwise `COMMENT`.
 ## agent: `ts-critic`
 ---
 description: Hostile first-pass TypeScript reviewer for bundled Azure DevOps runtime helpers
-model: small
 ---
 You are a hostile senior TypeScript reviewer performing a first-pass audit of
 code that is bundled and executed on Azure DevOps build agents.

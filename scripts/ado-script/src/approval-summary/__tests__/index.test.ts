@@ -1,13 +1,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { main, parseRepositoryPolicies, parseReviewed } from "../index.js";
+import { main, parsePrPolicies, parseRepositoryPolicies, parseReviewed } from "../index.js";
 
 const dirs: string[] = [];
 function freshDir(): string {
-  const d = mkdtempSync(join(tmpdir(), "approval-summary-"));
+  const d = mkdtempSync(join(process.cwd(), ".approval-summary-test-"));
   dirs.push(d);
   return d;
 }
@@ -17,9 +16,20 @@ afterEach(() => {
 });
 
 describe("parseReviewed", () => {
+  it("only accepts compiler-normalized PR policies with lossless decimal fixed IDs", () => {
+    const policies = parsePrPolicies(JSON.stringify({
+      "update-pull-request": {target:{kind:"fixed",id:"18446744073709551615"}},
+      "abandon-pull-request": {target:{kind:"triggering"}},
+      "add-pull-request-labels": {target:{kind:"explicit"}},
+      "bad-raw-target": {target:"42"},
+      "bad-rounded-target": {target:{kind:"fixed",id:18446744073709552000}},
+    }));
+    expect(policies.size).toBe(3);
+    expect(policies.get("update-pull-request")?.target).toEqual({kind:"fixed",id:"18446744073709551615"});
+  });
   it("splits a newline-delimited list, trims, and drops empties", () => {
-    const set = parseReviewed(" create-pull-request \n \n add-pr-comment ");
-    expect([...set].sort()).toEqual(["add-pr-comment", "create-pull-request"]);
+    const set = parseReviewed(" create-pull-request \n \n add-pull-request-comment ");
+    expect([...set].sort()).toEqual(["add-pull-request-comment", "create-pull-request"]);
   });
 
   describe("parseRepositoryPolicies", () => {
@@ -57,6 +67,39 @@ describe("parseReviewed", () => {
 });
 
 describe("main", () => {
+  it("previews native and synthetic triggering destinations without using self or fork metadata", () => {
+    const directory = freshDir();
+    const input = join(directory, "proposals.ndjson");
+    const output = join(directory, "summary.md");
+    writeFileSync(input, '{"name":"update-pull-request","title":"New title"}');
+    const identity = {
+      collection_uri:"https://dev.azure.com/org/", project:"Other", repository_name:"target",
+      repository_id:"11111111-1111-1111-1111-111111111111", id:"42",
+    };
+    const common = {
+      AW_SAFE_OUTPUTS_NDJSON:input,AW_APPROVAL_SUMMARY_OUT:output,
+      AW_PR_POLICIES:JSON.stringify({"update-pull-request":{target:{kind:"triggering"}}}),
+      ADO_AW_SELF_REPOSITORY_NAME:"templates",
+      SYSTEM_PULLREQUEST_SOURCEREPOSITORYURI:"https://dev.azure.com/fork/Elsewhere/_git/source",
+    };
+    for (const env of [
+      {...common,ADO_AW_TRIGGERING_PR_IDENTITY:JSON.stringify(identity)},
+      {...common,ADO_AW_TRIGGERING_PR_CAPTURED:"true",ADO_AW_TRIGGER_COLLECTION_URI:identity.collection_uri,
+        ADO_AW_TRIGGER_REPOSITORY_URI:"https://dev.azure.com/org/Other/_git/target",
+        ADO_AW_TRIGGER_REPOSITORY_ID:identity.repository_id,ADO_AW_TRIGGER_REPOSITORY_PROVIDER:"TfsGit",
+        ADO_AW_TRIGGER_BUILD_REASON:"PullRequest",ADO_AW_TRIGGER_PR_ID:"42"},
+    ]) {
+      expect(main(env)).toBe(0);
+      const summary = readFileSync(output,"utf8");
+      expect(summary).toContain("| PR | 42 |");
+      expect(summary).toContain("https://dev.azure.com/org/Other/target");
+      expect(summary).not.toContain("templates");
+      expect(summary).not.toContain("/fork/");
+    }
+    main({...common,ADO_AW_TRIGGERING_PR_IDENTITY:"",SYSTEM_PULLREQUEST_PULLREQUESTID:"42"});
+    expect(readFileSync(output,"utf8")).toContain("complete triggering PR identity unavailable");
+  });
+
   it("writes a summary and returns 0 when proposals exist", () => {
     const dir = freshDir();
     const ndjsonPath = join(dir, "safe_outputs.ndjson");

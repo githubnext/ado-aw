@@ -43,6 +43,8 @@ export function makeEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
     BUILD_SOURCEBRANCH: "refs/heads/feature/x",
     SYSTEM_TEAMPROJECT: "MyProject",
     BUILD_REPOSITORY_ID: "00000000-0000-0000-0000-000000000000",
+    SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
+    BUILD_REPOSITORY_URI: "https://dev.azure.com/org/MyProject/_git/target",
     ...overrides,
   };
 }

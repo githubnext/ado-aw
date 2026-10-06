@@ -383,6 +383,20 @@ GitHub-typed repos return before any SDK load.
 
 ## Bundle env contract
 
+The approval-summary bundle receives `AW_PR_POLICIES`, a non-secret map of
+normalized target policies. Targets have an explicit kind (`fixed`, `explicit`,
+or `triggering`); fixed IDs are decimal strings, preserving precision across
+the Rust/Node boundary. Raw quoted numbers are not reinterpreted by the renderer.
+
+Native PR identity is captured from trusted build metadata separately from the
+compiler's `self` checkout. Synthetic Setup resolution supplies
+`ADO_AW_TRIGGERING_PR_IDENTITY`, carrying the selected PR's collection,
+project, repository name/ID and PR ID. Typed job outputs make that same identity
+available to the preview and both SafeOutputs variants. Missing or inconsistent
+identity is unresolved in the preview and rejected by triggering-target
+executors. Same-run references identify an earlier create proposal without
+inventing a real PR ID. The preview is not an authorization decision.
+
 Every compiler-emitted step that runs an ado-script bundle has an implicit
 environment contract — which `process.env` keys the bundle reads. That contract
 is modelled in [`src/compile/ado_bundle.rs`](../src/compile/ado_bundle.rs):

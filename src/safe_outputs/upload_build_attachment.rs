@@ -1030,6 +1030,7 @@ attachment-type: "agent-artifact"
             ado_organization: None,
             ado_project: None,
             ado_project_id: None,
+            pipeline_collection_uri: None,
             access_token: None,
             github_token: None,
             github_actor_login: None,
@@ -1066,6 +1067,8 @@ attachment-type: "agent-artifact"
             resolved_pull_requests: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            budget_groups: Default::default(),
+            triggering_pr: Default::default(),
             triggered_by_build_id: None,
             triggered_by_definition_name: None,
             triggered_by_build_number: None,

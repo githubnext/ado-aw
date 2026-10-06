@@ -112,6 +112,39 @@ GitHub githubnext/ado-aw @abc123
 Because every commit is parented on `abc123`, the per-case commits are
 siblings: one bulk object push plus N tiny deltas.
 
+Status polling recovers from transient transport failures, request timeouts,
+HTTP 408/429 and transient server errors without immediately cancelling healthy
+children. Three consecutive failed reads exhaust the retry budget; a successful
+read resets it. Backoff and `Retry-After` stay within the original run deadline,
+and sibling failure interrupts the backoff. Authentication/authorization errors,
+missing builds, malformed responses and identity mismatches cancel immediately.
+Only reads are retried: queueing and other mutations are not automatically
+replayed. Cancellation still requires observed terminal state before ref cleanup.
+
+### Paired boundary-resource cleanup
+
+Boundary tests retain the normal source ref
+`refs/heads/ado-aw-smoke-candidate/<buildId>/<caseId>`, but their disposable
+targets use `refs/heads/ado-aw-smoke-boundary-target/<buildId>/<caseId>`.
+The separate prefix prevents confusion with case names ending in `-target`.
+This is test-harness naming only, not a production safe-output policy.
+
+The source, target and boundary PR are cleaned as one group. The source's child
+builds must be terminal across all definitions, not merely the currently
+selected lanes, and the owned PR must be confirmed abandoned before
+either branch is deleted. An active/unknown child, failed PR lookup/abandonment,
+incomplete discovery or conflicting ownership retains the group. Legacy
+`<source>-target` branches require corroborating repository, PR source/target,
+test-marker and orchestrator identity; ambiguous leftovers are reported, not
+guessed at. Recovery also handles setup whose PR-creation response was lost.
+
+Each deletion is conditional on the ref's observed SHA. A failed lease is not
+retried unconditionally; read-back reports retained and confirmed-absent refs.
+The PR and multiple ref operations are not an atomic ADO transaction, so partial
+cleanup remains an explicit failure. Startup stale recovery logs warnings and
+continues; cleanup failure for the current run fails that run. An unexpectedly
+completed boundary PR is retained for investigation, not treated as abandoned.
+
 ### `ado-aw-mirror` is not a mirror
 
 Nothing syncs GitHub into it, and `main` does not exist there. It holds exactly
@@ -128,6 +161,35 @@ It is a *staging repo*, not a replica. Candidate refs are never pushed to
 GitHub.
 
 ## Adding a smoke
+
+### Opt-in live PR boundaries
+
+`pr-synthetic-push` additionally runs real source preparation and MCP patch
+capture, then verifies a direct-child source commit and exact proof-file content.
+It only modifies the orchestrator-owned candidate PR branch. Select it with
+`canary`; it is excluded from default unattended cases like the other PR boundaries.
+
+Queue the existing candidate orchestrator with `caseIds` containing `canary`
+and one or more of `pr-synthetic-auto`, `pr-synthetic-rejected`, or
+`pr-synthetic-approved`. These cases are not in default unattended selections.
+`SMOKE_CASE_IDS` is the harness equivalent; unknown IDs are rejected.
+
+The orchestrator creates an owned PR between disposable candidate refs in the
+existing mirror. The actual trusted Setup resolver discovers that PR. The
+automatic case requires an exact description update; the rejection case
+requires successful Setup/Agent/Detection and automatic execution, a failed
+ManualReview gate, skipped reviewed execution and an unchanged description.
+For jobs skipped before agent allocation, ADO reports a skipped `Phase` rather
+than creating a `Job` record. The observer requires that explicit skipped
+record (absence alone is not proof) and rejects reviewed executor artifacts.
+Expected failure alone is not enough. Build tags and published artifact
+families are also verified before cleanup.
+
+The rejection case never auto-approves: its test gate times out to reject.
+The approved case is human-on-demand and must not be queued unattended.
+Native PR validation additionally requires a pre-existing branch-validation
+policy/definition; these synthetic API-queued tests do not claim native live
+coverage and do not provision that infrastructure.
 
 1. Write the markdown (anywhere under `tests/`; `tests/safe-outputs/` is the
    usual home).

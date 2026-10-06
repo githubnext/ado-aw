@@ -62,6 +62,7 @@ export interface CaseAssertions {
   readonly pipelineText?: AgentCommandAssertion;
   /** Build tags the child run must carry, with `{buildId}` expanded to the child build id. */
   readonly requiredBuildTags?: readonly string[];
+  readonly pushedFile?: { readonly path: string; readonly content: string };
 }
 
 export interface SmokeLane {
@@ -78,6 +79,7 @@ export interface SmokeCase {
   /** Repo-relative source path (`.md` for compiled, `.yml`/`.yaml` for raw). */
   readonly source: string;
   readonly assertions?: CaseAssertions;
+  readonly prBoundary?: "automatic" | "rejected" | "approved";
 }
 
 export interface SmokeManifest {
@@ -217,16 +219,25 @@ function parseAssertions(raw: unknown, caseId: string): CaseAssertions | undefin
     }
   }
 
+  let pushedFile: CaseAssertions["pushedFile"];
+  if (obj.pushedFile !== undefined) {
+    const file = asRecord(obj.pushedFile, `case '${caseId}' assertions.pushedFile`);
+    const path = validateSourcePath(file.path, caseId);
+    const content = asString(file.content, `case '${caseId}' pushedFile.content`);
+    if (content.length > 4096) fail(`case '${caseId}' pushedFile.content exceeds the assertion bound`);
+    pushedFile = { path, content };
+  }
   if (
     agentCommand === undefined &&
     pipelineText === undefined &&
-    requiredBuildTags === undefined
+    requiredBuildTags === undefined &&
+    pushedFile === undefined
   ) {
     fail(
       `case '${caseId}' assertions must declare agentCommand, pipelineText and/or requiredBuildTags`,
     );
   }
-  return { agentCommand, pipelineText, requiredBuildTags };
+  return { agentCommand, pipelineText, requiredBuildTags, pushedFile };
 }
 
 /** Expand `{buildId}` in a declared build tag. */
@@ -316,7 +327,17 @@ export function parseManifest(text: string): SmokeManifest {
     const source = validateSourcePath(entry.source, id);
     validateKindMatchesExtension(kind, source, id);
 
-    cases.push({ id, lane, kind, modes, source, assertions: parseAssertions(entry.assertions, id) });
+    let prBoundary: SmokeCase["prBoundary"];
+    if (entry.prBoundary !== undefined) {
+      const mode = asString(entry.prBoundary, `case '${id}' prBoundary`);
+      if (!["automatic", "rejected", "approved"].includes(mode)
+        || kind !== "compiled" || modes.some((mode) => mode !== "candidate")) {
+        fail(`case '${id}' PR boundary must be a candidate-only compiled automatic/rejected/approved case`);
+      }
+      prBoundary = mode as SmokeCase["prBoundary"];
+    }
+    cases.push({ id, lane, kind, modes, source, assertions: parseAssertions(entry.assertions, id),
+      ...(prBoundary ? { prBoundary } : {}) });
   }
 
   if (cases.length === 0) fail("cases must declare at least one case");
@@ -361,7 +382,14 @@ export async function loadCases(
   const text = await readFile(join(worktreeDir, CASES_MANIFEST_PATH), "utf8");
   const manifest = parseManifest(text);
 
-  const selected = manifest.cases.filter((entry) => entry.modes.includes(mode));
+  const requested = env.SMOKE_CASE_IDS?.trim()
+    ? env.SMOKE_CASE_IDS.split(",").map((id) => id.trim()) : undefined;
+  if (requested && (requested.some((id) => !id || !manifest.cases.some((entry) => entry.id === id && entry.modes.includes(mode)))
+      || new Set(requested).size !== requested.length)) {
+    throw new Error("SMOKE_CASE_IDS must contain distinct case IDs available in the selected mode");
+  }
+  const selected = manifest.cases.filter((entry) => entry.modes.includes(mode)
+    && (requested ? requested.includes(entry.id) : entry.prBoundary === undefined));
   if (selected.length === 0) {
     throw new Error(`${CASES_MANIFEST_PATH}: no case participates in mode '${mode}'`);
   }
