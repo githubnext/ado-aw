@@ -14,8 +14,6 @@ steps:
     displayName: Select Agent runtime model
 safe-outputs:
   noop: {}
-  threat-detection:
-    enabled: false
 ---
 
 ## Same-job runtime model smoke

@@ -9,8 +9,6 @@ engine:
   timeout-minutes: 15
 safe-outputs:
   noop: {}
-  threat-detection:
-    enabled: false
 ---
 
 ## Queue-time runtime model smoke
