@@ -529,7 +529,7 @@ TS port gains:
 The bundle is installed and downloaded into the Agent job by
 `AdoScriptExtension`, which fires whenever either `import.js` or
 `exec-context-pr.js` is needed. See
-[`ado-script.md`](ado-script.md#agent-job-runtime-import-resolver--pr-context-precompute).
+[`ado-script.md`](ado-script.md#agent-job-runtime-import-resolver-pr-context-precompute).
 
 ## Trust boundary
 
