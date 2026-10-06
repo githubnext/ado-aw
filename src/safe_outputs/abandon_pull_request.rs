@@ -1174,6 +1174,13 @@ mod tests {
                 "{}",
                 execution.message
             );
+            if status == "abandoned" {
+                let data = execution.data.as_ref().expect("no-op result data");
+                assert_eq!(data["already_abandoned"], true);
+                assert_eq!(data["abandoned"], true);
+                assert_eq!(data["comment_posted"], false);
+                assert_eq!(data["comment_status"], "not-attempted");
+            }
             server.verify().await;
         }
     }
