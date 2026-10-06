@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -146,6 +149,24 @@ describe("copilot runner", () => {
     await expect(main(["read-result", "a", "agent"], "/tmp/runner.js")).resolves.toBe(2);
     expect(error).toHaveBeenCalledWith(
       "usage: copilot-runner run <prepared-invocation.json>",
+    );
+    error.mockRestore();
+  });
+
+  it("reports unreadable and malformed prepared invocations", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "copilot-runner-"));
+    const missingPath = join(directory, "missing.json");
+    const malformedPath = join(directory, "malformed.json");
+    writeFileSync(malformedPath, "not-json");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(main(["run", missingPath], "/tmp/runner.js")).resolves.toBe(1);
+    await expect(main(["run", malformedPath], "/tmp/runner.js")).resolves.toBe(1);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining("copilot-runner:"),
+    );
+    expect(error).toHaveBeenCalledWith(
+      "copilot-runner: prepared invocation is not valid JSON",
     );
     error.mockRestore();
   });

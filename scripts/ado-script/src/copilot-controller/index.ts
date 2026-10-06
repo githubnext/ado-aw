@@ -23,6 +23,8 @@ export async function main(argv: string[]): Promise<number> {
     try {
       const request = parseInvocationRequest(readFileSync(argv[1]!, "utf8"));
       const { prepared, result } = prepareInvocation(request, process.env);
+      // The sandbox document is the commit point: trusted preflight removes
+      // any prior result and cannot start AWF unless both writes succeed.
       writeJsonAtomic(argv[3]!, result);
       writeJsonAtomic(argv[2]!, prepared);
       return 0;

@@ -76,6 +76,8 @@ describe("Copilot invocation protocol", () => {
     [{ ...request(), role: "other" }, "must be 'agent' or 'detection'"],
     [{ ...request(), command: "copilot;sh" }, "field 'command' is invalid"],
     [{ ...request(), command: "bin/copilot" }, "field 'command' is invalid"],
+    [{ ...request(), command: "." }, "field 'command' is invalid"],
+    [{ ...request(), command: ".." }, "field 'command' is invalid"],
     [{ ...request(), command: "/tmp/../copilot" }, "field 'command' is invalid"],
     [{ ...request(), command: "/tmp//copilot" }, "field 'command' is invalid"],
     [{ ...request(), command: "/tmp/copilot/" }, "field 'command' is invalid"],
@@ -187,7 +189,18 @@ describe("model preparation", () => {
     expect(
       resolveRequestedModel(request(), {
         ADO_AW_MODEL_AGENT_COPILOT: "$(ADO_AW_MODEL_AGENT_COPILOT)",
+        ADO_AW_DEFAULT_MODEL_COPILOT: "default-model",
+      }),
+    ).toBe("default-model");
+    expect(
+      resolveRequestedModel(request(), {
+        ADO_AW_MODEL_AGENT_COPILOT: "$(ADO_AW_MODEL_AGENT_COPILOT)",
         ADO_AW_DEFAULT_MODEL_COPILOT: "$(ADO_AW_DEFAULT_MODEL_COPILOT)",
+      }),
+    ).toBeNull();
+    expect(
+      resolveRequestedModel(request(), {
+        ADO_AW_DEFAULT_MODEL_COPILOT: "",
       }),
     ).toBeNull();
   });
