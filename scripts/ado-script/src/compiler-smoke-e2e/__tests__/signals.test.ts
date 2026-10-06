@@ -42,7 +42,7 @@ const CASES: ResolvedCase[] = [
     kind: "compiled",
     modes: ["candidate"],
     source: "tests/smoke/runtime-model-queue.md",
-    assertions: { requestedModels: { agent: "auto" } },
+    assertions: { requestedModels: { agent: "gpt-5.4" } },
     definitionId: 3006,
   },
 ];
@@ -251,7 +251,7 @@ describe("verifyCandidateAudit", () => {
       .mockResolvedValueOnce({
         status: 0,
         stdout: JSON.stringify({
-          overview: { build_id: 43, aw_info: { model: "gpt-5.4" } },
+          overview: { build_id: 43, aw_info: { model: "auto" } },
         }),
         stderr: "",
         timedOut: false,
@@ -269,6 +269,6 @@ describe("verifyCandidateAudit", () => {
     );
 
     expect(outcome.ok).toBe(false);
-    expect(outcome.results[1]?.message).toMatch(/expected "auto"/);
+    expect(outcome.results[1]?.message).toMatch(/expected "gpt-5.4"/);
   });
 });

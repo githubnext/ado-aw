@@ -80,11 +80,11 @@
       "modes": ["candidate"],
       "source": "tests/smoke/runtime-model-queue.md",
       "queueVariables": {
-        "ADO_AW_MODEL_AGENT_COPILOT": "auto"
+        "ADO_AW_MODEL_AGENT_COPILOT": "gpt-5.4"
       },
       "assertions": {
         "requestedModels": {
-          "agent": "auto"
+          "agent": "gpt-5.4"
         }
       }
     },
@@ -96,7 +96,7 @@
       "source": "tests/smoke/runtime-model-set-variable.md",
       "assertions": {
         "requestedModels": {
-          "agent": "auto"
+          "agent": "gpt-5.4"
         }
       }
     },

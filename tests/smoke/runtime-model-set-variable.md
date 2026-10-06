@@ -10,7 +10,7 @@ engine:
 steps:
   - bash: |
       set -euo pipefail
-      echo "##vso[task.setvariable variable=ADO_AW_MODEL_AGENT_COPILOT]auto"
+      echo "##vso[task.setvariable variable=ADO_AW_MODEL_AGENT_COPILOT]gpt-5.4"
     displayName: Select Agent runtime model
 safe-outputs:
   noop: {}
