@@ -77,8 +77,20 @@ export async function verifyCaseSignals(
   };
 }
 
-/** Audit one completed candidate child through the released CLI contract. */
+interface CandidateAuditReport {
+  overview?: {
+    build_id?: number;
+    aw_info?: {
+      model?: string | null;
+      detection_model?: string | null;
+    };
+  };
+  downloaded_files?: { path?: string }[];
+}
+
+/** Audit candidate children through the released CLI contract. */
 export async function verifyCandidateAudit(
+  cases: readonly ResolvedCase[],
   results: readonly FixtureBuildResult[],
   options: {
     adoAwBin: string;
@@ -89,78 +101,106 @@ export async function verifyCandidateAudit(
     timeoutMs: number;
   },
 ): Promise<SignalVerificationOutcome> {
-  const target = results.find(
+  const canary = results.find(
     (result) => result.caseId === "canary" && result.status === "succeeded" && result.buildId !== undefined,
   );
-  if (!target?.buildId) return { ok: false, results: results.map((result) => ({ ...result })) };
+  if (!canary?.buildId) return { ok: false, results: results.map((result) => ({ ...result })) };
 
-  const outputDir = await mkdtemp(join(tmpdir(), "ado-aw-smoke-audit-"));
-  try {
-    const outcome = await safeSpawn({
-      cmd: options.adoAwBin,
-      args: [
-        "audit",
-        String(target.buildId),
-        "--json",
-        "--no-cache",
-        "--output",
-        outputDir,
-        "--org",
-        options.orgUrl,
-        "--project",
-        options.project,
-      ],
-      cwd: options.cwd,
-      env: { AZURE_DEVOPS_EXT_PAT: options.token },
-      timeoutMs: options.timeoutMs,
-    });
+  const casesById = new Map(cases.map((entry) => [entry.id, entry]));
+  const targets = results.filter((result) => {
+    if (result.status !== "succeeded" || result.buildId === undefined) return false;
+    return (
+      result.caseId === "canary" ||
+      casesById.get(result.caseId)?.assertions?.requestedModels !== undefined
+    );
+  });
+  const verified = results.map((result) => ({ ...result }));
+
+  for (const target of targets) {
+    const outputDir = await mkdtemp(join(tmpdir(), "ado-aw-smoke-audit-"));
     let error: string | undefined;
-    if (outcome.timedOut || outcome.status !== 0) {
-      error = `exit=${outcome.status ?? "signal"} timedOut=${outcome.timedOut}; stderr=${redact(outcome.stderr, [options.token])}`;
-    } else {
-      try {
-        const audit = JSON.parse(outcome.stdout) as {
-          overview?: { build_id?: number };
-          downloaded_files?: { path?: string }[];
-        };
-        const paths =
-          audit.downloaded_files
-            ?.flatMap((file) => file.path ?? [])
-            .map((path) => path.replaceAll("\\", "/")) ?? [];
-        const expectedRoots = [
-          `agent_outputs_${target.buildId}/`,
-          `analyzed_outputs_${target.buildId}/`,
-          "safe_outputs/",
-        ];
-        const missingRoots = expectedRoots.filter(
-          (root) => !paths.some((path) => path.startsWith(root)),
-        );
-        if (audit.overview?.build_id !== target.buildId || missingRoots.length > 0) {
-          error =
-            `JSON report did not contain the child build id and every published artifact family; ` +
-            `missing roots: ${missingRoots.join(", ") || "<none>"}`;
-        }
-      } catch (parseError) {
-        error = `invalid JSON report: ${parseError instanceof Error ? parseError.message : String(parseError)}`;
-      }
-    }
-    if (!error) return { ok: true, results: results.map((result) => ({ ...result })) };
+    try {
+      const outcome = await safeSpawn({
+        cmd: options.adoAwBin,
+        args: [
+          "audit",
+          String(target.buildId),
+          "--json",
+          "--no-cache",
+          "--output",
+          outputDir,
+          "--org",
+          options.orgUrl,
+          "--project",
+          options.project,
+        ],
+        cwd: options.cwd,
+        env: { AZURE_DEVOPS_EXT_PAT: options.token },
+        timeoutMs: options.timeoutMs,
+      });
+      if (outcome.timedOut || outcome.status !== 0) {
+        error = `exit=${outcome.status ?? "signal"} timedOut=${outcome.timedOut}; stderr=${redact(outcome.stderr, [options.token])}`;
+      } else {
+        try {
+          const audit = JSON.parse(outcome.stdout) as CandidateAuditReport;
+          if (audit.overview?.build_id !== target.buildId) {
+            error = `JSON report build id was ${audit.overview?.build_id ?? "<missing>"}; expected ${target.buildId}`;
+          }
 
-    return {
-      ok: false,
-      results: results.map((result) =>
-        result.caseId === target.caseId
-          ? {
-              ...result,
-              status: "failed",
-              message:
-                `candidate audit contract failed for build #${target.buildId} (${target.url ?? "URL unavailable"}); ` +
-                `expected artifacts agent_outputs_${target.buildId}, analyzed_outputs_${target.buildId}, and safe_outputs: ${error}`,
+          if (!error && target.caseId === "canary") {
+            const paths =
+              audit.downloaded_files
+                ?.flatMap((file) => file.path ?? [])
+                .map((path) => path.replaceAll("\\", "/")) ?? [];
+            const expectedRoots = [
+              `agent_outputs_${target.buildId}/`,
+              `analyzed_outputs_${target.buildId}/`,
+              "safe_outputs/",
+            ];
+            const missingRoots = expectedRoots.filter(
+              (root) => !paths.some((path) => path.startsWith(root)),
+            );
+            if (missingRoots.length > 0) {
+              error =
+                `JSON report did not contain every published artifact family; ` +
+                `missing roots: ${missingRoots.join(", ")}`;
             }
-          : { ...result },
-      ),
-    };
-  } finally {
-    await rm(outputDir, { recursive: true, force: true });
+          }
+
+          const requested = casesById.get(target.caseId)?.assertions?.requestedModels;
+          if (!error && requested?.agent !== undefined) {
+            const actual = audit.overview?.aw_info?.model;
+            if (actual !== requested.agent) {
+              error = `requested Agent model was ${JSON.stringify(actual ?? null)}; expected ${JSON.stringify(requested.agent)}`;
+            }
+          }
+          if (!error && requested?.detection !== undefined) {
+            const actual = audit.overview?.aw_info?.detection_model;
+            if (actual !== requested.detection) {
+              error = `requested Detection model was ${JSON.stringify(actual ?? null)}; expected ${JSON.stringify(requested.detection)}`;
+            }
+          }
+        } catch (parseError) {
+          error = `invalid JSON report: ${parseError instanceof Error ? parseError.message : String(parseError)}`;
+        }
+      }
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+
+    if (error) {
+      const index = verified.findIndex((result) => result.caseId === target.caseId);
+      verified[index] = {
+        ...verified[index]!,
+        status: "failed",
+        message:
+          `candidate audit verification failed for build #${target.buildId} (${target.url ?? "URL unavailable"}): ${error}`,
+      };
+    }
   }
+
+  return {
+    ok: verified.every((result) => result.status === "succeeded"),
+    results: verified,
+  };
 }

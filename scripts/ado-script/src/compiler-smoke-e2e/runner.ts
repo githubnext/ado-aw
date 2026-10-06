@@ -50,7 +50,14 @@ export interface PolledBuild {
 
 /** The minimal ADO Build surface this state machine needs. */
 export interface FixtureBuildClient {
-  queueBuild(definitionId: number, opts: { sourceBranch: string; sourceVersion: string }): Promise<{ id: number }>;
+  queueBuild(
+    definitionId: number,
+    opts: {
+      sourceBranch: string;
+      sourceVersion: string;
+      variables?: Readonly<Record<string, string>>;
+    },
+  ): Promise<{ id: number }>;
   getBuild(buildId: number): Promise<PolledBuild>;
   cancelBuild(buildId: number): Promise<void>;
   buildUrl(buildId: number): string;
@@ -70,6 +77,8 @@ export interface FixtureBuildRequest {
   definitionId: number;
   sourceBranch: string;
   sourceVersion: string;
+  /** Non-secret ADO variables supplied when the child build is queued. */
+  variables?: Readonly<Record<string, string>>;
   /** Tags applied to the queued run so it is identifiable in a shared lane's history. */
   tags?: readonly string[];
 }
@@ -312,6 +321,7 @@ export async function runFixtures(
         const build = await client.queueBuild(req.definitionId, {
           sourceBranch: req.sourceBranch,
           sourceVersion: req.sourceVersion,
+          variables: req.variables,
         });
         queued.push({ index: i, buildId: build.id, start });
         results[i] = {

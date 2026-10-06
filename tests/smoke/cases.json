@@ -74,6 +74,33 @@
       "source": "tests/smoke/multi-repo.md"
     },
     {
+      "id": "runtime-model-queue",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/runtime-model-queue.md",
+      "queueVariables": {
+        "ADO_AW_MODEL_AGENT_COPILOT": "auto"
+      },
+      "assertions": {
+        "requestedModels": {
+          "agent": "auto"
+        }
+      }
+    },
+    {
+      "id": "runtime-model-set-variable",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/runtime-model-set-variable.md",
+      "assertions": {
+        "requestedModels": {
+          "agent": "auto"
+        }
+      }
+    },
+    {
       "id": "janitor",
       "lane": "agentic",
       "kind": "compiled",

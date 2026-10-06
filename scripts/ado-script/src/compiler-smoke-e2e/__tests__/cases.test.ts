@@ -313,7 +313,7 @@ describe("parseManifest", () => {
             },
           ]),
         ),
-      ).toThrow(/must declare agentCommand, pipelineText and\/or requiredBuildTags/);
+      ).toThrow(/must declare agentCommand, pipelineText, requiredBuildTags and\/or requestedModels/);
     });
 
     it("rejects an agentCommand with no snippets", () => {
@@ -355,6 +355,67 @@ describe("parseManifest", () => {
         required: ["Start ado-proxy"],
         forbidden: ["$SC_READ_TOKEN"],
       });
+    });
+
+    it("parses and validates requested model assertions", () => {
+      const parsed = parseManifest(
+        cases([
+          {
+            id: "x",
+            lane: "agentic",
+            kind: "compiled",
+            modes: ["candidate", "released"],
+            source: "a.md",
+            assertions: { requestedModels: { agent: "auto", detection: "gpt-5.4" } },
+          },
+        ]),
+      );
+      expect(parsed.cases[0]?.assertions?.requestedModels).toEqual({
+        agent: "auto",
+        detection: "gpt-5.4",
+      });
+
+      expect(() =>
+        parseManifest(
+          cases([
+            {
+              id: "x",
+              lane: "agentic",
+              kind: "compiled",
+              modes: ["candidate", "released"],
+              source: "a.md",
+              assertions: { requestedModels: {} },
+            },
+          ]),
+        ),
+      ).toThrow(/must declare agent and\/or detection/);
+    });
+  });
+
+  describe("queue variable validation", () => {
+    it("parses valid variables and rejects empty or malformed values", () => {
+      const entry = {
+        id: "x",
+        lane: "agentic",
+        kind: "compiled",
+        modes: ["candidate", "released"],
+        source: "a.md",
+      };
+      const parsed = parseManifest(
+        cases([{ ...entry, queueVariables: { ADO_AW_MODEL_AGENT_COPILOT: "auto" } }]),
+      );
+      expect(parsed.cases[0]?.queueVariables).toEqual({
+        ADO_AW_MODEL_AGENT_COPILOT: "auto",
+      });
+      expect(() => parseManifest(cases([{ ...entry, queueVariables: {} }]))).toThrow(
+        /must not be empty/,
+      );
+      expect(() =>
+        parseManifest(cases([{ ...entry, queueVariables: { "not-valid": "auto" } }])),
+      ).toThrow(/must match/);
+      expect(() =>
+        parseManifest(cases([{ ...entry, queueVariables: { ADO_AW_MODEL_AGENT_COPILOT: "" } }])),
+      ).toThrow(/must be a non-empty string/);
     });
   });
 });

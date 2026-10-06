@@ -249,14 +249,23 @@ export class AdoRest {
    */
   async queueBuild(
     definitionId: number,
-    opts: { sourceBranch: string; sourceVersion: string },
+    opts: {
+      sourceBranch: string;
+      sourceVersion: string;
+      variables?: Readonly<Record<string, string>>;
+    },
   ): Promise<{ id: number }> {
     const path = this.projPath(`_apis/build/builds?api-version=7.1`);
-    const body = {
+    const body: Record<string, unknown> = {
       definition: { id: definitionId },
       sourceBranch: opts.sourceBranch,
       sourceVersion: opts.sourceVersion,
     };
+    if (opts.variables && Object.keys(opts.variables).length > 0) {
+      body.variables = Object.fromEntries(
+        Object.entries(opts.variables).map(([name, value]) => [name, { value }]),
+      );
+    }
     const res = await this.request<{ id: number }>(path, { method: "POST", body });
     if (!res) throw new Error(`queueBuild(${definitionId}) returned no body`);
     return res;

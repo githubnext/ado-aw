@@ -368,6 +368,7 @@ export async function main(): Promise<number> {
       definitionId: entry.definitionId,
       sourceBranch: staged.get(entry.id)!.ref,
       sourceVersion: staged.get(entry.id)!.sha,
+      variables: entry.queueVariables,
       tags: [`smoke-case:${entry.id}`, `smoke-candidate:${config.buildId}`],
     }));
 
@@ -386,7 +387,7 @@ export async function main(): Promise<number> {
     const signalOutcome = await verifyCaseSignals(rest, resolved.cases, outcome.results);
     const auditOutcome =
       config.compilerSource === "candidate"
-        ? await verifyCandidateAudit(signalOutcome.results, {
+        ? await verifyCandidateAudit(resolved.cases, signalOutcome.results, {
             adoAwBin: config.adoAwBin,
             cwd: config.sourcesDirectory,
             orgUrl: config.orgUrl,
