@@ -262,9 +262,11 @@ export class AdoRest {
       sourceVersion: opts.sourceVersion,
     };
     if (opts.variables && Object.keys(opts.variables).length > 0) {
-      body.variables = Object.fromEntries(
-        Object.entries(opts.variables).map(([name, value]) => [name, { value }]),
-      );
+      // Build Queue's legacy `parameters` string is how `az pipelines run
+      // --variables` sends queue-time variables. A top-level `variables`
+      // object belongs to the Pipelines Runs API and is silently ignored by
+      // this endpoint.
+      body.parameters = JSON.stringify(opts.variables);
     }
     const res = await this.request<{ id: number }>(path, { method: "POST", body });
     if (!res) throw new Error(`queueBuild(${definitionId}) returned no body`);

@@ -188,7 +188,8 @@ Optional per-case assertions, so novel checks stay out of the harness code:
 
 `requestedModels` runs `ado-aw audit` against the completed child and compares
 the requested Agent and/or Detection model recorded in `overview.aw_info`.
-Queue variables use the Build API's `variables` object and therefore exercise
+Queue variables use the Build Queue API's `parameters` JSON string, matching
+the encoding used by `az pipelines run --variables`, and therefore exercise
 the same runtime source as variables supplied in the Azure DevOps Run Pipeline
 UI. A lane definition may need the variable predeclared with
 `allowOverride=true` when the project restricts queue-time variables.

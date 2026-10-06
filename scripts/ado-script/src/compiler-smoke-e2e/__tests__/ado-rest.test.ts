@@ -99,7 +99,7 @@ describe("AdoRest.queueBuild", () => {
     });
   });
 
-  it("serializes queue variables using the ADO Build API variable shape", async () => {
+  it("serializes queue variables through the Build Queue parameters string", async () => {
     let sentBody: unknown;
     const fetchImpl = vi.fn(
       async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -114,8 +114,9 @@ describe("AdoRest.queueBuild", () => {
       variables: { ADO_AW_MODEL_AGENT_COPILOT: "auto" },
     });
     expect(sentBody).toMatchObject({
-      variables: { ADO_AW_MODEL_AGENT_COPILOT: { value: "auto" } },
+      parameters: JSON.stringify({ ADO_AW_MODEL_AGENT_COPILOT: "auto" }),
     });
+    expect(sentBody).not.toHaveProperty("variables");
   });
 
   it("throws with a descriptive error on a non-2xx response", async () => {
