@@ -274,6 +274,25 @@ describe("authorize — denials", () => {
 });
 
 describe("authorize — additional organization-relative scopes", () => {
+  it("allows area discovery only for organizations present in the policy", () => {
+    expect(
+      decide("OPTIONS", "/contoso/_apis/git", {
+        policy: MULTI_SCOPE_POLICY,
+      }).allow,
+    ).toBe(true);
+    expect(
+      decide("OPTIONS", "/fabrikam/_apis/git", {
+        policy: MULTI_SCOPE_POLICY,
+      }).allow,
+    ).toBe(true);
+    expectDeny(
+      decide("OPTIONS", "/adatum/_apis/git", {
+        policy: MULTI_SCOPE_POLICY,
+      }),
+      "out-of-scope",
+    );
+  });
+
   it("allows a project explicitly granted in another organization", () => {
     expect(
       decide("GET", "/fabrikam/_apis/projects/Shared?api-version=7.1", {
@@ -298,6 +317,32 @@ describe("authorize — additional organization-relative scopes", () => {
       { policy: MULTI_SCOPE_POLICY },
     );
     expectDeny(decision, "out-of-scope");
+  });
+
+  it("keeps cross-organization repository reads inside their granted project", () => {
+    expect(
+      decide(
+        "GET",
+        "/fabrikam/Shared/_apis/git/repositories/shared-api/refs?api-version=7.1&filter=heads",
+        { policy: MULTI_SCOPE_POLICY },
+      ).allow,
+    ).toBe(true);
+    expectDeny(
+      decide(
+        "GET",
+        "/contoso/Shared/_apis/git/repositories/shared-api/refs?api-version=7.1&filter=heads",
+        { policy: MULTI_SCOPE_POLICY },
+      ),
+      "out-of-scope",
+    );
+    expectDeny(
+      decide(
+        "GET",
+        "/fabrikam/Shared/_apis/git/repositories/private-api/refs?api-version=7.1&filter=heads",
+        { policy: MULTI_SCOPE_POLICY },
+      ),
+      "out-of-scope",
+    );
   });
 
   it("allows a repos-derived repository without opening its project", () => {

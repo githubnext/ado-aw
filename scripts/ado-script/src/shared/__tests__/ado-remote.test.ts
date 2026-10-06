@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   adoOrganizationFromCollectionUri,
   isCurrentAdoOrganization,
+  normalizeAdoOrganizationUrl,
   parseAdoRepoUrl,
 } from "../ado-remote.js";
 
@@ -59,6 +60,9 @@ describe("ADO collection matching", () => {
     expect(
       adoOrganizationFromCollectionUri("https://myorg.visualstudio.com/"),
     ).toBe("myorg");
+    expect(
+      adoOrganizationFromCollectionUri("http://myorg.visualstudio.com/"),
+    ).toBe("myorg");
   });
 
   it("recognizes same-org identities and rejects cross-org identities", () => {
@@ -75,5 +79,56 @@ describe("ADO collection matching", () => {
         SYSTEM_COLLECTIONURI: "https://dev.azure.com/other/",
       }),
     ).toBe(false);
+  });
+});
+
+describe("normalizeAdoOrganizationUrl", () => {
+  it("preserves modern organization URLs", () => {
+    const normalized = normalizeAdoOrganizationUrl(
+      "https://dev.azure.com/My%20Org/sub/path?api-version=7.1#area",
+    );
+    expect(normalized?.organization).toBe("my org");
+    expect(normalized?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/My%20Org/sub/path?api-version=7.1#area",
+    );
+  });
+
+  it("moves a legacy hostname organization into the canonical path", () => {
+    const normalized = normalizeAdoOrganizationUrl(
+      "https://Contoso.visualstudio.com/service/path?x=1#fragment",
+    );
+    expect(normalized?.organization).toBe("contoso");
+    expect(normalized?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/contoso/service/path?x=1#fragment",
+    );
+  });
+
+  it("removes exactly one legacy DefaultCollection segment", () => {
+    const nested = normalizeAdoOrganizationUrl(
+      "https://contoso.visualstudio.com/DEFAULTCOLLECTION/service/path",
+    );
+    expect(nested?.organization).toBe("contoso");
+    expect(nested?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/contoso/service/path",
+    );
+
+    const root = normalizeAdoOrganizationUrl(
+      "https://contoso.visualstudio.com/DefaultCollection/",
+    );
+    expect(root?.organization).toBe("contoso");
+    expect(root?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/contoso/",
+    );
+  });
+
+  it("rejects unrelated, insecure, organization-less, and malformed URLs", () => {
+    expect(normalizeAdoOrganizationUrl("https://example.test/contoso/")).toBeNull();
+    expect(
+      normalizeAdoOrganizationUrl("https://app.vssps.visualstudio.com/"),
+    ).toBeNull();
+    expect(normalizeAdoOrganizationUrl("http://dev.azure.com/contoso/")).toBeNull();
+    expect(normalizeAdoOrganizationUrl("https://dev.azure.com/")).toBeNull();
+    expect(normalizeAdoOrganizationUrl("https://visualstudio.com/")).toBeNull();
+    expect(normalizeAdoOrganizationUrl("not a url")).toBeNull();
   });
 });

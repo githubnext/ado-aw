@@ -179,13 +179,42 @@ async function startFakeAdo(ca: CaMaterials, calls: UpstreamCall[]): Promise<num
       authorization: request.headers.authorization,
       headerNames: Object.keys(request.headers),
     });
-    const body = JSON.stringify({
-      count: 2,
-      value: [
-        { id: POLICY.project_id, name: "Widgets" },
-        { id: "33333333-3333-3333-3333-333333333333", name: "Secrets" },
-      ],
-    });
+    const requestUrl = request.url ?? "";
+    const body =
+      request.method === "GET" &&
+      requestUrl.startsWith(`/${ORGANIZATION}/_apis/resourceareas?`)
+        ? JSON.stringify({
+            count: 1,
+            value: [
+              {
+                id: "git-area",
+                name: "git",
+                locationUrl: `https://${ORGANIZATION}.visualstudio.com/DefaultCollection/`,
+              },
+            ],
+          })
+        : request.method === "OPTIONS" &&
+            requestUrl === `/${ORGANIZATION}/_apis/git`
+          ? JSON.stringify({ count: 0, value: [] })
+          : request.method === "GET" &&
+              requestUrl.startsWith(
+                `/${ORGANIZATION}/Widgets/_apis/git/repositories/widget-api?`,
+              )
+            ? JSON.stringify({
+                id: POLICY.repository_id,
+                name: POLICY.repository,
+                project: { id: POLICY.project_id, name: POLICY.project },
+              })
+            : JSON.stringify({
+                count: 2,
+                value: [
+                  { id: POLICY.project_id, name: "Widgets" },
+                  {
+                    id: "33333333-3333-3333-3333-333333333333",
+                    name: "Secrets",
+                  },
+                ],
+              });
     response.writeHead(200, {
       "content-type": "application/json",
       "set-cookie": "UserAuthentication=should-not-reach-the-agent",
@@ -592,6 +621,73 @@ suite("ado-proxy end to end", () => {
     expect(body.value[0]?.name).toBe("Widgets");
     expect(response.headers["set-cookie"]).toBeUndefined();
     expect(response.body).not.toContain(CANARY);
+  });
+
+  it("keeps legacy SDK discovery and the following repository read on-policy", async () => {
+    const before = harness.upstreamCalls.length;
+    const discovery = await requestThroughProxy(
+      harness.proxyPort,
+      "dev.azure.com",
+      `/${ORGANIZATION}/_apis/resourceareas?api-version=7.1`,
+      { ca: harness.proxyCaPem },
+    );
+    expect(discovery.status).toBe(200);
+    const discoveryBody = JSON.parse(discovery.body) as {
+      value: { locationUrl: string }[];
+    };
+    const location = new URL(discoveryBody.value[0]?.locationUrl ?? "");
+    expect(location.origin).toBe("https://dev.azure.com");
+    expect(location.pathname).toBe(`/${ORGANIZATION}/`);
+
+    const areaDiscovery = await requestThroughProxy(
+      harness.proxyPort,
+      location.hostname,
+      `${location.pathname}_apis/git`,
+      { ca: harness.proxyCaPem, method: "OPTIONS" },
+    );
+    expect(areaDiscovery.status).toBe(200);
+
+    const repository = await requestThroughProxy(
+      harness.proxyPort,
+      location.hostname,
+      `/${ORGANIZATION}/Widgets/_apis/git/repositories/widget-api?api-version=7.1`,
+      { ca: harness.proxyCaPem },
+    );
+    expect(repository.status).toBe(200);
+    expect(JSON.parse(repository.body)).toMatchObject({
+      name: "widget-api",
+      project: { name: "Widgets" },
+    });
+
+    const calls = harness.upstreamCalls.slice(before);
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      `GET /${ORGANIZATION}/_apis/resourceareas?api-version=7.1`,
+      `OPTIONS /${ORGANIZATION}/_apis/git`,
+      `GET /${ORGANIZATION}/Widgets/_apis/git/repositories/widget-api?api-version=7.1`,
+    ]);
+    const authorization = calls[0]?.authorization;
+    expect(authorization).toBeDefined();
+    expect(calls.every((call) => call.authorization === authorization)).toBe(true);
+    expect(calls.some((call) => call.url === "/_apis/git")).toBe(false);
+  });
+
+  it("denies out-of-scope discovery and repository reads before upstream contact", async () => {
+    const before = harness.upstreamCalls.length;
+    const organization = await requestThroughProxy(
+      harness.proxyPort,
+      "dev.azure.com",
+      "/adatum/_apis/git",
+      { ca: harness.proxyCaPem, method: "OPTIONS" },
+    );
+    const repository = await requestThroughProxy(
+      harness.proxyPort,
+      "dev.azure.com",
+      `/${ORGANIZATION}/Widgets/_apis/git/repositories/private-api?api-version=7.1`,
+      { ca: harness.proxyCaPem },
+    );
+    expect(organization.status).toBe(403);
+    expect(repository.status).toBe(403);
+    expect(harness.upstreamCalls.length).toBe(before);
   });
 
   it("refuses a write without contacting the upstream", async () => {
