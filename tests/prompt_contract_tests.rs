@@ -160,7 +160,10 @@ fn authoring_prompts_separate_pr_conversations_reviews_and_votes() {
             "`expected_head_sha`",
             "`update-pull-request-comment`",
         ] {
-            assert!(content.contains(required), "{rel} is missing PR intent contract {required}");
+            assert!(
+                content.contains(required),
+                "{rel} is missing PR intent contract {required}"
+            );
         }
     }
 }
@@ -173,12 +176,16 @@ fn repository_workflow_subagents_inherit_model_selection() {
         if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
             continue;
         }
+
         let content = fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
         for block in content.split("\n## agent: ").skip(1) {
             let (name, body) = block.split_once('\n').expect("inline agent heading");
             let front_matter = body
                 .strip_prefix("---\n")
-                .and_then(|body| body.split_once("\n---").map(|(front_matter, _)| front_matter))
+                .and_then(|body| {
+                    body.split_once("\n---")
+                        .map(|(front_matter, _)| front_matter)
+                })
                 .expect("inline agent front matter");
             let config: serde_yaml::Mapping = serde_yaml::from_str(front_matter).unwrap();
             assert!(
@@ -195,6 +202,118 @@ fn repository_workflow_subagents_inherit_model_selection() {
         }
     }
     for name in ["`rust-critic`", "`ts-critic`", "`pr-processor`"] {
-        assert!(subagents.iter().any(|agent| agent == name), "missing inline agent {name}");
+        assert!(
+            subagents.iter().any(|agent| agent == name),
+            "missing inline agent {name}"
+        );
+    }
+}
+
+#[test]
+fn reviewers_pin_inline_and_summary_targets_to_trusted_dispatch_context() {
+    let text = read(".github/workflows/shared/pr-review-base.md").replace("\r\n", "\n");
+    let front = text
+        .strip_prefix("---\n")
+        .unwrap()
+        .split_once("\n---")
+        .unwrap()
+        .0;
+    let config: serde_yaml::Value = serde_yaml::from_str(front).unwrap();
+    let inline = &config["safe-outputs"]["create-pull-request-review-comment"];
+    let summary = &config["safe-outputs"]["submit-pull-request-review"];
+    let target = inline["target"].as_str().unwrap();
+    assert_eq!(summary["target"], inline["target"]);
+    assert_eq!(
+        target,
+        "${{ github.event.pull_request.number || github.event.issue.number || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number || '0' }}"
+    );
+    let commit = "${{ github.event.pull_request.head.sha || github.sha }}";
+    assert_eq!(inline["commit-id"].as_str().unwrap(), commit);
+    assert_eq!(summary["commit-id"].as_str().unwrap(), commit);
+    let guard = "github.event.pull_request.number || github.event.issue.pull_request || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request'";
+    for workflow in [
+        "review-rust",
+        "review-typescript",
+        "review-tests",
+        "review-security",
+        "review-compiler-contract",
+    ] {
+        let source = read(&format!(".github/workflows/{workflow}.md")).replace("\r\n", "\n");
+        let front = source
+            .strip_prefix("---\n")
+            .unwrap()
+            .split_once("\n---")
+            .unwrap()
+            .0;
+        let source: serde_yaml::Value = serde_yaml::from_str(front).unwrap();
+        assert_eq!(
+            source["if"].as_str(),
+            Some(guard),
+            "{workflow}: root PR-only guard"
+        );
+        let lock: serde_yaml::Value =
+            serde_yaml::from_str(&read(&format!(".github/workflows/{workflow}.lock.yml"))).unwrap();
+        assert!(
+            lock["jobs"]["activation"]["if"]
+                .as_str()
+                .unwrap()
+                .contains(guard),
+            "{workflow}: compiled PR-only guard"
+        );
+        assert_eq!(
+            lock["jobs"]["agent"]["permissions"]["pull-requests"].as_str(),
+            Some("read")
+        );
+        let handlers = lock["jobs"]["safe_outputs"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find_map(|step| step["env"]["GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG"].as_str())
+            .unwrap();
+        assert!(
+            !handlers.contains("\\u0026"),
+            "JSON escaping must not corrupt GitHub expression operators"
+        );
+        let handlers: serde_json::Value = serde_json::from_str(handlers).unwrap();
+        for handler in [
+            "create_pull_request_review_comment",
+            "submit_pull_request_review",
+        ] {
+            assert_eq!(
+                handlers[handler]["target"].as_str(),
+                Some(target),
+                "{workflow}: {handler}"
+            );
+            assert_eq!(
+                handlers[handler]["commit_id"].as_str(),
+                Some(commit),
+                "{workflow}: {handler}"
+            );
+            assert!(
+                handlers[handler].get("allowed_repos").is_none(),
+                "{workflow} must not widen repository scope"
+            );
+        }
+    }
+}
+
+#[test]
+fn rust_reviewer_reserves_time_for_a_bounded_final_review() {
+    let prompt = read(".github/workflows/review-rust.md");
+    for required in [
+        "12-minute agent-work budget",
+        "by minute 12 submit",
+        "at most a 60-second",
+        "Never poll repeatedly",
+        "at most three high-risk changed Rust",
+        "six-minute investigation budget",
+        "Do not build the repository or run full test",
+        "unreviewed areas",
+        "Submit exactly once even if the critic was unavailable",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "Rust reviewer is missing its bounded contract: {required}"
+        );
     }
 }

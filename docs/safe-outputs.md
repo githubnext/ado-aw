@@ -1575,6 +1575,7 @@ after live creation. The compiler rejects both split-process configurations.
 Section-level `safe-outputs.staged` defaults and per-tool `staged` overrides are
 resolved before this comparison.
 Each follow-up counts against its tool budget and any shared budget group.
+
 Existing `submit-pull-request-review` configurations remain numeric-only unless
 `allow-temporary-ids: true` is configured. Automatic migration enables this for
 legacy votes that already supported temporary references.
@@ -1592,6 +1593,46 @@ Example agent call sequence:
 
 The first line represents the `create-pull-request` call; use the actual
 temporary ID returned by that call in the later `add-pull-request-reviewers` call.
+
+#### Shared PR mutation budgets
+
+Authors can declare `safe-outputs.budget-groups` directly; it is not restricted
+to migration-generated configuration. Each named group has exactly two fields:
+`max` (a nonnegative integer shared attempt limit) and `tools` (a nonempty list
+of configured canonical PR mutation tools).
+
+```yaml
+safe-outputs:
+  update-pull-request:
+    target: triggering
+    max: 3
+  add-pull-request-labels:
+    target: triggering
+    allowed-labels: [triaged]
+    max: 3
+  budget-groups:
+    pr-maintenance:
+      max: 2
+      tools: [update-pull-request, add-pull-request-labels]
+```
+
+This permits at most two attempts across the two tools combined, in proposal
+order. Each tool's own `max` still applies independently. Failed attempts and
+executed no-ops consume the shared budget; entries rejected because a budget
+is already exhausted do not execute. A group `max: 0` prevents all member
+attempts. Budgets reset with each SafeOutputs executor invocation.
+
+Group names must be nonempty and cannot contain pipeline commands. Every
+member must be an explicitly configured PR mutation tool, and a tool can occur
+only once across all groups. Creation, diagnostic tools, custom jobs and non-PR
+tools cannot be members. Members must share the same effective approval lane
+(gated or automatic) and staged setting; invalid groups fail compilation and
+are independently checked before execution. Grouping never grants additional
+repository access, allowed events, labels or nested-comment authority.
+
+The `update-pr` group written by legacy migration uses this same schema.
+Preserve its inherited limit unless deliberately changing the workflow's
+authority.
 
 ### PR label policies and transitions
 

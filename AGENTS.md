@@ -235,13 +235,25 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── hide_github_issue_comment.rs
 │   │   ├── link_github_sub_issue.rs
 │   │   ├── link_work_items.rs
+│   │   ├── mark_pull_request_as_ready_for_review.rs
 │   │   ├── missing_data.rs
 │   │   ├── missing_tool.rs
 │   │   ├── noop.rs
+│   │   ├── pr_comments.rs # Owned-comment provenance and non-destructive lifecycle
 │   │   ├── pr_common.rs # Shared PR references and target/policy resolution
+│   │   ├── pr_http.rs # Bounded PR REST requests and response reads
+│   │   ├── pr_inline.rs # Immutable-revision inline comment preparation
+│   │   ├── pr_labels.rs # Shared PR label mutation policies
 │   │   ├── pr_mutations.rs # Shared PR mutations and legacy configuration validation
+│   │   ├── pr_patch.rs # Shared bounded patch selection, private index capture and exact blobs
+│   │   ├── pr_patch/
+│   │   │   ├── parse.rs # Native Git patch metadata and expansion preflight
+│   │   │   └── tests.rs # Real-Git patch and tree-fidelity regressions
+│   │   ├── push_to_pull_request_branch.rs
 │   │   ├── queue_build.rs
 │   │   ├── remove_github_issue_labels.rs
+│   │   ├── remove_pull_request_labels.rs
+│   │   ├── replace_pull_request_label.rs
 │   │   ├── reply_to_pr_comment.rs
 │   │   ├── report_incomplete.rs
 │   │   ├── resolve_pr_thread.rs
@@ -254,6 +266,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── update_github_issue.rs
 │   │   ├── update_pr.rs # Legacy configuration types used by migration (not a tool)
 │   │   ├── update_pull_request.rs
+│   │   ├── update_pull_request_comment.rs
 │   │   ├── update_wiki_page.rs
 │   │   ├── update_work_item.rs
 │   │   ├── upload_build_attachment.rs
@@ -781,6 +794,13 @@ reviewers or PR Sous Chef: that can select a model unavailable to the workflow.
   `pr-review-comments.json` to avoid re-posting on every push.
 - `pr-data-prefetch.yml` — an engine-less workflow that warms the
   `pr-prefetch-<sha>` cache in ~30-60s so all five reviewers get a cache hit.
+
+Inline comments and review summaries share a fixed target derived from the
+trusted native event or centralized command context, plus the reviewed commit.
+Each reviewer declares its PR-only activation guard at the workflow root;
+`tests/prompt_contract_tests.rs` verifies the guard and fixed targets in every
+generated lock. Do not replace this with `target: "*"` to work around missing
+dispatch context. Recompile all five reviewers after changing the shared base.
 
 Generated artefacts are excluded from the pre-fetched diff (`*.lock.yml`,
 `scripts/ado-script/*.js`, `*.gen.ts`, `*.gen.json`, `Cargo.lock`). Keep the

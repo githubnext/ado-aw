@@ -188,7 +188,10 @@ const inlineCases: Scenario<InlineState>[] = (["right", "left", "stale"] as cons
     }
     const url = `${ctx.orgUrl.replace(/\/+$/, "")}/${encodeURIComponent(ctx.project)}/_apis/git/repositories/${encodeURIComponent(state.repo)}`
       + `/pullRequests/${state.prId}/threads/${id}?api-version=7.1`;
-    const response = await fetch(url, { headers: { Authorization: `Basic ${Buffer.from(`:${ctx.token}`).toString("base64")}` } });
+    const response = await fetch(url, {
+      headers: { Authorization: `Basic ${Buffer.from(`:${ctx.token}`).toString("base64")}` },
+      signal: AbortSignal.timeout(30_000),
+    });
     if (!response.ok) throw new Error(`Inline readback failed: HTTP ${response.status}`);
     const detail: unknown = await response.json();
     if (!isRecord(detail) || !isRecord(detail.threadContext) || !isRecord(detail.pullRequestThreadContext)) {

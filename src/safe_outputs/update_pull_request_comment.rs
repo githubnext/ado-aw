@@ -112,6 +112,7 @@ impl Executor for UpdatePullRequestCommentResult {
             describe_pr_reference(self.pull_request_id.as_ref())
         )
     }
+
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
         UpdatePullRequestCommentParams {
             pull_request_id: self.pull_request_id.clone(),
@@ -164,5 +165,198 @@ impl Executor for UpdatePullRequestCommentResult {
             None,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    const ACTOR: &str = "33333333-3333-3333-3333-333333333333";
+    const ORIGINAL: &str = "Original owned report.";
+    const REPLACEMENT: &str = "Replacement owned report.";
+
+    fn context(server: &MockServer, key: &str) -> ExecutionContext {
+        let mut ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            ado_project_id: Some("11111111-1111-1111-1111-111111111111".into()),
+            pipeline_collection_uri: Some("https://dev.azure.com/source".into()),
+            definition_id: Some(7),
+            build_id: Some(100),
+            access_token: Some("opaque-test-token".into()),
+            ..Default::default()
+        };
+        ctx.tool_configs.insert(
+            "update-pull-request-comment".into(),
+            json!({"target":"*", "comment-key":key}),
+        );
+        ctx
+    }
+
+    fn proposal() -> Value {
+        json!({"name":"update-pull-request-comment","pull_request_id":42,
+                "thread_id":3,"comment_id":1,"content":REPLACEMENT})
+    }
+
+    fn owned_thread(ctx: &ExecutionContext, key: &str) -> Value {
+        let owner =
+            super::super::pr_comments::owner(ctx, "comment", &Identifier::parse(key).unwrap())
+                .unwrap()
+                .unwrap();
+        let mut thread = json!({"id":3,"status":"active","comments":[{
+            "id":1,"parentCommentId":0,"content":ORIGINAL,"author":{"id":ACTOR}
+        }]});
+        super::super::pr_comments::stamp(&mut thread, Some(&owner), ctx, ORIGINAL).unwrap();
+        thread
+    }
+
+    #[tokio::test]
+    async fn executor_updates_only_verified_owned_root_comments() {
+        for case in [
+            "owned",
+            "key-limit",
+            "actor",
+            "pipeline",
+            "key",
+            "unmarked",
+            "hash",
+            "reply",
+            "comment-id",
+            "thread-id",
+        ] {
+            let server = MockServer::start().await;
+            let key = if case == "key-limit" {
+                "k".repeat(100)
+            } else {
+                "report".into()
+            };
+            let mut ctx = context(&server, &key);
+            let mut thread = owned_thread(&ctx, &key);
+            let mut entry = proposal();
+            match case {
+                    "actor" => thread["comments"][0]["author"]["id"] = json!("44444444-4444-4444-4444-444444444444"),
+                    "pipeline" => ctx.definition_id = Some(8),
+                    "key" => ctx.tool_configs.get_mut("update-pull-request-comment").unwrap()["comment-key"] = json!("different"),
+                    "unmarked" => thread["properties"] = json!({}),
+                    "hash" => thread["comments"][0]["content"] = json!("A manual edit must not be overwritten."),
+                    "reply" => thread["comments"].as_array_mut().unwrap().push(json!({
+                        "id":2,"parentCommentId":1,"content":"Reply from the same actor.","author":{"id":ACTOR}
+                    })),
+                    "comment-id" => entry["comment_id"] = json!(2),
+                    "thread-id" => thread["id"] = json!(4),
+                    _ => {}
+                }
+            let original = thread.clone();
+            let state = Arc::new(Mutex::new(thread));
+            let read = state.clone();
+            let route = "/P/_apis/git/repositories/repo/pullRequests/42/threads/3";
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(move |_: &wiremock::Request| {
+                    ResponseTemplate::new(200).set_body_json(read.lock().unwrap().clone())
+                })
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/_apis/connectiondata"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"authenticatedUser":{"id":ACTOR}})),
+                )
+                .mount(&server)
+                .await;
+            let write = state.clone();
+            let succeeds = matches!(case, "owned" | "key-limit");
+            Mock::given(method("PATCH"))
+                .and(path(format!("{route}/comments/1")))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: Value = serde_json::from_slice(&request.body).unwrap();
+                    assert_eq!(body.as_object().unwrap().len(), 1);
+                    write.lock().unwrap()["comments"][0]["content"] = body["content"].clone();
+                    ResponseTemplate::new(200)
+                })
+                .expect(u64::from(succeeds))
+                .mount(&server)
+                .await;
+            let outcome = crate::execute::execute_safe_output(&entry, &ctx).await;
+            if succeeds {
+                let (_, result) = outcome.unwrap();
+                assert!(result.success, "{}", result.message);
+                let after = state.lock().unwrap();
+                assert!(
+                    after["comments"][0]["content"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(REPLACEMENT)
+                );
+                assert_eq!(after["properties"], original["properties"]);
+                assert_eq!(after["status"], original["status"]);
+                assert_eq!(result.data.as_ref().unwrap()["thread_id"], 3);
+                assert_eq!(result.data.as_ref().unwrap()["comment_id"], 1);
+            } else {
+                assert!(outcome.is_err(), "{case} must fail before mutation");
+                assert_eq!(*state.lock().unwrap(), original, "{case}");
+                assert!(
+                    server
+                        .received_requests()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .all(|request| request.method.as_str() == "GET"),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_rejects_invalid_ids_and_keys_before_network() {
+        for case in [
+            "zero-thread",
+            "negative-thread",
+            "zero-comment",
+            "negative-comment",
+            "long-key",
+            "missing-pipeline",
+        ] {
+            let server = MockServer::start().await;
+            let key = if case == "long-key" {
+                "k".repeat(101)
+            } else {
+                "report".into()
+            };
+            let mut ctx = context(&server, &key);
+            let mut entry = proposal();
+            match case {
+                "zero-thread" => entry["thread_id"] = json!(0),
+                "negative-thread" => entry["thread_id"] = json!(-1),
+                "zero-comment" => entry["comment_id"] = json!(0),
+                "negative-comment" => entry["comment_id"] = json!(-1),
+                "missing-pipeline" => ctx.definition_id = None,
+                _ => {}
+            }
+            let error = crate::execute::execute_safe_output(&entry, &ctx)
+                .await
+                .unwrap_err();
+            let expected = match case {
+                "long-key" => "100 bytes",
+                "missing-pipeline" => "pipeline identity",
+                _ => "must be positive",
+            };
+            assert!(format!("{error:#}").contains(expected), "{case}: {error:#}");
+            assert!(
+                server.received_requests().await.unwrap().is_empty(),
+                "{case}"
+            );
+        }
     }
 }

@@ -796,3 +796,43 @@ pub(super) fn delta_size(bytes: &[u8], cursor: &mut usize) -> anyhow::Result<usi
 
     anyhow::bail!("Binary delta length overflow")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::unquote;
+
+    #[test]
+    fn quoted_paths_reject_malformed_escapes_without_panicking() {
+        for value in [
+            "\"unterminated",
+            "\"trailing\\",
+            "\"bad\\8escape\"",
+            "\"bad\\q\"",
+            "\"\\0\"",
+            "\"\\00\"",
+            "\"\\08x\"",
+            "\"\\400\"",
+            "\"\\377\"",
+            "\"\\303\"",
+        ] {
+            assert!(unquote(value).is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn quoted_paths_preserve_bytes_and_report_exact_token_boundary() {
+        for (value, expected, suffix) in [
+            ("\"\\303\\251 guide.md\"\t", "\u{e9} guide.md", "\t"),
+            (
+                "\"a \\\"quote\\\" and \\\\ slash\" extra",
+                "a \"quote\" and \\ slash",
+                " extra",
+            ),
+            ("unquoted file.md", "unquoted file.md", ""),
+        ] {
+            let (decoded, consumed) = unquote(value).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(&value[consumed..], suffix);
+        }
+    }
+}
