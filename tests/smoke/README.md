@@ -35,7 +35,7 @@ credential class:
 
 | Lane | Secrets / service connections | Cases |
 | --- | --- | --- |
-| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, ado-proxy, noop-target, custom-safe-output, multi-repo, janitor |
+| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, ado-proxy, noop-target, custom-safe-output, multi-repo, runtime-model-queue, runtime-model-set-variable, janitor |
 | `infra` | none | *(reserved for AWF and the ado-proxy sidecar)* |
 
 No case currently files GitHub issues, so the lane holds no GitHub PAT beyond
@@ -139,7 +139,10 @@ GitHub.
   "lane": "agentic",            // must already exist; a NEW lane costs a registration
   "kind": "compiled",           // or "raw" for hand-written YAML
   "modes": ["candidate", "released"],
-  "source": "tests/safe-outputs/my-case.md"
+  "source": "tests/safe-outputs/my-case.md",
+  "queueVariables": {           // optional, non-secret ADO queue-time variables
+    "ADO_AW_MODEL_AGENT_COPILOT": "gpt-6-luna"
+  }
 }
 ```
 
@@ -178,9 +181,18 @@ Optional per-case assertions, so novel checks stay out of the harness code:
     "required": ["displayName: Start ado-proxy policy engine"],
     "forbidden": ["--network host"]
   },
-  "requiredBuildTags": ["ado-aw-custom-job-{buildId}"]
+  "requiredBuildTags": ["ado-aw-custom-job-{buildId}"],
+  "requestedModels": { "agent": "gpt-6-luna" }
 }
 ```
+
+`requestedModels` runs `ado-aw audit` against the completed child and compares
+the requested Agent and/or Detection model recorded in `overview.aw_info`.
+Queue variables use the Build Queue API's `parameters` JSON string, matching
+the encoding used by `az pipelines run --variables`, and therefore exercise
+the same runtime source as variables supplied in the Azure DevOps Run Pipeline
+UI. A lane definition may need the variable predeclared with
+`allowOverride=true` when the project restricts queue-time variables.
 
 ### `kind: raw`
 
@@ -246,6 +258,7 @@ malformed or mis-laned manifest fails locally rather than in ADO.
 | 6 | Exactly one ref per case is created, and every ref is deleted | both |
 | 7 | Each build ran its lane definition on that case's own ref | both |
 | 8 | Queued build count equals case count (no ref push CI-triggered a lane) | both |
+| 9 | Queue-time and preceding same-job variables select the requested Agent model recorded by audit | candidate |
 
 ## Fork security boundary
 

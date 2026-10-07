@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "src/**"
+      - "scripts/ado-script/**"
       - "tests/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -62,6 +63,13 @@ jobs:
           mcpg:MCPG_VERSION:src/compile/common.rs
           VERSIONS
 
+      - name: Build Copilot controller and runner bundles
+        run: |
+          set -euo pipefail
+          npm --prefix scripts/ado-script ci
+          npm --prefix scripts/ado-script run build:copilot-controller
+          npm --prefix scripts/ado-script run build:copilot-runner
+
       - name: Install compiler-pinned GitHub Copilot CLI
         run: |
           set -euo pipefail
@@ -108,9 +116,12 @@ jobs:
       - name: Run handwritten AWF + Copilot + SafeOutputs contract
         env:
           ADO_AW_COPILOT_CLI_ARTIFACT_DIR: ${{ runner.temp }}/copilot-cli-safeoutputs
+          ADO_AW_COPILOT_CLI_CONTROL_DIR: ${{ runner.temp }}/copilot-cli-control
           ADO_AW_BIN: ${{ github.workspace }}/target/debug/ado-aw
           AWF_BIN: ${{ runner.temp }}/bin/awf
           COPILOT_BIN: ${{ runner.temp }}/bin/copilot
+          COPILOT_CONTROLLER_BUNDLE: ${{ github.workspace }}/scripts/ado-script/copilot-controller.js
+          COPILOT_RUNNER_BUNDLE: ${{ github.workspace }}/scripts/ado-script/copilot-runner.js
           AWF_VERSION: ${{ steps.versions.outputs.awf }}
           MCPG_VERSION: ${{ steps.versions.outputs.mcpg }}
         run: bash tests/awf-copilot-safeoutputs/run.sh

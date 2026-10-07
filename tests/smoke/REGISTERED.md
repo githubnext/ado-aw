@@ -21,6 +21,12 @@ an explicitly supplied case ref.
 `infra` carries no cases yet, and a lane with no case in the running mode is
 never resolved, so it needs no definition until the first `infra` case lands.
 
+The `agentic` lane declares an empty, non-secret
+`ADO_AW_MODEL_AGENT_COPILOT` variable with `allowOverride=true`. The empty
+definition value preserves the normal Copilot default for other cases, while
+`runtime-model-queue` supplies a concrete value through the Build REST API and
+verifies the resulting audit metadata.
+
 **Only `agentic` needs registering at cutover** — one definition for the whole
 suite.
 

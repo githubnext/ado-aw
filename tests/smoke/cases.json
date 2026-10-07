@@ -74,6 +74,33 @@
       "source": "tests/smoke/multi-repo.md"
     },
     {
+      "id": "runtime-model-queue",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/runtime-model-queue.md",
+      "queueVariables": {
+        "ADO_AW_MODEL_AGENT_COPILOT": "gpt-6-luna"
+      },
+      "assertions": {
+        "requestedModels": {
+          "agent": "gpt-6-luna"
+        }
+      }
+    },
+    {
+      "id": "runtime-model-set-variable",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/runtime-model-set-variable.md",
+      "assertions": {
+        "requestedModels": {
+          "agent": "gpt-6-luna"
+        }
+      }
+    },
+    {
       "id": "janitor",
       "lane": "agentic",
       "kind": "compiled",

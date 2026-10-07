@@ -36,6 +36,15 @@ const CASES: ResolvedCase[] = [
     source: "tests/safe-outputs/canary.md",
     definitionId: 3006,
   },
+  {
+    id: "runtime-model-queue",
+    lane: "agentic",
+    kind: "compiled",
+    modes: ["candidate"],
+    source: "tests/smoke/runtime-model-queue.md",
+    assertions: { requestedModels: { agent: "gpt-6-luna" } },
+    definitionId: 3006,
+  },
 ];
 
 function result(overrides: Partial<FixtureBuildResult> = {}): FixtureBuildResult {
@@ -177,7 +186,7 @@ describe("verifyCandidateAudit", () => {
     });
 
     const canary = result({ caseId: "canary" });
-    const outcome = await verifyCandidateAudit([canary], options);
+    const outcome = await verifyCandidateAudit(CASES, [canary], options);
 
     expect(outcome).toEqual({ ok: true, results: [canary] });
     expect(safeSpawnMock).toHaveBeenCalledWith(
@@ -200,7 +209,11 @@ describe("verifyCandidateAudit", () => {
       stderrTruncated: false,
     });
 
-    const outcome = await verifyCandidateAudit([result({ caseId: "canary" })], options);
+    const outcome = await verifyCandidateAudit(
+      CASES,
+      [result({ caseId: "canary" })],
+      options,
+    );
 
     expect(outcome.ok).toBe(false);
     expect(outcome.results[0]?.message).toContain("***");
@@ -209,11 +222,53 @@ describe("verifyCandidateAudit", () => {
 
   it("fails closed without spawning when no successful canary build exists", async () => {
     const outcome = await verifyCandidateAudit(
+      CASES,
       [result({ caseId: "canary", status: "failed", result: "failed" })],
       options,
     );
 
     expect(outcome.ok).toBe(false);
     expect(safeSpawnMock).not.toHaveBeenCalled();
+  });
+
+  it("verifies the requested Agent model from audit metadata", async () => {
+    safeSpawnMock
+      .mockResolvedValueOnce({
+        status: 0,
+        stdout: JSON.stringify({
+          overview: { build_id: 42 },
+          downloaded_files: [
+            { path: "agent_outputs_42/agent-output.json" },
+            { path: "analyzed_outputs_42/verdict.json" },
+            { path: "safe_outputs/executed-safe-outputs.ndjson" },
+          ],
+        }),
+        stderr: "",
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      })
+      .mockResolvedValueOnce({
+        status: 0,
+        stdout: JSON.stringify({
+          overview: { build_id: 43, aw_info: { model: "auto" } },
+        }),
+        stderr: "",
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      });
+
+    const outcome = await verifyCandidateAudit(
+      CASES,
+      [
+        result({ caseId: "canary" }),
+        result({ caseId: "runtime-model-queue", buildId: 43 }),
+      ],
+      options,
+    );
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.results[1]?.message).toMatch(/expected "gpt-6-luna"/);
   });
 });

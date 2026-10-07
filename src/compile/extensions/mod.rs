@@ -686,14 +686,10 @@ pub use crate::runtimes::python::PythonExtension;
 pub use crate::tools::azure_devops::AzureDevOpsExtension;
 pub use crate::tools::cache_memory::CacheMemoryExtension;
 pub use ado_aw_marker::AdoAwMarkerExtension;
+pub(crate) use ado_aw_marker::APPEND_AW_INFO_FIELD;
 pub use ado_script::AdoScriptExtension;
 pub use azure_cli::AzureCliExtension;
-pub use exec_context::{
-    ExecContextExtension, ci_push_contributor_will_activate, manual_contributor_will_activate,
-    pipeline_contributor_will_activate, pr_checks_contributor_will_activate,
-    pr_contributor_will_activate, repo_contributor_will_activate,
-    schedule_contributor_will_activate, workitem_contributor_will_activate,
-};
+pub use exec_context::ExecContextExtension;
 pub use github::GitHubExtension;
 pub use safe_outputs::SafeOutputsExtension;
 
@@ -773,59 +769,6 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 pr_filters: front_matter.pr_filters().cloned(),
                 pipeline_filters: front_matter.pipeline_filters().cloned(),
                 inlined_imports: front_matter.inlined_imports,
-                // Tell the ado-script extension whether the PR-context
-                // contributor will activate so it can fire the Agent-job
-                // install/download even when `inlined-imports: true` (no
-                // import.js needed). The two extensions stay loosely
-                // coupled: ExecContextExtension owns invoking the bundle;
-                // AdoScriptExtension owns installing it. Shared helper
-                // keeps the activation predicate in lock-step.
-                exec_context_pr_active: pr_contributor_will_activate(front_matter),
-                // Same loose-coupling pattern for the Manual contributor
-                // (Stage 1 of the exec-context contributor build-out —
-                // see plan.md). Activates whenever any `parameters:`
-                // block is declared and the contributor isn't explicitly
-                // disabled.
-                exec_context_manual_active: manual_contributor_will_activate(front_matter),
-                // Same loose-coupling pattern for the Pipeline contributor
-                // (Stage 2 of the exec-context contributor build-out —
-                // see plan.md). Activates whenever `on.pipeline` is
-                // configured and the contributor isn't explicitly
-                // disabled.
-                exec_context_pipeline_active: pipeline_contributor_will_activate(front_matter),
-                // CI-push contributor (Stage 3 — opt-in, default OFF).
-                exec_context_ci_push_active: ci_push_contributor_will_activate(front_matter),
-                // Workitem contributor (Stage 4 — PR-linked mode only).
-                // Activates whenever the PR contributor activates and
-                // workitem isn't explicitly disabled.
-                exec_context_workitem_active: workitem_contributor_will_activate(front_matter),
-                // Schedule contributor (Stage 5 — opt-in, default OFF).
-                exec_context_schedule_active: schedule_contributor_will_activate(front_matter),
-                // PR-checks extension (Stage 6 — opt-in, default OFF).
-                exec_context_pr_checks_active: pr_checks_contributor_will_activate(front_matter),
-                // Repo contributor (Stage 7 — opt-in, default OFF, no
-                // bearer / no REST, pure git).
-                exec_context_repo_active: repo_contributor_will_activate(front_matter),
-                // True whenever any safe-output tool is enabled — drives the
-                // Agent-job bundle install/download so `approval-summary.js`
-                // is present for the end-of-job render step that
-                // `build_agent_job` emits. MUST use the same predicate as that
-                // step (see `FrontMatter::has_any_safe_output_tool`).
-                safe_outputs_summary_active: front_matter.has_any_safe_output_tool(),
-                // True when `engine.github-app-token` is configured — drives the
-                // Agent-job bundle install/download so `github-app-token.js` is
-                // present for the mint/revoke steps that `build_agent_job` emits
-                // around the Copilot run. Same loose-coupling pattern as
-                // `safe_outputs_summary_active`: the consuming steps live in
-                // `build_agent_job`, not this extension.
-                github_app_token_active: front_matter.engine.github_app_token().is_some(),
-                // True when `create-pull-request` is configured (issue #1413) —
-                // drives the Agent-job bundle download so `prepare-pr-base.js`
-                // is present for the base-ref prepare step `build_agent_job`
-                // emits before the Copilot run. Same loose-coupling pattern as
-                // `github_app_token_active`.
-                prepare_pr_base_active: front_matter.create_pr_config().is_some(),
-                azure_mcp_auth_active: front_matter.has_azure_authenticated_mcp_servers(),
                 pr_trigger_for_synth,
                 supply_chain: front_matter.supply_chain().cloned(),
             }

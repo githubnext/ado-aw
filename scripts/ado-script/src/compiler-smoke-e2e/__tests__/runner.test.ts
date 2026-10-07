@@ -101,6 +101,49 @@ describe("runFixtures", () => {
     expect(outcome.results.every((r) => r.terminalProven)).toBe(true);
   });
 
+  it("forwards queue variables unchanged", async () => {
+    let queuedOptions: Parameters<FixtureBuildClient["queueBuild"]>[1] | undefined;
+    const client: FixtureBuildClient = {
+      async queueBuild(_definitionId, options) {
+        queuedOptions = options;
+        return { id: 103 };
+      },
+      async getBuild() {
+        return {
+          status: "completed",
+          result: "succeeded",
+          definition: { id: 1 },
+          sourceBranch: "refs/heads/x",
+          sourceVersion: "sha",
+        };
+      },
+      async cancelBuild() {},
+      async addBuildTags() {},
+      buildUrl(buildId) {
+        return `https://example/${buildId}`;
+      },
+    };
+    const request = {
+      ...req("runtime-model-queue", 1),
+      variables: { ADO_AW_MODEL_AGENT_COPILOT: "auto" },
+    };
+
+    const outcome = await runFixtures(client, [request], {
+      concurrency: 1,
+      timeoutMs: 10_000,
+      pollMs: 1,
+      log: () => {},
+      sleepImpl: noopSleep,
+    });
+
+    expect(outcome.ok).toBe(true);
+    expect(queuedOptions).toEqual({
+      sourceBranch: "refs/heads/x",
+      sourceVersion: "sha",
+      variables: { ADO_AW_MODEL_AGENT_COPILOT: "auto" },
+    });
+  });
+
   it("preserves declaration order in results regardless of completion order", async () => {
     const { client } = makeFakeClient({
       queueResults: { 1: { ok: true, id: 201 }, 2: { ok: true, id: 202 } },

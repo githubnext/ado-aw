@@ -99,6 +99,26 @@ describe("AdoRest.queueBuild", () => {
     });
   });
 
+  it("serializes queue variables through the Build Queue parameters string", async () => {
+    let sentBody: unknown;
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sentBody = JSON.parse(String(init?.body));
+        return jsonResponse(200, { id: 556 });
+      },
+    );
+    const rest = makeRest(fetchImpl as unknown as typeof fetch);
+    await rest.queueBuild(2560, {
+      sourceBranch: "refs/heads/x",
+      sourceVersion: "deadbeef",
+      variables: { ADO_AW_MODEL_AGENT_COPILOT: "auto" },
+    });
+    expect(sentBody).toMatchObject({
+      parameters: JSON.stringify({ ADO_AW_MODEL_AGENT_COPILOT: "auto" }),
+    });
+    expect(sentBody).not.toHaveProperty("variables");
+  });
+
   it("throws with a descriptive error on a non-2xx response", async () => {
     const fetchImpl = vi.fn(async () => new Response("nope", { status: 500 }));
     const rest = makeRest(fetchImpl as unknown as typeof fetch);

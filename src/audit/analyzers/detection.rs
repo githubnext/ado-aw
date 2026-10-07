@@ -1,10 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, warn};
 use serde_json::Value;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::audit::model::{DetectionAnalysis, DetectionThreats};
+use crate::audit::model::{AwInfo, DetectionAnalysis, DetectionThreats};
 
 /// Read the detection verdict from `analyzed_outputs_<BuildId>/threat-analysis.json`.
 ///
@@ -65,7 +65,36 @@ pub async fn analyze_detection(download_root: &Path) -> Result<Option<DetectionA
     }))
 }
 
+/// Load the Detection-enriched copy of `aw_info.json` from the latest
+/// `analyzed_outputs_<BuildId>` artifact.
+pub async fn load_aw_info(download_root: &Path) -> Result<Option<AwInfo>> {
+    let Some(directory) = find_analyzed_outputs_dir(download_root).await else {
+        return Ok(None);
+    };
+    let path = [
+        directory.join("aw_info.json"),
+        directory.join("staging").join("aw_info.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file());
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let contents = tokio::fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("Failed to read Detection aw_info file {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse Detection aw_info file {}", path.display()))
+        .map(Some)
+}
+
 async fn find_verdict_path(download_root: &Path) -> Option<PathBuf> {
+    find_analyzed_outputs_dir(download_root)
+        .await
+        .map(|directory| directory.join("threat-analysis.json"))
+}
+
+async fn find_analyzed_outputs_dir(download_root: &Path) -> Option<PathBuf> {
     let mut entries = match tokio::fs::read_dir(download_root).await {
         Ok(entries) => entries,
         Err(err) if err.kind() == ErrorKind::NotFound => return None,
@@ -122,7 +151,7 @@ async fn find_verdict_path(download_root: &Path) -> Option<PathBuf> {
         }
     }
 
-    latest_dir.map(|(_, dir)| dir.join("threat-analysis.json"))
+    latest_dir.map(|(_, dir)| dir)
 }
 
 fn extract_bool(v: &Value, key: &str) -> bool {
@@ -163,7 +192,7 @@ fn extract_reasons(v: &Value, verdict_path: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::analyze_detection;
+    use super::{analyze_detection, load_aw_info};
     use crate::audit::model::DetectionThreats;
     use tempfile::TempDir;
 
@@ -176,6 +205,14 @@ mod tests {
 
     async fn create_analyzed_outputs_dir(temp_dir: &TempDir, dir_name: &str) {
         tokio::fs::create_dir_all(temp_dir.path().join(dir_name))
+            .await
+            .unwrap();
+    }
+
+    async fn write_aw_info(temp_dir: &TempDir, dir_name: &str, contents: &str) {
+        let dir = temp_dir.path().join(dir_name);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("aw_info.json"), contents)
             .await
             .unwrap();
     }
@@ -345,5 +382,44 @@ mod tests {
             analysis.verdict_path,
             Some(expected_verdict_path("analyzed_outputs_10"))
         );
+    }
+
+    #[tokio::test]
+    async fn loads_detection_enriched_aw_info_from_latest_artifact() {
+        let temp_dir = TempDir::new().unwrap();
+        write_aw_info(
+            &temp_dir,
+            "analyzed_outputs_9",
+            r#"{"detection_model":"older"}"#,
+        )
+        .await;
+        write_aw_info(
+            &temp_dir,
+            "analyzed_outputs_10",
+            r#"{"detection_model":"detector-model"}"#,
+        )
+        .await;
+
+        let aw_info = load_aw_info(temp_dir.path()).await.unwrap().unwrap();
+
+        assert_eq!(aw_info.detection_model.as_deref(), Some("detector-model"));
+    }
+
+    #[tokio::test]
+    async fn detection_aw_info_is_optional_for_older_artifacts() {
+        let temp_dir = TempDir::new().unwrap();
+        create_analyzed_outputs_dir(&temp_dir, "analyzed_outputs_42").await;
+
+        assert!(load_aw_info(temp_dir.path()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_detection_aw_info_is_an_error() {
+        let temp_dir = TempDir::new().unwrap();
+        write_aw_info(&temp_dir, "analyzed_outputs_42", "{not valid json").await;
+
+        let error = load_aw_info(temp_dir.path()).await.unwrap_err().to_string();
+
+        assert!(error.contains("Failed to parse Detection aw_info"), "{error}");
     }
 }

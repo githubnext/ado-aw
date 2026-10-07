@@ -8,7 +8,13 @@ const mockCalls: string[] = [];
 const compiledCasePaths: string[] = [];
 const stagedWrites: { to: string; contents: string }[] = [];
 let queuedCaseIds: string[] = [];
-let queuedRequests: { caseId: string; lane: string; definitionId: number; sourceBranch: string }[] = [];
+let queuedRequests: {
+  caseId: string;
+  lane: string;
+  definitionId: number;
+  sourceBranch: string;
+  variables?: Readonly<Record<string, string>>;
+}[] = [];
 let deletedRefs: string[] = [];
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -171,7 +177,7 @@ vi.mock("../signals.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../signals.js")>();
   return {
     ...actual,
-    verifyCandidateAudit: vi.fn(async (results: readonly FixtureBuildResult[]) => ({
+    verifyCandidateAudit: vi.fn(async (_cases: unknown, results: readonly FixtureBuildResult[]) => ({
       ok: true,
       results: results.map((result) => ({ ...result })),
     })),
@@ -185,7 +191,13 @@ vi.mock("../runner.js", async (importOriginal) => {
     runFixtures: vi.fn(
       async (
         _client: unknown,
-        requests: { caseId: string; lane: string; definitionId: number; sourceBranch: string }[],
+        requests: {
+          caseId: string;
+          lane: string;
+          definitionId: number;
+          sourceBranch: string;
+          variables?: Readonly<Record<string, string>>;
+        }[],
       ) => {
         mockCalls.push("runFixtures");
         queuedCaseIds = requests.map((request) => request.caseId);
@@ -271,6 +283,8 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
       "noop-target",
       "custom-safe-output",
       "multi-repo",
+      "runtime-model-queue",
+      "runtime-model-set-variable",
     ]);
     expect(queuedCaseIds).not.toContain("janitor");
     expect(compiledCasePaths).toEqual([
@@ -279,7 +293,12 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
       "tests/safe-outputs/noop-target.md",
       "tests/smoke/custom-safe-output.md",
       "tests/smoke/multi-repo.md",
+      "tests/smoke/runtime-model-queue.md",
+      "tests/smoke/runtime-model-set-variable.md",
     ]);
+    expect(
+      queuedRequests.find((request) => request.caseId === "runtime-model-queue")?.variables,
+    ).toEqual({ ADO_AW_MODEL_AGENT_COPILOT: "gpt-6-luna" });
 
     // Cleanup ordering: remote refs deleted BEFORE the local worktree is removed.
     expect(mockCalls.indexOf("deleteRemoteRefs")).toBeGreaterThanOrEqual(0);
@@ -297,9 +316,11 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
+      "refs/heads/ado-aw-smoke-candidate/630001/runtime-model-queue",
+      "refs/heads/ado-aw-smoke-candidate/630001/runtime-model-set-variable",
     ]);
     // Every case is staged to the SAME path — the ref is what distinguishes them.
-    expect(stagedWrites.length).toBe(5);
+    expect(stagedWrites.length).toBe(7);
     for (const write of stagedWrites) {
       expect(write.to).toBe(join(WORKTREE, "candidate", ".smoke", "pipeline.yml"));
       // The compiler emits no trigger keys once `on:` is stripped, and a
@@ -329,7 +350,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
 
     const gitModule = await import("../git.js");
     const resets = vi.mocked(gitModule.resetWorktree).mock.calls;
-    expect(resets.length).toBe(5);
+    expect(resets.length).toBe(7);
     for (const call of resets) {
       expect(call[0]).toMatchObject({ commitish: "basecommit" });
     }
@@ -456,6 +477,8 @@ describe("smoke-e2e index.main (per-case ref retention)", () => {
       "refs/heads/ado-aw-smoke-candidate/630001/noop-target",
       "refs/heads/ado-aw-smoke-candidate/630001/custom-safe-output",
       "refs/heads/ado-aw-smoke-candidate/630001/multi-repo",
+      "refs/heads/ado-aw-smoke-candidate/630001/runtime-model-queue",
+      "refs/heads/ado-aw-smoke-candidate/630001/runtime-model-set-variable",
     ]);
     expect(deletedRefs).not.toContain("refs/heads/ado-aw-smoke-candidate/630001/ado-proxy");
   });

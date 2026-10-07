@@ -249,14 +249,25 @@ export class AdoRest {
    */
   async queueBuild(
     definitionId: number,
-    opts: { sourceBranch: string; sourceVersion: string },
+    opts: {
+      sourceBranch: string;
+      sourceVersion: string;
+      variables?: Readonly<Record<string, string>>;
+    },
   ): Promise<{ id: number }> {
     const path = this.projPath(`_apis/build/builds?api-version=7.1`);
-    const body = {
+    const body: Record<string, unknown> = {
       definition: { id: definitionId },
       sourceBranch: opts.sourceBranch,
       sourceVersion: opts.sourceVersion,
     };
+    if (opts.variables && Object.keys(opts.variables).length > 0) {
+      // Build Queue's legacy `parameters` string is how `az pipelines run
+      // --variables` sends queue-time variables. A top-level `variables`
+      // object belongs to the Pipelines Runs API and is silently ignored by
+      // this endpoint.
+      body.parameters = JSON.stringify(opts.variables);
+    }
     const res = await this.request<{ id: number }>(path, { method: "POST", body });
     if (!res) throw new Error(`queueBuild(${definitionId}) returned no body`);
     return res;

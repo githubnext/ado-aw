@@ -138,13 +138,6 @@ impl ContextContributor for PrContextContributor {
     }
 
     fn should_activate(&self, ctx: &CompileContext) -> bool {
-        // MAINTENANCE: this MUST stay in lock-step with
-        // `super::pr_contributor_will_activate` (the shared helper used
-        // by `collect_extensions` to populate
-        // `AdoScriptExtension::exec_context_pr_active`). The divergence-
-        // trap tests in `super::tests` exercise the helper path; this
-        // method is the runtime-context-aware version used by the
-        // declarations path.
         if ctx.front_matter.pr_trigger().is_none() {
             return false;
         }

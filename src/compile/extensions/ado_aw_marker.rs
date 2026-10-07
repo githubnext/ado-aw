@@ -48,6 +48,52 @@ shell_script! {
 }
 
 shell_script! {
+    /// Append one validated string field to a single-line JSON object.
+    ///
+    /// This phase is shared by the Agent metadata writer and the Detection
+    /// metadata enrichment step so their file-update behavior cannot drift.
+    APPEND_AW_INFO_FIELD {
+        interpreter: Bash,
+        bindings: [],
+        externals: [],
+        fragments: [],
+        body: r#"
+ado_aw_append_info_field() {
+  local field="$1"
+  local value="$2"
+  local file="$3"
+  if [ -z "$value" ]; then
+    return 0
+  fi
+  local json
+  local compact_json
+  local tmp
+  local separator=","
+  json="$(cat "$file")"
+  if [ "$json" = "{}" ]; then
+    separator=""
+  else
+    case "$json" in
+      \{*\}) ;;
+      *)
+        echo "ERROR: aw_info.json is not a single-line JSON object" >&2
+        return 1
+        ;;
+    esac
+  fi
+  compact_json="$(printf '%s' "$json" | tr -d '[:space:]')"
+  if printf '%s' "$compact_json" | grep -Fq "\"${field}\":"; then
+    return 0
+  fi
+  tmp="$(mktemp)"
+  printf '%s%s"%s":"%s"}' "${json%?}" "$separator" "$field" "$value" > "$tmp"
+  mv "$tmp" "$file"
+}
+"#,
+    }
+}
+
+shell_script! {
     /// Write `aw_info.json` to Agent.TempDirectory/staging.
     ///
     /// The JSON is spliced as a fragment because it may (harmlessly) contain
@@ -242,23 +288,20 @@ impl CompileMetadata {
             .front_matter
             .safe_outputs
             .contains_key(crate::compile::types::THREAT_DETECTION_KEY);
-        let (threat_detection_enabled, detection_engine, detection_model) =
-            if explicit_threat_detection {
-                let config = ctx.front_matter.threat_detection_config()?;
-                let (engine, model) = if config.engine.is_some() {
-                    let effective = ctx.front_matter.effective_detection_engine(&config);
-                    let engine = crate::engine::get_engine(effective.engine_id())?;
-                    let model = match engine {
-                        crate::engine::Engine::Copilot => effective.model().map(str::to_string),
-                    };
-                    (Some(effective.engine_id().to_string()), model)
-                } else {
-                    (None, None)
-                };
-                (Some(config.is_enabled()), engine, model)
-            } else {
-                (None, None, None)
-            };
+        let config = ctx.front_matter.threat_detection_config()?;
+        let effective = ctx.front_matter.effective_detection_engine(&config);
+        let engine = crate::engine::get_engine(effective.engine_id())?;
+        let detection_model = if config.is_enabled() {
+            match engine {
+                crate::engine::Engine::Copilot => effective.model().map(str::to_string),
+            }
+        } else {
+            None
+        };
+        let threat_detection_enabled =
+            explicit_threat_detection.then_some(config.is_enabled());
+        let detection_engine = (explicit_threat_detection && config.engine.is_some())
+            .then_some(effective.engine_id().to_string());
         Ok(Some(Self {
             source: super::super::common::normalize_source_path(input_path),
             org: ctx
@@ -330,7 +373,10 @@ impl CompileMetadata {
             );
         }
         if let Some(model) = &self.model {
-            object.insert("model".to_string(), serde_json::Value::String(model.clone()));
+            object.insert(
+                "model".to_string(),
+                serde_json::Value::String(model.clone()),
+            );
         }
         if let Some(model) = &self.detection_model {
             object.insert(
@@ -459,6 +505,8 @@ mod tests {
     use crate::compile::extensions::CompileContext;
     use crate::compile::types::FrontMatter;
     use std::path::Path;
+    #[cfg(unix)]
+    use std::process::{Command, Output};
 
     fn parse_fm(yaml: &str) -> FrontMatter {
         serde_yaml::from_str(yaml).expect("front matter parses")
@@ -476,6 +524,37 @@ mod tests {
             Step::Bash(b) => b,
             other => panic!("expected Step::Bash, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    fn run_append_aw_info_field(
+        field: &str,
+        value: &str,
+        aw_info_json: &str,
+    ) -> (Output, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("aw_info.json");
+        std::fs::write(&path, aw_info_json).expect("write aw_info.json");
+        let script = format!(
+            "{}\nado_aw_append_info_field \"$FIELD\" \"$VALUE\" \"$FILE\"",
+            APPEND_AW_INFO_FIELD.body.trim()
+        );
+        let mut command = Command::new("bash");
+        command
+            .arg("-c")
+            .arg(script)
+            .env_clear()
+            .env("FIELD", field)
+            .env("VALUE", value)
+            .env("FILE", &path);
+        (command.output().expect("bash should run"), temp)
+    }
+
+    #[cfg(unix)]
+    fn read_aw_info_json(temp: &tempfile::TempDir) -> serde_json::Value {
+        let path = temp.path().join("aw_info.json");
+        let contents = std::fs::read_to_string(path).expect("aw_info.json should be written");
+        serde_json::from_str(&contents).expect("aw_info.json should parse")
     }
 
     #[test]
@@ -591,7 +670,7 @@ mod tests {
             step.script
         );
         assert!(
-            !step.script.contains("\"model\""),
+            !step.script.contains("\"model\":\""),
             "step should omit model when no model is configured:\n{}",
             step.script
         );
@@ -623,14 +702,105 @@ mod tests {
             "step missing build_definition_id macro:\n{}",
             step.script
         );
-        assert!(!step.script.contains("detection_model"));
-        assert!(!step.script.contains("threat_detection_enabled"));
+        assert!(!step.script.contains("\"threat_detection_enabled\""));
+        assert!(
+            !step
+                .env
+                .contains_key(crate::engine::ADO_AW_MODEL_DETECTION_COPILOT)
+        );
+        assert!(
+            !step
+                .env
+                .contains_key(crate::engine::ADO_AW_MODEL_AGENT_COPILOT)
+        );
+        assert!(
+            !step
+                .env
+                .contains_key(crate::engine::ADO_AW_DEFAULT_MODEL_COPILOT)
+        );
+        assert!(
+            !step.script.contains("$(ADO_AW_MODEL_DETECTION_COPILOT)"),
+            "runtime model macros must only appear in env mappings:\n{}",
+            step.script
+        );
+        assert!(
+            !step.script.contains("$(ADO_AW_DEFAULT_MODEL_COPILOT)"),
+            "runtime model macros must only appear in env mappings:\n{}",
+            step.script
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn append_aw_info_field_does_not_confuse_value_with_model_key() {
+        let (output, temp) = run_append_aw_info_field(
+            "model",
+            "gpt-5",
+            r#"{"agent_name":"model","schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        let value = read_aw_info_json(&temp);
+        assert_eq!(value["agent_name"], "model");
+        assert_eq!(value["model"], "gpt-5");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn append_aw_info_field_does_not_confuse_value_with_detection_model_key() {
+        let (output, temp) = run_append_aw_info_field(
+            "detection_model",
+            "gpt-5-mini",
+            r#"{"agent_name":"detection_model","schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        let value = read_aw_info_json(&temp);
+        assert_eq!(value["agent_name"], "detection_model");
+        assert_eq!(value["detection_model"], "gpt-5-mini");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn append_aw_info_field_preserves_existing_key_with_whitespace() {
+        let (output, temp) = run_append_aw_info_field(
+            "model",
+            "replacement",
+            r#"{"model" : "original","schema":"ado-aw/aw_info/1"}"#,
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        let value = read_aw_info_json(&temp);
+        assert_eq!(value["model"], "original");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn append_aw_info_field_returns_failure_without_exiting_its_caller() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("aw_info.json");
+        std::fs::write(&path, "not-json").expect("write aw_info.json");
+        let script = format!(
+            "{}\nstatus=0\nado_aw_append_info_field model gpt-5 \"$FILE\" || status=$?\nprintf 'after:%s' \"$status\"",
+            APPEND_AW_INFO_FIELD.body.trim()
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env_clear()
+            .env("FILE", path)
+            .output()
+            .expect("bash should run");
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "after:1");
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("aw_info.json is not a single-line JSON object"));
     }
 
     #[test]
     fn explicit_model_emits_aw_info_model_metadata() {
-        let fm =
-            parse_fm("name: t\ndescription: x\nengine:\n  id: copilot\n  model: some-model\n");
+        let fm = parse_fm("name: t\ndescription: x\nengine:\n  id: copilot\n  model: some-model\n");
         let input_path = Path::new("agents/foo.md");
         let ctx = CompileContext {
             agent_name: &fm.name,
@@ -651,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_threat_detection_emits_detector_metadata() {
+    fn disabled_threat_detection_omits_detector_model() {
         let fm = parse_fm(
             "name: t\ndescription: x\nengine:\n  id: copilot\n  model: agent-model\n\
              safe-outputs:\n  threat-detection:\n    enabled: false\n    engine:\n      \
@@ -670,8 +840,7 @@ mod tests {
         let steps = agent_prepare_steps(&ctx);
         let step = bash_step(&steps[1]);
         assert!(
-            step.script
-                .contains("\"threat_detection_enabled\":false"),
+            step.script.contains("\"threat_detection_enabled\":false"),
             "{}",
             step.script
         );
@@ -680,19 +849,12 @@ mod tests {
             "{}",
             step.script
         );
-        assert!(
-            step.script
-                .contains("\"detection_model\":\"detector-model\""),
-            "{}",
-            step.script
-        );
+        assert!(!step.script.contains("\"detection_model\""), "{}", step.script);
     }
 
     #[test]
     fn explicit_default_threat_detection_emits_enabled_state_only() {
-        let fm = parse_fm(
-            "name: t\ndescription: x\nsafe-outputs:\n  threat-detection: true\n",
-        );
+        let fm = parse_fm("name: t\ndescription: x\nsafe-outputs:\n  threat-detection: true\n");
         let input_path = Path::new("agents/foo.md");
         let ctx = CompileContext {
             agent_name: &fm.name,
@@ -711,7 +873,81 @@ mod tests {
             step.script
         );
         assert!(!step.script.contains("\"detection_engine\""));
-        assert!(!step.script.contains("\"detection_model\""));
+        assert!(!step.script.contains("ADO_AW_MODEL_DETECTION_COPILOT"));
+    }
+
+    #[test]
+    fn inherited_detection_model_is_emitted_as_static_metadata() {
+        let fm = parse_fm(
+            "name: t\ndescription: x\nengine:\n  id: copilot\n  model: agent-model\n\
+             safe-outputs:\n  threat-detection: true\n",
+        );
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        let step = bash_step(&steps[1]);
+        assert!(
+            step.script.contains("\"detection_model\":\"agent-model\""),
+            "{}",
+            step.script
+        );
+    }
+
+    #[test]
+    fn implicit_detection_inherits_static_agent_model_metadata() {
+        let fm =
+            parse_fm("name: t\ndescription: x\nengine:\n  id: copilot\n  model: agent-model\n");
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        let step = bash_step(&steps[1]);
+        assert!(
+            step.script
+                .contains("\"detection_model\":\"agent-model\""),
+            "{}",
+            step.script
+        );
+    }
+
+    #[test]
+    fn enabled_detection_specific_static_model_is_emitted() {
+        let fm = parse_fm(
+            "name: t\ndescription: x\nsafe-outputs:\n  threat-detection:\n    enabled: true\n    engine:\n      model: detector-model\n",
+        );
+        let input_path = Path::new("agents/foo.md");
+        let ctx = CompileContext {
+            agent_name: &fm.name,
+            front_matter: &fm,
+            ado_context: None,
+            engine: crate::engine::Engine::Copilot,
+            compile_dir: None,
+            input_path: Some(input_path),
+            imported_prompt_body: String::new(),
+        };
+        let steps = agent_prepare_steps(&ctx);
+        let step = bash_step(&steps[1]);
+        assert!(
+            step.script
+                .contains("\"detection_model\":\"detector-model\""),
+            "{}",
+            step.script
+        );
     }
 
     #[test]

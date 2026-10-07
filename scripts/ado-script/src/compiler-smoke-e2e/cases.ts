@@ -62,6 +62,11 @@ export interface CaseAssertions {
   readonly pipelineText?: AgentCommandAssertion;
   /** Build tags the child run must carry, with `{buildId}` expanded to the child build id. */
   readonly requiredBuildTags?: readonly string[];
+  /** Requested runtime models recorded in the child's audit metadata. */
+  readonly requestedModels?: {
+    readonly agent?: string;
+    readonly detection?: string;
+  };
 }
 
 export interface SmokeLane {
@@ -77,6 +82,8 @@ export interface SmokeCase {
   readonly modes: readonly CompilerSource[];
   /** Repo-relative source path (`.md` for compiled, `.yml`/`.yaml` for raw). */
   readonly source: string;
+  /** Non-secret variables supplied through the ADO queue-build API. */
+  readonly queueVariables?: Readonly<Record<string, string>>;
   readonly assertions?: CaseAssertions;
 }
 
@@ -162,6 +169,27 @@ function validateKindMatchesExtension(kind: CaseKind, source: string, caseId: st
   }
 }
 
+function parseQueueVariables(
+  raw: unknown,
+  caseId: string,
+): Readonly<Record<string, string>> | undefined {
+  if (raw === undefined) return undefined;
+  const obj = asRecord(raw, `case '${caseId}' queueVariables`);
+  const entries = Object.entries(obj);
+  if (entries.length === 0) {
+    fail(`case '${caseId}' queueVariables must not be empty`);
+  }
+
+  const variables: Record<string, string> = {};
+  for (const [name, rawValue] of entries) {
+    if (!ENV_NAME_RE.test(name)) {
+      fail(`case '${caseId}' queue variable '${name}' must match ${ENV_NAME_RE}`);
+    }
+    variables[name] = asString(rawValue, `case '${caseId}' queueVariables.${name}`);
+  }
+  return variables;
+}
+
 function parseAssertions(raw: unknown, caseId: string): CaseAssertions | undefined {
   if (raw === undefined) return undefined;
   const obj = asRecord(raw, `case '${caseId}' assertions`);
@@ -217,16 +245,41 @@ function parseAssertions(raw: unknown, caseId: string): CaseAssertions | undefin
     }
   }
 
+  let requestedModels: CaseAssertions["requestedModels"];
+  if (obj.requestedModels !== undefined) {
+    const models = asRecord(
+      obj.requestedModels,
+      `case '${caseId}' assertions.requestedModels`,
+    );
+    requestedModels = {
+      agent:
+        models.agent === undefined
+          ? undefined
+          : asString(models.agent, `case '${caseId}' assertions.requestedModels.agent`),
+      detection:
+        models.detection === undefined
+          ? undefined
+          : asString(
+              models.detection,
+              `case '${caseId}' assertions.requestedModels.detection`,
+            ),
+    };
+    if (requestedModels.agent === undefined && requestedModels.detection === undefined) {
+      fail(`case '${caseId}' assertions.requestedModels must declare agent and/or detection`);
+    }
+  }
+
   if (
     agentCommand === undefined &&
     pipelineText === undefined &&
-    requiredBuildTags === undefined
+    requiredBuildTags === undefined &&
+    requestedModels === undefined
   ) {
     fail(
-      `case '${caseId}' assertions must declare agentCommand, pipelineText and/or requiredBuildTags`,
+      `case '${caseId}' assertions must declare agentCommand, pipelineText, requiredBuildTags and/or requestedModels`,
     );
   }
-  return { agentCommand, pipelineText, requiredBuildTags };
+  return { agentCommand, pipelineText, requiredBuildTags, requestedModels };
 }
 
 /** Expand `{buildId}` in a declared build tag. */
@@ -316,7 +369,15 @@ export function parseManifest(text: string): SmokeManifest {
     const source = validateSourcePath(entry.source, id);
     validateKindMatchesExtension(kind, source, id);
 
-    cases.push({ id, lane, kind, modes, source, assertions: parseAssertions(entry.assertions, id) });
+    cases.push({
+      id,
+      lane,
+      kind,
+      modes,
+      source,
+      queueVariables: parseQueueVariables(entry.queueVariables, id),
+      assertions: parseAssertions(entry.assertions, id),
+    });
   }
 
   if (cases.length === 0) fail("cases must declare at least one case");

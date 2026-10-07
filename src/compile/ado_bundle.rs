@@ -53,6 +53,11 @@ pub enum Bundle {
     ExecContextRepo,
     ApprovalSummary,
     Conclusion,
+    /// Trusted Copilot invocation controller. Runs only on the pipeline host
+    /// for preflight preparation and postflight result validation.
+    CopilotController,
+    /// Minimal Copilot process runner executed only inside AWF.
+    CopilotRunner,
     /// GitHub App installation-token minter/revoker (issue #1316). Runs before
     /// the Copilot invocation in the Agent and Detection jobs. It authenticates
     /// to the **GitHub** API (not ADO REST), so it needs no ADO bearer.
@@ -155,6 +160,8 @@ impl Bundle {
         Bundle::ExecContextRepo,
         Bundle::ApprovalSummary,
         Bundle::Conclusion,
+        Bundle::CopilotController,
+        Bundle::CopilotRunner,
         Bundle::GithubAppToken,
         Bundle::PreparePrBase,
         Bundle::AzureWifRefresh,
@@ -183,6 +190,8 @@ impl Bundle {
             Bundle::ExecContextRepo => paths::EXEC_CONTEXT_REPO_PATH,
             Bundle::ApprovalSummary => paths::APPROVAL_SUMMARY_PATH,
             Bundle::Conclusion => paths::CONCLUSION_PATH,
+            Bundle::CopilotController => paths::COPILOT_CONTROLLER_PATH,
+            Bundle::CopilotRunner => paths::COPILOT_RUNNER_PATH,
             Bundle::GithubAppToken => paths::GITHUB_APP_TOKEN_PATH,
             Bundle::PreparePrBase => paths::PREPARE_PR_BASE_PATH,
             Bundle::AzureWifRefresh => paths::AZURE_WIF_REFRESH_PATH,
@@ -212,6 +221,8 @@ impl Bundle {
             | Bundle::ExecContextManual
             | Bundle::ExecContextRepo
             | Bundle::ApprovalSummary
+            | Bundle::CopilotController
+            | Bundle::CopilotRunner
             // Authenticates to the GitHub API with its own App JWT / minted
             // token, not the ADO bearer.
             | Bundle::GithubAppToken
