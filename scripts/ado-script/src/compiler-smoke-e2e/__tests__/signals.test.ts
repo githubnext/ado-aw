@@ -42,7 +42,7 @@ const CASES: ResolvedCase[] = [
     kind: "compiled",
     modes: ["candidate"],
     source: "tests/smoke/runtime-model-queue.md",
-    assertions: { requestedModels: { agent: "gpt-5.4" } },
+    assertions: { requestedModels: { agent: "gpt-6-luna" } },
     definitionId: 3006,
   },
 ];
@@ -269,6 +269,6 @@ describe("verifyCandidateAudit", () => {
     );
 
     expect(outcome.ok).toBe(false);
-    expect(outcome.results[1]?.message).toMatch(/expected "gpt-5.4"/);
+    expect(outcome.results[1]?.message).toMatch(/expected "gpt-6-luna"/);
   });
 });

@@ -141,7 +141,7 @@ GitHub.
   "modes": ["candidate", "released"],
   "source": "tests/safe-outputs/my-case.md",
   "queueVariables": {           // optional, non-secret ADO queue-time variables
-    "ADO_AW_MODEL_AGENT_COPILOT": "gpt-5.4"
+    "ADO_AW_MODEL_AGENT_COPILOT": "gpt-6-luna"
   }
 }
 ```
@@ -182,7 +182,7 @@ Optional per-case assertions, so novel checks stay out of the harness code:
     "forbidden": ["--network host"]
   },
   "requiredBuildTags": ["ado-aw-custom-job-{buildId}"],
-  "requestedModels": { "agent": "gpt-5.4" }
+  "requestedModels": { "agent": "gpt-6-luna" }
 }
 ```
 

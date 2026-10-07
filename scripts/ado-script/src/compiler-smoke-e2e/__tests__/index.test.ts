@@ -298,7 +298,7 @@ describe("smoke-e2e index.main (happy path, candidate mode)", () => {
     ]);
     expect(
       queuedRequests.find((request) => request.caseId === "runtime-model-queue")?.variables,
-    ).toEqual({ ADO_AW_MODEL_AGENT_COPILOT: "gpt-5.4" });
+    ).toEqual({ ADO_AW_MODEL_AGENT_COPILOT: "gpt-6-luna" });
 
     // Cleanup ordering: remote refs deleted BEFORE the local worktree is removed.
     expect(mockCalls.indexOf("deleteRemoteRefs")).toBeGreaterThanOrEqual(0);
