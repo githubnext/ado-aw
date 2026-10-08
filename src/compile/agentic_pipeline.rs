@@ -683,6 +683,54 @@ pub(crate) fn build_canonical_jobs(
     //   - no reviewed tools           → single default job (unchanged)
     //   - all reviewed tools          → single default job, gated by ManualReview
     //   - mixed (auto + reviewed)     → auto job + reviewed job
+    let safeoutputs_shape = push_safeoutputs_jobs(&mut jobs, front_matter, cfg, &p)?;
+    if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
+        jobs.push(teardown);
+    }
+    if let Some(conclusion) = build_conclusion_job(
+        front_matter,
+        cfg,
+        &p,
+        &custom_defs,
+        safeoutputs_shape.has_reviewed_job,
+    )? {
+        jobs.push(conclusion);
+    }
+
+    // Wire dependsOn between jobs (graph pass also derives but
+    // explicit edges make the YAML match committed lock files).
+    wire_explicit_dependencies(
+        &mut jobs,
+        &p,
+        &custom_defs,
+        &custom_direct_reviewed_job_ids,
+        &custom_automatic_job_ids,
+        &custom_job_ids,
+        safeoutputs_shape.waits_for_review,
+    )?;
+    Ok(jobs)
+}
+
+/// Outcome of [`push_safeoutputs_jobs`]: which downstream wiring/gating
+/// decisions depend on how safe-output execution was split.
+struct SafeOutputsShape {
+    /// Whether a separate `SafeOutputs_Reviewed` job was emitted (mixed
+    /// auto + reviewed tools).
+    has_reviewed_job: bool,
+    /// Whether the (single, unsplit) SafeOutputs job is itself gated behind
+    /// manual review (all configured tools are reviewed).
+    waits_for_review: bool,
+}
+
+/// Builds and pushes the Stage 3 safe-output execution job(s) onto `jobs`,
+/// splitting into automatic + manual-review-gated variants when the
+/// configured safe outputs mix reviewed and non-reviewed tools.
+fn push_safeoutputs_jobs(
+    jobs: &mut Vec<Job>,
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    p: &JobPrefix<'_>,
+) -> Result<SafeOutputsShape> {
     let (auto_all, reviewed_all) = front_matter.partition_safe_outputs_by_approval();
     let custom_tool_names = front_matter.custom_safe_output_tool_names();
     let custom_tool_set: std::collections::HashSet<&str> =
@@ -695,14 +743,14 @@ pub(crate) fn build_canonical_jobs(
         .into_iter()
         .filter(|tool| !custom_tool_set.contains(tool.as_str()))
         .collect();
-    let has_reviewed_safeoutputs_job = !reviewed.is_empty() && !auto.is_empty();
+    let has_reviewed_job = !reviewed.is_empty() && !auto.is_empty();
     // Which variant actually runs `create-pull-request` (and thus needs the
     // `prepare-pr-base` fetch/deepen — issue #1453). In a split it lives in
     // exactly one variant; the other filters it out, so only the running
     // variant should pay for the bundle download + prepare step.
     let create_pr_configured = front_matter.create_pr_config().is_some();
     let create_pr_reviewed = reviewed.iter().any(|t| t == CREATE_PULL_REQUEST_TOOL);
-    let safeoutputs_waits_for_review = !reviewed.is_empty() && auto.is_empty();
+    let waits_for_review = !reviewed.is_empty() && auto.is_empty();
     let github_issue_tools_configured = front_matter.github_issue_tool_names();
     let github_issue_tools_reviewed: Vec<String> = github_issue_tools_configured
         .iter()
@@ -718,7 +766,7 @@ pub(crate) fn build_canonical_jobs(
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
-            &p,
+            p,
             &SafeOutputsVariant::default_single(
                 create_pr_configured,
                 github_issue_tools_configured,
@@ -729,7 +777,7 @@ pub(crate) fn build_canonical_jobs(
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
-            &p,
+            p,
             &SafeOutputsVariant::automatic(
                 &reviewed,
                 create_pr_configured && !create_pr_reviewed,
@@ -740,7 +788,7 @@ pub(crate) fn build_canonical_jobs(
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
-            &p,
+            p,
             &SafeOutputsVariant::reviewed(
                 &reviewed,
                 create_pr_configured && create_pr_reviewed,
@@ -748,31 +796,10 @@ pub(crate) fn build_canonical_jobs(
             ),
         )?);
     }
-    if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
-        jobs.push(teardown);
-    }
-    if let Some(conclusion) = build_conclusion_job(
-        front_matter,
-        cfg,
-        &p,
-        &custom_defs,
-        has_reviewed_safeoutputs_job,
-    )? {
-        jobs.push(conclusion);
-    }
-
-    // Wire dependsOn between jobs (graph pass also derives but
-    // explicit edges make the YAML match committed lock files).
-    wire_explicit_dependencies(
-        &mut jobs,
-        &p,
-        &custom_defs,
-        &custom_direct_reviewed_job_ids,
-        &custom_automatic_job_ids,
-        &custom_job_ids,
-        safeoutputs_waits_for_review,
-    )?;
-    Ok(jobs)
+    Ok(SafeOutputsShape {
+        has_reviewed_job,
+        waits_for_review,
+    })
 }
 
 /// Job-id prefix helper. Encapsulates the legacy-template quirk that
