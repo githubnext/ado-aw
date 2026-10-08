@@ -75,6 +75,22 @@ impl PythonRuntimeConfig {
             PythonRuntimeConfig::WithOptions(opts) => opts.config.as_deref(),
         }
     }
+
+    /// Handle of the `permissions.packages` feed used as the package index.
+    pub fn feed(&self) -> Option<&str> {
+        match self {
+            PythonRuntimeConfig::Enabled(_) => None,
+            PythonRuntimeConfig::WithOptions(opts) => opts.feed.as_deref(),
+        }
+    }
+
+    /// Whether public PyPI hosts stay on the AWF allowlist.
+    pub fn public_registry(&self) -> crate::runtimes::PublicRegistry {
+        match self {
+            PythonRuntimeConfig::Enabled(_) => crate::runtimes::PublicRegistry::default(),
+            PythonRuntimeConfig::WithOptions(opts) => opts.public_registry,
+        }
+    }
 }
 
 impl SanitizeConfigTrait for PythonRuntimeConfig {
@@ -107,6 +123,18 @@ pub struct PythonOptions {
     /// Reserved for future proxy-auth integration (gh-aw-firewall#2547).
     #[serde(default)]
     pub config: Option<String>,
+
+    /// Handle of a `permissions.packages` feed (granting `pypi`) to use as
+    /// the package index. The agent reaches it through the credential-isolated
+    /// package proxy. Mutually exclusive with `feed-url` and `config`.
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub feed: Option<crate::secure::AdoFeedName>,
+
+    /// `block` removes public PyPI hosts from the AWF allowlist.
+    #[serde(default, rename = "public-registry")]
+    #[sanitize_config(skip)]
+    pub public_registry: crate::runtimes::PublicRegistry,
 }
 
 /// Bash commands that the Python runtime adds to the allow-list.

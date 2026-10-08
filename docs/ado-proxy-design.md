@@ -39,10 +39,44 @@ The following remain outside this provider:
 - credential-, token-, key-, SAS-, service-connection-, variable-secret-, and
   secure-file-returning operations;
 - Azure DevOps Server/on-premises and sovereign/custom clouds;
-- git smart HTTP, artifacts and signed redirects, Analytics/OData, and broad
+- git smart HTTP, Azure Artifacts traffic outside the package family below
+  (Maven, Universal Packages, feed management), Analytics/OData, and broad
   batch APIs until separately modeled.
 
 Writes remain SafeOutputs or future privileged executors.
+
+### Package feeds
+
+`permissions.packages` adds a second, independent **package family** to the
+same proxy (see [`package-feeds.md`](package-feeds.md)). It covers read-only
+Azure Artifacts protocol traffic to `pkgs.dev.azure.com` for npm, PyPI, NuGet,
+and Cargo.
+
+- **Separate slot.** The material document carries the REST bearer (`token`,
+  from `permissions.read`) and the package credential (`package_token`) in
+  separate slots. The REST slot is never attached to a package host, and the
+  package slot is never attached to a REST host. Either family is inert when
+  its permission is absent, and the proxy starts when either is present.
+- **Package credential.** The build identity (`$(System.AccessToken)`, mapped
+  only into the start step) or a workload-identity token minted into the
+  secret `SC_PACKAGES_TOKEN` by `AzureCLI@3`.
+- **Policy.** `GET`/`HEAD` only, on catalogued protocol routes, for granted
+  organization/project/feed/view tuples. Feed and project names are resolved
+  to GUIDs on the host before AWF starts (`ado-proxy.js resolve-feeds`), which
+  also preflights access, so both forms match the same grant.
+- **Redirects.** Package downloads redirect to pre-signed blob storage. The
+  proxy never follows a redirect. It relays `Location` only for allowlisted
+  storage hosts (`*.vsblob.visualstudio.com`, `*.blob.core.windows.net`). The
+  client fetches the signed URL through Squid with no credential. That keeps
+  bulk downloads out of the proxy, and a signed URL authorizes only the one
+  blob.
+- **Ingress.** Generated wrappers for `npm`, `npx`, `pip`, `pip3`, `uv`,
+  `dotnet`, and `cargo` set `HTTPS_PROXY` and per-process CA trust, like the
+  `az` wrapper.
+- **Routing is not the boundary.** Squid still allows `pkgs.dev.azure.com`,
+  because the proxy's own upstream requests leave through Squid. A client that
+  bypasses its wrapper reaches the feed with no credential and is refused. The
+  agent never holds the credential, whichever route it takes.
 
 ## Trust boundaries
 
@@ -94,6 +128,7 @@ there is exactly one place where "what may be read" is decided.
 |---|---|---|
 | Azure CLI (`az`) | an agent-side wrapper sets `HTTPS_PROXY` at the engine's `CONNECT` port and execs stock `az`, which keeps the canonical `dev.azure.com` URL | the `az` process only |
 | Azure DevOps MCP | container on a Docker `--internal` network, where `dev.azure.com` is redirected at the policy engine via `--add-host`. Internal is load-bearing: a normal bridge has outbound NAT and would leave a direct route past the engine | the MCP container only |
+| Package managers (`npm`, `pip`, `uv`, `dotnet`, `cargo`) | agent-side wrappers set `HTTPS_PROXY` at the engine's `CONNECT` port, as for `az`; only `pkgs.dev.azure.com` is intercepted | the wrapped process only |
 | Hand-rolled `curl` / SDK calls from the Agent | none — Squid denies the protected hosts | none; fails closed |
 
 **Why `az` needs no argument rewriting.** Earlier drafts pointed `az` at the
@@ -408,8 +443,10 @@ Custody rules the implementation enforces:
   request id, protected host, method, normalized operation id, decision,
   machine-readable reason and short detail, upstream status class, latency,
   response byte count, and the names of any credential headers the client
-  supplied and the proxy stripped. Raw paths, query values, headers, bodies,
-  and credentials have nowhere to go in the record type.
+  supplied and the proxy stripped. Package-family records add the optional
+  `family` and `protocol` fields, so v1 readers stay compatible. Raw paths,
+  query values, headers, bodies, and credentials have nowhere to go in the
+  record type.
 
 Operational diagnostics are equally deliberate:
 

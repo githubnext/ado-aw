@@ -127,18 +127,135 @@ export function sanitizeRequestHeaders(
 export function sanitizeResponseHeaders(
   incoming: Readonly<Record<string, string | string[] | undefined>>,
 ): Record<string, string> {
+  return pickHeaders(incoming, FORWARDED_RESPONSE_HEADERS);
+}
+
+function pickHeaders(
+  incoming: Readonly<Record<string, string | string[] | undefined>>,
+  allowed: ReadonlySet<string>,
+): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const [rawName, rawValue] of Object.entries(incoming)) {
     const name = rawName.toLowerCase();
-    if (!FORWARDED_RESPONSE_HEADERS.has(name)) continue;
+    if (!allowed.has(name)) continue;
     const value = firstValue(rawValue);
     if (value !== undefined) headers[name] = value;
   }
   return headers;
 }
 
+/**
+ * Request headers forwarded to a package host, lowercased.
+ *
+ * Package clients need conditional and ranged fetches (restore caches, resumed
+ * downloads) and send a few protocol-identification headers. Everything else
+ * is dropped for the same reason as on the REST path: the request the policy
+ * authorized must be the request that is sent. Notably absent:
+ *
+ *   - `authorization`, `cookie`, `proxy-*` — client credentials, never relayed;
+ *   - `x-nuget-apikey` — NuGet's push credential, and a push is never allowed;
+ *   - `npm-otp`, `npm-auth-type` — interactive-auth material;
+ *   - `referer` — npm puts the invoking command line there, which upstream
+ *     does not need;
+ *   - `forwarded` / `x-forwarded-*` and hop-by-hop headers.
+ */
+const PACKAGE_REQUEST_HEADERS: ReadonlySet<string> = new Set([
+  "accept",
+  "accept-language",
+  "user-agent",
+  "cache-control",
+  "pragma",
+  "if-none-match",
+  "if-modified-since",
+  "if-match",
+  "if-unmodified-since",
+  "range",
+  "if-range",
+  // npm protocol identification.
+  "npm-command",
+  "npm-scope",
+  "npm-session",
+  "npm-in-ci",
+  // NuGet protocol identification. An explicit list rather than an
+  // `x-nuget-*` prefix so `x-nuget-apikey` can never slip through.
+  "x-nuget-session-id",
+  "x-nuget-client-version",
+  "x-nuget-protocol-version",
+]);
+
+/**
+ * Response headers returned from a package host, lowercased.
+ *
+ * Enough for clients to cache, resume, and name downloads. `set-cookie` and
+ * `www-authenticate` are never relayed (session material, interactive-login
+ * prompts), and `location` is handled separately by the redirect validator.
+ */
+const PACKAGE_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
+  "content-type",
+  "content-length",
+  // Relayed in case the upstream ignores `accept-encoding: identity`;
+  // dropping it would hand the client compressed bytes it believes are plain.
+  "content-encoding",
+  "etag",
+  "last-modified",
+  "cache-control",
+  "expires",
+  "date",
+  "accept-ranges",
+  "content-range",
+  "content-disposition",
+  "vary",
+  "x-content-type-options",
+  "retry-after",
+]);
+
+/** Credential-like headers a package client may send, logged when stripped. */
+const PACKAGE_CREDENTIAL_HEADERS: readonly string[] = [
+  ...CREDENTIAL_HEADERS,
+  "x-nuget-apikey",
+  "npm-otp",
+];
+
+/**
+ * Build the upstream header set for an authorized package request.
+ *
+ * As with {@link sanitizeRequestHeaders}, the credential is applied by the
+ * caller after the allow decision; this function never sees it.
+ */
+export function sanitizePackageRequestHeaders(
+  incoming: Readonly<Record<string, string | string[] | undefined>>,
+  host: string,
+): SanitizedHeaders {
+  const strippedCredentials: string[] = [];
+  for (const rawName of Object.keys(incoming)) {
+    const name = rawName.toLowerCase();
+    if (PACKAGE_CREDENTIAL_HEADERS.includes(name)) strippedCredentials.push(name);
+  }
+
+  const headers = pickHeaders(incoming, PACKAGE_REQUEST_HEADERS);
+  headers.host = host;
+  // Azure Artifacts shares Azure DevOps' identity front end: without this an
+  // under-privileged request may get a 203 sign-in page instead of a 401.
+  headers["x-tfs-fedauthredirect"] = "Suppress";
+  // Keeps the response byte budget honest: the limit is on what the client
+  // receives, so it must not be defeated by a compressed transfer.
+  headers["accept-encoding"] = "identity";
+  headers.connection = "close";
+
+  return { headers, strippedCredentials };
+}
+
+/** Filter a package host's response headers down to the safe set. */
+export function sanitizePackageResponseHeaders(
+  incoming: Readonly<Record<string, string | string[] | undefined>>,
+): Record<string, string> {
+  return pickHeaders(incoming, PACKAGE_RESPONSE_HEADERS);
+}
+
 export const INTERNAL = {
   FORWARDED_REQUEST_HEADERS,
   FORWARDED_RESPONSE_HEADERS,
   CREDENTIAL_HEADERS,
+  PACKAGE_REQUEST_HEADERS,
+  PACKAGE_RESPONSE_HEADERS,
 };

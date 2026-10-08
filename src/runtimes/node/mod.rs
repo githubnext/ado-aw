@@ -78,6 +78,22 @@ impl NodeRuntimeConfig {
             NodeRuntimeConfig::WithOptions(opts) => opts.config.as_deref(),
         }
     }
+
+    /// Handle of the `permissions.packages` feed used as the npm registry.
+    pub fn feed(&self) -> Option<&str> {
+        match self {
+            NodeRuntimeConfig::Enabled(_) => None,
+            NodeRuntimeConfig::WithOptions(opts) => opts.feed.as_deref(),
+        }
+    }
+
+    /// Whether public npm registry hosts stay on the AWF allowlist.
+    pub fn public_registry(&self) -> crate::runtimes::PublicRegistry {
+        match self {
+            NodeRuntimeConfig::Enabled(_) => crate::runtimes::PublicRegistry::default(),
+            NodeRuntimeConfig::WithOptions(opts) => opts.public_registry,
+        }
+    }
 }
 
 impl SanitizeConfigTrait for NodeRuntimeConfig {
@@ -110,6 +126,18 @@ pub struct NodeOptions {
     /// Reserved for future proxy-auth integration (gh-aw-firewall#2547).
     #[serde(default)]
     pub config: Option<String>,
+
+    /// Handle of a `permissions.packages` feed (granting `npm`) to use as the
+    /// registry. The agent reaches it through the credential-isolated package
+    /// proxy. Mutually exclusive with `feed-url` and `config`.
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub feed: Option<crate::secure::AdoFeedName>,
+
+    /// `block` removes public npm registry hosts from the AWF allowlist.
+    #[serde(default, rename = "public-registry")]
+    #[sanitize_config(skip)]
+    pub public_registry: crate::runtimes::PublicRegistry,
 }
 
 /// Bash commands that the Node.js runtime adds to the allow-list.

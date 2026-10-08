@@ -17,7 +17,8 @@
 use serde::Serialize;
 
 use super::catalog::{
-    CATALOG_SCHEMA_VERSION, Capability, ORGANIZATION_HOST, SPS_FALLBACK_HOST,
+    CATALOG_SCHEMA_VERSION, Capability, ORGANIZATION_HOST, PACKAGE_HOST, PackageProtocolId,
+    SPS_FALLBACK_HOST,
 };
 use crate::compile::types::FrontMatter;
 
@@ -106,6 +107,37 @@ pub struct PolicyDocument {
     pub additional_scopes: Vec<PolicyOrganizationScope>,
     pub capabilities: Vec<&'static str>,
     pub protected_hosts: Vec<&'static str>,
+    /// Package-feed grants for `permissions.packages`. Absent when the
+    /// workflow configures none, in which case the package host is not
+    /// intercepted at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packages: Option<PolicyPackages>,
+}
+
+/// Package-family section of the policy document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PolicyPackages {
+    /// Hosts intercepted for package traffic. Must equal the catalog's
+    /// `package_hosts`; the bundle refuses a document that omits one.
+    pub hosts: Vec<&'static str>,
+    pub feeds: Vec<PolicyPackageFeed>,
+}
+
+/// One readable feed.
+///
+/// `project_id`, `feed_id`, and `view_id` are not emitted by the compiler:
+/// the trusted host step resolves them from the Feeds REST API before the
+/// proxy starts, because package metadata frequently addresses feeds and
+/// projects by GUID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PolicyPackageFeed {
+    pub organization: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub feed: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    pub protocols: Vec<PackageProtocolId>,
 }
 
 /// One explicitly allowed organization and its projects.
@@ -150,7 +182,19 @@ impl PolicyDocument {
     /// author reordering their `capabilities:` list must not produce a
     /// different pipeline.
     pub fn new(front_matter: &FrontMatter) -> Self {
-        let requested = ado_proxy_capabilities(front_matter);
+        // Without `permissions.read` there is no REST credential, so no REST
+        // operation may be enabled. The engine still runs (for packages) and
+        // still intercepts the REST hosts, denying everything there.
+        let read_enabled = front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.read.as_ref())
+            .is_some();
+        let requested = if read_enabled {
+            ado_proxy_capabilities(front_matter)
+        } else {
+            Vec::new()
+        };
         let capabilities = requested
             .iter()
             .map(|capability| capability.as_str())
@@ -173,7 +217,46 @@ impl PolicyDocument {
             // the document omitted would be byte-tunnelled to Squid instead,
             // which is the single failure mode the proxy cannot tolerate.
             protected_hosts: vec![ORGANIZATION_HOST, SPS_FALLBACK_HOST],
+            packages: Self::packages(front_matter),
         }
+    }
+
+    /// Lower `permissions.packages` into the feed grants the bundle enforces.
+    ///
+    /// A feed with no explicit organization belongs to the current one, which
+    /// is a property of the run, so it uses the same placeholder as the REST
+    /// scope.
+    fn packages(front_matter: &FrontMatter) -> Option<PolicyPackages> {
+        let packages = front_matter
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.packages.as_ref())?;
+        Some(PolicyPackages {
+            hosts: vec![PACKAGE_HOST],
+            feeds: packages
+                .feeds
+                .iter()
+                .map(|feed| {
+                    let mut protocols: Vec<PackageProtocolId> = feed
+                        .protocols
+                        .iter()
+                        .map(|protocol| protocol.to_catalog())
+                        .collect();
+                    protocols.sort_by_key(|protocol| *protocol as u8);
+                    protocols.dedup();
+                    PolicyPackageFeed {
+                        organization: feed.organization.as_ref().map_or_else(
+                            || ORGANIZATION_PLACEHOLDER.to_string(),
+                            |organization| organization.as_str().to_string(),
+                        ),
+                        project: feed.project.as_ref().map(|value| value.as_str().to_string()),
+                        feed: feed.feed.as_str().to_string(),
+                        view: feed.view.as_ref().map(|value| value.as_str().to_string()),
+                        protocols,
+                    }
+                })
+                .collect(),
+        })
     }
 
     /// Lower `permissions.read.allow` into the exact organization-relative tree
@@ -381,7 +464,7 @@ repos:
         // operation is a GET or OPTIONS, and secret-bearing route families are
         // denied outright. Starting narrower would leave the MCP unable to
         // answer most questions.
-        let document = PolicyDocument::new(&plain());
+        let document = PolicyDocument::new(&with_read_shorthand());
         for capability in Capability::ALL {
             assert!(
                 document.capabilities.contains(&capability.as_str()),
@@ -389,6 +472,68 @@ repos:
                 capability.as_str()
             );
         }
+    }
+
+    fn with_read_shorthand() -> FrontMatter {
+        crate::compile::parse_markdown(
+            "---\nname: t\ndescription: x\npermissions:\n  read: my-read-sc\n---\n",
+        )
+        .unwrap()
+        .0
+    }
+
+    fn with_packages(extra_permissions: &str) -> FrontMatter {
+        crate::compile::parse_markdown(&format!(
+            "---\nname: t\ndescription: x\npermissions:\n{extra_permissions}  packages:\n    \
+             feeds:\n      - feed: internal\n        project: Engineering\n        \
+             view: Release\n        protocols: [nuget, npm]\n      - name: partner\n        \
+             organization: fabrikam\n        feed: shared\n        upstream: allow\n        \
+             protocols: [cargo]\n    service-connection: wif\n---\n"
+        ))
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn packages_without_read_grant_no_rest_capability() {
+        let document = PolicyDocument::new(&with_packages(""));
+        assert!(
+            document.capabilities.is_empty(),
+            "without permissions.read there is no REST credential: {:?}",
+            document.capabilities
+        );
+        // REST hosts stay intercepted so they are denied rather than tunnelled.
+        assert_eq!(document.protected_hosts, vec![ORGANIZATION_HOST, SPS_FALLBACK_HOST]);
+    }
+
+    #[test]
+    fn packages_lower_into_organization_relative_feed_grants() {
+        let document = PolicyDocument::new(&with_packages("  read: my-read-sc\n"));
+        assert!(!document.capabilities.is_empty());
+        let packages = document.packages.expect("packages section");
+        assert_eq!(packages.hosts, vec![PACKAGE_HOST]);
+        assert_eq!(
+            packages.feeds,
+            vec![
+                PolicyPackageFeed {
+                    organization: ORGANIZATION_PLACEHOLDER.to_string(),
+                    project: Some("Engineering".to_string()),
+                    feed: "internal".to_string(),
+                    view: Some("Release".to_string()),
+                    protocols: vec![PackageProtocolId::Npm, PackageProtocolId::Nuget],
+                },
+                PolicyPackageFeed {
+                    organization: "fabrikam".to_string(),
+                    project: None,
+                    feed: "shared".to_string(),
+                    view: None,
+                    protocols: vec![PackageProtocolId::Cargo],
+                },
+            ]
+        );
+        let json = PolicyDocument::new(&with_packages("")).to_json();
+        assert!(json.contains("\"protocols\": [\n          \"npm\",\n          \"nuget\""), "{json}");
+        assert!(!PolicyDocument::new(&plain()).to_json().contains("packages"));
     }
 
     #[test]

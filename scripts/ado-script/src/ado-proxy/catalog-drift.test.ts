@@ -88,7 +88,7 @@ describe("ado-proxy catalog drift guard", () => {
 
   it("declares the schema version the sidecar pins against", () => {
     const catalog = readSnapshot();
-    expect(catalog.schema_version).toBe("ado-aw/ado-proxy-catalog/v1");
+    expect(catalog.schema_version).toBe("ado-aw/ado-proxy-catalog/v2");
   });
 
   it("reports the runtime available after the full wiring lands", () => {
