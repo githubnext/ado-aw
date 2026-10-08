@@ -8688,6 +8688,138 @@ fn test_supply_chain_feed_never_authenticates_in_awf_jobs() {
     assert!(job_text("SafeOutputs").contains("NuGetAuthenticate@1"));
 }
 
+/// `permissions.packages` with the build identity: the proxy runs without a
+/// REST credential, maps `System.AccessToken` only into its own start step,
+/// resolves feeds on the host, intercepts the package host, installs the
+/// package-manager wrappers, and points runtimes at the canonical feed URL —
+/// with no authenticate task anywhere in an AWF job.
+#[test]
+fn test_package_feeds_build_identity_wiring() {
+    let compiled = compile_fixture("package-feeds-agent.md");
+    assert_valid_yaml(&compiled, "package-feeds-agent.md");
+    let doc = parse_compiled_yaml(&compiled);
+    let agent = serde_yaml::to_string(find_job_mapping(&doc, "Agent").unwrap()).unwrap();
+
+    assert!(agent.contains("Start ado-proxy policy engine"), "{agent}");
+    assert!(agent.contains("ADO_PROXY_PACKAGE_BEARER: $(System.AccessToken)"));
+    assert!(
+        !agent.contains("ADO_PROXY_BEARER: $("),
+        "no REST credential without permissions.read"
+    );
+    assert!(!agent.contains("SC_READ_TOKEN"));
+    assert!(agent.contains("resolve-feeds --policy-file"));
+    assert!(agent.contains("pkgs.dev.azure.com"), "package host leaf + policy");
+    assert!(agent.contains("--topology-attach \"awmg-ado-proxy\""));
+    assert!(agent.contains("Install package-manager wrappers (ado-proxy)"));
+    assert!(agent.contains("/tmp/ado-aw-pkg-bin"));
+    assert!(agent.contains("Internal package feeds"));
+    assert!(
+        agent.contains(
+            "https://pkgs.dev.azure.com/contoso/Engineering/_packaging/internal-packages@Release/npm/registry/"
+        ),
+        "npm registry selection"
+    );
+    assert!(agent.contains(
+        "https://pkgs.dev.azure.com/contoso/Engineering/_packaging/internal-packages@Release/pypi/simple/"
+    ));
+    assert!(agent.contains(
+        "https://pkgs.dev.azure.com/contoso/Engineering/_packaging/internal-packages@Release/nuget/v3/index.json"
+    ));
+    for task in ["NuGetAuthenticate", "npmAuthenticate", "PipAuthenticate", "AzureCLI@3"] {
+        assert!(!agent.contains(task), "{task} must not appear in the Agent job");
+    }
+    // No WIF mint, so no token lifetime cap and no SC_PACKAGES_TOKEN.
+    assert!(!compiled.contains("SC_PACKAGES_TOKEN"));
+
+    // `public-registry: block` removes PyPI but keeps npm/NuGet public hosts.
+    let allowed = agent
+        .lines()
+        .find(|line| line.contains("ALLOWED_DOMAINS="))
+        .expect("allowlist binding");
+    assert!(!allowed.contains("pypi.org") && !allowed.contains("files.pythonhosted.org"));
+    assert!(allowed.contains("registry.npmjs.org") && allowed.contains("api.nuget.org"));
+}
+
+/// A workload-identity package connection mints `SC_PACKAGES_TOKEN` in the
+/// Agent job, maps only that into the proxy, excludes it from AWF, and is
+/// subject to the proxied timeout cap.
+#[test]
+fn test_package_feeds_service_connection_wiring() {
+    let source = "---\nname: Packages WIF\ndescription: d\npermissions:\n  packages:\n    \
+                  service-connection: artifacts-reader\n    identity-role: reader\n    feeds:\n      \
+                  - feed: shared\n        organization: fabrikam\n        protocols: [cargo]\n---\n\nBody\n";
+    let (ok, compiled, stderr) = compile_inline_source("packages-wif", source);
+    assert!(ok, "{stderr}");
+    let doc = parse_compiled_yaml(&compiled);
+    let agent = serde_yaml::to_string(find_job_mapping(&doc, "Agent").unwrap()).unwrap();
+    assert!(agent.contains("AzureCLI@3"));
+    assert!(agent.contains("connectedServiceNameARM: artifacts-reader") || agent.contains("artifacts-reader"));
+    assert!(agent.contains("variable=SC_PACKAGES_TOKEN;issecret=true"));
+    assert!(agent.contains("ADO_PROXY_PACKAGE_BEARER: $(SC_PACKAGES_TOKEN)"));
+    assert!(!agent.contains("System.AccessToken"), "build identity must not be mapped");
+    assert!(agent.contains("--exclude-env SC_PACKAGES_TOKEN"));
+
+    let capped = source.replace(
+        "permissions:",
+        "engine:\n  id: copilot\n  timeout-minutes: 90\npermissions:",
+    );
+    let (ok, _, stderr) = compile_inline_source("packages-wif-timeout", &capped);
+    assert!(!ok && stderr.contains("timeout-minutes"), "{stderr}");
+}
+
+/// Without `permissions.packages`, nothing about the package proxy appears,
+/// and a runtime `feed:` reference is rejected.
+#[test]
+fn test_package_feeds_absent_and_dangling_reference() {
+    let compiled = compile_fixture("minimal-agent.md");
+    assert!(!compiled.contains("Install package-manager wrappers"));
+    assert!(!compiled.contains("ADO_PROXY_PACKAGE_BEARER"));
+    assert!(!compiled.contains("resolve-feeds"));
+
+    let (ok, _, stderr) = compile_inline_source(
+        "dangling-feed",
+        "---\nname: d\ndescription: d\nruntimes:\n  node:\n    feed: internal\n---\n\nBody\n",
+    );
+    assert!(!ok);
+    assert!(stderr.contains("`permissions.packages` is not configured"), "{stderr}");
+}
+
+/// The package-feed smoke source is not yet registered in
+/// `tests/smoke/cases.json` (it needs a provisioned feed; see
+/// `tests/smoke/REGISTERED.md`). Keep it compiling and asserting the shape the
+/// live case will rely on.
+#[test]
+fn test_package_feeds_smoke_source_compiles() {
+    let smoke = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("smoke")
+            .join("package-feeds.md"),
+    )
+    .expect("read package-feed smoke source");
+    let compiled =
+        compile_fixture_tree_with_flags("minimal-agent.md", &[], &[], |_| smoke.clone());
+    let doc = parse_compiled_yaml(&compiled);
+    let agent = serde_yaml::to_string(find_job_mapping(&doc, "Agent").unwrap()).unwrap();
+
+    assert!(agent.contains("displayName: Start ado-proxy policy engine"));
+    assert!(agent.contains("ADO_PROXY_PACKAGE_BEARER: $(System.AccessToken)"));
+    assert!(agent.contains("Install package-manager wrappers (ado-proxy)"));
+    assert!(agent.contains(
+        "https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/ado-aw-smoke/npm/registry/"
+    ));
+    for task in ["NuGetAuthenticate", "npmAuthenticate", "PipAuthenticate"] {
+        assert!(!agent.contains(task), "{task} must not appear in the Agent job");
+    }
+    let allowed = agent
+        .lines()
+        .find(|line| line.contains("ALLOWED_DOMAINS="))
+        .expect("allowlist binding");
+    for host in ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"] {
+        assert!(!allowed.contains(host), "{host} must be blocked: {allowed}");
+    }
+}
+
 /// With `supply-chain.feed` + `supply-chain.registry` configured, every
 /// GitHub/GHCR fetch is rerouted to the internal feed + registry while
 /// checksum verification is preserved.

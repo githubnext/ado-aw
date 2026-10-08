@@ -33,6 +33,13 @@ export interface DecisionRecord {
   readonly response_bytes?: number;
   /** Credential headers the client supplied and the proxy stripped. */
   readonly stripped_credentials?: readonly string[];
+  /**
+   * Which policy family made the decision: the REST catalog or the package
+   * feed authorizer. Absent on records that belong to neither (tunnel errors).
+   */
+  readonly family?: "rest" | "packages";
+  /** Package protocol (`npm`, `nuget`, …) for a package-family record. */
+  readonly protocol?: string;
 }
 
 /**

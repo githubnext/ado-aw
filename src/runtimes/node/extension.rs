@@ -63,6 +63,19 @@ impl CompilerExtension for NodeExtension {
                  Use one or the other."
             );
         }
+        crate::runtimes::validate_feed_exclusivity(
+            "node",
+            self.config.feed(),
+            self.config.feed_url(),
+            self.config.config(),
+        )?;
+        warnings.extend(crate::runtimes::public_registry_warning(
+            ctx.front_matter,
+            "node",
+            self.config.public_registry(),
+            self.config.feed(),
+            self.config.feed_url().is_some() || self.config.config().is_some(),
+        ));
 
         // Warn if config: is set — accepted but not yet functional inside AWF
         if self.config.config().is_some() {
@@ -90,9 +103,20 @@ impl CompilerExtension for NodeExtension {
         }
 
         let agent_prepare_steps = vec![Step::Task(node_install_task_step(&self.config))];
+        // A granted feed is reached through the credential-isolated package
+        // proxy, so its URL carries no credential either.
+        let source_url = match self.config.feed() {
+            Some(handle) => Some(crate::runtimes::selected_feed_url(
+                ctx,
+                "node",
+                handle,
+                crate::compile::types::PackageProtocol::Npm,
+            )?),
+            None => self.config.feed_url().map(str::to_string),
+        };
         let mut agent_env_vars = Vec::new();
-        if let Some(feed_url) = self.config.feed_url() {
-            agent_env_vars.push(("NPM_CONFIG_REGISTRY".to_string(), feed_url.to_string()));
+        if let Some(source_url) = source_url {
+            agent_env_vars.push(("NPM_CONFIG_REGISTRY".to_string(), source_url));
         }
         Ok(Declarations {
             agent_prepare_steps,
@@ -148,7 +172,7 @@ mod tests {
     #[test]
     fn test_validate_config_and_feed_url_are_mutually_exclusive() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nruntimes:\n  node:\n    config: '.npmrc'\n    feed-url: 'https://pkgs.dev.azure.com/org/project/_packaging/feed/npm/registry/'\n---\n",
+            "---\nname: test\ndescription: test\nruntimes:\n  node:\n    config: '.npmrc'\n    feed-url: 'https://packages.example.test/org/project/_packaging/feed/npm/registry/'\n---\n",
         )
         .unwrap();
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
@@ -227,7 +251,7 @@ mod tests {
     #[test]
     fn declarations_feed_url_selects_registry_without_authenticate_task() {
         let (fm, _) = parse_markdown(
-            "---\nname: t\ndescription: x\nruntimes:\n  node:\n    feed-url: 'https://pkgs.dev.azure.com/org/project/_packaging/feed/npm/registry/'\n---\n",
+            "---\nname: t\ndescription: x\nruntimes:\n  node:\n    feed-url: 'https://packages.example.test/org/project/_packaging/feed/npm/registry/'\n---\n",
         )
         .unwrap();
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();

@@ -40,6 +40,7 @@ fn add_ado_proxy_findings(
     add_ado_proxy_unhealthy_lifecycle_finding(proxy, findings, recommendations);
     add_ado_proxy_credential_unavailable_finding(proxy, findings, recommendations);
     add_ado_proxy_upstream_failed_finding(proxy, findings, recommendations);
+    add_ado_proxy_package_unauthorized_finding(proxy, findings, recommendations);
     add_ado_proxy_out_of_scope_response_finding(proxy, findings, recommendations);
     add_ado_proxy_prompt_conflict_finding(proxy, findings, recommendations);
     add_ado_proxy_prohibited_request_finding(proxy, findings, recommendations);
@@ -119,6 +120,46 @@ fn add_ado_proxy_credential_unavailable_finding(
             action: String::from("Inspect the permissions.read service connection"),
             reason: String::from(
                 "The trusted proxy token source failed; the credential must not be moved into the agent.",
+            ),
+            example: None,
+        },
+    );
+}
+
+fn add_ado_proxy_package_unauthorized_finding(
+    proxy: &crate::audit::model::AdoProxyAnalysis,
+    findings: &mut Vec<Finding>,
+    recommendations: &mut Vec<Recommendation>,
+) {
+    let unauthorized = proxy_reason_count(proxy, &["upstream-unauthorized"]);
+    if unauthorized == 0 {
+        return;
+    }
+
+    push_finding(
+        findings,
+        Finding {
+            category: String::from("ado_proxy"),
+            severity: Severity::High,
+            title: String::from("Azure Artifacts rejected the package-feed credential"),
+            description: format!(
+                "{unauthorized} policy-allowed package request(s) were refused by Azure Artifacts."
+            ),
+            impact: Some(String::from(
+                "Package restores from the granted feed failed even though policy allowed them.",
+            )),
+        },
+    );
+    push_recommendation(
+        recommendations,
+        Recommendation {
+            priority: String::from("high"),
+            action: String::from(
+                "Grant the permissions.packages identity the Feed Reader role on the feed",
+            ),
+            reason: String::from(
+                "The build identity or service-connection principal lacks feed access; grant the \
+                 role in the feed's Permissions settings rather than giving the agent a credential.",
             ),
             example: None,
         },
@@ -867,6 +908,11 @@ mod tests {
                         reason: String::from("out-of-scope-response"),
                         count: 1,
                     },
+                    AdoProxyReasonStat {
+                        decision: String::from("error"),
+                        reason: String::from("upstream-unauthorized"),
+                        count: 1,
+                    },
                 ],
                 ..Default::default()
             }),
@@ -879,6 +925,7 @@ mod tests {
             "ado-proxy credential was unavailable",
             "ado-proxy could not reach Azure DevOps upstream",
             "ado-proxy blocked an over-broad upstream response",
+            "Azure Artifacts rejected the package-feed credential",
         ] {
             assert_eq!(finding_by_title(&audit, title).severity, Severity::High);
         }

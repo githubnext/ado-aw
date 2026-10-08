@@ -86,6 +86,7 @@ const FIXTURES: &[&str] = &[
     "github-app-token-agent.md",
     "custom-safe-output-bash-coverage.md",
     "pipeline-artifact-agent.md",
+    "package-feeds-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all

@@ -233,6 +233,61 @@ orchestrators, then deleting the retired definitions.
     secrets onto definitions that no longer exist and silently skip the lane
     that runs.
 
+## Pending cases
+
+Smoke sources that need AgentPlayground resources nobody has provisioned yet.
+They are **not** in [`cases.json`](cases.json): registering one before its
+resources exist would fail every candidate run. A compiler test keeps each
+source compiling in the meantime.
+
+### `package-feeds` ([`package-feeds.md`](package-feeds.md))
+
+Proves `permissions.packages`: npm and pip restore from an Azure Artifacts
+feed through `ado-proxy` with no feed credential in the sandbox, ungranted
+feeds are refused, and `public-registry: block` removes the public registry.
+It also validates the two unverified parts of the implementation, the
+per-protocol upstream auth scheme (`Bearer` for npm, `Basic` for PyPI) and
+the blob-storage redirect hosts.
+
+1. **Create the feed.** In AgentPlayground, create a **project-scoped** feed
+   named `ado-aw-smoke` with the **npmjs** and **PyPI** public upstream
+   sources enabled.
+2. **Grant the lane identity.** In **Feed settings → Permissions**, make sure
+   the identity behind `2567` holds **Feed and Upstream Reader
+   (Collaborator)**. New feeds grant `AgentPlayground Build Service
+   (msazuresphere)` this role by default. If the lane runs as `Project
+   Collection Build Service (msazuresphere)` (**Limit job authorization scope
+   to current project** off), add that identity instead. The run's preflight
+   names the identity it used if this is wrong.
+3. **Do not create** `ado-aw-smoke-not-granted`. The case relies on that feed
+   being outside the grant, and it is refused before any request leaves the
+   proxy whether or not it exists.
+4. **Register the case.** Add this entry to `cases.json`:
+
+   ```json
+   {
+     "id": "package-feeds",
+     "lane": "agentic",
+     "kind": "compiled",
+     "modes": ["candidate"],
+     "source": "tests/smoke/package-feeds.md",
+     "assertions": {
+       "pipelineText": {
+         "required": [
+           "displayName: Start ado-proxy policy engine",
+           "Install package-manager wrappers (ado-proxy)",
+           "resolve-feeds --policy-file"
+         ],
+         "forbidden": ["NuGetAuthenticate", "npmAuthenticate", "PipAuthenticate"]
+       },
+       "requiredBuildTags": ["ado-aw-packages-{buildId}"]
+     }
+   }
+   ```
+
+5. **Run the candidate orchestrator** once and confirm the case goes green
+   before relying on it.
+
 ## Security record
 
 Every credentialed GitHub-backed definition that validates PRs must persist:

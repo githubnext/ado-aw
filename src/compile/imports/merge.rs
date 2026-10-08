@@ -428,7 +428,7 @@ fn merge_permissions_required(target: &mut Mapping, incoming: &Value) -> Result<
         .context("merged `permissions-required` is invalid")?
         .unwrap_or_default();
     let incoming: PermissionsRequired = serde_yaml::from_value(incoming.clone())
-        .context("`permissions-required` must contain boolean `read` / `write` fields")?;
+        .context("`permissions-required` must contain boolean `read` / `write` / `packages` fields")?;
     requirements.union(incoming);
     target.insert(
         Value::String("permissions-required".to_string()),

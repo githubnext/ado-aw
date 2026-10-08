@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const CATALOG_SCHEMA_VERSION: &str = "ado-aw/ado-proxy-catalog/v1";
+pub const CATALOG_SCHEMA_VERSION: &str = "ado-aw/ado-proxy-catalog/v2";
 
 /// Whether authors can actually reach this catalog through a compiled pipeline.
 ///
@@ -21,6 +21,106 @@ pub const ORGANIZATION_HOST: &str = "dev.azure.com";
 /// discovery. It is organization-agnostic, so its routes carry no `{org}`
 /// segment and are scoped by allowed resource-area id instead.
 pub const SPS_FALLBACK_HOST: &str = "app.vssps.visualstudio.com";
+
+/// Azure Artifacts package-protocol host.
+///
+/// Intercepted only when a workflow configures `permissions.packages`; it is
+/// never a REST-catalog host, so the REST credential can never reach it and
+/// the package credential can never reach [`ORGANIZATION_HOST`].
+pub const PACKAGE_HOST: &str = "pkgs.dev.azure.com";
+
+/// Host suffixes a package response may redirect to.
+///
+/// Azure Artifacts serves package content from blob storage through
+/// pre-signed (SAS) redirects. The proxy relays such a `Location` to the
+/// client, which follows it through Squid without any credential; it never
+/// follows a redirect itself while holding the feed credential.
+pub const PACKAGE_REDIRECT_HOST_SUFFIXES: &[&str] =
+    &[".vsblob.visualstudio.com", ".blob.core.windows.net"];
+
+/// Largest package response streamed through the proxy.
+pub const PACKAGE_RESPONSE_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// A package protocol the package family understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageProtocolId {
+    Npm,
+    Pypi,
+    Nuget,
+    Cargo,
+}
+
+/// How the package credential is presented upstream.
+///
+/// Mirrors what the protocol's official Azure Pipelines authenticate task
+/// makes its client send, so Azure Artifacts sees the same request shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageAuthScheme {
+    /// `Authorization: Bearer <token>`.
+    Bearer,
+    /// `Authorization: Basic base64("ado-aw:<token>")`.
+    Basic,
+}
+
+/// One package protocol's request contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PackageProtocolRoute {
+    pub protocol: PackageProtocolId,
+    /// Path prefixes (case-insensitive) allowed after
+    /// `/_packaging/{feed}[@{view}]/`. Anything else under the feed is denied.
+    pub path_prefixes: &'static [&'static str],
+    /// Methods allowed for this protocol. Only reads.
+    pub methods: &'static [PackageMethod],
+    pub auth_scheme: PackageAuthScheme,
+    /// Whether `%2F` may appear inside a path segment. npm encodes the `/` of
+    /// a scoped package name (`@scope%2Fname`) this way.
+    pub allow_encoded_slash: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum PackageMethod {
+    Get,
+    Head,
+}
+
+const PACKAGE_READ_METHODS: &[PackageMethod] = &[PackageMethod::Get, PackageMethod::Head];
+
+/// The package family's per-protocol contracts.
+pub fn package_protocols() -> Vec<PackageProtocolRoute> {
+    vec![
+        PackageProtocolRoute {
+            protocol: PackageProtocolId::Npm,
+            path_prefixes: &["npm/registry/"],
+            methods: PACKAGE_READ_METHODS,
+            auth_scheme: PackageAuthScheme::Bearer,
+            allow_encoded_slash: true,
+        },
+        PackageProtocolRoute {
+            protocol: PackageProtocolId::Pypi,
+            path_prefixes: &["pypi/simple/", "pypi/download/"],
+            methods: PACKAGE_READ_METHODS,
+            auth_scheme: PackageAuthScheme::Basic,
+            allow_encoded_slash: false,
+        },
+        PackageProtocolRoute {
+            protocol: PackageProtocolId::Nuget,
+            path_prefixes: &["nuget/v3/"],
+            methods: PACKAGE_READ_METHODS,
+            auth_scheme: PackageAuthScheme::Basic,
+            allow_encoded_slash: false,
+        },
+        PackageProtocolRoute {
+            protocol: PackageProtocolId::Cargo,
+            path_prefixes: &["cargo/"],
+            methods: PACKAGE_READ_METHODS,
+            auth_scheme: PackageAuthScheme::Bearer,
+            allow_encoded_slash: false,
+        },
+    ]
+}
 
 const JSON_LIMIT: u64 = 10 * 1024 * 1024;
 const NO_QUERY: &[&str] = &[];
@@ -188,6 +288,15 @@ pub struct Catalog {
     pub api_version_min: [u32; 2],
     /// Inclusive `[major, minor]` upper bound of the accepted REST API version.
     pub api_version_max: [u32; 2],
+    /// Hosts of the package family. Intercepted only when the policy carries
+    /// a `packages` section.
+    pub package_hosts: &'static [&'static str],
+    /// Per-protocol package request contracts.
+    pub package_protocols: Vec<PackageProtocolRoute>,
+    /// Host suffixes a package redirect may target.
+    pub package_redirect_host_suffixes: &'static [&'static str],
+    /// Largest package response streamed through the proxy.
+    pub package_response_limit: u64,
 }
 
 /// Generate the JSON Schema for the `ado-proxy` catalog.
@@ -245,6 +354,10 @@ pub fn catalog() -> Catalog {
         denied_route_families: DENIED_ROUTE_FAMILIES,
         api_version_min: [min_major, min_minor],
         api_version_max: [max_major, max_minor],
+        package_hosts: &[PACKAGE_HOST],
+        package_protocols: package_protocols(),
+        package_redirect_host_suffixes: PACKAGE_REDIRECT_HOST_SUFFIXES,
+        package_response_limit: PACKAGE_RESPONSE_LIMIT,
     }
 }
 
@@ -787,7 +900,8 @@ mod tests {
 
     #[test]
     fn protected_hosts_exclude_package_and_token_services() {
-        let hosts = catalog().protected_hosts;
+        let catalog = catalog();
+        let hosts = catalog.protected_hosts;
         for denied in [
             "pkgs.dev.azure.com",
             "artifacts.dev.azure.com",
@@ -795,6 +909,49 @@ mod tests {
             "vssps.dev.azure.com",
         ] {
             assert!(!hosts.contains(&denied));
+        }
+        // The package host is its own family: the REST credential is bound to
+        // `protected_hosts` and must never apply to it, and vice versa.
+        assert_eq!(catalog.package_hosts, &[PACKAGE_HOST]);
+        for host in catalog.package_hosts {
+            assert!(!hosts.contains(host));
+        }
+    }
+
+    #[test]
+    fn package_protocols_are_read_only_and_cover_every_protocol() {
+        let protocols = package_protocols();
+        for id in [
+            PackageProtocolId::Npm,
+            PackageProtocolId::Pypi,
+            PackageProtocolId::Nuget,
+            PackageProtocolId::Cargo,
+        ] {
+            let route = protocols
+                .iter()
+                .find(|route| route.protocol == id)
+                .unwrap_or_else(|| panic!("missing package protocol {id:?}"));
+            assert!(!route.path_prefixes.is_empty());
+            for prefix in route.path_prefixes {
+                assert!(prefix.ends_with('/') && !prefix.starts_with('/'), "{prefix}");
+                assert_eq!(*prefix, prefix.to_ascii_lowercase(), "{prefix}");
+            }
+            assert!(
+                route
+                    .methods
+                    .iter()
+                    .all(|method| matches!(method, PackageMethod::Get | PackageMethod::Head))
+            );
+        }
+        assert_eq!(protocols.len(), 4);
+        // Only npm encodes a separator inside a name segment.
+        assert!(
+            protocols
+                .iter()
+                .all(|route| route.allow_encoded_slash == (route.protocol == PackageProtocolId::Npm))
+        );
+        for suffix in PACKAGE_REDIRECT_HOST_SUFFIXES {
+            assert!(suffix.starts_with('.'), "suffix must be anchored: {suffix}");
         }
     }
 

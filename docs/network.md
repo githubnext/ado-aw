@@ -6,7 +6,7 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 Network isolation is provided by AWF (Agentic Workflow Firewall), which provides L7 (HTTP/HTTPS) egress control using Squid proxy and Docker containers. AWF restricts network access to an allowlist of approved domains.
 
-Generated pipelines run AWF v0.27.32+ in **strict topology mode**: both the Agent and Detection jobs invoke AWF rootlessly with an explicit `--network-isolation` flag — there is no `sudo`, `--enable-host-access`, or `--legacy-security` fallback, and no author-facing knob to opt back into the legacy topology. The Agent additionally passes `--topology-attach awmg-mcpg` so the trusted MCPG container is attached to AWF's internal `awf-net`, and appends that hostname to `NO_PROXY`/`no_proxy` so MCP traffic bypasses Squid; when the credential-isolated `ado-proxy` sidecar is enabled (`permissions.read` is configured), the Agent passes a second `--topology-attach awmg-ado-proxy` and adds that hostname to `NO_PROXY`/`no_proxy` too. Detection has no MCPG/ado-proxy attachment. See [`docs/mcpg.md`](mcpg.md) for the MCPG topology, [`docs/mcp.md`](mcp.md) for MCP server configuration, and [`docs/ado-proxy-design.md`](ado-proxy-design.md) for the ado-proxy sidecar.
+Generated pipelines run AWF v0.27.32+ in **strict topology mode**: both the Agent and Detection jobs invoke AWF rootlessly with an explicit `--network-isolation` flag — there is no `sudo`, `--enable-host-access`, or `--legacy-security` fallback, and no author-facing knob to opt back into the legacy topology. The Agent additionally passes `--topology-attach awmg-mcpg` so the trusted MCPG container is attached to AWF's internal `awf-net`, and appends that hostname to `NO_PROXY`/`no_proxy` so MCP traffic bypasses Squid; when the credential-isolated `ado-proxy` sidecar is enabled (`permissions.read` or `permissions.packages` is configured), the Agent passes a second `--topology-attach awmg-ado-proxy` and adds that hostname to `NO_PROXY`/`no_proxy` too. Detection has no MCPG/ado-proxy attachment. See [`docs/mcpg.md`](mcpg.md) for the MCPG topology, [`docs/mcp.md`](mcp.md) for MCP server configuration, and [`docs/ado-proxy-design.md`](ado-proxy-design.md) for the ado-proxy sidecar.
 
 The `ado-aw` compiler binary is distributed via [GitHub Releases](https://github.com/githubnext/ado-aw/releases) with SHA256 checksum verification. The AWF binary is distributed via [GitHub Releases](https://github.com/github/gh-aw-firewall/releases) with SHA256 checksum verification. Docker is sourced via the `DockerInstaller@0` ADO task.
 
@@ -53,6 +53,20 @@ When `permissions.read` enables credential-isolated Azure DevOps reads, the
 Azure CLI extension additionally contributes `aka.ms` (Microsoft's link
 shortener, used by `az` subcommand metadata). See
 [Proxy-gated Azure CLI (`az`)](#proxy-gated-azure-cli-az) below.
+
+`runtimes.<python|node|dotnet>.public-registry: block` removes that
+ecosystem's public registry hosts (for example `pypi.org`,
+`registry.npmjs.org`, or `api.nuget.org`) from the allowlist, so packages come
+only from internal feeds. See [`package-feeds.md`](package-feeds.md).
+
+## Proxy-gated package managers
+
+`permissions.packages` starts the same `ado-proxy` sidecar for Azure Artifacts
+package traffic. Generated wrappers route `npm`, `npx`, `pip`, `pip3`, `uv`,
+`dotnet`, and `cargo` through it, and it attaches the feed credential only to
+read-only requests for granted feeds. The proxy is attached to AWF with
+`--topology-attach awmg-ado-proxy` whenever `permissions.read` or
+`permissions.packages` is configured. See [`package-feeds.md`](package-feeds.md).
 
 ## Proxy-gated Azure CLI (`az`)
 

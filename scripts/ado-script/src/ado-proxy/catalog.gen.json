@@ -1,5 +1,5 @@
 {
-  "schema_version": "ado-aw/ado-proxy-catalog/v1",
+  "schema_version": "ado-aw/ado-proxy-catalog/v2",
   "runtime_available": true,
   "protected_hosts": [
     "dev.azure.com",
@@ -628,5 +628,64 @@
   "api_version_max": [
     7,
     2
-  ]
+  ],
+  "package_hosts": [
+    "pkgs.dev.azure.com"
+  ],
+  "package_protocols": [
+    {
+      "protocol": "npm",
+      "path_prefixes": [
+        "npm/registry/"
+      ],
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "auth_scheme": "bearer",
+      "allow_encoded_slash": true
+    },
+    {
+      "protocol": "pypi",
+      "path_prefixes": [
+        "pypi/simple/",
+        "pypi/download/"
+      ],
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "auth_scheme": "basic",
+      "allow_encoded_slash": false
+    },
+    {
+      "protocol": "nuget",
+      "path_prefixes": [
+        "nuget/v3/"
+      ],
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "auth_scheme": "basic",
+      "allow_encoded_slash": false
+    },
+    {
+      "protocol": "cargo",
+      "path_prefixes": [
+        "cargo/"
+      ],
+      "methods": [
+        "GET",
+        "HEAD"
+      ],
+      "auth_scheme": "bearer",
+      "allow_encoded_slash": false
+    }
+  ],
+  "package_redirect_host_suffixes": [
+    ".vsblob.visualstudio.com",
+    ".blob.core.windows.net"
+  ],
+  "package_response_limit": 536870912
 }

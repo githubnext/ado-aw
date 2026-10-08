@@ -206,7 +206,7 @@ Only these imported fields are applied:
 | `tools` | Recursive merge; command/allow arrays union and deduplicate; earlier imports provide defaults and consumer scalar settings win |
 | `mcp-servers` | First import wins across imports; an imported server overrides a same-named consumer server |
 | `network.allowed` | Ordered union across imports and consumer; all other network controls remain consumer-owned |
-| `permissions-required` | Boolean OR of abstract `read` / `write` requirements |
+| `permissions-required` | Boolean OR of abstract `read` / `write` / `packages` requirements |
 | `safe-outputs.jobs` | Custom job names are unique across consumer and imports; duplicates fail |
 | Built-in `safe-outputs` keys | Duplicates across imports fail; consumer configuration replaces imported built-in configuration |
 | `runtimes` | Consumer fields override imported fields; earlier imports fill remaining fields |
@@ -265,6 +265,8 @@ Imported components cannot set concrete `permissions:` values. Compilation
 fails when required Agent read capability is missing. `write: true` is
 satisfied by Stage 3's ordinary default `$(System.AccessToken)` capability;
 `permissions.write` remains an optional consumer choice for cross-org scope or
-named-identity attribution. The reusable validation helper is also exposed on
-the typed requirements value for parent integration paths that
-validate front matter outside import orchestration.
+named-identity attribution. `packages: true` requires a concrete
+`permissions.packages` block (see [`package-feeds.md`](package-feeds.md)), for
+components whose instructions restore from internal feeds. The reusable
+validation helper is also exposed on the typed requirements value for parent
+integration paths that validate front matter outside import orchestration.

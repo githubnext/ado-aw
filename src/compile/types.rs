@@ -3055,6 +3055,10 @@ pub struct PermissionsRequired {
     /// `permissions.write` service connection is not required.
     #[serde(default)]
     pub write: bool,
+    /// The agent requires credential-isolated package-feed access, satisfied
+    /// only by a concrete `permissions.packages` block.
+    #[serde(default)]
+    pub packages: bool,
 }
 
 impl PermissionsRequired {
@@ -3062,15 +3066,22 @@ impl PermissionsRequired {
     pub fn union(&mut self, other: Self) {
         self.read |= other.read;
         self.write |= other.write;
+        self.packages |= other.packages;
     }
 
     /// Return requirements not satisfied by the consumer's available
     /// capabilities.
     pub fn missing_from(self, permissions: Option<&PermissionsConfig>) -> Vec<&'static str> {
         let read_available = permissions.and_then(|value| value.read.as_ref()).is_some();
+        let packages_available = permissions
+            .and_then(|value| value.packages.as_ref())
+            .is_some();
         let mut missing = Vec::new();
         if self.read && !read_available {
             missing.push("read");
+        }
+        if self.packages && !packages_available {
+            missing.push("packages");
         }
         // `write: true` is always satisfied by Stage 3's ordinary default
         // $(System.AccessToken). `permissions.write` changes identity/scope,
@@ -3085,9 +3096,10 @@ impl PermissionsRequired {
         if !missing.is_empty() {
             anyhow::bail!(
                 "imported components require ADO {} permission{}, but the consumer does not \
-                 provide the required Agent read capability",
+                 provide it. Add the matching `permissions.{}` block.",
                 missing.join(" and "),
                 if missing.len() == 1 { "" } else { "s" },
+                missing.join("` and `permissions."),
             );
         }
         Ok(())
@@ -3130,6 +3142,224 @@ pub struct PermissionsConfig {
     /// This token is never exposed to the agent.
     #[serde(default)]
     pub write: Option<WritePermissionConfig>,
+    /// Credential-isolated Azure Artifacts package-feed access for the agent.
+    ///
+    /// The credential is acquired outside the sandbox and held only by the
+    /// trusted `ado-proxy`, which attaches it to read-only requests for the
+    /// granted feeds. See `docs/package-feeds.md`.
+    #[serde(default)]
+    pub packages: Option<PackagesPermissionConfig>,
+}
+
+/// Package ecosystems the package-feed proxy understands.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageProtocol {
+    Npm,
+    Pypi,
+    Nuget,
+    Cargo,
+}
+
+impl PackageProtocol {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Npm => "npm",
+            Self::Pypi => "pypi",
+            Self::Nuget => "nuget",
+            Self::Cargo => "cargo",
+        }
+    }
+
+    /// Project onto the authoritative catalog protocol.
+    pub const fn to_catalog(self) -> crate::ado_proxy::catalog::PackageProtocolId {
+        use crate::ado_proxy::catalog::PackageProtocolId;
+        match self {
+            Self::Npm => PackageProtocolId::Npm,
+            Self::Pypi => PackageProtocolId::Pypi,
+            Self::Nuget => PackageProtocolId::Nuget,
+            Self::Cargo => PackageProtocolId::Cargo,
+        }
+    }
+}
+
+/// Whether agent reads may cause the feed to save packages from its upstream
+/// sources.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageUpstream {
+    #[default]
+    Deny,
+    Allow,
+}
+
+/// Highest feed role the package identity holds.
+///
+/// Azure Artifacts saves a package from an upstream source when an identity
+/// with the **Feed and Upstream Reader (Collaborator)** role requests one that
+/// is not yet cached, so a plain read can write to the feed. Only `reader`
+/// rules that out.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageIdentityRole {
+    Reader,
+    #[default]
+    Collaborator,
+}
+
+/// `permissions.packages`: credential and feed grants for agent package
+/// restores.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PackagesPermissionConfig {
+    /// Workload-identity service connection used to mint the feed credential.
+    /// Omit to use the job's build identity (`$(System.AccessToken)`), which
+    /// can only reach feeds in the current organization.
+    #[serde(default, rename = "service-connection")]
+    pub service_connection: Option<crate::secure::ServiceConnection>,
+    /// AzureCLI@3 connection type for `service-connection`.
+    #[serde(default, rename = "connection-type")]
+    pub connection_type: Option<WriteConnectionType>,
+    /// Highest feed role the identity holds; `collaborator` when omitted.
+    #[serde(default, rename = "identity-role")]
+    pub identity_role: PackageIdentityRole,
+    /// Feeds the agent may read. Required and non-empty.
+    #[serde(default)]
+    pub feeds: Vec<PackageFeedGrant>,
+}
+
+/// One feed the agent may read through the package proxy.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PackageFeedGrant {
+    /// Local handle that `runtimes.<x>.feed` refers to. Defaults to `feed`.
+    #[serde(default)]
+    pub name: Option<crate::secure::AdoFeedName>,
+    /// Organization hosting the feed. Defaults to the current organization.
+    /// The build identity only works within the current organization; for any
+    /// other, set `service-connection` (a mismatch fails when the pipeline
+    /// resolves the feed, before the agent starts).
+    #[serde(default)]
+    pub organization: Option<crate::secure::AdoOrganization>,
+    /// Project for a project-scoped feed. Omit for an organization-scoped feed.
+    #[serde(default)]
+    pub project: Option<crate::secure::AdoProject>,
+    /// Feed name or GUID.
+    pub feed: crate::secure::AdoFeedName,
+    /// Feed view (for example `Release`). When set, only that view is readable.
+    #[serde(default)]
+    pub view: Option<crate::secure::AdoFeedName>,
+    /// Package protocols the agent may use against this feed. Required and
+    /// non-empty: omission must never grant every protocol.
+    #[serde(default)]
+    pub protocols: Vec<PackageProtocol>,
+    /// Whether agent reads may save packages from upstream sources.
+    #[serde(default)]
+    pub upstream: PackageUpstream,
+}
+
+impl PackageFeedGrant {
+    /// Handle used by `runtimes.<x>.feed`.
+    pub fn handle(&self) -> &str {
+        self.name.as_ref().unwrap_or(&self.feed).as_str()
+    }
+
+    pub fn allows(&self, protocol: PackageProtocol) -> bool {
+        self.protocols.contains(&protocol)
+    }
+}
+
+impl PackagesPermissionConfig {
+    /// The feed whose handle matches `handle`, case-insensitively.
+    pub fn feed(&self, handle: &str) -> Option<&PackageFeedGrant> {
+        self.feeds
+            .iter()
+            .find(|feed| feed.handle().eq_ignore_ascii_case(handle))
+    }
+
+    /// Whether the credential comes from a minted service connection rather
+    /// than the job's build identity.
+    pub fn uses_service_connection(&self) -> bool {
+        self.service_connection.is_some()
+    }
+
+    /// Effective AzureCLI@3 connection type when a service connection is set.
+    pub fn effective_connection_type(&self) -> WriteConnectionType {
+        self.connection_type.unwrap_or_default()
+    }
+
+    /// Cross-field rules the schema alone cannot express.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        const LABEL: &str = "permissions.packages";
+        if self.connection_type.is_some() && self.service_connection.is_none() {
+            anyhow::bail!(
+                "{LABEL}.connection-type requires {LABEL}.service-connection; the build \
+                 identity needs no connection type"
+            );
+        }
+        if self.feeds.is_empty() {
+            anyhow::bail!("{LABEL}.feeds must name at least one feed");
+        }
+
+        let mut handles = std::collections::HashSet::new();
+        let mut identities = std::collections::HashSet::new();
+        for feed in &self.feeds {
+            let handle = feed.handle();
+            if !handles.insert(handle.to_ascii_lowercase()) {
+                anyhow::bail!(
+                    "{LABEL}.feeds contains duplicate name '{handle}'; give each entry a \
+                     distinct `name`"
+                );
+            }
+            let identity = format!(
+                "{}/{}/{}@{}",
+                feed.organization.as_deref().unwrap_or("").to_ascii_lowercase(),
+                feed.project.as_deref().unwrap_or("").to_ascii_lowercase(),
+                feed.feed.to_ascii_lowercase(),
+                feed.view.as_deref().unwrap_or("").to_ascii_lowercase(),
+            );
+            if !identities.insert(identity) {
+                anyhow::bail!(
+                    "{LABEL}.feeds grants feed '{}' more than once with the same \
+                     organization, project, and view",
+                    feed.feed.as_str()
+                );
+            }
+            if feed.protocols.is_empty() {
+                anyhow::bail!(
+                    "{LABEL}.feeds entry '{handle}' lists no protocols. Name the protocols \
+                     to allow (npm, pypi, nuget, cargo); an empty list would grant every \
+                     protocol."
+                );
+            }
+            let mut protocols = feed.protocols.clone();
+            protocols.sort();
+            protocols.dedup();
+            if protocols.len() != feed.protocols.len() {
+                anyhow::bail!("{LABEL}.feeds entry '{handle}' lists a protocol more than once");
+            }
+            if feed.upstream == PackageUpstream::Deny
+                && feed.view.is_none()
+                && self.identity_role != PackageIdentityRole::Reader
+            {
+                anyhow::bail!(
+                    "{LABEL}.feeds entry '{handle}' has `upstream: deny`, but a \
+                     Collaborator identity saves uncached upstream packages into the feed \
+                     when the agent requests them. Do one of: set `view:` (only packages \
+                     already promoted to that view are readable), grant the identity only \
+                     Feed Reader and set {LABEL}.identity-role: reader, or opt in with \
+                     `upstream: allow`."
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SanitizeConfigTrait for PackagesPermissionConfig {
+    fn sanitize_config_fields(&mut self) {
+        // Every string field is a validated newtype checked at deserialization.
+    }
 }
 
 /// Service-connection type used to acquire an Azure DevOps bearer.
@@ -5087,12 +5317,14 @@ imports:
         let required = PermissionsRequired {
             read: true,
             write: true,
+            packages: false,
         };
         let concrete = PermissionsConfig {
             read: Some(ReadPermissionConfig::ServiceConnection(
                 crate::secure::ServiceConnection::parse("read-connection").unwrap(),
             )),
             write: None,
+            packages: None,
         };
         assert!(required.missing_from(Some(&concrete)).is_empty());
         assert!(required.validate_against(Some(&concrete)).is_ok());
@@ -5102,6 +5334,7 @@ imports:
             PermissionsRequired {
                 read: false,
                 write: true,
+                packages: false,
             }
             .validate_against(None)
             .is_ok()
@@ -5115,7 +5348,104 @@ imports:
                     write: Some(WritePermissionConfig::ServiceConnection(
                         crate::secure::ServiceConnection::parse("write").unwrap(),
                     )),
+                    packages: None,
                 }))
+                .is_ok()
+        );
+
+        let packages = PermissionsRequired {
+            packages: true,
+            ..PermissionsRequired::default()
+        };
+        assert_eq!(packages.missing_from(Some(&concrete)), vec!["packages"]);
+        let err = packages
+            .validate_against(Some(&concrete))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("permissions.packages"), "{err}");
+    }
+
+    fn parse_packages(yaml: &str) -> anyhow::Result<PackagesPermissionConfig> {
+        let config: PackagesPermissionConfig = serde_yaml::from_str(yaml)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    #[test]
+    fn packages_permission_accepts_build_identity_with_view() {
+        let config = parse_packages(
+            "feeds:\n  - feed: internal\n    project: Engineering\n    view: Release\n    \
+             protocols: [npm, nuget]\n",
+        )
+        .unwrap();
+        assert!(!config.uses_service_connection());
+        let feed = config.feed("INTERNAL").unwrap();
+        assert_eq!(feed.handle(), "internal");
+        assert!(feed.allows(PackageProtocol::Npm));
+        assert!(!feed.allows(PackageProtocol::Cargo));
+        assert_eq!(feed.upstream, PackageUpstream::Deny);
+    }
+
+    #[test]
+    fn packages_permission_accepts_reader_wif_cross_org() {
+        let config = parse_packages(
+            "service-connection: artifacts-reader\nconnection-type: azureDevOps\n\
+             identity-role: reader\nfeeds:\n  - name: partner\n    organization: fabrikam\n    \
+             feed: shared\n    protocols: [cargo]\n",
+        )
+        .unwrap();
+        assert!(config.uses_service_connection());
+        assert_eq!(
+            config.effective_connection_type(),
+            WriteConnectionType::AzureDevOps
+        );
+        assert_eq!(config.feed("partner").unwrap().feed.as_str(), "shared");
+    }
+
+    #[test]
+    fn packages_permission_rejects_unsafe_or_ambiguous_grants() {
+        for (yaml, needle) in [
+            ("feeds: []\n", "at least one feed"),
+            ("feeds:\n  - feed: f\n    view: Release\n", "lists no protocols"),
+            (
+                "feeds:\n  - feed: f\n    view: Release\n    protocols: [npm, npm]\n",
+                "more than once",
+            ),
+            (
+                "feeds:\n  - feed: f\n    protocols: [npm]\n",
+                "Collaborator identity saves uncached upstream",
+            ),
+            (
+                "connection-type: azureRM\nfeeds:\n  - feed: f\n    upstream: allow\n    \
+                 protocols: [npm]\n",
+                "connection-type requires",
+            ),
+            (
+                "feeds:\n  - feed: a\n    view: Release\n    protocols: [npm]\n  - name: A\n    \
+                 feed: b\n    view: Release\n    protocols: [npm]\n",
+                "duplicate name",
+            ),
+            (
+                "feeds:\n  - feed: f\n    view: Release\n    protocols: [npm]\n  - name: other\n    \
+                 feed: F\n    view: release\n    protocols: [nuget]\n",
+                "more than once with the same",
+            ),
+        ] {
+            let err = parse_packages(yaml).unwrap_err().to_string();
+            assert!(err.contains(needle), "{yaml}: {err}");
+        }
+
+        for yaml in [
+            "feeds:\n  - feed: ../x\n    protocols: [npm]\n",
+            "feeds:\n  - feed: f@Release\n    protocols: [npm]\n",
+            "feeds:\n  - feed: f\n    protocols: [maven]\n",
+            "feeds:\n  - feed: f\n    protocols: [npm]\n    surprise: true\n",
+        ] {
+            assert!(parse_packages(yaml).is_err(), "{yaml} must be rejected");
+        }
+
+        assert!(
+            parse_packages("feeds:\n  - feed: f\n    upstream: allow\n    protocols: [pypi]\n")
                 .is_ok()
         );
     }

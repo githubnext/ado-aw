@@ -37,6 +37,7 @@
 //! - [`AdoOrganization`] — an Azure DevOps Services organization name.
 //! - [`AdoProject`] — an Azure DevOps project name or GUID.
 //! - [`AdoRepository`] — an Azure DevOps repository name or GUID.
+//! - [`AdoFeedName`] — an Azure Artifacts feed / view name or feed GUID.
 //! - [`AdoWorkItemFieldRef`] — an Azure DevOps work item field reference name.
 //! - [`Version`] — a version string (`1.2.3`, `latest`).
 //! - [`SemanticVersion`] — an exact semantic version (`1.2.3`, `2.0.0-beta.1`).
@@ -564,6 +565,35 @@ validated_string! {
                 "{label} '{value}' must be an Azure DevOps repository name \
                  (1-64 characters, no reserved punctuation or \
                  leading/trailing '.') or a canonical GUID"
+            )
+        }
+    }
+}
+
+validated_string! {
+    /// An Azure Artifacts feed or feed-view name, or a feed GUID.
+    ///
+    /// Feed names are 1-64 characters of ASCII alphanumerics, `-`, `_`, and
+    /// `.`, and may not start with `.` or `_`. The same character set is a
+    /// strict superset of a canonical GUID, so GUID-form feed IDs are accepted
+    /// too. The value is placed into proxy policy and feed URLs, so anything
+    /// that could act as a path separator, view separator (`@`), query, or
+    /// shell metacharacter is rejected.
+    AdoFeedName, "feed", |value: &str, label: &str| {
+        let valid = !value.is_empty()
+            && value.len() <= 64
+            && !value.starts_with('.')
+            && !value.starts_with('_')
+            && !value.ends_with('.')
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if valid {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "{label} '{value}' must be 1-64 ASCII alphanumeric, '-', '_' or '.' \
+                 characters, must not start with '.' or '_', and must not end with '.'"
             )
         }
     }

@@ -676,6 +676,7 @@ pub mod ado_script;
 mod azure_cli;
 mod exec_context;
 mod github;
+mod package_feeds;
 mod safe_outputs;
 
 // Re-export tool/runtime extensions from their colocated homes
@@ -695,6 +696,7 @@ pub use exec_context::{
     schedule_contributor_will_activate, workitem_contributor_will_activate,
 };
 pub use github::GitHubExtension;
+pub use package_feeds::PackageFeedsExtension;
 pub use safe_outputs::SafeOutputsExtension;
 
 extension_enum! {
@@ -715,6 +717,7 @@ extension_enum! {
         AzureDevOps(AzureDevOpsExtension),
         CacheMemory(CacheMemoryExtension),
         AzureCli(AzureCliExtension),
+        PackageFeeds(PackageFeedsExtension),
     }
 }
 // ──────────────────────────────────────────────────────────────────────
@@ -826,6 +829,7 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
                 // `github_app_token_active`.
                 prepare_pr_base_active: front_matter.create_pr_config().is_some(),
                 azure_mcp_auth_active: front_matter.has_azure_authenticated_mcp_servers(),
+                ado_proxy_active: super::common::ado_proxy_runtime_enabled(front_matter),
                 pr_trigger_for_synth,
                 supply_chain: front_matter.supply_chain().cloned(),
             }
@@ -850,6 +854,14 @@ pub fn collect_extensions(front_matter: &FrontMatter) -> Vec<Extension> {
     // unproxied fallback.
     if super::common::ado_proxy_enabled(front_matter) {
         extensions.push(Extension::AzureCli(AzureCliExtension));
+    }
+
+    // `permissions.packages` routes package managers through the same engine
+    // via per-tool wrappers. Independent of `permissions.read`.
+    if let Some(packages) = super::common::packages_permission(front_matter) {
+        extensions.push(Extension::PackageFeeds(PackageFeedsExtension::new(
+            packages.clone(),
+        )));
     }
 
     // ── Runtimes (ExtensionPhase::Runtime) ──
