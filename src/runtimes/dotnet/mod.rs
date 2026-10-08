@@ -1,9 +1,10 @@
 //! .NET runtime support for the ado-aw compiler.
 //!
 //! When enabled via `runtimes: dotnet:`, the compiler auto-installs a specific
-//! .NET SDK version via `UseDotNet@2`, emits `NuGetAuthenticate@1` for internal
-//! feed access, adds .NET ecosystem domains to the AWF network allowlist,
-//! and extends the bash command allow-list with `dotnet`.
+//! .NET SDK version via `UseDotNet@2`, adds .NET ecosystem domains to the AWF
+//! network allowlist, and extends the bash command allow-list with `dotnet`.
+//! A configured feed selects the package source only — the agent never
+//! receives a feed credential.
 //!
 //! No AWF mounts or PATH prepends are needed because `UseDotNet@2` installs
 //! to `/opt/hostedtoolcache` (already mounted read-only by AWF) and publishes
@@ -124,11 +125,11 @@ pub struct DotnetOptions {
     #[serde(default)]
     pub version: Option<String>,
 
-    /// Internal NuGet feed URL (typically the v3 `index.json` of an Azure
-    /// Artifacts feed). When set, the compiler emits a step that creates a
-    /// minimal `nuget.config` referencing this source (only if the repo
-    /// doesn't already have one) and then runs `NuGetAuthenticate@1` so the
-    /// ADO build service identity can authenticate to the feed.
+    /// NuGet feed URL (typically the v3 `index.json` of an Azure Artifacts
+    /// feed). When set, the compiler emits a step that creates a minimal
+    /// `nuget.config` referencing this source, only if the repo doesn't
+    /// already have one. No credential is attached, so feeds that require
+    /// authentication reject the agent's requests.
     ///
     /// Unlike Python (`PIP_INDEX_URL`) and Node (`NPM_CONFIG_REGISTRY`),
     /// no env var is injected — NuGet does not have a first-class env-var
@@ -136,11 +137,10 @@ pub struct DotnetOptions {
     #[serde(default, rename = "feed-url")]
     pub feed_url: Option<String>,
 
-    /// Path to a checked-in `nuget.config` file in the repo. When set, the
-    /// compiler runs `NuGetAuthenticate@1` against the workspace (which
-    /// auto-discovers `nuget.config` files); the file is fully functional
-    /// inside the AWF agent environment because AWF preserves workspace
-    /// files. Mutually exclusive with `feed-url`.
+    /// Path to a checked-in `nuget.config` file in the repo. AWF preserves
+    /// workspace files, so the file is visible inside the agent environment;
+    /// sources that require authentication still reject the agent's requests.
+    /// Mutually exclusive with `feed-url`.
     #[serde(default)]
     pub config: Option<String>,
 }

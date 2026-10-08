@@ -1373,23 +1373,23 @@ pub struct RuntimesConfig {
     pub lean: Option<crate::runtimes::lean::LeanRuntimeConfig>,
 
     /// Python runtime.
-    /// Auto-installs Python via UsePythonVersion@0, emits PipAuthenticate@1,
-    /// adds Python ecosystem domains to the AWF network allowlist, extends
-    /// the bash command allow-list, and optionally injects feed URL env vars.
+    /// Auto-installs Python via UsePythonVersion@0, adds Python ecosystem
+    /// domains to the AWF network allowlist, extends the bash command
+    /// allow-list, and optionally injects feed URL env vars.
     #[serde(default)]
     pub python: Option<crate::runtimes::python::PythonRuntimeConfig>,
 
     /// Node.js runtime.
-    /// Auto-installs Node.js via UseNode@1, emits npmAuthenticate@0,
-    /// adds Node ecosystem domains to the AWF network allowlist, extends
-    /// the bash command allow-list, and optionally injects feed URL env vars.
+    /// Auto-installs Node.js via UseNode@1, adds Node ecosystem domains to
+    /// the AWF network allowlist, extends the bash command allow-list, and
+    /// optionally injects feed URL env vars.
     #[serde(default)]
     pub node: Option<crate::runtimes::node::NodeRuntimeConfig>,
 
     /// .NET runtime.
-    /// Auto-installs the .NET SDK via UseDotNet@2, emits NuGetAuthenticate@1,
-    /// adds .NET ecosystem domains to the AWF network allowlist, and extends
-    /// the bash command allow-list. Feed configuration uses `nuget.config`
+    /// Auto-installs the .NET SDK via UseDotNet@2, adds .NET ecosystem
+    /// domains to the AWF network allowlist, and extends the bash command
+    /// allow-list. Feed configuration uses `nuget.config`
     /// (generated or checked in) rather than env vars — NuGet has no env-var
     /// equivalent for selecting a package source.
     #[serde(default)]

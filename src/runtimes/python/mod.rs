@@ -1,10 +1,10 @@
 //! Python runtime support for the ado-aw compiler.
 //!
 //! When enabled via `runtimes: python:`, the compiler auto-installs a specific
-//! Python version via `UsePythonVersion@0`, emits `PipAuthenticate@1` for
-//! internal feed access, adds Python ecosystem domains to the AWF network
-//! allowlist, extends the bash command allow-list, and optionally injects
-//! feed URL env vars for `pip` and `uv`.
+//! Python version via `UsePythonVersion@0`, adds Python ecosystem domains to
+//! the AWF network allowlist, extends the bash command allow-list, and
+//! optionally injects feed URL env vars for `pip` and `uv`. The feed URL
+//! selects the source only — the agent never receives a feed credential.
 //!
 //! No AWF mounts or PATH prepends are needed because `UsePythonVersion@0`
 //! installs to `/opt/hostedtoolcache` (already mounted read-only by AWF)
@@ -95,9 +95,10 @@ pub struct PythonOptions {
     #[serde(default)]
     pub version: Option<String>,
 
-    /// Internal package feed URL. When set, the compiler injects
-    /// `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent
-    /// environment so pip/uv use this feed without config file changes.
+    /// Package feed URL. When set, the compiler injects `PIP_INDEX_URL` and
+    /// `UV_DEFAULT_INDEX` env vars into the agent environment so pip/uv use
+    /// this feed without config file changes. No credential is attached, so
+    /// feeds that require authentication reject the agent's requests.
     #[serde(default, rename = "feed-url")]
     pub feed_url: Option<String>,
 

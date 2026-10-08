@@ -66,15 +66,15 @@ runtimes:                      # optional runtime configuration (language enviro
   # lean:                      # Alternative object format (with toolchain pinning)
   #   toolchain: "leanprover/lean4:v4.29.1"
   # python: true               # Python runtime — auto-installs via UsePythonVersion@0 (see docs/runtimes.md)
-  # python:                    # Alternative object format (pin version, configure internal feed)
+  # python:                    # Alternative object format (pin version, select package index; no feed credential)
   #   version: "3.12"
   #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
   # node: true                 # Node.js runtime — auto-installs via UseNode@1 (see docs/runtimes.md)
-  # node:                      # Alternative object format (pin version, configure internal feed)
+  # node:                      # Alternative object format (pin version, select npm registry; no feed credential)
   #   version: "22.x"
   #   feed-url: "https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/"
   # dotnet: true               # .NET runtime — auto-installs via UseDotNet@2 (see docs/runtimes.md)
-  # dotnet:                    # Alternative object format (pin version, configure internal feed via nuget.config)
+  # dotnet:                    # Alternative object format (pin version, select source via nuget.config; no feed credential)
   #   version: "8.0.x"          # use "global.json" to pin from the repo's global.json
   #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
 # env:                         # workflow-level environment variables (accepted by parser, not yet forwarded to compiled pipeline output)
@@ -243,6 +243,7 @@ execution-context:             # optional execution-context plugin (see docs/exe
     enabled: false              # opt-in repository identity context
     conventions: false          # opt-in deeper probe (CODEOWNERS / CONTRIBUTING.md / .editorconfig)
 steps:                         # inline steps before agent runs (same job, generate context)
+                               # *Authenticate package tasks are rejected here (docs/runtimes.md#package-feed-credentials)
   - bash: echo "Preparing context for agent"
     displayName: "Prepare context"
 post-steps:                    # inline steps after agent runs (same job, process artifacts)
