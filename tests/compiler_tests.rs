@@ -3552,9 +3552,9 @@ Build and test .NET projects.
 
 /// Integration test: `runtimes: dotnet:` with `feed-url:` end-to-end compilation
 ///
-/// Verifies that when `feed-url` is set, the compiler emits both the
-/// ensure-nuget.config shim and the `NuGetAuthenticate@1` step in addition
-/// to the install task.
+/// Verifies that when `feed-url` is set, the compiler emits the non-secret
+/// ensure-nuget.config shim but no `NuGetAuthenticate@1`, whose
+/// `VSS_NUGET_ACCESSTOKEN` job variable AWF would forward to the agent.
 #[test]
 fn test_dotnet_runtime_with_feed_url_compiled_output() {
     let temp_dir = std::env::temp_dir().join(format!(
@@ -3603,8 +3603,8 @@ runtimes:
         "Should include UseDotNet@2"
     );
     assert!(
-        compiled.contains("NuGetAuthenticate@1"),
-        "Should include NuGetAuthenticate@1 when feed-url is set"
+        !compiled.contains("NuGetAuthenticate@1"),
+        "Must not emit NuGetAuthenticate@1 in the Agent job"
     );
     assert!(
         compiled.contains("nuget.config"),
@@ -3777,8 +3777,9 @@ safe-outputs:
 
 /// Integration test: `runtimes: python:` with `feed-url:` end-to-end compilation
 ///
-/// Verifies that when `feed-url` is set, the compiler emits `PipAuthenticate@1`
-/// and injects `PIP_INDEX_URL` / `UV_DEFAULT_INDEX` env vars into the agent step.
+/// Verifies that when `feed-url` is set, the compiler injects
+/// `PIP_INDEX_URL` / `UV_DEFAULT_INDEX` but no `PipAuthenticate@1`, whose
+/// token-bearing index URL job variable AWF would forward to the agent.
 #[test]
 fn test_python_runtime_with_feed_url_compiled_output() {
     let temp_dir = std::env::temp_dir().join(format!(
@@ -3824,8 +3825,8 @@ safe-outputs:
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
 
     assert!(
-        compiled.contains("PipAuthenticate@1"),
-        "Should include PipAuthenticate@1 when feed-url is set"
+        !compiled.contains("PipAuthenticate@1"),
+        "Must not emit PipAuthenticate@1 in the Agent job"
     );
     assert!(
         compiled.contains("PIP_INDEX_URL"),
@@ -3841,8 +3842,9 @@ safe-outputs:
 
 /// Integration test: `runtimes: node:` with `feed-url:` end-to-end compilation
 ///
-/// Verifies that when `feed-url` is set, the compiler emits `npmAuthenticate@0`
-/// and injects `NPM_CONFIG_REGISTRY` env var into the agent step.
+/// Verifies that when `feed-url` is set, the compiler injects
+/// `NPM_CONFIG_REGISTRY` but emits no `npmAuthenticate@0`, which would append
+/// the job token to a workspace `.npmrc` the agent can read.
 #[test]
 fn test_node_runtime_with_feed_url_compiled_output() {
     let temp_dir =
@@ -3886,8 +3888,8 @@ safe-outputs:
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
 
     assert!(
-        compiled.contains("npmAuthenticate@0"),
-        "Should include npmAuthenticate@0 when feed-url is set"
+        !compiled.contains("npmAuthenticate@0") && !compiled.contains("Ensure .npmrc"),
+        "Must not emit npmAuthenticate@0 or a workspace .npmrc in the Agent job"
     );
     assert!(
         compiled.contains("NPM_CONFIG_REGISTRY"),
@@ -8653,6 +8655,37 @@ fn test_supply_chain_pipeline_artifact_all_compile_targets() {
         assert!(!compiled.contains("github.com/githubnext/ado-aw/releases"));
         assert!(!compiled.contains("github.com/github/gh-aw-firewall/releases"));
     }
+}
+
+/// `NuGetAuthenticate@1` exports `VSS_NUGET_ACCESSTOKEN` as a non-secret job
+/// variable, so every AWF-wrapped job must download mirror artifacts without
+/// it (`DownloadPackage@1` authenticates itself). Non-AWF jobs keep it, and
+/// both AWF runs exclude the variable as defense in depth.
+#[test]
+fn test_supply_chain_feed_never_authenticates_in_awf_jobs() {
+    let compiled = compile_fixture("supply-chain-agent.md");
+    let doc = parse_compiled_yaml(&compiled);
+    let job_text = |id: &str| {
+        let job = find_job_mapping(&doc, id).unwrap_or_else(|| panic!("missing {id} job"));
+        serde_yaml::to_string(job).unwrap()
+    };
+
+    for id in ["Agent", "Detection"] {
+        let text = job_text(id);
+        assert!(
+            text.contains("DownloadPackage@1"),
+            "{id} must still download mirror artifacts"
+        );
+        assert!(
+            !text.contains("NuGetAuthenticate@1"),
+            "{id} runs AWF with --env-all and must not run NuGetAuthenticate@1"
+        );
+        assert!(
+            text.contains("--exclude-env VSS_NUGET_ACCESSTOKEN"),
+            "{id} AWF run must exclude VSS_NUGET_ACCESSTOKEN"
+        );
+    }
+    assert!(job_text("SafeOutputs").contains("NuGetAuthenticate@1"));
 }
 
 /// With `supply-chain.feed` + `supply-chain.registry` configured, every

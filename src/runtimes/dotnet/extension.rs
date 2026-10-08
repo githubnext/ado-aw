@@ -3,7 +3,6 @@
 use super::{DOTNET_BASH_COMMANDS, DotnetRuntimeConfig, GLOBAL_JSON_SENTINEL};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{BashStep, Step, TaskStep};
-use crate::compile::ir::tasks::nuget_authenticate::NuGetAuthenticate;
 use crate::compile::ir::tasks::use_dotnet::UseDotNet;
 use crate::compile::shell::ShellScript;
 use crate::shell_script;
@@ -11,8 +10,8 @@ use crate::validate;
 use anyhow::Result;
 
 shell_script! {
-    /// Ensure a workspace-level `nuget.config` exists before
-    /// `NuGetAuthenticate@1` runs.
+    /// Ensure a workspace-level `nuget.config` exists so the configured
+    /// `feed-url` is the package source.
     ///
     /// The existence check covers the three case variations NuGet itself
     /// recognises on case-sensitive filesystems (`nuget.config`,
@@ -49,8 +48,11 @@ fi
 /// .NET runtime extension.
 ///
 /// Injects: ecosystem network hosts (dotnet), bash commands (dotnet),
-/// install steps (UseDotNet@2), authenticate steps (NuGetAuthenticate@1),
-/// optionally a `nuget.config` shim, and a prompt supplement.
+/// install steps (UseDotNet@2), optionally a `nuget.config` shim, and a
+/// prompt supplement.
+///
+/// No `NuGetAuthenticate@1`: it exports `VSS_NUGET_ACCESSTOKEN` as a
+/// non-secret job variable, which AWF's `--env-all` would hand to the agent.
 ///
 /// Unlike the Python and Node extensions, no agent env vars are emitted —
 /// NuGet's package-source convention is the `nuget.config` file, not env
@@ -79,9 +81,7 @@ impl CompilerExtension for DotnetExtension {
     /// * a [`Step::Task`] for `UseDotNet@2` (either `useGlobalJson` or
     ///   an explicit version),
     /// * a [`Step::Bash`] for `Ensure nuget.config exists` when a
-    ///   `feed-url:` is configured,
-    /// * a [`Step::Task`] for `NuGetAuthenticate@1` when either
-    ///   `feed-url:` or `config:` is configured.
+    ///   `feed-url:` is configured.
     ///
     /// Hosts, bash commands, prompt supplement also flow through.
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
@@ -143,21 +143,24 @@ impl CompilerExtension for DotnetExtension {
         }
 
         // Validate config path (defend against pipeline injection). The value
-        // is not currently embedded in any generated YAML — `NuGetAuthenticate@1`
-        // auto-discovers `nuget.config` — but we still validate it as a
-        // defence-in-depth measure in case it is surfaced in displayName or
-        // logs in the future.
+        // is not currently embedded in any generated YAML, but we still
+        // validate it as a defence-in-depth measure in case it is surfaced in
+        // displayName or logs in the future.
         if let Some(config) = self.config.config() {
             validate::reject_pipeline_injection(config, "runtimes.dotnet.config")?;
         }
 
-        let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
+        let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(2);
         agent_prepare_steps.push(Step::Task(dotnet_install_task_step(&self.config)));
         if self.config.feed_url().is_some() {
             agent_prepare_steps.push(Step::Bash(ensure_nuget_config_bash_step(&self.config)));
-            agent_prepare_steps.push(Step::Task(nuget_authenticate_task_step()));
+            warnings.push(crate::runtimes::unauthenticated_feed_warning(
+                "runtimes.dotnet.feed-url",
+            ));
         } else if self.config.config().is_some() {
-            agent_prepare_steps.push(Step::Task(nuget_authenticate_task_step()));
+            warnings.push(crate::runtimes::unauthenticated_feed_warning(
+                "runtimes.dotnet.config",
+            ));
         }
         Ok(Declarations {
             agent_prepare_steps,
@@ -199,13 +202,6 @@ fn dotnet_install_task_step(config: &DotnetRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("8.0.x");
     UseDotNet::with_version(version)
         .with_display_name(format!("Install .NET SDK {version}"))
-        .into_step()
-}
-
-/// Build the typed [`TaskStep`] for NuGet authentication.
-fn nuget_authenticate_task_step() -> TaskStep {
-    NuGetAuthenticate::new()
-        .with_display_name("Authenticate NuGet (build service identity)")
         .into_step()
 }
 
@@ -380,10 +376,10 @@ mod tests {
         }
     }
 
-    /// `feed-url:` triggers the ensure-nuget-config Bash step plus
-    /// `NuGetAuthenticate@1`. Three steps total, in that order.
+    /// `feed-url:` triggers the non-secret ensure-nuget-config Bash step
+    /// only; no `NuGetAuthenticate@1`, and the author is warned.
     #[test]
-    fn declarations_with_feed_url_adds_ensure_and_auth_steps() {
+    fn declarations_with_feed_url_adds_ensure_step_without_auth() {
         let (fm, _) = parse_markdown(
             "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
         )
@@ -391,7 +387,7 @@ mod tests {
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
         let decl = ext.declarations(&ctx_from(&fm)).unwrap();
-        assert_eq!(decl.agent_prepare_steps.len(), 3);
+        assert_eq!(decl.agent_prepare_steps.len(), 2);
         match &decl.agent_prepare_steps[1] {
             Step::Bash(b) => {
                 assert_eq!(b.display_name, "Ensure nuget.config exists");
@@ -399,16 +395,17 @@ mod tests {
             }
             other => panic!("expected Step::Bash for ensure-nuget, got {other:?}"),
         }
-        match &decl.agent_prepare_steps[2] {
-            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
-            other => panic!("expected Step::Task for NuGetAuthenticate@1, got {other:?}"),
-        }
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("runtimes.dotnet.feed-url"))
+        );
     }
 
-    /// `config:` (without `feed-url:`) skips the ensure step but still
-    /// emits `NuGetAuthenticate@1`. Two steps total.
+    /// `config:` (without `feed-url:`) emits only the install step and a
+    /// warning that the agent holds no feed credential.
     #[test]
-    fn declarations_with_config_only_skips_ensure_keeps_auth() {
+    fn declarations_with_config_only_emits_install_and_warning() {
         let (fm, _) = parse_markdown(
             "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n---\n",
         )
@@ -416,10 +413,11 @@ mod tests {
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
         let ext = DotnetExtension::new(dotnet.clone());
         let decl = ext.declarations(&ctx_from(&fm)).unwrap();
-        assert_eq!(decl.agent_prepare_steps.len(), 2);
-        match &decl.agent_prepare_steps[1] {
-            Step::Task(t) => assert_eq!(t.task, "NuGetAuthenticate@1"),
-            other => panic!("expected Step::Task, got {other:?}"),
-        }
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("runtimes.dotnet.config"))
+        );
     }
 }

@@ -104,7 +104,6 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     // Rust generators
     "Install Lean 4 (elan)",         // src/runtimes/lean/mod.rs
     "Append Lean 4 prompt",          // src/runtimes/lean/extension.rs
-    "Ensure .npmrc exists",          // src/runtimes/node/mod.rs
     "Ensure nuget.config exists",    // src/runtimes/dotnet/mod.rs
     "Restore previous agent memory", // src/tools/cache_memory/extension.rs
     "Initialize empty agent memory (clearMemory=true)",
