@@ -1,6 +1,6 @@
 ---
-name: "ado-aw candidate smoke: credential-isolated package feeds"
-description: "Proves npm, pip, and dotnet restore from an Azure Artifacts feed through ado-proxy with the build identity, and that no feed credential reaches the sandbox"
+name: "ado-aw candidate smoke: credential-isolated package feeds (WIF)"
+description: "Proves npm, pip, and dotnet restore from an Azure Artifacts feed through ado-proxy with a workload-identity token that never reaches the sandbox"
 target: standalone
 pool:
   name: AZS-1ES-L-Playground-ubuntu-22.04
@@ -16,38 +16,35 @@ tools:
 runtimes:
   node:
     feed: smoke
-    public-registry: block
   python:
     feed: smoke
-    public-registry: block
   dotnet:
     feed: smoke
-    public-registry: block
 permissions:
   packages:
-    # No service connection: the job's build identity
-    # (AgentPlayground Build Service) is the feed credential.
+    # Workload-identity federation: AzureCLI@3 mints an Entra token for this
+    # connection's service principal, which holds Feed and Upstream Reader
+    # (Collaborator) on the feed. The token goes only to ado-proxy.
+    service-connection: agent-playground-read
     feeds:
       - name: smoke
         organization: msazuresphere
         project: AgentPlayground
         feed: AgentPlaygroundTestFeed
         protocols: [npm, pypi, nuget]
-        # The feed is empty and relies on its upstreams, so reads must be
-        # allowed to save packages from them (Collaborator role).
         upstream: allow
 safe-outputs:
   add-build-tag:
-    tag-prefix: "ado-aw-packages-"
+    tag-prefix: "ado-aw-packages-wif-"
     max: 1
 ---
 
-## Candidate package-feed smoke (build identity)
+## Candidate package-feed smoke (workload identity)
 
 You are a deterministic smoke test for credential-isolated Azure Artifacts
-package restores. The feed credential is held by `ado-proxy`; you do not have
-it and must not need it. Run every command exactly as written, from the current
-working directory.
+package restores. The feed credential is an Entra token held by `ado-proxy`;
+you do not have it and must not need it. Run every command exactly as written,
+from the current working directory.
 
 Run these checks **in order**. If any check does not behave exactly as
 described, stop without emitting a safe output. The parent smoke orchestrator
@@ -57,7 +54,7 @@ fails because the proof tag is absent.
    nothing and exit non-zero:
 
    ```bash
-   printenv SYSTEM_ACCESSTOKEN SC_PACKAGES_TOKEN VSS_NUGET_ACCESSTOKEN PIP_EXTRA_INDEX_URL
+   printenv SC_PACKAGES_TOKEN SYSTEM_ACCESSTOKEN VSS_NUGET_ACCESSTOKEN PIP_EXTRA_INDEX_URL
    ```
 
 2. Prove npm downloads a package tarball from the internal feed through the
@@ -86,21 +83,7 @@ fails because the proof tag is absent.
    dotnet add .ado-aw-smoke-nuget package Newtonsoft.Json --version 13.0.3
    ```
 
-5. Prove a feed the workflow does not grant is refused. This command must fail,
-   and its output must contain `403`:
-
-   ```bash
-   npm view is-number version --registry https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/AgentPlaygroundTestFeed-not-granted/npm/registry/
-   ```
-
-6. Prove the public npm registry is blocked. This command must fail without
-   printing a version number:
-
-   ```bash
-   npm view is-number version --registry https://registry.npmjs.org/
-   ```
-
-7. Only after every check above behaves as described, invoke the
+5. Only after every check above behaves as described, invoke the
    `add-build-tag` safe-output tool with:
 
    - `build_id`: `$(Build.BuildId)`

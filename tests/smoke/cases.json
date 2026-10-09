@@ -50,6 +50,52 @@
       }
     },
     {
+      "id": "package-feeds",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/package-feeds.md",
+      "assertions": {
+        "pipelineText": {
+          "required": [
+            "displayName: Start ado-proxy policy engine",
+            "Install package-manager wrappers (ado-proxy)",
+            "resolve-feeds --policy-file",
+            "ADO_PROXY_PACKAGE_BEARER: $(System.AccessToken)"
+          ],
+          "forbidden": [
+            "NuGetAuthenticate",
+            "npmAuthenticate",
+            "PipAuthenticate"
+          ]
+        },
+        "requiredBuildTags": ["ado-aw-packages-{buildId}"]
+      }
+    },
+    {
+      "id": "package-feeds-wif",
+      "lane": "agentic",
+      "kind": "compiled",
+      "modes": ["candidate"],
+      "source": "tests/smoke/package-feeds-wif.md",
+      "assertions": {
+        "pipelineText": {
+          "required": [
+            "displayName: Start ado-proxy policy engine",
+            "Install package-manager wrappers (ado-proxy)",
+            "resolve-feeds --policy-file",
+            "ADO_PROXY_PACKAGE_BEARER: $(SC_PACKAGES_TOKEN)",
+            "--exclude-env SC_PACKAGES_TOKEN"
+          ],
+          "forbidden": [
+            "NuGetAuthenticate",
+            "npmAuthenticate",
+            "PipAuthenticate"
+          ]
+        },
+        "requiredBuildTags": ["ado-aw-packages-wif-{buildId}"]
+      }
+    },    {
       "id": "noop-target",
       "lane": "agentic",
       "kind": "compiled",

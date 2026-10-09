@@ -8784,42 +8784,57 @@ fn test_package_feeds_absent_and_dangling_reference() {
     assert!(stderr.contains("`permissions.packages` is not configured"), "{stderr}");
 }
 
-/// The package-feed smoke source is not yet registered in
-/// `tests/smoke/cases.json` (it needs a provisioned feed; see
-/// `tests/smoke/REGISTERED.md`). Keep it compiling and asserting the shape the
-/// live case will rely on.
+/// The live package-feed smoke cases compile, and the compiled pipelines
+/// satisfy the `pipelineText` assertions `tests/smoke/cases.json` declares for
+/// them. Checking those here means a compiler change that breaks an assertion
+/// fails `cargo test`, not the nightly smoke.
 #[test]
-fn test_package_feeds_smoke_source_compiles() {
-    let smoke = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("smoke")
-            .join("package-feeds.md"),
+fn test_package_feeds_smoke_sources_compile() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("tests").join("smoke").join("cases.json"))
+            .expect("read smoke manifest"),
     )
-    .expect("read package-feed smoke source");
-    let compiled =
-        compile_fixture_tree_with_flags("minimal-agent.md", &[], &[], |_| smoke.clone());
-    let doc = parse_compiled_yaml(&compiled);
-    let agent = serde_yaml::to_string(find_job_mapping(&doc, "Agent").unwrap()).unwrap();
+    .expect("parse smoke manifest");
+    let feed_url =
+        "https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/AgentPlaygroundTestFeed/npm/registry/";
 
-    assert!(agent.contains("displayName: Start ado-proxy policy engine"));
-    assert!(agent.contains("ADO_PROXY_PACKAGE_BEARER: $(System.AccessToken)"));
-    assert!(agent.contains("Install package-manager wrappers (ado-proxy)"));
-    assert!(agent.contains(
-        "https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/ado-aw-smoke/npm/registry/"
-    ));
-    for task in ["NuGetAuthenticate", "npmAuthenticate", "PipAuthenticate"] {
-        assert!(!agent.contains(task), "{task} must not appear in the Agent job");
-    }
-    let allowed = agent
-        .lines()
-        .find(|line| line.contains("ALLOWED_DOMAINS="))
-        .expect("allowlist binding");
-    for host in ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"] {
-        assert!(!allowed.contains(host), "{host} must be blocked: {allowed}");
+    for (case_id, uses_wif) in [("package-feeds", false), ("package-feeds-wif", true)] {
+        let case = manifest["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == case_id)
+            .unwrap_or_else(|| panic!("{case_id} is not registered in cases.json"));
+        let source = case["source"].as_str().unwrap();
+        let smoke = fs::read_to_string(root.join(source)).expect("read smoke source");
+        let compiled =
+            compile_fixture_tree_with_flags("minimal-agent.md", &[], &[], |_| smoke.clone());
+
+        let text = &case["assertions"]["pipelineText"];
+        for required in text["required"].as_array().unwrap() {
+            let required = required.as_str().unwrap();
+            assert!(compiled.contains(required), "{case_id}: missing `{required}`");
+        }
+        for forbidden in text["forbidden"].as_array().unwrap() {
+            let forbidden = forbidden.as_str().unwrap();
+            assert!(!compiled.contains(forbidden), "{case_id}: found `{forbidden}`");
+        }
+
+        let doc = parse_compiled_yaml(&compiled);
+        let agent = serde_yaml::to_string(find_job_mapping(&doc, "Agent").unwrap()).unwrap();
+        assert!(agent.contains(feed_url), "{case_id}: npm registry selection");
+        assert_eq!(agent.contains("AzureCLI@3"), uses_wif, "{case_id}: WIF mint step");
+        let allowed = agent
+            .lines()
+            .find(|line| line.contains("ALLOWED_DOMAINS="))
+            .expect("allowlist binding");
+        // Only the build-identity case blocks the public registries.
+        for host in ["registry.npmjs.org", "pypi.org", "api.nuget.org"] {
+            assert_eq!(allowed.contains(host), uses_wif, "{case_id}: {host}");
+        }
     }
 }
-
 /// With `supply-chain.feed` + `supply-chain.registry` configured, every
 /// GitHub/GHCR fetch is rerouted to the internal feed + registry while
 /// checksum verification is preserved.
