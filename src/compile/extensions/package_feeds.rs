@@ -276,11 +276,30 @@ impl CompilerExtension for PackageFeedsExtension {
         ExtensionPhase::Tool
     }
 
-    fn declarations(&self, _ctx: &CompileContext) -> anyhow::Result<Declarations> {
+    fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
+        let mut warnings = Vec::new();
+        let edit_disabled = ctx
+            .front_matter
+            .tools
+            .as_ref()
+            .and_then(|tools| tools.edit)
+            == Some(false);
+        if edit_disabled {
+            // Observed live: without `--allow-all-paths` Copilot CLI refuses
+            // every npm, pip, and dotnet invocation non-interactively.
+            warnings.push(
+                "permissions.packages is configured but tools.edit is false. Without edit, \
+                 Copilot CLI runs without path permissions and refuses package-manager \
+                 commands, which write caches and temporary files outside the workspace. \
+                 Leave tools.edit enabled for workflows that restore packages."
+                    .to_string(),
+            );
+        }
         Ok(Declarations {
             agent_prepare_steps: vec![Step::Bash(install_wrappers_step())],
             awf_path_prepends: vec![PACKAGE_WRAPPER_DIR.to_string()],
             prompt_supplement: Some(prompt_supplement(&self.config)),
+            warnings,
             ..Declarations::default()
         })
     }
@@ -337,5 +356,21 @@ mod tests {
         let prompt = decl.prompt_supplement.unwrap();
         assert!(prompt.contains("Feed `internal` (current organization, project `Eng`, view `Release` only): `npm`, `cargo`"), "{prompt}");
         assert!(prompt.contains("`cargo`"));
+        assert!(decl.warnings.is_empty(), "{:?}", decl.warnings);
+    }
+
+    #[test]
+    fn warns_when_edit_is_disabled() {
+        let config = packages("    feeds:\n      - feed: internal\n        upstream: allow\n        protocols: [npm]\n");
+        let fm = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: x\ntools:\n  edit: false\n---\n",
+        )
+        .unwrap()
+        .0;
+        let decl = PackageFeedsExtension::new(config)
+            .declarations(&CompileContext::for_test(&fm))
+            .unwrap();
+        assert_eq!(decl.warnings.len(), 1);
+        assert!(decl.warnings[0].contains("tools.edit is false"), "{:?}", decl.warnings);
     }
 }
