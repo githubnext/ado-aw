@@ -68,7 +68,8 @@ use super::common::PerJobPools;
 use super::common::{
     self, ADO_BUILD_ID_SUFFIX, ADO_MCP_HOST_NODE_MODULES, ADO_MCP_PACKAGE,
     ADO_PROXY_CONTAINER_NAME, ADO_PROXY_IMAGE, ADO_PROXY_LISTEN_PORT, ADO_PROXY_NETWORK_NAME,
-    ADO_PROXY_PUBLIC_CA_HOST_PATH, ADO_PROXY_TLS_PORT, AWF_SQUID_URL, AWF_VERSION, AZ_WRAPPER_DIR,
+    ADO_PROXY_PUBLIC_CA_BUNDLE_HOST_PATH, ADO_PROXY_PUBLIC_CA_HOST_PATH, ADO_PROXY_TLS_PORT,
+    AWF_SQUID_URL, AWF_VERSION, AZ_WRAPPER_DIR,
     HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
     image_ref,
 };
@@ -186,6 +187,13 @@ fn awf_exclude_keys(
             .iter()
             .map(|key| (*key).to_string()),
     );
+    if common::packages_permission(front_matter)
+        .is_some_and(crate::compile::types::PackagesPermissionConfig::uses_service_connection)
+    {
+        // Same-job secret, so ADO never exports it to a step environment;
+        // excluded anyway so the isolation intent is explicit.
+        keys.push(common::PACKAGES_TOKEN_VAR.to_string());
+    }
     for (server_name, _, _) in front_matter.azure_authenticated_mcp_servers() {
         keys.push(super::mcpg::azure_auth_client_variable(server_name)?.into_inner());
         keys.push(super::mcpg::azure_auth_tenant_variable(server_name)?.into_inner());
@@ -212,6 +220,7 @@ fn validate_pipeline_front_matter(
     common::validate_front_matter_identity(front_matter)?;
     common::validate_permissions_read_policy(front_matter)?;
     common::validate_permissions_write_policy(front_matter)?;
+    common::validate_permissions_packages_policy(front_matter)?;
     if let Some(minutes) = front_matter.engine.timeout_minutes() {
         common::validate_proxied_timeout(front_matter, minutes)?;
     }
@@ -1245,6 +1254,12 @@ fn build_agent_job(
     if let Some(step) = &cfg.acquire_read_token {
         steps.push(step.clone());
     }
+    // 3a. acquire the package-feed token when `permissions.packages` names a
+    //     workload-identity service connection. The build-identity mode needs
+    //     no mint: the proxy start step maps `System.AccessToken` directly.
+    if let Some(step) = common::acquire_packages_token_step(front_matter) {
+        steps.push(step);
+    }
 
     // 4. engine install steps (Copilot CLI install). YAML string from
     //    `Engine::install_steps`; lowered through `Step::RawYaml`
@@ -1312,8 +1327,9 @@ fn build_agent_job(
     //
     //      Must precede MCPG: the Azure DevOps MCP is redirected at the
     //      engine's container address, and that address does not exist until
-    //      the engine is running.
-    let ado_proxy_enabled = common::ado_proxy_enabled(front_matter);
+    //      the engine is running. Runs for REST reads (`permissions.read`)
+    //      and/or package feeds (`permissions.packages`).
+    let ado_proxy_enabled = common::ado_proxy_runtime_enabled(front_matter);
     if ado_proxy_enabled {
         steps.push(Step::Bash(prepare_ado_proxy_network_step()));
         if common::ado_mcp_enabled(front_matter) {
@@ -5313,9 +5329,28 @@ fn stop_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Vec<Step> {
 /// Not yet emitted: see [`stop_ado_proxy_step`].
 fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
     let policy = PolicyDocument::new(front_matter).to_json();
-    let hosts: Vec<&str> = catalog::catalog().protected_hosts.to_vec();
+    let packages = common::packages_permission(front_matter);
+    let catalog = catalog::catalog();
+    let mut hosts: Vec<&str> = catalog.protected_hosts.to_vec();
+    if packages.is_some() {
+        hosts.extend(catalog.package_hosts.iter().copied());
+    }
+    let (resolve_feeds, publish_ca_bundle) = if packages.is_some() {
+        (
+            phase_body(&START_ADO_PROXY_RESOLVE_FEEDS),
+            // Rendered with its own binding so pipelines without package feeds
+            // carry no unused variable.
+            ShellScript::new(&START_ADO_PROXY_PUBLISH_CA_BUNDLE)
+                .bind_text("CA_BUNDLE_HOST_PATH", ADO_PROXY_PUBLIC_CA_BUNDLE_HOST_PATH)
+                .render()
+                .trim()
+                .to_string(),
+        )
+    } else {
+        (String::new(), String::new())
+    };
 
-    ShellScript::new(&START_ADO_PROXY)
+    let step = ShellScript::new(&START_ADO_PROXY)
         .bind_text("PROXY_CONTAINER", ADO_PROXY_CONTAINER_NAME)
         .bind_text("PROXY_IMAGE", ADO_PROXY_IMAGE)
         .bind_text("PROXY_NETWORK", ADO_PROXY_NETWORK_NAME)
@@ -5351,6 +5386,7 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
             phase_body(&START_ADO_PROXY_SETUP_WORKDIR),
         )
         .fragment("write_policy", phase_body(&START_ADO_PROXY_WRITE_POLICY))
+        .fragment("resolve_feeds", resolve_feeds)
         .fragment(
             "mint_material",
             phase_body(&START_ADO_PROXY_MINT_MATERIAL),
@@ -5372,11 +5408,33 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
             phase_body(&START_ADO_PROXY_DESTROY_PRIVATE),
         )
         .fragment("wait_ready", phase_body(&START_ADO_PROXY_WAIT_READY))
-        .into_step("Start ado-proxy policy engine")
-        // The bearer is read from the environment here and immediately
-        // base64-encoded into the stdin document; it is never written to a
-        // file and never reaches the container's `Env`.
-        .with_env("ADO_PROXY_BEARER", EnvValue::secret("SC_READ_TOKEN"))
+        .fragment("publish_ca_bundle", publish_ca_bundle)
+        .into_step("Start ado-proxy policy engine");
+
+    // Each credential is read from the environment and immediately
+    // base64-encoded into the stdin document; it is never written to a file
+    // and never reaches the container's `Env`. A slot whose permission is not
+    // configured is simply not mapped, so the engine starts without it.
+    let step = if common::ado_proxy_enabled(front_matter) {
+        step.with_env("ADO_PROXY_BEARER", EnvValue::secret("SC_READ_TOKEN"))
+    } else {
+        step
+    };
+    match packages {
+        Some(packages) if packages.uses_service_connection() => step.with_env(
+            "ADO_PROXY_PACKAGE_BEARER",
+            EnvValue::secret(common::PACKAGES_TOKEN_VAR),
+        ),
+        // Build identity. `System.AccessToken` is a secret variable, so ADO
+        // never exports it to a step's environment unless mapped — and it is
+        // mapped only here, in a trusted step that runs before any agent
+        // process exists.
+        Some(_) => step.with_env(
+            "ADO_PROXY_PACKAGE_BEARER",
+            EnvValue::secret("System.AccessToken"),
+        ),
+        None => step,
+    }
 }
 
 /// Return a phase's body verbatim (trimmed and dedented) so it can be
@@ -5489,6 +5547,65 @@ fn ado_proxy_container_entrypoint_flattened() -> String {
 // The full script still runs as a **single trusted Bash task** because the
 // credential-custody contract (bearer via env only, private material on
 // stdin, destroyed before polling) requires atomic execution.
+
+shell_script! {
+    /// Phase 3a (packages only): resolve each granted feed to its feed,
+    /// project, and view GUIDs and fail fast when the package identity cannot
+    /// read it.
+    ///
+    /// Runs on the trusted host, before the container starts, because the
+    /// engine's only egress (AWF's Squid) does not exist yet. The credential
+    /// reaches the resolver on stdin through the `printf` builtin, so it is
+    /// never in argv or a file.
+    START_ADO_PROXY_RESOLVE_FEEDS {
+        interpreter: Bash,
+        bindings: [],
+        externals: [PROXY_DIR, PROXY_SCRIPT_PATH, ADO_PROXY_PACKAGE_BEARER],
+        fragments: [],
+        body: r###"
+# Resolve package-feed GUIDs and verify the package identity can read
+# each granted feed before anything starts.
+if ! printf '%s' "$ADO_PROXY_PACKAGE_BEARER" \
+  | node "$PROXY_SCRIPT_PATH" resolve-feeds --policy-file "$PROXY_DIR/policy/policy.json"; then
+  echo "##vso[task.complete result=Failed]ado-proxy could not resolve or read a permissions.packages feed"
+  exit 1
+fi
+echo "ado-proxy policy (feeds resolved):"
+python3 -m json.tool < "$PROXY_DIR/policy/policy.json"
+"###,
+    }
+}
+
+shell_script! {
+    /// Phase 10 (packages only): publish the system trust bundle concatenated
+    /// with the proxy CA. `pip`, `uv`, `dotnet`, and `cargo` accept only a
+    /// replacement bundle, so trusting the proxy for them requires shipping
+    /// the public roots alongside it. Public material only; the proxy mints
+    /// leaves solely for the hosts it intercepts, so trusting it cannot
+    /// impersonate any other host.
+    START_ADO_PROXY_PUBLISH_CA_BUNDLE {
+        interpreter: Bash,
+        bindings: [CA_BUNDLE_HOST_PATH],
+        externals: [CA_HOST_PATH],
+        fragments: [],
+        body: r###"
+SYSTEM_CA_BUNDLE=""
+for CANDIDATE in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+  if [ -f "$CANDIDATE" ]; then
+    SYSTEM_CA_BUNDLE="$CANDIDATE"
+    break
+  fi
+done
+if [ -z "$SYSTEM_CA_BUNDLE" ]; then
+  echo "##vso[task.complete result=Failed]no system CA bundle found for package-manager trust"
+  exit 1
+fi
+cat "$SYSTEM_CA_BUNDLE" "$CA_HOST_PATH" > "$CA_BUNDLE_HOST_PATH"
+chmod 644 "$CA_BUNDLE_HOST_PATH"
+echo "package-manager trust bundle published at $CA_BUNDLE_HOST_PATH"
+"###,
+    }
+}
 
 shell_script! {
     /// Phase 1: create the agent-private work directory outside `/tmp` and
@@ -5611,16 +5728,22 @@ shell_script! {
     START_ADO_PROXY_BUILD_MATERIAL {
         interpreter: Bash,
         bindings: [],
-        externals: [PROXY_DIR, LEAF_HOSTS, ADO_PROXY_BEARER],
+        externals: [PROXY_DIR, LEAF_HOSTS, ADO_PROXY_BEARER, ADO_PROXY_PACKAGE_BEARER],
         fragments: [],
         body: r###"
 # Build the material document. jq assembles it so that a value
 # containing JSON metacharacters cannot alter the document shape.
+# Each credential slot is optional: a workflow may configure only
+# Azure DevOps reads, only package feeds, or both. The engine refuses
+# to start if a slot its policy needs is missing.
 PROXY_MATERIAL=$(jq -n \
-  --arg schema 'ado-aw/ado-proxy-material/v1' \
+  --arg schema 'ado-aw/ado-proxy-material/v2' \
   --arg ca_cert "$(base64 -w0 < "$PROXY_DIR/ca.pem")" \
-  --arg token "$(printf '%s' "$ADO_PROXY_BEARER" | base64 -w0)" \
-  '{schema: $schema, ca_cert: $ca_cert, token: $token, leaves: {}}')
+  --arg token "$(printf '%s' "${ADO_PROXY_BEARER:-}" | base64 -w0)" \
+  --arg package_token "$(printf '%s' "${ADO_PROXY_PACKAGE_BEARER:-}" | base64 -w0)" \
+  '{schema: $schema, ca_cert: $ca_cert, leaves: {}}
+   + (if $token == "" then {} else {token: $token} end)
+   + (if $package_token == "" then {} else {package_token: $package_token} end)')
 # shellcheck disable=SC2086 # LEAF_HOSTS is Binding::words; unquoted expansion is the documented word-list contract.
 for PROXY_HOST in $LEAF_HOSTS; do
   PROXY_MATERIAL=$(printf '%s' "$PROXY_MATERIAL" | jq \
@@ -5830,12 +5953,14 @@ shell_script! {
             setup_workdir,
             resolve_org,
             write_policy,
+            resolve_feeds,
             mint_material,
             build_material,
             run_container,
             handover_material,
             destroy_private,
-            wait_ready
+            wait_ready,
+            publish_ca_bundle
         ],
         // Every phase but `resolve_org` is a registered script, so the lint
         // shellchecks the *composed* body rather than an outline of markers.
@@ -5846,12 +5971,14 @@ shell_script! {
         phases: [
             setup_workdir = START_ADO_PROXY_SETUP_WORKDIR,
             write_policy = START_ADO_PROXY_WRITE_POLICY,
+            resolve_feeds = START_ADO_PROXY_RESOLVE_FEEDS,
             mint_material = START_ADO_PROXY_MINT_MATERIAL,
             build_material = START_ADO_PROXY_BUILD_MATERIAL,
             run_container = START_ADO_PROXY_RUN_CONTAINER,
             handover_material = START_ADO_PROXY_HANDOVER_MATERIAL,
             destroy_private = START_ADO_PROXY_DESTROY_PRIVATE,
             wait_ready = START_ADO_PROXY_WAIT_READY,
+            publish_ca_bundle = START_ADO_PROXY_PUBLISH_CA_BUNDLE,
         ],
         body: r###"
 # Start the ado-proxy policy engine.
@@ -5865,6 +5992,8 @@ shell_script! {
 
 # ado-aw:fragment write_policy
 
+# ado-aw:fragment resolve_feeds
+
 # ado-aw:fragment mint_material
 
 # ado-aw:fragment build_material
@@ -5876,6 +6005,8 @@ shell_script! {
 # ado-aw:fragment destroy_private
 
 # ado-aw:fragment wait_ready
+
+# ado-aw:fragment publish_ca_bundle
 "###,
     }
 }

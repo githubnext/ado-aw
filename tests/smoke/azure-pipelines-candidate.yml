@@ -15,6 +15,15 @@
 
 trigger: none
 
+# Queue-time case filter, e.g. "package-feeds,package-feeds-wif". The default
+# is a single space because Azure Pipelines requires a non-empty default for a
+# string runtime parameter; the harness treats whitespace as "every case".
+parameters:
+  - name: smokeCases
+    displayName: Smoke case ids to run (comma-separated; blank runs all)
+    type: string
+    default: " "
+
 pr:
   branches:
     include:
@@ -51,3 +60,4 @@ jobs:
       - template: orchestrator-steps.yml
         parameters:
           compilerSource: candidate
+          smokeCases: ${{ parameters.smokeCases }}

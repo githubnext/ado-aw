@@ -85,6 +85,22 @@ describe("candidate orchestrator trigger policy", () => {
     ]);
   });
 
+  it("forwards the smokeCases queue-time filter only as an environment variable", () => {
+    const root = parse(readFileSync(pipelinePath, "utf8")) as {
+      parameters?: Array<{ name?: string; type?: string; default?: string }>;
+      jobs?: Array<{ steps?: Array<{ parameters?: Record<string, string> }> }>;
+    };
+    expect(root.parameters).toEqual([
+      expect.objectContaining({ name: "smokeCases", type: "string", default: " " }),
+    ]);
+    expect(root.jobs?.[0]?.steps?.[0]?.parameters?.smokeCases).toBe("${{ parameters.smokeCases }}");
+
+    const run = steps.find((step) => step.displayName?.startsWith("Run all smoke cases"));
+    expect(run?.env?.SMOKE_CASES).toBe("${{ parameters.smokeCases }}");
+    // A free-form queue-time value must never be spliced into script text.
+    expect(text.match(/parameters\.smokeCases/g)).toHaveLength(1);
+  });
+
   it("keeps PRs eligible for the Azure Pipelines comment trigger", () => {
     expect(pipeline.trigger).toBe("none");
     expect(pipeline.pr?.branches?.include).toEqual(["main"]);

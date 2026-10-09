@@ -79,3 +79,4 @@ Return:
 - https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/engine.md
 - https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/targets.md
 - https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/network.md
+- https://raw.githubusercontent.com/githubnext/ado-aw/main/docs/package-feeds.md

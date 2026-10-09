@@ -17,6 +17,13 @@ parameters:
     values:
       - candidate
       - released
+  # Comma-separated case ids to run; blank runs every case in the mode. Only
+  # the candidate root exposes it as a queue-time parameter. It reaches the
+  # harness as an environment variable and is validated against the manifest
+  # there, never interpolated into a script.
+  - name: smokeCases
+    type: string
+    default: ""
 
 steps:
   - checkout: self
@@ -475,6 +482,7 @@ steps:
       BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
       SYSTEM_DEFINITIONID: $(System.DefinitionId)
       SMOKE_COMPILER_SOURCE: ${{ parameters.compilerSource }}
+      SMOKE_CASES: ${{ parameters.smokeCases }}
       SMOKE_ADO_AW_BIN: $(Build.SourcesDirectory)/target/release/ado-aw
       SMOKE_ARTIFACT_NAME: $(EFFECTIVE_SMOKE_ARTIFACT_NAME)
       SMOKE_MIRROR_REPO: $(EFFECTIVE_SMOKE_MIRROR_REPO)

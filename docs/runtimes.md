@@ -47,7 +47,7 @@ runtimes:
 runtimes:
   python:
     version: "3.12"
-    feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
+    feed: internal          # a permissions.packages feed granting pypi
 ```
 
 **Fields:**
@@ -55,14 +55,16 @@ runtimes:
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Python version to install (e.g., `"3.12"`, `"3.11"`). Passed to `UsePythonVersion@0` `versionSpec`. Defaults to latest 3.x. |
-| `feed-url` | string | PyPI-compatible feed URL. Injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment. Selects the source only — no credential is attached (see [Package-feed credentials](#package-feed-credentials)). |
+| `feed` | string | Handle of a `permissions.packages` feed that grants `pypi`. Sets `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` to the feed's canonical `pypi/simple/` URL; the credential stays in the package proxy (see [`package-feeds.md`](package-feeds.md)). Mutually exclusive with `feed-url` and `config`. |
+| `public-registry` | `allow` \| `block` | `block` removes the public PyPI hosts from the AWF allowlist. Defaults to `allow`. |
+| `feed-url` | string | PyPI-compatible feed URL for a feed that needs no credential. Injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment. Azure Artifacts URLs are migrated to `feed` by codemod 0009 (see [Package-feed credentials](#package-feed-credentials)). |
 | `config` | string | Path to a pip/uv config file. Accepted with a warning — the file will not be available inside the AWF agent environment until proxy-auth support lands. |
 
 When enabled, the compiler:
 - Contributes a `UsePythonVersion@0` task to `Declarations::agent_prepare_steps` (runs before AWF)
 - Auto-adds `python`, `python3`, `pip`, `pip3`, `uv` to the bash command allow-list
 - Adds Python ecosystem domains to the network allowlist (pypi.org, pythonhosted.org, etc.)
-- If `feed-url` is set, injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment and warns that the agent holds no feed credential
+- If `feed` or `feed-url` is set, injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment; `feed-url` also warns that the agent holds no feed credential
 - Appends a prompt supplement informing the agent about Python availability
 - No AWF mounts or PATH prepends needed — `UsePythonVersion@0` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
 
@@ -79,7 +81,7 @@ runtimes:
 runtimes:
   node:
     version: "22.x"
-    feed-url: "https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/"
+    feed: internal          # a permissions.packages feed granting npm
 ```
 
 **Fields:**
@@ -87,14 +89,16 @@ runtimes:
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Node.js version to install (e.g., `"22.x"`, `"20.x"`). Passed to `UseNode@1` `version`. Defaults to `"22.x"`. |
-| `feed-url` | string | npm registry URL. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. Selects the source only — no credential is attached (see [Package-feed credentials](#package-feed-credentials)). |
+| `feed` | string | Handle of a `permissions.packages` feed that grants `npm`. Sets `NPM_CONFIG_REGISTRY` to the feed's canonical `npm/registry/` URL; the credential stays in the package proxy (see [`package-feeds.md`](package-feeds.md)). Mutually exclusive with `feed-url` and `config`. |
+| `public-registry` | `allow` \| `block` | `block` removes the public npm registry hosts from the AWF allowlist. Defaults to `allow`. |
+| `feed-url` | string | npm registry URL for a registry that needs no credential. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. Azure Artifacts URLs are migrated to `feed` by codemod 0009 (see [Package-feed credentials](#package-feed-credentials)). |
 | `config` | string | Path to an .npmrc config file. Accepted with a warning — the file will not be available inside the AWF agent environment until proxy-auth support lands. |
 
 When enabled, the compiler:
 - Contributes a `UseNode@1` task to `Declarations::agent_prepare_steps` (runs before AWF)
 - Auto-adds `node`, `npm`, `npx` to the bash command allow-list
 - Adds Node ecosystem domains to the network allowlist (npmjs.org, nodejs.org, etc.)
-- If `feed-url` is set, injects `NPM_CONFIG_REGISTRY` env var into the agent environment and warns that the agent holds no feed credential
+- If `feed` or `feed-url` is set, injects `NPM_CONFIG_REGISTRY` env var into the agent environment; `feed-url` also warns that the agent holds no feed credential
 - Appends a prompt supplement informing the agent about Node.js availability
 - No AWF mounts or PATH prepends needed — `UseNode@1` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
 - Note: AWF overlays `~/.npmrc` with `/dev/null` for credential security — the `NPM_CONFIG_REGISTRY` env var approach avoids conflicting with this overlay
@@ -111,7 +115,7 @@ runtimes:
 runtimes:
   dotnet:
     version: "8.0.x"
-    feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
+    feed: internal          # a permissions.packages feed granting nuget
 
 # Or point at a checked-in nuget.config
 runtimes:
@@ -130,8 +134,10 @@ runtimes:
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | .NET SDK version to install (e.g., `"8.0.x"`, `"9.0.x"`). Passed to `UseDotNet@2` `version` with `packageType: 'sdk'`. Defaults to `"8.0.x"`. The special value `"global.json"` (case-insensitive) emits `useGlobalJson: true` instead, which discovers and installs every SDK referenced by `global.json` files in the workspace. |
-| `feed-url` | string | NuGet feed URL (typically the v3 `index.json` of an Azure Artifacts feed). When set, the compiler creates a minimal `nuget.config` if none exists. Selects the source only — no credential is attached (see [Package-feed credentials](#package-feed-credentials)). |
-| `config` | string | Path to a checked-in `nuget.config` in the repo. Mutually exclusive with `feed-url`. Sources that require authentication still reject the agent's requests. |
+| `feed` | string | Handle of a `permissions.packages` feed that grants `nuget`. Writes a minimal `nuget.config` pointing at the feed's canonical `nuget/v3/index.json` when none exists; the credential stays in the package proxy (see [`package-feeds.md`](package-feeds.md)). Mutually exclusive with `feed-url` and `config`. |
+| `public-registry` | `allow` \| `block` | `block` removes the public nuget.org hosts from the AWF allowlist. Defaults to `allow`. |
+| `feed-url` | string | NuGet feed URL for a feed that needs no credential. When set, the compiler creates a minimal `nuget.config` if none exists. Azure Artifacts URLs are migrated to `feed` by codemod 0009 (see [Package-feed credentials](#package-feed-credentials)). |
+| `config` | string | Path to a checked-in `nuget.config` in the repo. Mutually exclusive with `feed-url`. Azure Artifacts sources in it work when `permissions.packages` grants them. |
 
 **`global.json` precedence.** A `global.json` file in the repo is the canonical
 way to pin the .NET SDK. The compiler enforces a single source of truth:
@@ -149,7 +155,7 @@ way to pin the .NET SDK. The compiler enforces a single source of truth:
 
 When enabled, the compiler:
 - Contributes a `UseDotNet@2` task to `Declarations::agent_prepare_steps` (runs before AWF)
-- If `feed-url` is set, injects an ensure-`nuget.config` step (writes a minimal `nuget.config` referencing the feed only when one doesn't already exist)
+- If `feed` or `feed-url` is set, injects an ensure-`nuget.config` step (writes a minimal `nuget.config` referencing the feed only when one doesn't already exist)
 - If `feed-url` or `config` is set, warns that the agent holds no feed credential
 - Auto-adds `dotnet` to the bash command allow-list
 - Adds .NET ecosystem domains to the network allowlist (nuget.org, dotnet.microsoft.com, pkgs.dev.azure.com, etc.)
@@ -173,9 +179,13 @@ of them would hand the job's build-identity token to the agent.
 
 Consequences:
 
-- `feed-url` and `config` select the package source but carry no credential.
-  Anonymous feeds work; feeds that require authentication (including Azure
-  Artifacts) reject the agent's requests, and the compiler warns.
+- Azure Artifacts feeds are reached through the credential-isolated package
+  proxy instead: grant them under `permissions.packages` and select them with
+  `runtimes.<x>.feed` (see [`package-feeds.md`](package-feeds.md)). Codemod
+  0009 migrates Azure Artifacts `feed-url` values automatically.
+- `feed-url` and `config` select a package source but carry no credential.
+  Anonymous feeds work; other feeds that require authentication reject the
+  agent's requests, and the compiler warns.
 - `steps:` and `safe-outputs.threat-detection.steps` — operator steps that
   run before AWF in the same job — may not use `NuGetAuthenticate`,
   `npmAuthenticate`, `PipAuthenticate`, `TwineAuthenticate`,

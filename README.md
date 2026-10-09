@@ -485,15 +485,16 @@ runtimes:
 
 | Runtime | Install mechanism | Notes |
 |---------|-------------------|-------|
-| `python` | `UsePythonVersion@0` | Adds `python`, `pip`, `uv` to the bash allow-list; `feed-url` selects the index without a credential |
-| `node` | `UseNode@1` | Adds `node`, `npm`, `npx` to the bash allow-list; `feed-url` selects the registry without a credential |
-| `dotnet` | `UseDotNet@2` | Adds `dotnet`; `version: "global.json"` auto-discovers SDKs from repo `global.json` files; `feed-url` writes a credential-free `nuget.config` |
+| `python` | `UsePythonVersion@0` | Adds `python`, `pip`, `uv` to the bash allow-list; `feed` selects a `permissions.packages` feed reached through the credential-isolated proxy |
+| `node` | `UseNode@1` | Adds `node`, `npm`, `npx` to the bash allow-list; `feed` selects a `permissions.packages` feed reached through the credential-isolated proxy |
+| `dotnet` | `UseDotNet@2` | Adds `dotnet`; `version: "global.json"` auto-discovers SDKs from repo `global.json` files; `feed` writes a credential-free `nuget.config` for a `permissions.packages` feed |
 | `lean` | elan toolchain install | Adds `lean`, `lake`, `elan`; auto-pins to a repo `lean-toolchain` file if present |
 
 Each runtime can be enabled with a bare `true` for defaults, or an object for
 version pinning and internal feed configuration. See
 [`docs/runtimes.md`](docs/runtimes.md) for the full field reference,
-including feed-authentication caveats and AWF mount/PATH details per runtime.
+including AWF mount/PATH details per runtime, and
+[`docs/package-feeds.md`](docs/package-feeds.md) for internal Azure Artifacts feeds.
 
 ---
 

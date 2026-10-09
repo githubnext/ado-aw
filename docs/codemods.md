@@ -138,7 +138,8 @@ src/compile/codemods/
 ├── 0005_drop_build_attachment_allowed_build_ids.rs # remove no-op upload-build-attachment.allowed-build-ids
 ├── 0006_explicit_push_trigger.rs # pin legacy implicit all-branches push trigger for pre-0.49.0 sources
 ├── 0007_promote_debug_create_github_issue.rs # move debug GitHub issue filing to regular safe-outputs
-└── 0008_explicit_mcp_pipeline_env.rs # replace empty MCP env passthrough with pipeline-variable objects
+├── 0008_explicit_mcp_pipeline_env.rs # replace empty MCP env passthrough with pipeline-variable objects
+└── 0009_package_feed_permissions.rs # move Azure Artifacts runtimes.<x>.feed-url to permissions.packages + runtimes.<x>.feed
 ```
 
 (New codemods are appended as `<NNNN>_<id>.rs` files.)
@@ -513,6 +514,55 @@ env:
 Non-empty literals and already-explicit mappings are unchanged. The new object
 form also supports remapping a container variable from a differently named ADO
 pipeline or variable-group variable.
+
+## Package feed permissions (`0009_package_feed_permissions`)
+
+Before 0.54.0, setting `runtimes.<python|node|dotnet>.feed-url` to an Azure
+Artifacts feed made the compiler run `PipAuthenticate`, `npmAuthenticate`, or
+`NuGetAuthenticate` in the Agent job. Those tasks published the feed credential
+into non-secret job variables and files, which AWF's `--env-all` passed into
+the sandbox, so they were removed. Feed credentials now live only in the
+trusted `ado-proxy` and are granted with `permissions.packages` (see
+[`package-feeds.md`](package-feeds.md)).
+
+The codemod rewrites each Azure Artifacts `feed-url`, on either
+`pkgs.dev.azure.com` or the legacy `{org}.pkgs.visualstudio.com` host:
+
+```yaml
+runtimes:
+  node:
+    feed-url: https://pkgs.dev.azure.com/contoso/Engineering/_packaging/shared/npm/registry/
+```
+
+becomes:
+
+```yaml
+permissions:
+  packages:
+    feeds:
+      - name: shared
+        organization: contoso
+        project: Engineering
+        feed: shared
+        protocols: [npm]
+        upstream: allow
+runtimes:
+  node:
+    feed: shared
+```
+
+- Runtimes that point at the same feed share a single grant and contribute
+  their protocols to it. Distinct feeds that would get the same handle are
+  disambiguated with a `-2`, `-3`, … suffix.
+- A URL that names a view (`feed@Release`) keeps it as `view:`. Without a view,
+  the codemod adds `upstream: allow`, which keeps the previous behavior: the
+  build identity could save packages from upstream sources. Tighten that after
+  migration by pinning a `view:` or switching to `identity-role: reader`.
+- `feed-url` values on other hosts are left unchanged. The runtime still points
+  the package manager at them, without credentials.
+- The codemod fails, and does not guess, if the URL cannot be parsed, if the
+  runtime already sets `feed`, or if an existing `permissions.packages` grant
+  uses the same handle for a different feed.
 
 ## Tests
 

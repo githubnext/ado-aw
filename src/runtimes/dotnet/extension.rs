@@ -110,6 +110,19 @@ impl CompilerExtension for DotnetExtension {
                  Use one or the other."
             );
         }
+        crate::runtimes::validate_feed_exclusivity(
+            "dotnet",
+            self.config.feed(),
+            self.config.feed_url(),
+            self.config.config(),
+        )?;
+        warnings.extend(crate::runtimes::public_registry_warning(
+            ctx.front_matter,
+            "dotnet",
+            self.config.public_registry(),
+            self.config.feed(),
+            self.config.feed_url().is_some() || self.config.config().is_some(),
+        ));
 
         // Validate feed URL
         if let Some(feed_url) = self.config.feed_url() {
@@ -152,8 +165,19 @@ impl CompilerExtension for DotnetExtension {
 
         let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(2);
         agent_prepare_steps.push(Step::Task(dotnet_install_task_step(&self.config)));
-        if self.config.feed_url().is_some() {
-            agent_prepare_steps.push(Step::Bash(ensure_nuget_config_bash_step(&self.config)));
+        if let Some(handle) = self.config.feed() {
+            // A granted feed is reached through the credential-isolated
+            // package proxy; the generated `nuget.config` carries no
+            // credential.
+            let source_url = crate::runtimes::selected_feed_url(
+                ctx,
+                "dotnet",
+                handle,
+                crate::compile::types::PackageProtocol::Nuget,
+            )?;
+            agent_prepare_steps.push(Step::Bash(ensure_nuget_config_bash_step(&source_url)));
+        } else if let Some(feed_url) = self.config.feed_url() {
+            agent_prepare_steps.push(Step::Bash(ensure_nuget_config_bash_step(feed_url)));
             warnings.push(crate::runtimes::unauthenticated_feed_warning(
                 "runtimes.dotnet.feed-url",
             ));
@@ -208,10 +232,7 @@ fn dotnet_install_task_step(config: &DotnetRuntimeConfig) -> TaskStep {
 /// Build the typed [`BashStep`] that ensures `nuget.config`. Same
 /// case-variation-aware existence check; same minimal `nuget.config`
 /// content when the file is missing.
-fn ensure_nuget_config_bash_step(config: &DotnetRuntimeConfig) -> BashStep {
-    let feed_url = config
-        .feed_url()
-        .unwrap_or("https://api.nuget.org/v3/index.json");
+fn ensure_nuget_config_bash_step(feed_url: &str) -> BashStep {
     ShellScript::new(&ENSURE_NUGET_CONFIG)
         .bind_text("FEED_URL", feed_url)
         .into_step("Ensure nuget.config exists")
@@ -240,7 +261,7 @@ mod tests {
     #[test]
     fn test_validate_config_and_feed_url_are_mutually_exclusive() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+            "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    config: 'nuget.config'\n    feed-url: 'https://packages.example.test/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
         )
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
@@ -381,7 +402,7 @@ mod tests {
     #[test]
     fn declarations_with_feed_url_adds_ensure_step_without_auth() {
         let (fm, _) = parse_markdown(
-            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet:\n    feed-url: 'https://packages.example.test/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
         )
         .unwrap();
         let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
@@ -391,7 +412,7 @@ mod tests {
         match &decl.agent_prepare_steps[1] {
             Step::Bash(b) => {
                 assert_eq!(b.display_name, "Ensure nuget.config exists");
-                assert!(b.script.contains("pkgs.dev.azure.com"));
+                assert!(b.script.contains("packages.example.test"));
             }
             other => panic!("expected Step::Bash for ensure-nuget, got {other:?}"),
         }

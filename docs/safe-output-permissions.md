@@ -335,5 +335,6 @@ Option 2 unless you have a specific reason to broaden the grant.
 - [`docs/safe-outputs.md`](safe-outputs.md) — full Stage 3 tool reference
 - [`docs/network.md`](network.md) — `permissions:` and the service-connection model
 - [`docs/audit.md`](audit.md) — `ado-aw audit` extracts every Stage 3 execution outcome under `safe_output_execution`
+- [`docs/package-feeds.md`](package-feeds.md#granting-feed-access) — the same build identities applied to Azure Artifacts feed roles for `permissions.packages` (Agent job package restores)
 - Microsoft Learn: [Job authorization scope](https://learn.microsoft.com/azure/devops/pipelines/process/access-tokens)
 - Microsoft Learn: [Default permissions and access for Azure DevOps](https://learn.microsoft.com/azure/devops/organizations/security/permissions)

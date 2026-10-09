@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { sanitizeRequestHeaders, sanitizeResponseHeaders } from "./headers.js";
+import {
+  sanitizePackageRequestHeaders,
+  sanitizePackageResponseHeaders,
+  sanitizeRequestHeaders,
+  sanitizeResponseHeaders,
+} from "./headers.js";
 
 describe("sanitizeRequestHeaders", () => {
   it("strips every client-supplied credential", () => {
@@ -99,6 +104,103 @@ describe("sanitizeResponseHeaders", () => {
     expect(headers).toEqual({
       "content-type": "application/json",
       "x-ms-continuationtoken": "next",
+    });
+  });
+});
+
+describe("sanitizePackageRequestHeaders", () => {
+  it("strips client credentials, including package-client ones", () => {
+    const { headers, strippedCredentials } = sanitizePackageRequestHeaders(
+      {
+        authorization: "Bearer sentinel",
+        "proxy-authorization": "Basic abc",
+        cookie: "a=b",
+        "x-nuget-apikey": "push-key",
+        "npm-otp": "123456",
+      },
+      "pkgs.dev.azure.com",
+    );
+    expect(headers.authorization).toBeUndefined();
+    expect(headers["x-nuget-apikey"]).toBeUndefined();
+    expect(headers["npm-otp"]).toBeUndefined();
+    expect(headers.cookie).toBeUndefined();
+    expect(strippedCredentials).toEqual(
+      expect.arrayContaining(["authorization", "proxy-authorization", "cookie", "x-nuget-apikey", "npm-otp"]),
+    );
+  });
+
+  it("keeps the conditional, ranged, and protocol headers package clients send", () => {
+    const { headers } = sanitizePackageRequestHeaders(
+      {
+        Accept: "application/vnd.npm.install-v1+json",
+        "If-None-Match": '"etag"',
+        "if-modified-since": "Mon, 01 Jan 2024 00:00:00 GMT",
+        range: "bytes=0-99",
+        "if-range": '"etag"',
+        "npm-command": "install",
+        "npm-session": "abc",
+        "x-nuget-session-id": "s",
+        "x-nuget-protocol-version": "4.1.0",
+        "user-agent": "npm/10",
+      },
+      "pkgs.dev.azure.com",
+    );
+    expect(headers).toMatchObject({
+      accept: "application/vnd.npm.install-v1+json",
+      "if-none-match": '"etag"',
+      range: "bytes=0-99",
+      "if-range": '"etag"',
+      "npm-command": "install",
+      "x-nuget-session-id": "s",
+      "user-agent": "npm/10",
+    });
+  });
+
+  it("drops forwarding, smuggling, and unknown headers, and pins the protocol ones", () => {
+    const { headers } = sanitizePackageRequestHeaders(
+      {
+        host: "evil.test",
+        forwarded: "for=1.2.3.4",
+        "x-forwarded-for": "1.2.3.4",
+        "x-forwarded-host": "evil.test",
+        "transfer-encoding": "chunked",
+        "x-http-method-override": "PUT",
+        referer: "install secret-thing",
+        "accept-encoding": "gzip",
+        connection: "keep-alive, x-secret",
+        "x-secret": "1",
+      },
+      "pkgs.dev.azure.com",
+    );
+    expect(headers).toEqual({
+      host: "pkgs.dev.azure.com",
+      "x-tfs-fedauthredirect": "Suppress",
+      "accept-encoding": "identity",
+      connection: "close",
+    });
+  });
+});
+
+describe("sanitizePackageResponseHeaders", () => {
+  it("relays caching and download headers but no session or auth material", () => {
+    const headers = sanitizePackageResponseHeaders({
+      "content-type": "application/octet-stream",
+      "content-length": "10",
+      etag: '"e"',
+      "last-modified": "x",
+      "content-disposition": "attachment; filename=x.tgz",
+      "set-cookie": ["a=b"],
+      "www-authenticate": "Bearer",
+      location: "https://evil.test/",
+      "x-vss-userdata": "id:name",
+      "strict-transport-security": "max-age=1",
+    });
+    expect(headers).toEqual({
+      "content-type": "application/octet-stream",
+      "content-length": "10",
+      etag: '"e"',
+      "last-modified": "x",
+      "content-disposition": "attachment; filename=x.tgz",
     });
   });
 });

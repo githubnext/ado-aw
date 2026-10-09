@@ -184,6 +184,154 @@ describe("parsePolicy", () => {
   });
 });
 
+describe("parsePolicy packages section", () => {
+  const FEED = {
+    organization: "contoso",
+    project: "Engineering",
+    feed: "internal",
+    view: "Release",
+    protocols: ["npm", "nuget"],
+  };
+  const packagesJson = (
+    overrides: Record<string, unknown> = {},
+    feedOverrides: Record<string, unknown> = {},
+  ): string =>
+    policyJson({
+      packages: {
+        hosts: ["pkgs.dev.azure.com"],
+        feeds: [{ ...FEED, ...feedOverrides }],
+        ...overrides,
+      },
+    });
+
+  it("is absent when the document carries no packages key", () => {
+    expect(parsePolicy(policyJson()).packages).toBeUndefined();
+  });
+
+  it("accepts a well-formed section, with and without resolved ids", () => {
+    const policy = parsePolicy(packagesJson());
+    expect(policy.packages).toEqual({ hosts: ["pkgs.dev.azure.com"], feeds: [FEED] });
+
+    const resolved = parsePolicy(
+      packagesJson(
+        {},
+        {
+          project_id: "11111111-1111-1111-1111-111111111111",
+          feed_id: "22222222-2222-2222-2222-222222222222",
+          view_id: "33333333-3333-3333-3333-333333333333",
+        },
+      ),
+    );
+    expect(resolved.packages?.feeds[0]?.feed_id).toBe("22222222-2222-2222-2222-222222222222");
+  });
+
+  it("accepts an organization-scoped feed with no view", () => {
+    const policy = parsePolicy(
+      packagesJson({}, { project: undefined, view: undefined, protocols: ["pypi"] }),
+    );
+    expect(policy.packages?.feeds[0]).toEqual({
+      organization: "contoso",
+      feed: "internal",
+      protocols: ["pypi"],
+    });
+  });
+
+  it("accepts a packages-only policy with no REST capability", () => {
+    // Every REST operation is then denied by the authorizer; the policy itself
+    // is legitimate.
+    const policy = parsePolicy(
+      JSON.stringify({
+        ...VALID_POLICY,
+        capabilities: [],
+        packages: { hosts: ["pkgs.dev.azure.com"], feeds: [FEED] },
+      }),
+    );
+    expect(policy.capabilities).toEqual([]);
+    expect(policy.packages?.feeds).toHaveLength(1);
+  });
+
+  it("rejects unknown keys in the section and in a feed", () => {
+    expect(() => parsePolicy(packagesJson({ allow_publish: true }))).toThrow(
+      /policy\.packages has unknown key/,
+    );
+    expect(() => parsePolicy(packagesJson({}, { upstream: "allow" }))).toThrow(
+      /feeds\[0\] has unknown key/,
+    );
+  });
+
+  it("rejects a host set that omits or extends the catalogued package hosts", () => {
+    // Omitting the host would leave package traffic unpoliced; an extra host
+    // would be intercepted with no rules the authorizer understands.
+    expect(() => parsePolicy(packagesJson({ hosts: [] }))).toThrow(/omits the catalogued/);
+    expect(() =>
+      parsePolicy(packagesJson({ hosts: ["pkgs.dev.azure.com", "evil.test"] })),
+    ).toThrow(/not a catalogued package host/);
+    expect(() => parsePolicy(packagesJson({ hosts: "pkgs.dev.azure.com" }))).toThrow(
+      /hosts must be an array/,
+    );
+    expect(parsePolicy(packagesJson({ hosts: ["PKGS.dev.azure.com."] })).packages).toBeDefined();
+  });
+
+  it("rejects an empty feed list", () => {
+    expect(() => parsePolicy(packagesJson({ feeds: [] }))).toThrow(/feeds must be a non-empty/);
+    expect(() => parsePolicy(packagesJson({ feeds: undefined }))).toThrow(/feeds must be a non-empty/);
+  });
+
+  it("rejects empty, unknown, or duplicated protocols", () => {
+    expect(() => parsePolicy(packagesJson({}, { protocols: [] }))).toThrow(/protocols must be/);
+    expect(() => parsePolicy(packagesJson({}, { protocols: ["maven"] }))).toThrow(
+      /unknown protocol: maven/,
+    );
+    expect(() => parsePolicy(packagesJson({}, { protocols: ["npm", "npm"] }))).toThrow(
+      /more than once/,
+    );
+  });
+
+  it.each(["organization", "feed"])("requires a non-empty %s", (key) => {
+    expect(() => parsePolicy(packagesJson({}, { [key]: undefined }))).toThrow(
+      new RegExp(`feeds\\[0\\]\\.${key} must be a non-empty string`),
+    );
+    expect(() => parsePolicy(packagesJson({}, { [key]: " " }))).toThrow(ConfigError);
+  });
+
+  it.each(["project", "view"])("rejects an empty optional %s", (key) => {
+    expect(() => parsePolicy(packagesJson({}, { [key]: "" }))).toThrow(
+      new RegExp(`${key} must be a non-empty string when present`),
+    );
+  });
+
+  it.each(["project_id", "feed_id", "view_id"])("rejects a non-canonical %s", (key) => {
+    for (const value of [
+      "not-a-guid",
+      "{11111111-1111-1111-1111-111111111111}",
+      "11111111111111111111111111111111",
+      "11111111-1111-1111-1111-11111111111g",
+    ]) {
+      expect(() => parsePolicy(packagesJson({}, { [key]: value }))).toThrow(/canonical GUID/);
+    }
+  });
+
+  it("rejects an id without the name it identifies", () => {
+    expect(() =>
+      parsePolicy(
+        packagesJson({}, { project: undefined, project_id: "11111111-1111-1111-1111-111111111111" }),
+      ),
+    ).toThrow(/project_id is set but project is not/);
+    expect(() =>
+      parsePolicy(
+        packagesJson({}, { view: undefined, view_id: "11111111-1111-1111-1111-111111111111" }),
+      ),
+    ).toThrow(/view_id is set but view is not/);
+  });
+
+  it("rejects a non-object section or feed", () => {
+    expect(() => parsePolicy(policyJson({ packages: [] }))).toThrow(/must be a JSON object/);
+    expect(() =>
+      parsePolicy(policyJson({ packages: { hosts: ["pkgs.dev.azure.com"], feeds: ["internal"] } })),
+    ).toThrow(/feeds\[0\] must be a JSON object/);
+  });
+});
+
 describe("loadConfig", () => {
   function writePolicy(): string {
     const dir = mkdtempSync(join(tmpdir(), "ado-proxy-config-"));

@@ -6,16 +6,23 @@
  * hosts to the agent at Squid. That makes this process the only path from the
  * agent to those hosts.
  *
- * Two request paths, and only two:
+ * Three request paths:
  *
  *   - **Non-protected destination** — CONNECT through Squid and byte-tunnel in
  *     both directions. No TLS termination, no parsing, no header changes, so
- *     package feeds and every other allowed host behave exactly as they do
- *     without the sidecar.
+ *     ungranted package feeds and every other allowed host behave exactly as
+ *     they do without the sidecar.
  *   - **Protected destination** — terminate TLS with an ephemeral CA, evaluate
  *     the request against the versioned catalog, strip every client-supplied
  *     credential, and inject the current bearer *only* after a complete allow
  *     decision.
+ *   - **Package feed** — only when the policy has a `packages` section: the
+ *     same interception, authorized by feed shape and carrying a separate
+ *     package credential (see `package.ts`).
+ *
+ * `ado-proxy.js resolve-feeds --policy-file <path>` is a separate one-shot mode
+ * run on the trusted host before the container starts; it fills feed, project,
+ * and view GUIDs into the policy (see `resolve-feeds.ts`).
  *
  * The bearer is never in argv or the environment: it is read from a private
  * file the trusted host task rotates. The interception certificates arrive on
@@ -26,9 +33,10 @@
  * this one is a long-running server: it starts before the agent and is torn
  * down by AWF when the agent exits.
  */
-import { CaError, publishCaCertificate, readCaMaterials } from "./ca.js";
+import { CaError, credentialProblem, publishCaCertificate, readCaMaterials } from "./ca.js";
 import { ConfigError, loadConfig, type ProxyConfig } from "./config.js";
 import { DecisionLog } from "./log.js";
+import { runResolveFeeds } from "./resolve-feeds.js";
 import { createDirectTlsServer, createProxyServer } from "./server.js";
 import { ScopeIndex } from "./scope.js";
 import { TokenSource } from "./token.js";
@@ -40,6 +48,12 @@ function report(message: string): void {
 
 /** Start the proxy and resolve with the process exit code once it stops. */
 export async function run(argv: readonly string[]): Promise<number> {
+  if (argv[0] === "resolve-feeds") {
+    // Runs on the trusted host before the proxy container starts; it shares
+    // only the policy parser with the server and binds no port.
+    return runResolveFeeds(argv.slice(1));
+  }
+
   let config: ProxyConfig;
   try {
     config = loadConfig(argv);
@@ -73,10 +87,20 @@ export async function run(argv: readonly string[]): Promise<number> {
     return 1;
   }
 
+  const problem = credentialProblem(config.policy, ca);
+  if (problem !== undefined) {
+    report(`cannot start: ${problem}`);
+    return 1;
+  }
+
   const deps = {
     config,
     ca,
-    tokens: new TokenSource(ca.token),
+    // Each family gets only its own credential. A missing one stays absent, so
+    // a request in that family fails `credential-unavailable` rather than
+    // borrowing the other family's token or going out unauthenticated.
+    ...(ca.token === undefined ? {} : { tokens: new TokenSource(ca.token) }),
+    ...(ca.packageToken === undefined ? {} : { packageTokens: new TokenSource(ca.packageToken) }),
     log: new DecisionLog(config.logDir),
     // Built once here rather than per request: request and response validation
     // must agree about what is in scope, and rebuilding per call would let the
@@ -103,7 +127,8 @@ export async function run(argv: readonly string[]): Promise<number> {
       `${config.listenAddress}:${config.tlsPort} (direct TLS); ` +
       `org=${config.policy.organization} project=${config.policy.project} ` +
       `capabilities=${config.policy.capabilities.join(",") || "(none)"} ` +
-      `protected=${config.policy.protected_hosts.join(",")}`,
+      `protected=${config.policy.protected_hosts.join(",")} ` +
+      `package_feeds=${config.policy.packages?.feeds.length ?? 0}`,
   );
 
   // AWF stops the sidecar once the agent exits. Close politely so buffered

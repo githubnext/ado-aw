@@ -642,7 +642,12 @@ pub fn validate_proxied_timeout(front_matter: &FrontMatter, timeout_minutes: u32
     if timeout_minutes <= MAX_PROXIED_TIMEOUT_MINUTES {
         return Ok(());
     }
-    let uses_proxy = ado_proxy_enabled(front_matter);
+    // The REST read token and a minted (WIF) package token both have the
+    // same ~1h lifetime and no renewal. The build identity's
+    // `System.AccessToken` lives as long as the job, so it imposes no cap.
+    let uses_proxy = ado_proxy_enabled(front_matter)
+        || packages_permission(front_matter)
+            .is_some_and(crate::compile::types::PackagesPermissionConfig::uses_service_connection);
     if !uses_proxy {
         return Ok(());
     }
@@ -689,6 +694,46 @@ pub fn validate_permissions_read_policy(front_matter: &FrontMatter) -> Result<()
     };
 
     options.validate()
+}
+
+/// Validate `permissions.packages` and every `runtimes.<x>.feed` reference to
+/// it.
+pub fn validate_permissions_packages_policy(front_matter: &FrontMatter) -> Result<()> {
+    let packages = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.packages.as_ref());
+    if let Some(packages) = packages {
+        packages.validate()?;
+    }
+
+    for selection in crate::runtimes::package_feed_selections(front_matter) {
+        let field = format!("runtimes.{}.feed", selection.runtime);
+        let Some(packages) = packages else {
+            anyhow::bail!(
+                "{field} refers to feed '{}', but `permissions.packages` is not configured. \
+                 Declare the feed under `permissions.packages.feeds`.",
+                selection.handle
+            );
+        };
+        let Some(feed) = packages.feed(selection.handle) else {
+            anyhow::bail!(
+                "{field} refers to feed '{}', which `permissions.packages.feeds` does not \
+                 declare",
+                selection.handle
+            );
+        };
+        if !feed.allows(selection.protocol) {
+            anyhow::bail!(
+                "{field} refers to feed '{}', which does not grant the {} protocol. Add \
+                 `{}` to that feed's `protocols`.",
+                selection.handle,
+                selection.protocol.as_str(),
+                selection.protocol.as_str(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Validate the expanded Stage 3 write credential and its additional scopes.
@@ -2190,6 +2235,17 @@ pub use crate::ado_proxy::policy::ado_proxy_capabilities;
 /// private key is destroyed by the step that starts the engine.
 pub const ADO_PROXY_PUBLIC_CA_HOST_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca.pem";
 
+/// Runner-side path of the system trust bundle concatenated with the proxy CA.
+///
+/// Some package managers (`pip`, `uv`, `dotnet`, `cargo`) only accept a
+/// *replacement* bundle, so trusting the proxy CA for them requires shipping
+/// the public roots alongside it. Public material only.
+pub const ADO_PROXY_PUBLIC_CA_BUNDLE_HOST_PATH: &str = "/tmp/ado-aw-lib/ado-proxy-ca-bundle.pem";
+
+/// Directory the package-manager wrappers are installed into inside the
+/// sandbox. Prepended to `PATH`, so it shadows the real binaries.
+pub const PACKAGE_WRAPPER_DIR: &str = "/tmp/ado-aw-pkg-bin";
+
 /// Default entrypoint args for the Azure DevOps MCP npm package.
 pub const ADO_MCP_PACKAGE: &str = "@azure-devops/mcp";
 
@@ -2844,6 +2900,67 @@ printf '##vso[task.setvariable variable=SC_WRITE_TOKEN;issecret=true]%s\n' "$ADO
 pub enum AdoTokenVariable {
     Read,
     Write,
+    /// Package-feed credential for the `ado-proxy` package family.
+    Packages,
+}
+
+shell_script! {
+    /// Mint the package-feed Azure DevOps bearer inside an authenticated
+    /// AzureCLI@3 task and publish it as a masked, same-job pipeline variable.
+    /// Only the trusted `ado-proxy` start step maps it into its environment.
+    ACQUIRE_ADO_PACKAGES_TOKEN {
+        interpreter: Bash,
+        bindings: [ADO_RESOURCE],
+        externals: [],
+        fragments: [],
+        body: r#"
+set -eo pipefail
+ADO_TOKEN=$(az account get-access-token \
+  --resource "$ADO_RESOURCE" \
+  --query accessToken -o tsv)
+if [ -z "$ADO_TOKEN" ]; then
+  echo "Azure CLI returned an empty Azure DevOps access token" >&2
+  exit 1
+fi
+printf '##vso[task.setvariable variable=SC_PACKAGES_TOKEN;issecret=true]%s\n' "$ADO_TOKEN"
+"#,
+    }
+}
+
+/// Same-job secret variable holding a minted package-feed credential.
+pub const PACKAGES_TOKEN_VAR: &str = "SC_PACKAGES_TOKEN";
+
+/// `permissions.packages`, when configured.
+pub fn packages_permission(
+    front_matter: &FrontMatter,
+) -> Option<&crate::compile::types::PackagesPermissionConfig> {
+    front_matter
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.packages.as_ref())
+}
+
+/// Whether the `ado-proxy` container runs at all.
+///
+/// Broader than [`ado_proxy_enabled`], which gates the Azure DevOps REST read
+/// path (`az` wrapper, MCP redirect, REST credential). Package-feed access
+/// needs the same trusted container but none of the REST wiring.
+pub fn ado_proxy_runtime_enabled(front_matter: &FrontMatter) -> bool {
+    ado_proxy_enabled(front_matter) || packages_permission(front_matter).is_some()
+}
+
+/// Typed AzureCLI@3 step minting the package-feed credential, when
+/// `permissions.packages` names a service connection.
+pub fn acquire_packages_token_step(
+    front_matter: &FrontMatter,
+) -> Option<crate::compile::ir::step::Step> {
+    let packages = packages_permission(front_matter)?;
+    let connection = packages.service_connection.as_ref()?;
+    acquire_ado_token_step(
+        Some(connection.as_str()),
+        packages.effective_connection_type(),
+        AdoTokenVariable::Packages,
+    )
 }
 
 pub fn acquire_ado_token_step(
@@ -2855,6 +2972,7 @@ pub fn acquire_ado_token_step(
     let (script_def, variable_name) = match variable {
         AdoTokenVariable::Read => (&ACQUIRE_ADO_READ_TOKEN, "SC_READ_TOKEN"),
         AdoTokenVariable::Write => (&ACQUIRE_ADO_WRITE_TOKEN, "SC_WRITE_TOKEN"),
+        AdoTokenVariable::Packages => (&ACQUIRE_ADO_PACKAGES_TOKEN, PACKAGES_TOKEN_VAR),
     };
     let connection = match connection_type {
         crate::compile::types::WriteConnectionType::AzureRm => {
@@ -4020,6 +4138,13 @@ pub fn generate_allowed_domains_for_engine(
     // Remove blocked hosts (supports both ecosystem identifiers and raw domains)
     remove_blocked_network_hosts(&blocked_hosts, &mut hosts);
 
+    // `runtimes.<x>.public-registry: block` removes that ecosystem's public
+    // package registry hosts last, so neither an extension nor `network.allowed`
+    // can re-add them. The agent can then only restore through granted feeds.
+    for host in crate::runtimes::blocked_public_registry_hosts(front_matter) {
+        hosts.remove(host);
+    }
+
     // Sort for deterministic output
     let mut allowlist: Vec<String> = hosts.into_iter().collect();
     allowlist.sort();
@@ -4340,6 +4465,48 @@ mod tests {
         assert!(
             err.contains("pool.demands requires `pool.name`") && err.contains("default 1ES pool"),
             "err: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_feed_references_must_match_a_granted_protocol() {
+        fn check(runtimes: &str, packages: &str) -> Result<()> {
+            let (fm, _) = parse_markdown(&format!(
+                "---\nname: t\ndescription: x\nruntimes:\n{runtimes}{packages}---\n"
+            ))
+            .unwrap();
+            validate_permissions_packages_policy(&fm)
+        }
+        const PACKAGES: &str = "permissions:\n  packages:\n    feeds:\n      - name: internal\n        \
+             feed: internal-packages\n        view: Release\n        protocols: [npm, nuget]\n";
+
+        assert!(check("  node:\n    feed: internal\n", PACKAGES).is_ok());
+        assert!(check("  dotnet:\n    feed: INTERNAL\n", PACKAGES).is_ok());
+
+        let err = check("  python:\n    feed: internal\n", PACKAGES)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not grant the pypi protocol"), "{err}");
+
+        let err = check("  node:\n    feed: missing\n", PACKAGES)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not declare"), "{err}");
+
+        let err = check("  node:\n    feed: internal\n", "")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`permissions.packages` is not configured"), "{err}");
+
+        // A disabled runtime's feed is ignored, and an invalid packages block
+        // fails even without any runtime referring to it.
+        assert!(check("  node: false\n", PACKAGES).is_ok());
+        assert!(
+            check(
+                "  node: true\n",
+                "permissions:\n  packages:\n    feeds: []\n"
+            )
+            .is_err()
         );
     }
 
@@ -5041,6 +5208,7 @@ mod tests {
                 ),
             ),
             write: None,
+            packages: None,
         });
         let params = engine_args_for(&fm).unwrap();
         assert!(

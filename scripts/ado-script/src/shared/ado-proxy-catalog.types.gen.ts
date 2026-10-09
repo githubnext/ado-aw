@@ -18,6 +18,18 @@ export type ScopePolicy =
   | "filter-resource-areas"
   | "response-current-project"
   | "response-current-repository";
+/**
+ * How the package credential is presented upstream.
+ *
+ * Mirrors what the protocol's official Azure Pipelines authenticate task
+ * makes its client send, so Azure Artifacts sees the same request shape.
+ */
+export type PackageAuthScheme = "bearer" | "basic";
+export type PackageMethod = "GET" | "HEAD";
+/**
+ * A package protocol the package family understands.
+ */
+export type PackageProtocolId = "npm" | "pypi" | "nuget" | "cargo";
 
 export interface Catalog {
   /**
@@ -36,6 +48,23 @@ export interface Catalog {
   api_version_min: [number, number];
   denied_route_families: string[];
   operations: Operation[];
+  /**
+   * Hosts of the package family. Intercepted only when the policy carries
+   * a `packages` section.
+   */
+  package_hosts: string[];
+  /**
+   * Per-protocol package request contracts.
+   */
+  package_protocols: PackageProtocolRoute[];
+  /**
+   * Host suffixes a package redirect may target.
+   */
+  package_redirect_host_suffixes: string[];
+  /**
+   * Largest package response streamed through the proxy.
+   */
+  package_response_limit: number;
   protected_hosts: string[];
   runtime_available: boolean;
   schema_version: string;
@@ -53,5 +82,27 @@ export interface Operation {
   response: ResponsePolicy;
   route: string;
   scope: ScopePolicy;
+  [k: string]: unknown;
+}
+/**
+ * One package protocol's request contract.
+ */
+export interface PackageProtocolRoute {
+  /**
+   * Whether `%2F` may appear inside a path segment. npm encodes the `/` of
+   * a scoped package name (`@scope%2Fname`) this way.
+   */
+  allow_encoded_slash: boolean;
+  auth_scheme: PackageAuthScheme;
+  /**
+   * Methods allowed for this protocol. Only reads.
+   */
+  methods: PackageMethod[];
+  /**
+   * Path prefixes (case-insensitive) allowed after
+   * `/_packaging/{feed}[@{view}]/`. Anything else under the feed is denied.
+   */
+  path_prefixes: string[];
+  protocol: PackageProtocolId;
   [k: string]: unknown;
 }

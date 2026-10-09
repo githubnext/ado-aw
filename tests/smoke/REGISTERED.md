@@ -233,6 +233,33 @@ orchestrators, then deleting the retired definitions.
     secrets onto definitions that no longer exist and silently skip the lane
     that runs.
 
+## Package-feed cases
+
+`package-feeds` ([`package-feeds.md`](package-feeds.md)) and
+`package-feeds-wif` ([`package-feeds-wif.md`](package-feeds-wif.md)) prove
+`permissions.packages` end to end. npm, pip, and dotnet restore from an Azure
+Artifacts feed through `ado-proxy` with no feed credential in the sandbox.
+The first case uses the build identity, the second a workload-identity token.
+The build-identity case also proves that ungranted feeds are refused and that
+`public-registry: block` removes the public registry.
+
+Both run on the existing `agentic` lane (`2567`); no new definition or
+service-connection authorization is needed. They depend on the resources
+below. **Removing the feed, or any of these grants, turns both cases red.**
+
+| Resource | State |
+| --- | --- |
+| Feed | `AgentPlaygroundTestFeed`, project-scoped in AgentPlayground (id `97b16576-7c8c-4317-a56d-ec4d1e10bffb`) |
+| Upstream sources | npmjs, NuGet Gallery, PyPI (plus others, unused) |
+| `AgentPlayground Build Service (msazuresphere)` | Feed and Upstream Reader (Collaborator). The lane runs as this identity because the project enforces job authorization scope. |
+| `agent-playground-read` service principal (app `885df4ff-04c2-4f29-ac3f-5d927203763d`) | Feed and Upstream Reader (Collaborator) |
+| `AgentPlaygroundTestFeed-not-granted` | Must **not** exist. The ungranted-feed check must be refused by policy, never by a real feed. |
+
+Collaborator, not Reader: the feed is empty and relies on its upstreams, and
+only Collaborator can save an upstream package on first read.
+
+If a preflight fails, the `Start ado-proxy policy engine` step names the
+feed, the identity, and the role to grant.
 ## Security record
 
 Every credentialed GitHub-backed definition that validates PRs must persist:
