@@ -308,6 +308,15 @@ export async function resolveFeeds(
       }
       target.view_id = viewId;
     }
+
+    // The feed GET above succeeds for any identity that can see the project,
+    // even one without the `ReadPackages` permission (observed live), so it
+    // proves nothing about restores. Listing packages requires exactly that
+    // permission, which makes it the honest preflight for read access.
+    const readOutcome = await get(
+      `${feedsBase(grant)}${feedId}/packages?$top=1&api-version=${API_VERSION}`,
+    );
+    if (readOutcome.kind !== "ok") return failure(grant, "read access", readOutcome);
   }
 
   const serialized = `${JSON.stringify(document, null, 2)}\n`;

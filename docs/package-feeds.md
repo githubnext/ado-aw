@@ -105,7 +105,8 @@ mandatory, for imported components that need feed access.
    applies the identity's feed role.
 7. Package downloads usually answer with a redirect to blob storage. The proxy
    never follows redirects. It relays a `3xx` `Location` only when the target
-   is `*.vsblob.visualstudio.com` or `*.blob.core.windows.net`. The client then
+   is `*.vsblob.vsassets.io` (where Azure Artifacts redirects today),
+   `*.vsblob.visualstudio.com`, or `*.blob.core.windows.net`. The client then
    fetches that pre-signed URL through Squid without a credential. Any other
    redirect is refused with `redirect-denied`.
 
@@ -176,7 +177,10 @@ each grant it:
 1. resolves the feed (and project) name to its GUID through
    `feeds.dev.azure.com`, so requests that use the GUID form match the same
    grant;
-2. confirms that the identity can read the feed.
+2. confirms that the identity can read the feed's packages, by listing one
+   package. That call needs the `ReadPackages` permission. The feed lookup in
+   step 1 succeeds for any identity that can see the project, so on its own it
+   proves nothing about restores.
 
 Any failure stops the job before the agent starts. The error names the feed,
 the organization and project, the identity (when Azure DevOps reports it), and
@@ -299,9 +303,13 @@ role is missing.
 - Workload-identity tokens are not renewed. Runs are bounded by the
   `permissions.read` timeout cap.
 - The Detection job has no package proxy.
-- The authentication scheme per protocol and the redirect hosts follow the
-  official clients and community reports. They need validation against a live
-  feed; see `tests/smoke/REGISTERED.md`.
+- Partly verified against live Azure Artifacts:
+  - An Entra token authenticates under both `Bearer` and
+    `Basic ado-aw:<token>` on the npm, PyPI, and NuGet endpoints.
+  - Downloads redirect (`303`) to `*.vsblob.vsassets.io`.
+  - The build-identity token over `Basic`, and the end-to-end restore
+    through the proxy, are covered by the package-feed smoke cases (see
+    `tests/smoke/REGISTERED.md`).
 
 ## Migrating from `feed-url`
 

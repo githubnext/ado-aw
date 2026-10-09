@@ -35,8 +35,15 @@ pub const PACKAGE_HOST: &str = "pkgs.dev.azure.com";
 /// pre-signed (SAS) redirects. The proxy relays such a `Location` to the
 /// client, which follows it through Squid without any credential; it never
 /// follows a redirect itself while holding the feed credential.
-pub const PACKAGE_REDIRECT_HOST_SUFFIXES: &[&str] =
-    &[".vsblob.visualstudio.com", ".blob.core.windows.net"];
+///
+/// `.vsblob.vsassets.io` is where npm, PyPI, and NuGet downloads redirect
+/// today (`303` to `<shard>vsblobprodcus<n>.vsblob.vsassets.io`, observed
+/// live). The other two are the older and the direct-storage forms.
+pub const PACKAGE_REDIRECT_HOST_SUFFIXES: &[&str] = &[
+    ".vsblob.vsassets.io",
+    ".vsblob.visualstudio.com",
+    ".blob.core.windows.net",
+];
 
 /// Largest package response streamed through the proxy.
 pub const PACKAGE_RESPONSE_LIMIT: u64 = 512 * 1024 * 1024;
