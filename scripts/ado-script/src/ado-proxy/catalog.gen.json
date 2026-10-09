@@ -684,6 +684,7 @@
     }
   ],
   "package_redirect_host_suffixes": [
+    ".vsblob.vsassets.io",
     ".vsblob.visualstudio.com",
     ".blob.core.windows.net"
   ],

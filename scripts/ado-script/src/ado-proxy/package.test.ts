@@ -325,6 +325,7 @@ describe("isAllowedRedirectHost", () => {
   it("accepts hosts under a catalogued suffix", () => {
     expect(isAllowedRedirectHost("account.blob.core.windows.net")).toBe(true);
     expect(isAllowedRedirectHost("a.b.vsblob.visualstudio.com")).toBe(true);
+    expect(isAllowedRedirectHost("lylvsblobprodcus31.vsblob.vsassets.io")).toBe(true);
     expect(isAllowedRedirectHost("ACCOUNT.BLOB.CORE.WINDOWS.NET.")).toBe(true);
   });
 
@@ -334,6 +335,9 @@ describe("isAllowedRedirectHost", () => {
     expect(isAllowedRedirectHost("blob.core.windows.net")).toBe(false);
     expect(isAllowedRedirectHost(".blob.core.windows.net")).toBe(false);
     expect(isAllowedRedirectHost("vsblob.visualstudio.com")).toBe(false);
+    expect(isAllowedRedirectHost("vsblob.vsassets.io")).toBe(false);
+    expect(isAllowedRedirectHost("cdn.vsassets.io")).toBe(false);
+    expect(isAllowedRedirectHost("x.vsblob.vsassets.io.attacker.test")).toBe(false);
     expect(isAllowedRedirectHost("[::1]")).toBe(false);
     expect(isAllowedRedirectHost("")).toBe(false);
   });
@@ -347,6 +351,9 @@ describe("authorizePackageRedirect", () => {
     const location = "https://account.blob.core.windows.net/c/blob?sv=2020&sig=abc%2B";
     expect(redirect(location)).toEqual({ allow: true, location });
     expect(redirect("https://x.vsblob.visualstudio.com/a/b")).toMatchObject({ allow: true });
+    expect(
+      redirect("https://lylvsblobprodcus31.vsblob.vsassets.io/b-1/x?sv=2019&sig=abc"),
+    ).toMatchObject({ allow: true });
   });
 
   it("refuses look-alike, non-https, credentialed, and off-port blob URLs", () => {

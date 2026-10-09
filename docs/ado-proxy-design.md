@@ -66,7 +66,7 @@ and Cargo.
   also preflights access, so both forms match the same grant.
 - **Redirects.** Package downloads redirect to pre-signed blob storage. The
   proxy never follows a redirect. It relays `Location` only for allowlisted
-  storage hosts (`*.vsblob.visualstudio.com`, `*.blob.core.windows.net`). The
+  storage hosts (`*.vsblob.vsassets.io`, `*.vsblob.visualstudio.com`, `*.blob.core.windows.net`). The
   client fetches the signed URL through Squid with no credential. That keeps
   bulk downloads out of the proxy, and a signed URL authorizes only the one
   blob.

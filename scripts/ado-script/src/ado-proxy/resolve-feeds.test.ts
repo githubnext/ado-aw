@@ -113,6 +113,7 @@ describe("resolveFeeds", () => {
     expect(requests.map((request) => request.url)).toEqual([
       "https://feeds.dev.azure.com/contoso/My%20Project/_apis/packaging/feeds/internal?api-version=7.1",
       `https://feeds.dev.azure.com/contoso/My%20Project/_apis/packaging/feeds/${FEED_ID}/views/Release?api-version=7.1`,
+      `https://feeds.dev.azure.com/contoso/My%20Project/_apis/packaging/feeds/${FEED_ID}/packages?$top=1&api-version=7.1`,
     ]);
     for (const request of requests) {
       expect(request.headers.authorization).toBe(`Bearer ${TOKEN}`);
@@ -154,6 +155,7 @@ describe("resolveFeeds", () => {
 
     expect(requests.map((request) => request.url)).toEqual([
       "https://feeds.dev.azure.com/contoso/_apis/packaging/feeds/shared?api-version=7.1",
+      `https://feeds.dev.azure.com/contoso/_apis/packaging/feeds/${FEED_ID}/packages?$top=1&api-version=7.1`,
     ]);
     const feed = parsePolicy(readFileSync(policyFile, "utf8")).packages?.feeds[0];
     expect(feed?.feed_id).toBe(FEED_ID);
@@ -191,6 +193,31 @@ describe("resolveFeeds", () => {
     expect(readFileSync(policyFile, "utf8")).toBe(raw);
   });
 
+  it("fails when the feed is visible but its packages are not readable", async () => {
+    // Observed live: the feed GET answers 200 to an identity without
+    // `ReadPackages`, so only the package listing proves restores can work.
+    const raw = writePolicy({
+      ...BASE_POLICY,
+      packages: {
+        hosts: ["pkgs.dev.azure.com"],
+        feeds: [{ organization: "contoso", project: "Engineering", feed: "internal", protocols: ["npm"] }],
+      },
+    });
+    const { deps, requests, stderr } = harness((url) => {
+      if (url.includes("/packages?")) return new Response("", { status: 403 });
+      if (url.endsWith("/_apis/connectionData")) return new Response("", { status: 404 });
+      return json({ id: FEED_ID, project: { id: PROJECT_ID } });
+    });
+
+    expect(await resolveFeeds(["--policy-file", policyFile], deps)).toBe(1);
+
+    expect(requests.some((request) => request.url.includes(`/feeds/${FEED_ID}/packages?$top=1`))).toBe(true);
+    const output = stderr.join("\n");
+    expect(output).toContain("cannot resolve read access");
+    expect(output).toContain("HTTP 403");
+    expect(output).toContain("is not allowed to read feed internal");
+    expect(readFileSync(policyFile, "utf8")).toBe(raw);
+  });
   it("explains a 404 as a naming or visibility problem", async () => {
     writePolicy({
       ...BASE_POLICY,
