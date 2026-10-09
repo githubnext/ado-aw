@@ -39,7 +39,7 @@ import {
   assertPipelineArtifactValues,
   assertReleaseUrlsPresent,
 } from "./assertions.js";
-import { loadCases, type ResolvedCase, type ResolvedCases } from "./cases.js";
+import { CASE_FILTER_ENV, loadCases, type ResolvedCase, type ResolvedCases } from "./cases.js";
 import { candidateRef, loadConfig, type SmokeConfig } from "./config.js";
 import { compileAndCheck } from "./compile-cli.js";
 import {
@@ -349,6 +349,8 @@ export async function main(): Promise<number> {
     // BUILD_SOURCEVERSION), never from the possibly-divergent
     // BUILD_SOURCESDIRECTORY.
     resolved = await loadCases(worktreeDir, process.env, config.compilerSource);
+    const filter = process.env[CASE_FILTER_ENV]?.trim();
+    if (filter) log(`[cases] ${CASE_FILTER_ENV} filter: ${filter}`);
     log(
       `[cases] ${resolved.cases.length} case(s) for mode '${resolved.mode}': ${resolved.cases
         .map((entry) => `${entry.id}(${entry.lane})`)
