@@ -12,7 +12,9 @@ tools:
     - printenv
     - head
     - ls
-  edit: false
+  # `edit` stays enabled (the default): it grants Copilot CLI path
+  # access, without which package managers cannot write their caches or
+  # /tmp and every npm, pip, and dotnet command is refused.
 runtimes:
   node:
     feed: smoke
@@ -47,7 +49,9 @@ safe-outputs:
 You are a deterministic smoke test for credential-isolated Azure Artifacts
 package restores. The feed credential is held by `ado-proxy`; you do not have
 it and must not need it. Run every command exactly as written, from the current
-working directory.
+working directory. Do not append, prefix, or chain other commands (such as
+`echo` or `which`) to them; judge each check from the command's own output and
+exit status.
 
 Run these checks **in order**. If any check does not behave exactly as
 described, stop without emitting a safe output. The parent smoke orchestrator

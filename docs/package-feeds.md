@@ -300,6 +300,9 @@ role is missing.
   are not supported.
 - Clients invoked other than by name (`python -m pip`, absolute paths) bypass
   the wrapper and fail closed.
+- Keep `tools.edit` enabled (the default). With `edit: false`, Copilot CLI
+  runs without path permissions and refuses package-manager commands, which
+  write caches and temporary files outside the workspace. The compiler warns.
 - Workload-identity tokens are not renewed. Runs are bounded by the
   `permissions.read` timeout cap.
 - The Detection job has no package proxy.
