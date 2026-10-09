@@ -312,6 +312,54 @@ mod tests {
     }
 
     #[test]
+    fn feed_is_exclusive_with_feed_url_and_config() {
+        validate_feed_exclusivity("node", Some("internal"), None, None).unwrap();
+        validate_feed_exclusivity("node", None, Some("https://x.test/"), Some("a")).unwrap();
+        for (feed_url, config) in [(Some("https://x.test/"), None), (None, Some(".npmrc"))] {
+            let err = validate_feed_exclusivity("node", Some("internal"), feed_url, config)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("runtimes.node: 'feed' cannot be combined with 'feed-url' or 'config'"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_runtime_rejects_feed_with_another_source() {
+        for (runtime, other) in [
+            ("python", "feed-url: https://packages.example.test/simple/"),
+            ("node", "config: .npmrc"),
+            ("dotnet", "config: nuget.config"),
+        ] {
+            let source = format!(
+                "---\nname: t\ndescription: x\npermissions:\n  packages:\n    feeds:\n      \
+                 - feed: internal\n        organization: contoso\n        upstream: allow\n        \
+                 protocols: [npm, pypi, nuget]\nruntimes:\n  {runtime}:\n    feed: internal\n    \
+                 {other}\n---\n"
+            );
+            let (fm, _) = crate::compile::parse_markdown(&source).unwrap();
+            let runtimes = fm.runtimes.as_ref().unwrap();
+            let ctx = crate::compile::extensions::CompileContext::for_test(&fm);
+            use crate::compile::extensions::CompilerExtension;
+            let err = match runtime {
+                "python" => python::extension::PythonExtension::new(runtimes.python.clone().unwrap())
+                    .declarations(&ctx),
+                "node" => node::extension::NodeExtension::new(runtimes.node.clone().unwrap())
+                    .declarations(&ctx),
+                _ => dotnet::extension::DotnetExtension::new(runtimes.dotnet.clone().unwrap())
+                    .declarations(&ctx),
+            }
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains(&format!("runtimes.{runtime}: 'feed' cannot be combined")),
+                "{runtime}: {err}"
+            );
+        }
+    }
+    #[test]
     fn public_registry_warning_is_silent_unless_blocked() {
         let fm = front_matter("      - feed: internal\n        protocols: [npm]\n");
         assert!(
