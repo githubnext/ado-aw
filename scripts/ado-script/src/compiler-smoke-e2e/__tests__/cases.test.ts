@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { expandBuildTag, parseManifest } from "../cases.js";
+import { expandBuildTag, parseManifest, selectCases } from "../cases.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..");
 const REAL_MANIFEST_PATH = join(REPO_ROOT, "tests", "smoke", "cases.json");
@@ -404,5 +404,42 @@ describe("the real shipped tests/smoke/cases.json", () => {
   it("covers the janitor in released mode so AgentPlayground keeps being pruned", () => {
     const janitor = parsed.cases.find((entry) => entry.id === "janitor");
     expect(janitor?.modes).toEqual(["released"]);
+  });
+});
+
+describe("selectCases (the smokeCases queue-time filter)", () => {
+  const parsed = parseManifest(
+    cases([
+      { id: "canary", lane: "agentic", kind: "compiled", modes: ["candidate", "released"], source: "tests/safe-outputs/canary.md" },
+      { id: "feeds", lane: "agentic", kind: "compiled", modes: ["candidate"], source: "tests/smoke/feeds.md" },
+      { id: "janitor", lane: "debug", kind: "compiled", modes: ["released"], source: "tests/safe-outputs/janitor.md" },
+    ]),
+  );
+  const ids = (selected: { id: string }[]) => selected.map((entry) => entry.id);
+
+  it("runs every case in the mode when the filter is unset, empty, or whitespace", () => {
+    for (const filter of [undefined, "", " ", " , "]) {
+      expect(ids(selectCases(parsed, "candidate", filter))).toEqual(["canary", "feeds"]);
+    }
+  });
+
+  it("narrows to the named cases, ignoring spacing and duplicates", () => {
+    expect(ids(selectCases(parsed, "candidate", " feeds ,feeds"))).toEqual(["feeds"]);
+    expect(ids(selectCases(parsed, "candidate", "feeds,canary"))).toEqual(["canary", "feeds"]);
+  });
+
+  it("drops lanes the filtered cases do not use", () => {
+    const selected = selectCases(parsed, "released", "canary");
+    expect(selected.map((entry) => entry.lane)).toEqual(["agentic"]);
+  });
+
+  it("refuses an unknown id rather than running less than was asked", () => {
+    expect(() => selectCases(parsed, "candidate", "feeds,typo")).toThrow(/unknown case 'typo'/);
+  });
+
+  it("refuses a case that does not participate in the mode", () => {
+    expect(() => selectCases(parsed, "candidate", "janitor")).toThrow(
+      /'janitor' does not participate in mode 'candidate'/,
+    );
   });
 });
