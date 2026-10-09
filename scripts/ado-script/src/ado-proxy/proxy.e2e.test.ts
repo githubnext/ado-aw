@@ -1214,15 +1214,40 @@ suite("ado-proxy package family end to end", () => {
   it("cuts off a streamed body that passes the limit", async () => {
     // The headers are already sent by then, so the only honest signal is a
     // truncated connection; the client must never see the whole artifact.
-    const response = await requestThroughProxy(
+    const decisionLog = join(workdir, "decisions", "ado-proxy-decisions.jsonl");
+    const tooLarge = (): number =>
+      readFileSync(decisionLog, "utf8")
+        .trim()
+        .split("\n")
+        .filter((line) => line.includes('"response-too-large"')).length;
+    const before = tooLarge();
+    const fullBody = 32 * 8 * 1024;
+
+    const outcome = await requestThroughProxy(
       harness.packageProxyPort,
       PACKAGE_HOST,
       `${FEED_PATH}/npm/registry/big-chunked`,
       { ca: harness.packageProxyCaPem },
-    ).catch(() => undefined);
-    if (response !== undefined) {
-      expect(response.body.length).toBeLessThan(32 * 8 * 1024);
+    ).then(
+      (response) => ({ kind: "response" as const, response }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+
+    if (outcome.kind === "response") {
+      // A close after a partial body: well short of the upstream payload, and
+      // no more than the limit plus chunk framing.
+      expect(outcome.response.body.length).toBeLessThan(fullBody);
+      expect(outcome.response.body.length).toBeLessThanOrEqual(TEST_PACKAGE_LIMIT + 16 * 1024);
+    } else {
+      // A reset is the other honest signal; anything else is a harness bug.
+      expect(String(outcome.error)).toMatch(/ECONNRESET|socket hang up|closed|aborted/i);
     }
+
+    // Either way the proxy must have recorded why it stopped.
+    for (let attempt = 0; attempt < 50 && tooLarge() === before; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(tooLarge()).toBe(before + 1);
   });
 
   it("refuses cleartext to an intercepted package host", async () => {
