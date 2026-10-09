@@ -76,6 +76,216 @@ fn vote_to_ado_value(vote: &str) -> Option<i32> {
     }
 }
 
+/// Validate a requested vote against the configured `allowed-votes` list and
+/// resolve it to its ADO numeric value.
+///
+/// Returns `Ok(Ok(value))` when the vote is permitted, or `Ok(Err(result))`
+/// with a user-facing failure `ExecutionResult` when it is not.
+fn validate_vote_selection(
+    vote_str: &str,
+    config: &UpdatePrConfig,
+) -> anyhow::Result<Result<i32, ExecutionResult>> {
+    // Validate against allowed-votes — REQUIRED for vote operation.
+    // An empty allowed-votes list means the operator hasn't opted in, so reject.
+    if config.allowed_votes.is_empty() {
+        return Ok(Err(ExecutionResult::failure(
+            "vote operation requires 'allowed-votes' to be configured in safe-outputs.update-pr. \
+             This prevents agents from casting unrestricted votes (including approve). \
+             Example:\n  safe-outputs:\n    update-pr:\n      allowed-votes:\n        - approve-with-suggestions\n        - wait-for-author"
+                .to_string(),
+        )));
+    }
+    if !config.allowed_votes.contains(&vote_str.to_string()) {
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Vote '{}' is not in the allowed-votes list: [{}]",
+            vote_str,
+            config.allowed_votes.join(", ")
+        ))));
+    }
+
+    let vote_value = vote_to_ado_value(vote_str).context(format!(
+        "Invalid vote value: '{}'. Must be one of: {}",
+        vote_str,
+        VALID_VOTES.join(", ")
+    ))?;
+
+    Ok(Ok(vote_value))
+}
+
+/// Resolve the authenticated user's identity via `_apis/connectiondata`.
+///
+/// Returns `Ok(Ok(user_id))` on success, or `Ok(Err(result))` with a
+/// user-facing failure `ExecutionResult` on HTTP or parse failure.
+async fn resolve_authenticated_user_id(
+    operation_ctx: &UpdatePrContext<'_>,
+) -> anyhow::Result<Result<String, ExecutionResult>> {
+    // Use the org URL for connection data — supports vanity domains and national clouds.
+    let connection_url = format!(
+        "{}/_apis/connectiondata",
+        operation_ctx.target.organization_url.trim_end_matches('/')
+    );
+    debug!("Connection data URL: {}", connection_url);
+
+    let conn_response = crate::safe_outputs::authenticate_ado_request(
+        operation_ctx.client.get(&connection_url),
+        operation_ctx.token,
+        operation_ctx.connection_type,
+    )
+    .send()
+    .await
+    .context("Failed to fetch connection data")?;
+
+    if !conn_response.status().is_success() {
+        let status = conn_response.status();
+        let error_body = conn_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Ok(Err(ExecutionResult::failure(format!(
+            "Failed to fetch connection data (HTTP {}): {}",
+            status, error_body
+        ))));
+    }
+
+    let conn_body: serde_json::Value = conn_response
+        .json()
+        .await
+        .context("Failed to parse connection data response")?;
+
+    let user_id = conn_body
+        .get("authenticatedUser")
+        .and_then(|au| au.get("id"))
+        .and_then(|id| id.as_str())
+        .context("Connection data response missing authenticatedUser.id")?
+        .to_string();
+    debug!("Authenticated user ID: {}", user_id);
+
+    Ok(Ok(user_id))
+}
+
+/// Self-approval guard: prevent the agent from approving PRs it created.
+///
+/// Positive votes (approve=10, approve-with-suggestions=5) are blocked when
+/// the authenticated user is also the PR author. Returns `Ok(None)` when the
+/// vote may proceed, or `Ok(Some(result))` with a user-facing failure
+/// `ExecutionResult` when the guard trips (or the PR lookup fails).
+async fn check_self_approval_guard(
+    operation_ctx: &UpdatePrContext<'_>,
+    vote_value: i32,
+    vote_str: &str,
+    user_id: &str,
+) -> anyhow::Result<Option<ExecutionResult>> {
+    if vote_value <= 0 {
+        return Ok(None);
+    }
+
+    let pr_url = format!(
+        "{}/pullRequests/{}?api-version=7.1",
+        operation_ctx.repository_api_base(),
+        operation_ctx.pr_id
+    );
+    let pr_response = crate::safe_outputs::authenticate_ado_request(
+        operation_ctx.client.get(&pr_url),
+        operation_ctx.token,
+        operation_ctx.connection_type,
+    )
+    .send()
+    .await
+    .context("Failed to fetch PR for self-approval check")?;
+
+    if !pr_response.status().is_success() {
+        let status = pr_response.status();
+        let error_body = pr_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Ok(Some(ExecutionResult::failure(format!(
+            "Failed to fetch PR #{} for self-approval check (HTTP {}): {}",
+            operation_ctx.pr_id, status, error_body
+        ))));
+    }
+
+    let pr_body: serde_json::Value = pr_response
+        .json()
+        .await
+        .context("Failed to parse PR response")?;
+
+    let creator_id = pr_body
+        .get("createdBy")
+        .and_then(|cb| cb.get("id"))
+        .and_then(|id| id.as_str());
+
+    if creator_id == Some(user_id) {
+        return Ok(Some(ExecutionResult::failure(format!(
+            "Self-approval blocked: the authenticated identity created PR #{} \
+             and cannot cast a positive vote ('{}') on it",
+            operation_ctx.pr_id, vote_str
+        ))));
+    }
+
+    Ok(None)
+}
+
+/// PUT the resolved vote to the PR reviewers endpoint.
+async fn submit_vote(
+    operation_ctx: &UpdatePrContext<'_>,
+    vote_str: &str,
+    vote_value: i32,
+    user_id: &str,
+) -> anyhow::Result<ExecutionResult> {
+    let encoded_user_id = utf8_percent_encode(user_id, PATH_SEGMENT).to_string();
+    let vote_url = format!(
+        "{}/pullRequests/{}/reviewers/{}?api-version=7.1",
+        operation_ctx.repository_api_base(),
+        operation_ctx.pr_id,
+        encoded_user_id
+    );
+    let vote_body = serde_json::json!({
+        "vote": vote_value
+    });
+
+    info!(
+        "Voting '{}' ({}) on PR #{}",
+        vote_str, vote_value, operation_ctx.pr_id
+    );
+    let response = crate::safe_outputs::authenticate_ado_request(
+        operation_ctx.client.put(&vote_url),
+        operation_ctx.token,
+        operation_ctx.connection_type,
+    )
+    .header("Content-Type", "application/json")
+    .json(&vote_body)
+    .send()
+    .await
+    .context("Failed to submit vote")?;
+
+    if response.status().is_success() {
+        info!(
+            "Vote '{}' submitted on PR #{}",
+            vote_str, operation_ctx.pr_id
+        );
+        Ok(ExecutionResult::success_with_data(
+            format!("Vote '{}' submitted on PR #{}", vote_str, operation_ctx.pr_id),
+            serde_json::json!({
+                "pull_request_id": operation_ctx.pr_id,
+                "operation": "vote",
+                "vote": vote_str,
+                "vote_value": vote_value,
+            }),
+        ))
+    } else {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        Ok(ExecutionResult::failure(format!(
+            "Failed to submit vote on PR #{} (HTTP {}): {}",
+            operation_ctx.pr_id, status, error_body
+        )))
+    }
+}
+
 /// Parameters for updating a pull request
 #[derive(Deserialize, JsonSchema)]
 pub struct UpdatePrParams {
@@ -659,175 +869,23 @@ impl UpdatePrResult {
             .as_deref()
             .context("vote value is required for vote operation")?;
 
-        // Validate against allowed-votes — REQUIRED for vote operation.
-        // An empty allowed-votes list means the operator hasn't opted in, so reject.
-        if config.allowed_votes.is_empty() {
-            return Ok(ExecutionResult::failure(
-                "vote operation requires 'allowed-votes' to be configured in safe-outputs.update-pr. \
-                 This prevents agents from casting unrestricted votes (including approve). \
-                 Example:\n  safe-outputs:\n    update-pr:\n      allowed-votes:\n        - approve-with-suggestions\n        - wait-for-author"
-                    .to_string(),
-            ));
-        }
-        if !config.allowed_votes.contains(&vote_str.to_string()) {
-            return Ok(ExecutionResult::failure(format!(
-                "Vote '{}' is not in the allowed-votes list: [{}]",
-                vote_str,
-                config.allowed_votes.join(", ")
-            )));
+        let vote_value = match validate_vote_selection(vote_str, config)? {
+            Ok(value) => value,
+            Err(result) => return Ok(result),
+        };
+
+        let user_id = match resolve_authenticated_user_id(operation_ctx).await? {
+            Ok(id) => id,
+            Err(result) => return Ok(result),
+        };
+
+        if let Some(result) =
+            check_self_approval_guard(operation_ctx, vote_value, vote_str, &user_id).await?
+        {
+            return Ok(result);
         }
 
-        let vote_value = vote_to_ado_value(vote_str).context(format!(
-            "Invalid vote value: '{}'. Must be one of: {}",
-            vote_str,
-            VALID_VOTES.join(", ")
-        ))?;
-
-        // Resolve the current user identity.
-        // Use the org URL for connection data — supports vanity domains and national clouds.
-        let connection_url = format!(
-            "{}/_apis/connectiondata",
-            operation_ctx.target.organization_url.trim_end_matches('/')
-        );
-        debug!("Connection data URL: {}", connection_url);
-
-        let conn_response = crate::safe_outputs::authenticate_ado_request(
-            operation_ctx.client.get(&connection_url),
-            operation_ctx.token,
-            operation_ctx.connection_type,
-        )
-        .send()
-        .await
-        .context("Failed to fetch connection data")?;
-
-        if !conn_response.status().is_success() {
-            let status = conn_response.status();
-            let error_body = conn_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to fetch connection data (HTTP {}): {}",
-                status, error_body
-            )));
-        }
-
-        let conn_body: serde_json::Value = conn_response
-            .json()
-            .await
-            .context("Failed to parse connection data response")?;
-
-        let user_id = conn_body
-            .get("authenticatedUser")
-            .and_then(|au| au.get("id"))
-            .and_then(|id| id.as_str())
-            .context("Connection data response missing authenticatedUser.id")?;
-        debug!("Authenticated user ID: {}", user_id);
-
-        // Self-approval guard: prevent the agent from approving PRs it created.
-        // Positive votes (approve=10, approve-with-suggestions=5) are blocked when
-        // the authenticated user is also the PR author.
-        if vote_value > 0 {
-            let pr_url = format!(
-                "{}/pullRequests/{}?api-version=7.1",
-                operation_ctx.repository_api_base(),
-                operation_ctx.pr_id
-            );
-            let pr_response = crate::safe_outputs::authenticate_ado_request(
-                operation_ctx.client.get(&pr_url),
-                operation_ctx.token,
-                operation_ctx.connection_type,
-            )
-            .send()
-            .await
-            .context("Failed to fetch PR for self-approval check")?;
-
-            if pr_response.status().is_success() {
-                let pr_body: serde_json::Value = pr_response
-                    .json()
-                    .await
-                    .context("Failed to parse PR response")?;
-
-                let creator_id = pr_body
-                    .get("createdBy")
-                    .and_then(|cb| cb.get("id"))
-                    .and_then(|id| id.as_str());
-
-                if creator_id == Some(user_id) {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Self-approval blocked: the authenticated identity created PR #{} \
-                         and cannot cast a positive vote ('{}') on it",
-                        operation_ctx.pr_id, vote_str
-                    )));
-                }
-            } else {
-                let status = pr_response.status();
-                let error_body = pr_response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to fetch PR #{} for self-approval check (HTTP {}): {}",
-                    operation_ctx.pr_id, status, error_body
-                )));
-            }
-        }
-
-        // PUT vote to reviewers endpoint
-        let encoded_user_id = utf8_percent_encode(user_id, PATH_SEGMENT).to_string();
-        let vote_url = format!(
-            "{}/pullRequests/{}/reviewers/{}?api-version=7.1",
-            operation_ctx.repository_api_base(),
-            operation_ctx.pr_id,
-            encoded_user_id
-        );
-        let vote_body = serde_json::json!({
-            "vote": vote_value
-        });
-
-        info!(
-            "Voting '{}' ({}) on PR #{}",
-            vote_str, vote_value, operation_ctx.pr_id
-        );
-        let response = crate::safe_outputs::authenticate_ado_request(
-            operation_ctx.client.put(&vote_url),
-            operation_ctx.token,
-            operation_ctx.connection_type,
-        )
-        .header("Content-Type", "application/json")
-        .json(&vote_body)
-        .send()
-        .await
-        .context("Failed to submit vote")?;
-
-        if response.status().is_success() {
-            info!(
-                "Vote '{}' submitted on PR #{}",
-                vote_str, operation_ctx.pr_id
-            );
-            Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Vote '{}' submitted on PR #{}",
-                    vote_str, operation_ctx.pr_id
-                ),
-                serde_json::json!({
-                    "pull_request_id": operation_ctx.pr_id,
-                    "operation": "vote",
-                    "vote": vote_str,
-                    "vote_value": vote_value,
-                }),
-            ))
-        } else {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            Ok(ExecutionResult::failure(format!(
-                "Failed to submit vote on PR #{} (HTTP {}): {}",
-                operation_ctx.pr_id, status, error_body
-            )))
-        }
+        submit_vote(operation_ctx, vote_str, vote_value, &user_id).await
     }
 
     /// Add reviewers to a pull request.
