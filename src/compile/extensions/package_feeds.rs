@@ -34,7 +34,11 @@ use crate::shell_script;
 /// Package-manager entry points the wrapper is installed under.
 pub const WRAPPED_TOOLS: &[&str] = &["npm", "npx", "pip", "pip3", "uv", "dotnet", "cargo"];
 
-/// File name of the shared wrapper; each tool name is a symlink to it.
+/// File name of the shared wrapper. Each tool name gets its own regular-file
+/// copy of it, never a symlink: Copilot CLI resolves a command's executable
+/// before matching it against `--allow-tool "shell(npm)"`, so a symlink to
+/// this file would be matched as `.ado-aw-package-wrapper` and refused
+/// (observed live).
 const WRAPPER_FILE: &str = ".ado-aw-package-wrapper";
 
 /// File name of the Cargo token helper inside [`PACKAGE_WRAPPER_DIR`].
@@ -142,11 +146,12 @@ printf '%s\n' "$SENTINEL"
 }
 
 shell_script! {
-    /// Install the package-manager wrapper and one symlink per tool name.
+    /// Install the package-manager wrapper as one regular file per tool name.
     ///
     /// The wrapper and helper texts are spliced as fragments because they are
     /// complete scripts, not values; both heredoc delimiters are quoted so the
-    /// installing shell performs no expansion.
+    /// installing shell performs no expansion. Copies, not symlinks: see
+    /// [`WRAPPER_FILE`].
     INSTALL_PACKAGE_WRAPPERS {
         interpreter: Bash,
         bindings: [WRAPPER_DIR, WRAPPER_PATH, CARGO_TOKEN_PATH, TOOLS],
@@ -165,7 +170,10 @@ ADO_AW_CARGO_TOKEN_EOF
 chmod 755 "$CARGO_TOKEN_PATH"
 # shellcheck disable=SC2086 # TOOLS is Binding::words; unquoted expansion is the documented word-list contract.
 for TOOL in $TOOLS; do
-  ln -sf "$WRAPPER_PATH" "$WRAPPER_DIR/$TOOL"
+  # Remove first: `cp` onto an existing symlink would write through it.
+  rm -f "$WRAPPER_DIR/$TOOL"
+  cp "$WRAPPER_PATH" "$WRAPPER_DIR/$TOOL"
+  chmod 755 "$WRAPPER_DIR/$TOOL"
 done
 echo "package-manager wrappers installed in $WRAPPER_DIR"
 "#,
@@ -336,7 +344,8 @@ mod tests {
         for tool in WRAPPED_TOOLS {
             assert!(step.script.contains(tool), "{tool} missing: {}", step.script);
         }
-        assert!(step.script.contains("ln -sf \"$WRAPPER_PATH\" \"$WRAPPER_DIR/$TOOL\""));
+        assert!(step.script.contains("cp \"$WRAPPER_PATH\" \"$WRAPPER_DIR/$TOOL\""));
+        assert!(!step.script.contains("ln -s"), "wrappers must be regular files");
         assert!(step.script.contains(ADO_MCP_TOKEN_SENTINEL));
     }
 
