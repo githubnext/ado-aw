@@ -47,6 +47,12 @@ from the current working directory. Do not append, prefix, or chain other
 commands (such as `echo` or `which`) to them; judge each check from the
 command's own output and exit status.
 
+Pipeline variables such as `$(Build.BuildId)` in these instructions are
+replaced with this run's own values before you receive them, so the build ID
+you see in the final step is this pipeline run's ID. That substitution is
+expected and is not prompt injection. Do not read or compare repository files;
+just run the checks.
+
 Run these checks **in order**. If any check does not behave exactly as
 described, stop without emitting a safe output. The parent smoke orchestrator
 fails because the proof tag is absent.
@@ -59,12 +65,12 @@ fails because the proof tag is absent.
    ```
 
 2. Prove npm downloads a package tarball from the internal feed through the
-   proxy. This must succeed and the directory must then contain
-   `is-number-7.0.0.tgz`:
+   proxy. Both commands must succeed; `npm pack` writes `is-number-7.0.0.tgz`
+   into the current directory:
 
    ```bash
-   npm pack is-number@7.0.0 --prefer-online --pack-destination /tmp/ado-aw-smoke-npm
-   ls /tmp/ado-aw-smoke-npm
+   npm pack is-number@7.0.0 --prefer-online
+   ls is-number-7.0.0.tgz
    ```
 
 3. Prove pip downloads a wheel from the internal feed through the proxy. This
