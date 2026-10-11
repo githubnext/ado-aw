@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AdoRest } from "../ado-rest.js";
+import { setPrAutoComplete } from "../scenarios/pr.js";
+import type { ScenarioContext } from "../scenario.js";
 
 const options = {
   orgUrl: "https://dev.azure.com/org/",
@@ -13,6 +15,180 @@ function stubFetch(responder: (url: string) => Response): ReturnType<typeof vi.f
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
+
+describe("disposable ref cleanup", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const name = "refs/heads/owned";
+  const objectId = "a".repeat(40);
+
+  it.each([{}, { value: null }, { value: [null] }, { value: [{ name }] },
+    { value: [{ name, objectId }, { name, objectId }] }])("rejects incomplete or ambiguous discovery %j", async (body) => {
+    const fetch = stubFetch(() => Response.json(body));
+    await expect(new AdoRest(options).deleteRef("repo", name)).rejects.toThrow(/incomplete|ambiguous/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the exact observed SHA and verifies absence", async () => {
+    let reads = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+      if (init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual([{ name, oldObjectId: objectId, newObjectId: "0".repeat(40) }]);
+        return Response.json({ value: [{ name, success: true }] });
+      }
+      return Response.json({ value: ++reads === 1 ? [{ name: `${name}-other`, objectId: "b".repeat(40) }, { name, objectId }] : [] });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await expect(new AdoRest(options).deleteRef("repo", name)).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["per-entry-failure", "malformed-response", "ref-remains", "lost-response"])(
+    "does not retry an unconfirmed deletion: %s", async (mode) => {
+      let writes = 0;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+        if (init?.method !== "POST") return Response.json({ value: [{ name, objectId }] });
+        writes += 1;
+        if (mode === "lost-response") throw new Error("lost response");
+        if (mode === "malformed-response") return Response.json({});
+        return Response.json({ value: [{ name, success: mode === "ref-remains", updateStatus: "staleOldObjectId" }] });
+      }));
+      await expect(new AdoRest(options).deleteRef("repo", name)).rejects.toThrow();
+      expect(writes).toBe(1);
+    },
+  );
+});
+
+describe("auto-complete scenario cleanup", () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  function cleanup() {
+    const rest = new AdoRest(options);
+    const deleteRef = vi.spyOn(rest, "deleteRef").mockResolvedValue(undefined);
+    const ctx: ScenarioContext = {
+      orgUrl: options.orgUrl, project: options.project, token: options.token, rest,
+      adoRepo: "repo", buildId: "42", adoAwBin: "unused", workDir: "unused",
+      log: () => {}, prefix: (tool) => `ado-aw-det-42-${tool}`,
+    };
+    return {
+      deleteRef,
+      run: () => setPrAutoComplete.cleanup(ctx, {
+        repo: "repo", prId: 42, branch: "ado-aw-det-42-src", targetBranch: "ado-aw-det-42-target",
+      }),
+    };
+  }
+
+  it.each(["completed", "abandoned", "missing"])("accepts an already %s auto-complete PR", async (status) => {
+    const fetch = stubFetch(() => status === "missing"
+      ? new Response("", { status: 404 })
+      : Response.json({ status }));
+    const test = cleanup();
+    await expect(test.run()).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(test.deleteRef).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["between-reads", "during-patch", "lost-response"])(
+    "accepts confirmed legitimate completion %s without retrying writes", async (race) => {
+      let reads = 0;
+      let writes = 0;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+        if (init?.method === "PATCH") {
+          writes += 1;
+          if (race === "lost-response") throw new Error("lost abandonment response");
+          return race === "during-patch"
+            ? new Response("already completed", { status: 409 })
+            : Response.json({ status: "completed" });
+        }
+        reads += 1;
+        const completed = race === "between-reads" ? reads > 1 : writes > 0;
+        return Response.json({ status: completed ? "completed" : "active" });
+      }));
+      const test = cleanup();
+      await expect(test.run()).resolves.toBeUndefined();
+      expect(writes).toBeLessThanOrEqual(1);
+      expect(test.deleteRef.mock.calls).toEqual([
+        ["repo", "refs/heads/ado-aw-det-42-src"],
+        ["repo", "refs/heads/ado-aw-det-42-target"],
+      ]);
+    },
+  );
+
+  it.each(["unknown", "unconfirmed-write", "failed-readback"])(
+    "surfaces %s while independently attempting both branch deletions", async (failure) => {
+      let writes = 0;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+        if (init?.method === "PATCH") {
+          writes += 1;
+          throw new Error("lost abandonment response");
+        }
+        if (writes > 0 && failure === "failed-readback") return new Response("forbidden", { status: 403 });
+        return Response.json({ status: failure === "unknown" ? "unknown" : "active" });
+      }));
+      const test = cleanup();
+      await expect(test.run()).rejects.toThrow();
+      expect(writes).toBeLessThanOrEqual(1);
+      expect(test.deleteRef).toHaveBeenCalledTimes(2);
+    },
+  );
+});
+
+describe("AdoRest.listPullRequestLabels", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uses authoritative labels endpoint and preserves every returned label", async () => {
+    const fetch = stubFetch((url) => url.includes("/labels?")
+      ? Response.json({ count: 2, value: [{name: "existing-label"}, {name: "new-label"}] })
+      : Response.json({ pullRequestId: 42, title: "PR without labels property" }));
+    const labels = await new AdoRest(options).listPullRequestLabels("repo name", 42);
+    expect(labels.map((label) => label.name)).toEqual(["existing-label", "new-label"]);
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "https://dev.azure.com/org/My%20Project/_apis/git/repositories/repo%20name/pullRequests/42/labels?api-version=7.1",
+    );
+  });
+
+  describe("AdoRest.abandonPullRequest cleanup", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it.each(["active", "abandoned", "missing"])("cleans up a %s PR without repeating abandonment", async (status) => {
+      const fetch = stubFetch(() => status === "missing"
+        ? new Response("", { status: 404 })
+        : Response.json({ status }));
+      await new AdoRest(options).abandonPullRequest("repo", 42);
+      expect(fetch).toHaveBeenCalledTimes(status === "active" ? 2 : 1);
+      if (status === "active") {
+        expect(fetch.mock.calls[1]?.[1]).toMatchObject({
+          method: "PATCH", body: JSON.stringify({ status: "abandoned" }),
+        });
+      }
+    });
+
+    it.each([{}, { status: "completed" }, { status: "unknown" }])(
+      "does not silently accept an unexpected PR state %j", async (state) => {
+        const fetch = stubFetch(() => Response.json(state));
+        await expect(new AdoRest(options).abandonPullRequest("repo", 42)).rejects.toThrow("unexpected status");
+        expect(fetch).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("retains cleanup read errors without attempting another mutation", async () => {
+      const fetch = stubFetch(() => new Response("forbidden", { status: 403 }));
+      await expect(new AdoRest(options).abandonPullRequest("repo", 42)).rejects.toThrow("403");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each([{}, { value: null }, { value: [null] }, { value: [{name: 1}] }])(
+    "does not report malformed %j as no labels", async (response) => {
+      stubFetch(() => Response.json(response));
+      await expect(new AdoRest(options).listPullRequestLabels("repo", 42)).rejects.toThrow(/missing value|invalid label/);
+    },
+  );
+
+  it("surfaces API failures instead of reporting missing labels", async () => {
+    stubFetch(() => new Response("forbidden", { status: 403 }));
+    await expect(new AdoRest(options).listPullRequestLabels("repo", 42)).rejects.toThrow("403");
+  });
+});
 
 describe("AdoRest.workItemTypeExists", () => {
   afterEach(() => {

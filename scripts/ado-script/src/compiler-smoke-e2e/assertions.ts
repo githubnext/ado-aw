@@ -57,13 +57,14 @@ export function assertReleaseUrlsPresent(yamlText: string, label: string): void 
  *
  * Applies to `raw` cases too, where no front-matter transform runs at all.
  */
-export function assertNoTriggers(yamlText: string, label: string): void {
+export function assertNoTriggers(yamlText: string, label: string, syntheticPr = false): void {
   const docs = parseAllDocuments(yamlText, { merge: false }).map((d) => d.toJS());
   for (const doc of docs) {
     if (!doc || typeof doc !== "object" || Array.isArray(doc)) continue;
     const root = doc as Record<string, unknown>;
 
     for (const key of ["trigger", "pr"] as const) {
+      if (key === "pr" && syntheticPr && root.pr && typeof root.pr === "object") continue;
       if (root[key] !== "none") {
         throw new Error(
           `${label}: staged pipeline must declare '${key}: none', got ${JSON.stringify(root[key] ?? null)}`,

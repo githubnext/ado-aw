@@ -30,6 +30,7 @@ import { dirname, join } from "node:path";
 import { mkdir } from "node:fs/promises";
 
 import { AdoRest } from "./ado-rest.js";
+import { verifyPrBoundary } from "./pr-boundary.js";
 import {
   assertAgentCommandPolicy,
   assertPipelineTextPolicy,
@@ -40,7 +41,8 @@ import {
   assertReleaseUrlsPresent,
 } from "./assertions.js";
 import { loadCases, type ResolvedCase, type ResolvedCases } from "./cases.js";
-import { candidateRef, loadConfig, type SmokeConfig } from "./config.js";
+import { boundaryMarker, boundaryTargetRef, candidateRef, loadConfig, type SmokeConfig } from "./config.js";
+import { cleanupCaseResources } from "./cleanup.js";
 import { compileAndCheck } from "./compile-cli.js";
 import {
   commitAll,
@@ -60,7 +62,7 @@ import { prepareCaseSource } from "./source.js";
 import { renderResultsTable } from "./report.js";
 import { runFixtures, type FixtureBuildRequest, type FixtureBuildResult } from "./runner.js";
 import { verifyCandidateAudit, verifyCaseSignals } from "./signals.js";
-import { scanStaleRefs } from "./stale.js";
+import { scanStaleRefs, type StaleRefDecision } from "./stale.js";
 
 function log(msg: string): void {
   // Percent-encode a leading '#' so a message cannot smuggle a ##vso command.
@@ -133,7 +135,7 @@ async function stageCase(
           artifact: config.artifactName,
         }
       : undefined;
-  await writeFile(join(worktreeDir, relMd), prepareCaseSource(original, artifact), "utf8");
+  await writeFile(join(worktreeDir, relMd), prepareCaseSource(original, artifact, entry.prBoundary), "utf8");
 
   const result = await compileAndCheck({
     adoAwBin: config.adoAwBin,
@@ -179,7 +181,7 @@ async function stageCase(
   // `on:` is what makes the compiler emit `trigger: none` / `pr: none`;
   // assert it on the staged bytes rather than trusting it.
   await writeFile(target, yamlText, "utf8");
-  assertNoTriggers(yamlText, entry.id);
+  assertNoTriggers(yamlText, entry.id, entry.prBoundary !== undefined);
 }
 
 /** Stage, commit and push every case, returning the per-case ref and commit SHA. */
@@ -244,7 +246,6 @@ async function stageAllCases(
 
 async function cleanupStaleRefs(
   config: SmokeConfig,
-  resolved: ResolvedCases,
   rest: AdoRest,
   mirrorUrl: string,
   ownRefs: ReadonlySet<string>,
@@ -256,35 +257,43 @@ async function cleanupStaleRefs(
       token: config.token,
       timeoutMs: config.childTimeoutMs,
     });
-    const decisions = await scanStaleRefs({
+    const scanOptions = {
       refs: refs.filter((entry) => !ownRefs.has(entry.ref)),
       baseRef: config.sourceBranch,
       ownRef: "",
       definitionId: config.definitionId,
-      laneDefinitionIds: resolved.laneDefinitionIds,
       staleRefHours: config.staleRefHours,
       client: rest,
-    });
-    const eligible = decisions.filter((decision) => decision.outcome === "eligible");
+      boundaryPrForSource: (source: string) => rest.findBoundaryPr(config.mirrorRepo, source),
+    };
+    const decisions = await scanStaleRefs(scanOptions);
+    const groups = new Map<string, StaleRefDecision[]>();
     for (const decision of decisions) {
+      const group = groups.get(decision.sourceRef) ?? [];
+      group.push(decision);
+      groups.set(decision.sourceRef, group);
       if (decision.outcome !== "eligible") {
         log(`[stale-scan] ${decision.ref}: ${decision.outcome} — ${decision.reason}`);
       }
     }
-    if (eligible.length === 0) return;
-    try {
-      await deleteRemoteRefs({
-        cwd: config.sourcesDirectory,
-        mirrorUrl,
-        refs: eligible.map((decision) => decision.ref),
-        token: config.token,
-        timeoutMs: config.childTimeoutMs,
-      });
-      for (const decision of eligible) {
-        log(`[stale-scan] deleted ${decision.ref}: ${decision.reason}`);
+    for (const [sourceRef, group] of groups) {
+      if (group.some((decision) => decision.outcome !== "eligible")) continue;
+      try {
+        const checked = await scanStaleRefs({ ...scanOptions, refs: group });
+        if (checked.some((decision) => decision.outcome !== "eligible")) {
+          log(`[stale-scan] retaining group ${sourceRef}: eligibility changed`);
+          continue;
+        }
+        await cleanupCaseResources({
+          client: rest, repository: config.mirrorRepo, sourceRef, refs: group, observedRefs: refs,
+          deleteRefs: (refs) => deleteRemoteRefs({
+            cwd: config.sourcesDirectory, mirrorUrl, refs, token: config.token, timeoutMs: config.childTimeoutMs,
+          }),
+        });
+        for (const decision of group) log(`[stale-scan] deleted ${decision.ref}: ${decision.reason}`);
+      } catch (err) {
+        log(`[stale-scan] WARNING: cleanup of ${sourceRef} failed: ${errMessage(err)}`);
       }
-    } catch (err) {
-      log(`[stale-scan] WARNING: failed to delete stale ref(s): ${errMessage(err)}`);
     }
   } catch (err) {
     log(`[stale-scan] WARNING: scan failed (best-effort, continuing): ${errMessage(err)}`);
@@ -313,6 +322,8 @@ export async function main(): Promise<number> {
 
   // Refs actually pushed, so cleanup never touches a ref we failed to create.
   const pushedRefs = new Map<string, string>();
+  const boundaryResources = new Map<string, { id: number; targetRef: string; description: string }>();
+  const boundaryTargetRefs = new Map<string, string>();
   let overallOk = true;
   // Whether we reached the point where builds may have been queued. Only
   // trustworthy because it is set immediately before `runFixtures`; see there.
@@ -356,11 +367,26 @@ export async function main(): Promise<number> {
     );
 
     const ownRefs = new Set(resolved.cases.map((entry) => candidateRef(config.buildId, entry.id)));
-    await cleanupStaleRefs(config, resolved, rest, mirrorUrl, ownRefs);
+    for (const entry of resolved.cases) {
+      if (entry.prBoundary) ownRefs.add(boundaryTargetRef(config.buildId, entry.id));
+    }
+    await cleanupStaleRefs(config, rest, mirrorUrl, ownRefs);
 
     const staged = await stageAllCases(config, resolved, worktreeDir, mirrorUrl, (caseId, ref) => {
       pushedRefs.set(caseId, ref);
     });
+
+    for (const entry of resolved.cases) {
+      if (!entry.prBoundary) continue;
+      const source = staged.get(entry.id)!;
+      const targetRef = boundaryTargetRef(config.buildId, entry.id);
+      boundaryTargetRefs.set(entry.id, targetRef);
+      await rest.createBoundaryTarget(config.mirrorRepo, targetRef, config.sourceVersion);
+      const description = boundaryMarker(config.buildId, entry.id);
+      const pr = await rest.createBoundaryPr(config.mirrorRepo, source.ref, targetRef, description);
+      boundaryResources.set(entry.id, { id: pr.pullRequestId, targetRef, description });
+      log(`[${entry.id}] disposable PR #${pr.pullRequestId} ready`);
+    }
 
     const requests: FixtureBuildRequest[] = resolved.cases.map((entry) => ({
       caseId: entry.id,
@@ -369,6 +395,7 @@ export async function main(): Promise<number> {
       sourceBranch: staged.get(entry.id)!.ref,
       sourceVersion: staged.get(entry.id)!.sha,
       tags: [`smoke-case:${entry.id}`, `smoke-candidate:${config.buildId}`],
+      expectedResult: entry.prBoundary === "rejected" ? "failed" : "succeeded",
     }));
 
     // Fail-closed: set immediately before the call that might queue builds, so
@@ -398,6 +425,37 @@ export async function main(): Promise<number> {
     results = auditOutcome.results;
     overallOk = outcome.ok && signalOutcome.ok && auditOutcome.ok;
     allTerminal = outcome.allTerminal;
+    for (const entry of resolved.cases) {
+      if (!entry.prBoundary) continue;
+      const resource = boundaryResources.get(entry.id);
+      const result = results.find((result) => result.caseId === entry.id);
+      if (!resource || !result?.buildId || result.status !== "succeeded") continue;
+      try {
+        const [pr, records, artifacts] = await Promise.all([
+          rest.boundaryPr(config.mirrorRepo, resource.id),
+          rest.boundaryTimeline(result.buildId),
+          rest.boundaryArtifacts(result.buildId),
+        ]);
+        for (const name of [`agent_outputs_${result.buildId}`, `analyzed_outputs_${result.buildId}`, "safe_outputs"]) {
+          if (!artifacts.includes(name)) throw new Error(`Boundary build did not publish ${name}`);
+        }
+        if (entry.prBoundary === "rejected" && artifacts.includes("safe_outputs_reviewed")) {
+          throw new Error("Rejected boundary unexpectedly published reviewed executor artifacts");
+        }
+        verifyPrBoundary(entry.prBoundary, result.buildId, resource.description, pr.description, records);
+        if (entry.assertions?.pushedFile) {
+          const source = staged.get(entry.id);
+          if (!source) throw new Error("Push proof is missing the staged source identity");
+          await rest.verifyBoundaryPush(config.mirrorRepo, source.ref, source.sha,
+            entry.assertions.pushedFile.path,
+            entry.assertions.pushedFile.content.replaceAll("{buildId}", String(result.buildId)));
+        }
+      } catch (error) {
+        result.status = "failed";
+        result.message = errMessage(error);
+        overallOk = false;
+      }
+    }
     if (!overallOk) failureMessage = "one or more smoke cases did not succeed";
     if (!allTerminal) {
       overallOk = false;
@@ -417,34 +475,44 @@ export async function main(): Promise<number> {
     // positively proven. One unproven case no longer strands every other
     // case's ref, as it did when all cases shared one ref.
     const provenById = new Map(results.map((result) => [result.caseId, result.terminalProven]));
-    const deletable: string[] = [];
-    const retained: string[] = [];
     for (const [caseId, ref] of pushedRefs) {
       // A pushed case with no result is only safe to clean up if we never got
       // as far as queueing. If queueing was attempted, a missing result means
       // `runFixtures` threw and a build may still be running — fail closed and
       // let the stale-ref scanner reclaim it once ADO can prove it stopped.
       const proven = provenById.get(caseId) ?? !queueAttempted;
-      (proven ? deletable : retained).push(ref);
-    }
-    if (deletable.length > 0) {
-      try {
-        await deleteRemoteRefs({
-          cwd: config.sourcesDirectory,
-          mirrorUrl,
-          refs: deletable,
-          token: config.token,
-          timeoutMs: config.childTimeoutMs,
-        });
-        log(`[git] deleted ${deletable.length} candidate ref(s)`);
-      } catch (err) {
-        overallOk = false;
-        failureMessage ??= `failed to delete candidate ref(s): ${errMessage(err)}`;
-        log(`WARNING: failed to delete candidate ref(s): ${errMessage(err)}`);
+      const targetRef = boundaryTargetRefs.get(caseId);
+      const requested = [ref, ...(targetRef ? [targetRef] : [])];
+      if (!proven) {
+        log(`WARNING: retaining ${requested.join(", ")} because the source build's terminal state is unconfirmed`);
+        continue;
       }
-    }
-    for (const ref of retained) {
-      log(`WARNING: retaining ${ref} because its build's terminal state could not be confirmed`);
+      const resource = boundaryResources.get(caseId);
+      try {
+        for (const branch of requested) {
+          const children = await rest.listBuildsForBranch(branch);
+          if (children.some((child) => child.status !== "completed")) {
+            throw new Error(`Another build on ${branch} is not terminal; retaining the resource group`);
+          }
+        }
+        const snapshot = await listCandidateRefs({
+          cwd: config.sourcesDirectory, mirrorUrl, token: config.token, timeoutMs: config.childTimeoutMs,
+        });
+        await cleanupCaseResources({
+          client: rest, repository: config.mirrorRepo, sourceRef: ref,
+          refs: snapshot.filter((entry) => requested.includes(entry.ref)),
+          observedRefs: snapshot,
+          expectedPrId: resource?.id,
+          deleteRefs: (refs) => deleteRemoteRefs({
+            cwd: config.sourcesDirectory, mirrorUrl, refs, token: config.token, timeoutMs: config.childTimeoutMs,
+          }),
+        });
+        log(`[git] confirmed cleanup of ${requested.join(", ")}`);
+      } catch (error) {
+        overallOk = false;
+        failureMessage ??= `failed to clean case ${caseId}: ${errMessage(error)}`;
+        log(`WARNING: cleanup of ${requested.join(", ")} failed: ${errMessage(error)}`);
+      }
     }
 
     try {

@@ -12,6 +12,8 @@
  */
 import { redact } from "./process.js";
 import { sleep as defaultSleep } from "./process.js";
+import { boundaryMarker, boundaryTargetRef } from "./config.js";
+import { parseBoundaryTargetRef, parseCandidateRef } from "./git.js";
 
 export interface AdoRestOptions {
   orgUrl: string;
@@ -39,10 +41,74 @@ export interface ArtifactInfo {
   resource?: { downloadUrl?: string; type?: string };
 }
 
+export interface BoundaryPr {
+  pullRequestId: number;
+  status: string;
+  description?: string;
+  title?: string;
+  sourceRefName?: string;
+  targetRefName?: string;
+  repository?: { id?: string; name?: string; project?: { id?: string; name?: string } };
+  forkSource?: unknown;
+}
+
+export interface OwnedBoundaryPr extends BoundaryPr {
+  title: string;
+  sourceRefName: string;
+  targetRefName: string;
+}
+
+export interface BoundaryTimelineRecord {
+  type?: string;
+  name?: string;
+  identifier?: string;
+  result?: string;
+}
+
 const DEFAULT_ARTIFACT_RETRIES = 5;
 const DEFAULT_ARTIFACT_RETRY_DELAY_MS = 5_000;
 const DEFAULT_TAG_RETRIES = 5;
 const DEFAULT_TAG_RETRY_DELAY_MS = 2_000;
+
+export class AdoHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = "AdoHttpError";
+  }
+}
+
+/** Undefined means permanent/unknown; zero means transient without a server delay. */
+export function transientReadRetryAfter(error: unknown): number | undefined {
+  if (error instanceof AdoHttpError) {
+    return [408, 429, 500, 502, 503, 504].includes(error.status)
+      ? error.retryAfterMs ?? 0
+      : undefined;
+  }
+  for (let cause: unknown = error, depth = 0; depth < 5; depth++) {
+    if (typeof cause !== "object" || cause === null) break;
+    if (cause instanceof Error && ["TimeoutError", "AbortError"].includes(cause.name)) return 0;
+    if ("code" in cause && typeof cause.code === "string" && [
+      "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "ETIMEDOUT", "EPIPE",
+      "EAI_AGAIN", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
+    ].includes(cause.code)) return 0;
+    cause = "cause" in cause ? cause.cause : undefined;
+  }
+  return undefined;
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value?.trim()) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds)
+    ? seconds >= 0 ? seconds * 1_000 : NaN
+    : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : undefined;
+}
 
 export class AdoRest {
   private readonly base: string;
@@ -73,7 +139,7 @@ export class AdoRest {
 
   private async request<T>(
     path: string,
-    opts: { method?: string; body?: unknown; allow404?: boolean } = {},
+    opts: { method?: string; body?: unknown; allow404?: boolean; timeoutMs?: number; complete?: boolean } = {},
   ): Promise<T | undefined> {
     const headers: Record<string, string> = {
       Authorization: this.authHeader,
@@ -88,12 +154,19 @@ export class AdoRest {
       method: opts.method ?? "GET",
       headers,
       body,
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(Math.max(1, Math.min(this.timeoutMs, opts.timeoutMs ?? this.timeoutMs))),
     });
     if (res.status === 404 && opts.allow404) return undefined;
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
-      throw new Error(`ADO ${opts.method ?? "GET"} ${path} -> HTTP ${res.status}: ${text}`);
+      throw new AdoHttpError(
+        `ADO ${opts.method ?? "GET"} ${path} -> HTTP ${res.status}: ${text}`,
+        res.status,
+        parseRetryAfter(res.headers.get("retry-after")),
+      );
+    }
+    if (opts.complete && res.headers.get("x-ms-continuationtoken")?.trim()) {
+      throw new Error("Incomplete ADO metadata cannot authorize smoke resource cleanup");
     }
     if (res.status === 204) return undefined;
     const text = await res.text();
@@ -148,11 +221,149 @@ export class AdoRest {
     );
   }
 
-  async getBuild(buildId: number): Promise<BuildSummary> {
+  async getBuild(buildId: number, opts: { timeoutMs?: number } = {}): Promise<BuildSummary> {
     const path = this.projPath(`_apis/build/builds/${buildId}?api-version=7.1`);
-    const res = await this.request<BuildSummary>(path);
+    const res = await this.request<BuildSummary>(path, opts);
     if (!res) throw new Error(`getBuild(${buildId}) returned no body`);
+    if (typeof res !== "object" || res.id !== buildId || typeof res.status !== "string"
+      || !["none", "notStarted", "postponed", "inProgress", "cancelling", "completed"].includes(res.status)) {
+      throw new Error(`getBuild(${buildId}) returned an invalid build summary`);
+    }
     return res;
+  }
+
+  async createBoundaryTarget(repo: string, ref: string, sha: string): Promise<void> {
+    if (!parseBoundaryTargetRef(ref)) {
+      throw new Error("Boundary target must be a disposable candidate ref");
+    }
+    const response = await this.request<{value?: {success?: boolean}[]}>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/refs?api-version=7.1`),
+      { method: "POST", body: [{ name: ref, oldObjectId: "0".repeat(40), newObjectId: sha }] },
+    );
+    if (response?.value?.length !== 1 || response.value[0]?.success !== true) {
+      throw new Error("Failed to create disposable PR boundary target");
+    }
+  }
+
+  async createBoundaryPr(repo: string, source: string, target: string, marker: string): Promise<BoundaryPr> {
+    const identity = parseCandidateRef(source);
+    if (!identity || target !== boundaryTargetRef(identity.buildId, identity.caseId)
+      || marker !== boundaryMarker(identity.buildId, identity.caseId)) {
+      throw new Error("Boundary PR must use the exact owned source, target and marker");
+    }
+    const response = await this.request<BoundaryPr>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullrequests?api-version=7.1`),
+      { method: "POST", body: {
+        sourceRefName: source, targetRefName: target, title: marker, description: marker,
+      } },
+    );
+    if (!response?.pullRequestId) throw new Error("PR boundary setup returned no PR ID");
+    return response;
+  }
+
+  async boundaryPr(repo: string, id: number): Promise<BoundaryPr> {
+    const response = await this.request<BoundaryPr>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${id}?api-version=7.1`),
+    );
+    if (!response) throw new Error("Boundary PR readback returned no object");
+    return response;
+  }
+
+  private validateBoundaryPr(repo: string, source: string, pr: BoundaryPr): asserts pr is OwnedBoundaryPr {
+    if (!pr || typeof pr !== "object") throw new Error("Boundary PR metadata must be an object");
+    const identity = parseCandidateRef(source);
+    const repository = pr.repository;
+    if (!identity || !Number.isSafeInteger(pr.pullRequestId) || pr.pullRequestId <= 0
+      || pr.sourceRefName !== source
+      || ![boundaryTargetRef(identity.buildId, identity.caseId), `${source}-target`].includes(pr.targetRefName ?? "")
+      || pr.title !== boundaryMarker(identity.buildId, identity.caseId)
+      || !["active", "abandoned", "completed"].includes(pr.status)
+      || pr.forkSource != null
+      || ![repository?.id, repository?.name].some((value) => typeof value === "string" && value.toLowerCase() === repo.toLowerCase())
+      || ![repository?.project?.id, repository?.project?.name].some((value) => typeof value === "string" && value.toLowerCase() === this.project.toLowerCase())) {
+      throw new Error(`Cannot establish boundary PR ownership for ${source}`);
+    }
+  }
+
+  async findBoundaryPr(repo: string, source: string): Promise<OwnedBoundaryPr | undefined> {
+    if (!parseCandidateRef(source)) throw new Error("Boundary PR discovery requires an owned source ref");
+    const query = new URLSearchParams({
+      "searchCriteria.sourceRefName": source, "searchCriteria.status": "all", "$top": "2", "api-version": "7.1",
+    });
+    const response = await this.request<{ value?: BoundaryPr[] }>(
+      this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullrequests?${query}`), { complete: true },
+    );
+    if (!Array.isArray(response?.value) || response.value.length > 1) {
+      throw new Error(`Boundary PR discovery is incomplete or ambiguous for ${source}`);
+    }
+    const pr = response.value[0];
+    if (pr !== undefined) this.validateBoundaryPr(repo, source, pr);
+    return pr;
+  }
+
+  async abandonBoundaryPr(repo: string, expected: OwnedBoundaryPr): Promise<void> {
+    const id = expected.pullRequestId;
+    const verify = (pr: BoundaryPr) => {
+      this.validateBoundaryPr(repo, expected.sourceRefName, pr);
+      if (pr.pullRequestId !== id || pr.targetRefName !== expected.targetRefName) {
+        throw new Error("Boundary PR identity changed during cleanup");
+      }
+    };
+    const pr = await this.boundaryPr(repo, id);
+    verify(pr);
+    if (pr.status === "active") {
+      let failure: unknown;
+      try {
+        await this.request(this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${id}?api-version=7.1`),
+          {method: "PATCH", body: {status: "abandoned"}});
+      } catch (error) {
+        failure = error;
+      }
+      const confirmed = await this.boundaryPr(repo, id);
+      verify(confirmed);
+      if (confirmed.status !== "abandoned") {
+        throw new Error(`Boundary PR #${id} abandonment is unconfirmed: ${confirmed.status}`, { cause: failure });
+      }
+    } else if (pr.status !== "abandoned") {
+      throw new Error(`Boundary PR #${id} unexpectedly ${pr.status}; retaining refs`);
+    }
+  }
+
+  async boundaryTimeline(buildId: number): Promise<BoundaryTimelineRecord[]> {
+    const response = await this.request<{records?: BoundaryTimelineRecord[]}>(
+      this.projPath(`_apis/build/builds/${buildId}/timeline?api-version=7.1`),
+    );
+    if (!Array.isArray(response?.records)) throw new Error("Build timeline response is missing records");
+    return response.records;
+  }
+
+  async boundaryArtifacts(buildId: number): Promise<string[]> {
+    const response = await this.request<{value?: ArtifactInfo[]}>(
+      this.projPath(`_apis/build/builds/${buildId}/artifacts?api-version=7.1`),
+    );
+    if (!Array.isArray(response?.value)) throw new Error("Build artifacts response is missing value");
+    return response.value.map((artifact) => artifact.name);
+  }
+
+  async verifyBoundaryPush(repo: string, sourceRef: string, originalHead: string, path: string, content: string): Promise<void> {
+    if (!sourceRef.startsWith("refs/heads/ado-aw-smoke-candidate/")) throw new Error("Push proof must use an owned candidate ref");
+    const root = this.projPath(`_apis/git/repositories/${AdoRest.seg(repo)}`);
+    const refs = await this.request<{ value?: { name?: string; objectId?: string }[] }>(
+      `${root}/refs?filter=${encodeURIComponent(sourceRef.replace(/^refs\//, ""))}&api-version=7.1`,
+    );
+    const matches = refs?.value?.filter((entry) => entry.name === sourceRef) ?? [];
+    const head = matches[0]?.objectId;
+    if (matches.length !== 1 || typeof head !== "string" || !/^[a-f0-9]{40}$/i.test(head) || head === originalHead) {
+      throw new Error("PR push proof did not advance the exact owned source ref");
+    }
+    const commit = await this.request<{ parents?: string[] }>(`${root}/commits/${head}?api-version=7.1`);
+    if (commit?.parents?.length !== 1 || commit.parents[0] !== originalHead) {
+      throw new Error("PR push proof was not a direct child of the prepared source head");
+    }
+    const item = await this.request<{ content?: string }>(
+      `${root}/items?path=${encodeURIComponent(`/${path}`)}&versionDescriptor.versionType=commit&versionDescriptor.version=${head}&includeContent=true&%24format=json&api-version=7.1`,
+    );
+    if (item?.content !== content) throw new Error("PR push proof file did not contain the exact expected content");
   }
 
   /** Read the observable tags on a completed child build. */
@@ -262,24 +473,19 @@ export class AdoRest {
     return res;
   }
 
-  /**
-   * List every build of `definitionId` on the exact `branch` (a full ref,
-   * e.g. `refs/heads/ado-aw-smoke-candidate/123`), regardless of status.
-   *
-   * Deliberately queries a single definition + exact branch and inspects
-   * each build's own `status` client-side, rather than asking ADO's
-   * `statusFilter` for a comma-separated set of "still running" states —
-   * whether that filter reliably matches every non-terminal status across
-   * ADO Build REST versions is not something this harness can assume.
-   * Used by the stale-ref scanner to prove NO fixture child build is still
-   * active on a candidate branch before it is deleted.
-   */
-  async listBuildsForDefinitionBranch(definitionId: number, branch: string): Promise<BuildSummary[]> {
-    const path = this.projPath(
-      `_apis/build/builds?definitions=${definitionId}&branchName=${AdoRest.seg(branch)}&api-version=7.1&$top=50`,
-    );
-    const res = await this.request<{ value?: BuildSummary[] }>(path);
-    return res?.value ?? [];
+  /** Include every definition: today's selected lanes cannot describe an older run. */
+  async listBuildsForBranch(branch: string): Promise<BuildSummary[]> {
+    const query = new URLSearchParams({ branchName: branch, "api-version": "7.1", "$top": "50" });
+    const path = this.projPath(`_apis/build/builds?${query}`);
+    const res = await this.request<{ value?: BuildSummary[] }>(path, { complete: true });
+    if (!Array.isArray(res?.value) || res.value.length >= 50
+      || res.value.some((build) => !build || !Number.isSafeInteger(build.definition?.id)
+        || (build.definition?.id ?? 0) <= 0
+        || build.sourceBranch !== branch || !Number.isSafeInteger(build.id) || build.id <= 0
+        || !["none", "notStarted", "postponed", "inProgress", "cancelling", "completed"].includes(build.status ?? ""))) {
+      throw new Error("Child build discovery is incomplete or contains mismatched build identities");
+    }
+    return res.value;
   }
 }
 

@@ -5,6 +5,7 @@ import {
   isCurrentAdoOrganization,
   normalizeAdoOrganizationUrl,
   parseAdoRepoUrl,
+  nativeTriggeringPrIdentity,
 } from "../ado-remote.js";
 
 describe("parseAdoRepoUrl", () => {
@@ -53,6 +54,20 @@ describe("parseAdoRepoUrl", () => {
 });
 
 describe("ADO collection matching", () => {
+  it("captures equivalent native URL spellings but rejects malformed collection paths", () => {
+    const env = {
+      BUILD_REASON:"PullRequest", BUILD_REPOSITORY_PROVIDER:"TfsGit",
+      BUILD_REPOSITORY_URI:"https://DEV.AZURE.COM/org/Other/_git/target/",
+      BUILD_REPOSITORY_ID:"11111111-1111-1111-1111-111111111111",
+      SYSTEM_PULLREQUEST_PULLREQUESTID:"18446744073709551615",
+      SYSTEM_COLLECTIONURI:"https://org.visualstudio.com/DefaultCollection/",
+    };
+    expect(nativeTriggeringPrIdentity(env)?.id).toBe("18446744073709551615");
+    for (const uri of ["https://dev.azure.com/org/extra","https://org.visualstudio.com/OtherCollection/"]) {
+      expect(nativeTriggeringPrIdentity({...env,SYSTEM_COLLECTIONURI:uri})).toBeUndefined();
+    }
+    expect(nativeTriggeringPrIdentity({...env,BUILD_REPOSITORY_URI:"https://dev.azure.com/org//Other/_git/target"})).toBeUndefined();
+  });
   it("extracts organizations from both service URL forms", () => {
     expect(adoOrganizationFromCollectionUri("https://dev.azure.com/MyOrg/")).toBe(
       "myorg",
@@ -62,7 +77,7 @@ describe("ADO collection matching", () => {
     ).toBe("myorg");
     expect(
       adoOrganizationFromCollectionUri("http://myorg.visualstudio.com/"),
-    ).toBe("myorg");
+    ).toBeNull();
   });
 
   it("recognizes same-org identities and rejects cross-org identities", () => {
@@ -83,6 +98,35 @@ describe("ADO collection matching", () => {
 });
 
 describe("normalizeAdoOrganizationUrl", () => {
+  it("keeps discovery suffixes without treating discovery URLs as collection identity", () => {
+    const legacy = "https://org.visualstudio.com/DefaultCollection/_apis/resourceAreas?api-version=7.1#area";
+    const normalized = normalizeAdoOrganizationUrl(legacy);
+    expect(normalized?.canonicalUrl.toString()).toBe(
+      "https://dev.azure.com/org/_apis/resourceAreas?api-version=7.1#area",
+    );
+    const env = {
+      BUILD_REASON: "PullRequest",
+      BUILD_REPOSITORY_PROVIDER: "TfsGit",
+      BUILD_REPOSITORY_URI: "https://org.visualstudio.com/DefaultCollection/Project/_git/repo",
+      BUILD_REPOSITORY_ID: "11111111-1111-1111-1111-111111111111",
+      SYSTEM_PULLREQUEST_PULLREQUESTID: "42",
+      SYSTEM_COLLECTIONURI: "https://org.visualstudio.com/DefaultCollection/",
+    };
+    expect(nativeTriggeringPrIdentity(env)?.id).toBe("42");
+    for (const collection of [legacy, normalized!.canonicalUrl.toString(), "http://org.visualstudio.com/"]) {
+      expect(adoOrganizationFromCollectionUri(collection)).toBeNull();
+      expect(nativeTriggeringPrIdentity({ ...env, SYSTEM_COLLECTIONURI: collection })).toBeUndefined();
+    }
+  });
+
+  it("retains strict decoded-segment validation for both URL consumers", () => {
+    for (const segment of ["org%2Fother", "org%5Cother", "org%00", "org%7F", "%ZZ"]) {
+      expect(normalizeAdoOrganizationUrl(`https://dev.azure.com/${segment}/_apis/resourceAreas`)).toBeNull();
+      expect(parseAdoRepoUrl(`https://dev.azure.com/${segment}/Project/_git/repo`)).toBeNull();
+      expect(adoOrganizationFromCollectionUri(`https://dev.azure.com/${segment}/`)).toBeNull();
+    }
+  });
+
   it("preserves modern organization URLs", () => {
     const normalized = normalizeAdoOrganizationUrl(
       "https://dev.azure.com/My%20Org/sub/path?api-version=7.1#area",

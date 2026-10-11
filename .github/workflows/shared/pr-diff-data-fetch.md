@@ -108,7 +108,19 @@ pre-agent-steps:
         exit 0
       fi
 
-      gh pr diff "$PR_NUMBER" --repo "$EXPR_GITHUB_REPOSITORY" \
+      gh pr view "$PR_NUMBER" \
+        --repo "$EXPR_GITHUB_REPOSITORY" \
+        --json number,title,body,headRefName,headRefOid,baseRefOid,additions,deletions,changedFiles,files \
+        > /tmp/gh-aw/agent/pr-meta.json
+      HEAD_SHA=$(jq -er '.headRefOid' /tmp/gh-aw/agent/pr-meta.json)
+      BASE_SHA=$(jq -er '.baseRefOid' /tmp/gh-aw/agent/pr-meta.json)
+      if [ -n "$CURRENT_HEAD_SHA" ] && [ "$HEAD_SHA" != "$CURRENT_HEAD_SHA" ]; then
+        echo "::error::PR head changed before prefetch; refusing to cache mismatched data."
+        exit 1
+      fi
+      CURRENT_HEAD_SHA="$HEAD_SHA"
+
+      if ! gh pr diff "$PR_NUMBER" --repo "$EXPR_GITHUB_REPOSITORY" \
           --exclude '**/*.lock.yml' \
           --exclude 'scripts/ado-script/*.js' \
           --exclude 'scripts/ado-script/test-bin/**' \
@@ -116,17 +128,30 @@ pre-agent-steps:
           --exclude '**/*.gen.json' \
           --exclude '**/dist/**' \
           --exclude 'Cargo.lock' \
+          > /tmp/gh-aw/agent/pr-diff.patch 2>/tmp/gh-aw/agent/pr-diff-error.txt; then
+        if ! grep -q 'diff exceeded the maximum number of lines' /tmp/gh-aw/agent/pr-diff-error.txt; then
+          cat /tmp/gh-aw/agent/pr-diff-error.txt >&2
+          exit 1
+        fi
+        [[ "$HEAD_SHA" =~ ^[a-fA-F0-9]{40}$ && "$BASE_SHA" =~ ^[a-fA-F0-9]{40}$ ]]
+        echo "::warning::PR exceeds GitHub's diff API limit; generating the full filtered diff from pinned Git objects."
+        OBJECTS=$(mktemp -d)
+        trap 'rm -rf -- "$OBJECTS"' EXIT
+        git init --bare --quiet "$OBJECTS"
+        AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+          GIT_CONFIG_VALUE_0="Authorization: Basic $AUTH" \
+          git --git-dir="$OBJECTS" -c credential.helper= -c http.followRedirects=false \
+          fetch --quiet --no-tags "${GITHUB_SERVER_URL}/${EXPR_GITHUB_REPOSITORY}.git" "$BASE_SHA" "$HEAD_SHA"
+        unset AUTH
+        git --git-dir="$OBJECTS" -c core.quotePath=false diff --no-ext-diff --no-textconv "$BASE_SHA...$HEAD_SHA" -- \
+          . ':(glob,exclude)**/*.lock.yml' ':(glob,exclude)scripts/ado-script/*.js' \
+          ':(glob,exclude)scripts/ado-script/test-bin/**' ':(glob,exclude)**/*.gen.ts' \
+          ':(glob,exclude)**/*.gen.json' ':(glob,exclude)**/dist/**' ':(exclude)Cargo.lock' \
           > /tmp/gh-aw/agent/pr-diff.patch
-      LINES=$(wc -l < /tmp/gh-aw/agent/pr-diff.patch)
-
-      gh pr view "$PR_NUMBER" \
-        --repo "$EXPR_GITHUB_REPOSITORY" \
-        --json number,title,body,headRefName,headRefOid,additions,deletions,changedFiles,files \
-        > /tmp/gh-aw/agent/pr-meta.json
-
-      if [ -z "$CURRENT_HEAD_SHA" ]; then
-        CURRENT_HEAD_SHA="$(jq -r '.headRefOid // empty' /tmp/gh-aw/agent/pr-meta.json)"
       fi
+      rm -f /tmp/gh-aw/agent/pr-diff-error.txt
+      LINES=$(wc -l < /tmp/gh-aw/agent/pr-diff.patch)
 
       gh api "repos/$EXPR_GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
         --paginate \

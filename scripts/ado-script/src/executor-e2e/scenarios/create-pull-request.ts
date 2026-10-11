@@ -3,9 +3,8 @@
  *
  * Stage 3's create-pull-request executor operates on a real git checkout on
  * disk: it reads a staged patch file, verifies its SHA-256, applies it via
- * `git apply --3way` on top of the target branch, and pushes a new source
- * branch + opens the PR via ADO REST using the recorded `base_commit` as the
- * parent.
+ * Git on the verified captured base, and pushes a new source branch + opens
+ * the PR via ADO REST using that same `base_commit` as the parent.
  *
  * We reproduce both supported checkout layouts deterministically (no LLM):
  *   - a named additional checkout at `<BUILD_SOURCESDIRECTORY>/<alias>`,
@@ -23,7 +22,7 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type {
@@ -34,7 +33,7 @@ import type {
 } from "../scenario.js";
 import { SkipError } from "../scenario.js";
 import { partialOutput } from "../execute-cli.js";
-import { detBody, numResult, strResult, Teardown } from "./common.js";
+import { defaultBranchShortName, detBody, numResult, strResult, Teardown } from "./common.js";
 import {
   crossOrgSource,
   resolveCrossOrgEnv,
@@ -42,6 +41,13 @@ import {
 } from "./cross-org.js";
 
 interface CreatePrState {
+  rejectedWithoutSource?: boolean;
+  ownedTarget?: string;
+  expectedFile?: string;
+  expectedBlob?: string;
+  expectedMode?: string;
+  originalFile?: string;
+  omittedCopy?: string;
   repo: string;
   sourceBranch: string;
   targetBranch: string;
@@ -66,6 +72,8 @@ interface CreatePrScenarioOptions {
   readonly repositorySelector: "named" | "self" | "cross-org";
   readonly patchRelPath: string;
   readonly changedFileSuffix?: string;
+  readonly patchMode?: "native-copy" | "native-rename" | "excluded-copy" | "crlf" | "binary" | "expansion-denied"
+    | "space-edit" | "space-rename-edit" | "mode-up-denied" | "mode-down-denied" | "mode-new-denied" | "mode-rename-denied" | "mode-edit";
 }
 
 const CREATE_PR_TEMPORARY_ID = "#aw_prcreate";
@@ -84,6 +92,7 @@ interface AddReviewersScenarioOptions {
   readonly patchRelPath: string;
   readonly changedFileSuffix: string;
   readonly submit: "configured-reviewer" | "resolved-id";
+  readonly configureOnCreate?: boolean;
 }
 
 export function resolveExecutorE2eReviewer(
@@ -149,7 +158,7 @@ function runGit(
   });
 }
 
-async function git(
+export async function git(
   ctx: ScenarioContext,
   args: string[],
   cwd: string,
@@ -165,9 +174,76 @@ async function git(
   return res.stdout;
 }
 
+export async function seedExecutableFixture(
+  ctx: ScenarioContext, repo: string, branch: string, checkout: string, path: string,
+  head: string, header: string, scenarioId: string,
+): Promise<string> {
+  if (repo !== ctx.adoRepo || !branch.startsWith(ctx.prefix("")) ||
+    await ctx.rest.getRefObjectId(repo, `heads/${branch}`) !== head) {
+    throw new Error("Executable fixture must use its unchanged owned branch");
+  }
+  await git(ctx, ["config", "core.filemode", "false"], checkout, header, scenarioId);
+  await git(ctx, ["update-index", "--chmod=+x", "--", path], checkout, header, scenarioId);
+  const tree = (await git(ctx, ["write-tree"], checkout, header, scenarioId)).trim();
+  const commit = (await git(ctx, ["-c", "user.name=ADO Fixture", "-c", "user.email=fixture@ado-aw",
+    "-c", "commit.gpgSign=false", "commit-tree", tree, "-p", head, "-m", "Disposable executable fixture"],
+    checkout, header, scenarioId)).trim();
+  await git(ctx, ["-c", "core.hooksPath=/dev/null", "-c", "http.followRedirects=false",
+    "-c", "push.followTags=false", "push", "--porcelain", "origin", `${commit}:refs/heads/${branch}`],
+    checkout, header, scenarioId);
+  if (await ctx.rest.getRefObjectId(repo, `heads/${branch}`) !== commit) {
+    throw new Error("Executable fixture push was not confirmed");
+  }
+  await git(ctx, ["update-ref", "HEAD", commit, head], checkout, header, scenarioId);
+  return commit;
+}
+
+function fixturePath(ctx: ScenarioContext, options: CreatePrScenarioOptions): string {
+  return `ado-aw-det/${ctx.buildId}/${options.patchMode?.startsWith("space-") ? "space dir/" : ""}${options.id}-seed.txt`;
+}
+
 async function setupCreatePullRequest(
   ctx: ScenarioContext,
   options: CreatePrScenarioOptions,
+): Promise<CreatePrState> {
+  if (!options.patchMode) return setupCreatePullRequestCheckout(ctx, options);
+  if (options.repositorySelector !== "named") throw new Error("Native patch fixtures require the existing primary ADO repo");
+  const target = `${ctx.prefix(options.id)}-target`;
+  if (await ctx.rest.getRefObjectId(ctx.adoRepo, `heads/${target}`)) {
+    throw new Error(`Disposable patch target already exists: ${target}`);
+  }
+  const branch = await defaultBranchShortName(ctx, ctx.adoRepo);
+  const sha = await ctx.rest.getRefObjectId(ctx.adoRepo, `heads/${branch}`);
+  if (!sha) throw new Error("Patch fixture base is unavailable");
+  const original = fixturePath(ctx, options);
+  try {
+    await ctx.rest.pushAddFileBranch(ctx.adoRepo, target, sha, `/${original}`,
+      options.patchMode === "expansion-denied" ? "x".repeat(429_575) :
+        `${detBody(ctx, options.id)} seed\n`.repeat(options.patchMode?.startsWith("space-") ? 20 : 1),
+      "Disposable native patch target");
+  } catch (error) {
+    throw new Error(`Target creation could not be confirmed; inspect owned ref refs/heads/${target}`, { cause: error });
+  }
+  try {
+    const state = await setupCreatePullRequestCheckout(ctx, options, target);
+    state.ownedTarget = target;
+    return state;
+  } catch (error) {
+    try {
+      await new Teardown()
+        .add("delete target", () => ctx.rest.deleteRef(ctx.adoRepo, `refs/heads/${target}`))
+        .add("remove local checkout", () => rm(join(ctx.workDir, options.id, "src-checkout"), { recursive: true, force: true }))
+        .run();
+    }
+    catch (cleanup) { throw new AggregateError([error, cleanup], `Patch setup and target cleanup failed: ${target}`); }
+    throw error;
+  }
+}
+
+async function setupCreatePullRequestCheckout(
+  ctx: ScenarioContext,
+  options: CreatePrScenarioOptions,
+  targetOverride?: string,
 ): Promise<CreatePrState> {
   const crossOrg =
     options.repositorySelector === "cross-org"
@@ -192,14 +268,15 @@ async function setupCreatePullRequest(
 
   const cloneUrl = `${orgUrl.replace(/\/+$/, "")}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repo)}`;
   ctx.log(`[${options.id}] cloning ${repo}`);
-  await git(ctx, ["clone", cloneUrl, checkoutDir], sourcesDir, authHeader, options.id);
+  await git(ctx, ["clone", ...(targetOverride ? ["--branch", targetOverride] : []), cloneUrl, checkoutDir],
+    sourcesDir, authHeader, options.id);
 
   // Determine the default branch and its HEAD (the patch base commit).
   // `symbolic-ref refs/remotes/origin/HEAD` exits non-zero (not empty) when
   // the remote HEAD symref isn't configured, which git() turns into a throw.
   // Catch that and fall back to "main" so the `|| "main"` isn't dead code.
-  let targetBranch = "main";
-  try {
+  let targetBranch = targetOverride ?? "main";
+  if (!targetOverride) try {
     const symref = await git(
       ctx,
       ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -211,7 +288,7 @@ async function setupCreatePullRequest(
   } catch {
     ctx.log(`[${options.id}] origin/HEAD symref not set; defaulting target branch to 'main'`);
   }
-  const baseCommit = (
+  let baseCommit = (
     await git(ctx, ["rev-parse", "HEAD"], checkoutDir, authHeader, options.id)
   ).trim();
 
@@ -220,25 +297,71 @@ async function setupCreatePullRequest(
   // The buildId-scoped path is assumed untracked: `git add -N` on an
   // already-tracked path is a no-op, so `git diff` would be empty and setup
   // would (cleanly) fail with "generated patch is empty".
-  const relFile = `ado-aw-det/${ctx.buildId}${options.changedFileSuffix ?? ""}.md`;
+  const originalFile = options.patchMode ? fixturePath(ctx, options) : undefined;
+  if (originalFile && ["mode-down-denied", "mode-rename-denied", "mode-edit"].includes(options.patchMode ?? "")) {
+    baseCommit = await seedExecutableFixture(ctx, repo, targetBranch, checkoutDir, originalFile, baseCommit, authHeader, options.id);
+  }
+  const relFile = originalFile && ["space-edit", "mode-up-denied", "mode-down-denied", "mode-edit"].includes(options.patchMode ?? "")
+    ? originalFile : `ado-aw-det/${ctx.buildId}${options.changedFileSuffix ?? ""}${options.patchMode === "space-rename-edit" ? " renamed guide" : ""}.md`;
   const absFile = join(checkoutDir, relFile);
   await mkdir(join(absFile, ".."), { recursive: true });
-  await writeFile(absFile, `${detBody(ctx, options.id)}\n`, "utf8");
-  await git(ctx, ["add", "-N", relFile], checkoutDir, authHeader, options.id);
-  const patchContent = await git(
-    ctx,
-    ["diff", "--", relFile],
-    checkoutDir,
-    authHeader,
-    options.id,
-  );
+  let omittedCopy: string | undefined;
+  let expectedBlob: string | undefined;
+  let expectedMode: string | undefined;
+  let patchContent: string;
+  if (options.patchMode === "expansion-denied") {
+    patchContent = Array.from({ length: 99 }, (_, index) =>
+      `diff --git a/${originalFile} b/expanded-${index}.txt\nsimilarity index 100%\ncopy from ${originalFile}\ncopy to expanded-${index}.txt\n`).join("");
+  } else if (options.patchMode) {
+    if (!originalFile) throw new Error("Native fixture source is missing");
+    if (options.patchMode === "crlf") await git(ctx, ["config", "core.autocrlf", "true"], checkoutDir, authHeader, options.id);
+    if (options.patchMode === "native-copy") await copyFile(join(checkoutDir, originalFile), absFile);
+    else if (["native-rename", "space-rename-edit", "mode-rename-denied"].includes(options.patchMode)) {
+      await rename(join(checkoutDir, originalFile), absFile);
+      if (options.patchMode === "space-rename-edit") {
+        await writeFile(absFile, `${`${detBody(ctx, options.id)} seed\n`.repeat(20)}additional line\n`);
+      }
+    }
+    else if (options.patchMode === "binary") await writeFile(absFile, Buffer.from([0, 255, 128, 10]));
+    else if (!["mode-up-denied", "mode-down-denied"].includes(options.patchMode)) await writeFile(absFile, options.patchMode === "excluded-copy"
+      ? "Independent retained content, not derived from the excluded seed.\n".repeat(20)
+      : `${detBody(ctx, options.id)}\n`, "utf8");
+    if (options.patchMode === "excluded-copy") {
+      omittedCopy = `${relFile}.excluded`;
+      await copyFile(join(checkoutDir, originalFile), join(checkoutDir, omittedCopy));
+    }
+    await git(ctx, ["add", "-A"], checkoutDir, authHeader, options.id);
+    if (options.patchMode.startsWith("mode-") && options.patchMode !== "mode-edit") {
+      await git(ctx, ["update-index", options.patchMode === "mode-down-denied" ? "--chmod=-x" : "--chmod=+x", "--", relFile],
+        checkoutDir, authHeader, options.id);
+    }
+    expectedBlob = (await git(ctx, ["rev-parse", `:${relFile}`], checkoutDir, authHeader, options.id)).trim();
+    expectedMode = (await git(ctx, ["--literal-pathspecs", "ls-files", "--stage", "--", relFile], checkoutDir, authHeader, options.id)).split(" ")[0];
+    patchContent = await git(ctx, ["diff", "--cached", "--binary", "--full-index", "--find-renames",
+      "--find-copies", "--find-copies-harder", baseCommit, "--"], checkoutDir, authHeader, options.id);
+    if ((options.patchMode === "native-copy" || options.patchMode === "excluded-copy") && !patchContent.includes("copy from ")) {
+      throw new Error("Native create fixture did not contain copy metadata");
+    }
+    if (["native-rename", "space-rename-edit"].includes(options.patchMode) && !patchContent.includes("rename from ")) {
+      throw new Error("Native create fixture did not contain rename metadata");
+    }
+  } else {
+    await writeFile(absFile, `${detBody(ctx, options.id)}\n`, "utf8");
+    await git(ctx, ["add", "-N", relFile], checkoutDir, authHeader, options.id);
+    patchContent = await git(ctx, ["diff", "--", relFile], checkoutDir, authHeader, options.id);
+  }
   if (!patchContent.trim()) throw new Error("generated patch is empty");
   // Reset the intent-to-add so the checkout stays clean.
-  await git(ctx, ["reset", "--", relFile], checkoutDir, authHeader, options.id);
+  await git(ctx, ["reset", "--", ...(options.patchMode ? [] : [relFile])], checkoutDir, authHeader, options.id);
 
   const patchSha256 = createHash("sha256").update(patchContent, "utf8").digest("hex");
 
   return {
+    expectedFile: options.patchMode ? relFile : undefined,
+    expectedBlob,
+    expectedMode,
+    originalFile,
+    omittedCopy,
     repo,
     sourceBranch: ctx.prefix(options.id),
     targetBranch,
@@ -270,8 +393,19 @@ function createPullRequestScenario(
       "delete-source-branch": true,
       "if-no-changes": "error",
       "include-stats": false,
+      ...(options.patchMode === "excluded-copy" ? { "excluded-files": [`${options.id}-seed.txt`] } : {}),
     }),
     setup: (ctx) => setupCreatePullRequest(ctx, options),
+    ...(options.patchMode?.endsWith("-denied") ? {
+      expectedFailure: { error: options.patchMode === "expansion-denied" ? /pre-application expansion/ : /file-mode change/ },
+    } : {}),
+    assertFailure: async (_ctx, state) => {
+      if (await state.rest.getRefObjectId(state.repo, `heads/${state.sourceBranch}`) ||
+        await state.rest.getRefObjectId(state.repo, `heads/${state.targetBranch}`) !== state.baseCommit) {
+        throw new Error("Rejected creation changed remote refs");
+      }
+      state.rejectedWithoutSource = true;
+    },
     source: async (_ctx, state) =>
       state.crossOrg ? crossOrgSource(state.crossOrg) : {},
     files: async (_ctx, state) => ({ [state.patchRelPath]: state.patchContent }),
@@ -319,8 +453,53 @@ function createPullRequestScenario(
       if (pr.status === "abandoned") throw new Error(`PR #${prId} is abandoned`);
       const sha = await state.rest.getRefObjectId(state.repo, `heads/${state.sourceBranch}`);
       if (!sha) throw new Error(`source branch '${state.sourceBranch}' was not pushed`);
+      if (state.expectedFile && state.expectedBlob) {
+        const header = "Basic " + Buffer.from(`:${state.executorToken}`).toString("base64");
+        await git(ctx, ["fetch", "origin", state.sourceBranch], state.checkoutDir, header, options.id);
+        const blob = (await git(ctx, ["rev-parse", `FETCH_HEAD:${state.expectedFile}`], state.checkoutDir, header, options.id)).trim();
+        if (blob !== state.expectedBlob) throw new Error("Created PR does not preserve exact proposed Git blob bytes");
+        const mode = (await git(ctx, ["--literal-pathspecs", "ls-tree", "FETCH_HEAD", "--", state.expectedFile],
+          state.checkoutDir, header, options.id)).split(" ")[0];
+        if (mode !== state.expectedMode) throw new Error("Created PR does not preserve the expected tree-entry mode");
+        const parent = (await git(ctx, ["rev-parse", "FETCH_HEAD^"], state.checkoutDir, header, options.id)).trim();
+        if (parent !== state.baseCommit) throw new Error("Created PR uses a different parent from its validated patch base");
+        const files = (await git(ctx, ["ls-tree", "-r", "--name-only", "FETCH_HEAD"], state.checkoutDir, header, options.id)).trim().split("\n");
+        if (["native-rename", "space-rename-edit"].includes(options.patchMode ?? "") && state.originalFile && files.includes(state.originalFile)) {
+          throw new Error("Created PR retained a renamed source");
+        }
+        if (state.omittedCopy && (files.includes(state.omittedCopy) || !Array.isArray(record.result?.omitted_operations)
+          || record.result.omitted_operations.length !== 1)) {
+          throw new Error("Creation did not omit and report the excluded native copy");
+        }
+      }
     },
     cleanup: async (ctx, state) => {
+      if (state.ownedTarget) {
+        await new Teardown().add("clean owned PR and refs", async () => {
+          if (state.rejectedWithoutSource) {
+            await state.rest.deleteRef(state.repo, `refs/heads/${state.ownedTarget}`);
+            return;
+          }
+          if (state.prId === undefined) {
+            throw new Error(`PR creation is unconfirmed; retaining source ${state.sourceBranch} and target ${state.ownedTarget}`);
+          }
+          const pr = await state.rest.getPullRequest(state.repo, state.prId);
+          if (pr.sourceRefName !== `refs/heads/${state.sourceBranch}` ||
+            pr.targetRefName !== `refs/heads/${state.ownedTarget}` ||
+            pr.title !== `${ctx.prefix(options.id)} (do not merge)`) {
+            throw new Error("Cannot establish owned native-fixture PR identity");
+          }
+          await state.rest.abandonPullRequest(state.repo, state.prId);
+          if ((await state.rest.getPullRequest(state.repo, state.prId)).status !== "abandoned") {
+            throw new Error("Fixture PR abandonment is unconfirmed; retaining both refs");
+          }
+          await new Teardown()
+            .add("delete source", () => state.rest.deleteRef(state.repo, `refs/heads/${state.sourceBranch}`))
+            .add("delete target", () => state.rest.deleteRef(state.repo, `refs/heads/${state.ownedTarget}`))
+            .run();
+        }).add("remove local checkout", () => rm(state.sourcesDir, { recursive: true, force: true })).run();
+        return;
+      }
       // Attempt each cleanup independently so an early failure never skips the
       // rest — otherwise a throwing abandonPullRequest would leak the source
       // branch and the local checkout dir.
@@ -420,14 +599,14 @@ async function cleanupTemporaryPrHandoff(
 }
 
 /**
- * Runs create-pull-request and update-pr in one executor process. This is the
+ * Runs create-pull-request and content editing in one executor process. This is the
  * production handoff shape: the create result registers the real PR under a
  * temporary ID, then the following update resolves that ID without the model
  * ever knowing Azure DevOps' numeric PR ID.
  */
 export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
   id: "create-pull-request-temporary-id-handoff",
-  tool: "update-pr",
+  tool: "update-pull-request",
   targetsAdoRepo: true,
   setup: (ctx) =>
     setupCreatePullRequest(ctx, {
@@ -437,7 +616,8 @@ export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
       changedFileSuffix: "-temporary-id-handoff",
     }),
   config: (_ctx, state) => ({
-    "allowed-operations": ["update-description"],
+    target: "*",
+    "include-stats": false,
     "allowed-repositories": [state.repo],
     max: 1,
   }),
@@ -470,8 +650,7 @@ export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
   }),
   ndjson: async (ctx) => ({
     pull_request_id: HANDOFF_TEMPORARY_ID,
-    operation: "update-description",
-    description: `${detBody(ctx, "create-pull-request-temporary-id-handoff")} Updated through temporary ID.`,
+    body: `${detBody(ctx, "create-pull-request-temporary-id-handoff")} Updated through temporary ID.`,
   }),
   assert: async (ctx, state, record, records) => {
     const created = executedRecordForTool(records, "create-pull-request");
@@ -511,7 +690,7 @@ function createPullRequestAddReviewersScenario(
 
   return {
     id: options.id,
-    tool: "update-pr",
+    tool: "add-pull-request-reviewers",
     targetsAdoRepo: true,
     setup: async (ctx) => {
       const reviewer = resolveExecutorE2eReviewer();
@@ -540,7 +719,7 @@ function createPullRequestAddReviewersScenario(
       return { ...state, reviewer, reviewerId };
     },
     config: (_ctx, state) => ({
-      "allowed-operations": ["add-reviewers"],
+      target: "*",
       "allowed-repositories": [state.repo],
       "allowed-reviewers": [submittedReviewer(state)],
       "max-reviewers": 1,
@@ -555,6 +734,7 @@ function createPullRequestAddReviewersScenario(
           "delete-source-branch": true,
           "if-no-changes": "error",
           "include-stats": false,
+          ...(options.configureOnCreate ? { reviewers: [state.reviewerId, state.reviewerId.toUpperCase()] } : {}),
         },
         entry: {
           title: `${ctx.prefix(options.id)} (do not merge)`,
@@ -577,7 +757,6 @@ function createPullRequestAddReviewersScenario(
     }),
     ndjson: async (_ctx, state) => ({
       pull_request_id: options.temporaryId,
-      operation: "add-reviewers",
       reviewers: [submittedReviewer(state)],
     }),
     assert: async (_ctx, state, record, records) => {
@@ -597,14 +776,14 @@ function createPullRequestAddReviewersScenario(
         );
       }
       if (strResult(record, "operation") !== "add-reviewers") {
-        throw new Error("update-pr reported an unexpected operation");
+        throw new Error("add-pull-request-reviewers reported an unexpected operation");
       }
       const failed = stringArrayResult(record, "failed");
       if (failed.length !== 0) {
         throw new Error(`add-reviewers reported failures: ${failed.join(", ")}`);
       }
       const expectedAdded = submittedReviewer(state);
-      const added = stringArrayResult(record, "added");
+      const added = stringArrayResult(record, options.configureOnCreate ? "already_present" : "added");
       if (
         !added.some(
           (reviewer) =>
@@ -614,6 +793,18 @@ function createPullRequestAddReviewersScenario(
         throw new Error(
           `add-reviewers result did not include submitted identity '${expectedAdded}'`,
         );
+      }
+      if (options.configureOnCreate) {
+        const changes = created.result?.reviewers;
+        if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
+          throw new Error("Creation did not report configured reviewer changes");
+        }
+        const summary = changes as Record<string, unknown>;
+        if (JSON.stringify(summary.added) !== JSON.stringify([state.reviewerId]) ||
+          JSON.stringify(summary.already_present) !== JSON.stringify([state.reviewerId.toUpperCase()]) ||
+          JSON.stringify(summary.failed) !== "[]" || JSON.stringify(record.result?.added) !== "[]") {
+          throw new Error("Creation/follow-up did not report repeated configured membership correctly");
+        }
       }
 
       const reviewers = await state.rest.listReviewers(state.repo, createdPrId);
@@ -661,9 +852,27 @@ export const createPullRequestAddReviewersGeneral =
 
 export const createPullRequestScenarios: Scenario<unknown>[] = [
   createPullRequest,
+  ...(["native-copy", "native-rename", "excluded-copy", "crlf", "binary", "expansion-denied",
+    "space-edit", "space-rename-edit", "mode-up-denied", "mode-down-denied", "mode-new-denied", "mode-rename-denied", "mode-edit"] as const).map((patchMode) =>
+    createPullRequestScenario({
+      id: `create-pull-request-${patchMode}`,
+      repositorySelector: "named",
+      patchRelPath: `create-pr-${patchMode}.patch`,
+      changedFileSuffix: `-${patchMode}`,
+      patchMode,
+    }),
+  ),
   createPullRequestSelfMultiCheckout,
   createPullRequestCrossOrg,
   createPullRequestTemporaryIdHandoff,
   createPullRequestAddReviewers,
   createPullRequestAddReviewersGeneral,
+  createPullRequestAddReviewersScenario({
+    id: "create-pull-request-configured-reviewers",
+    temporaryId: "#aw_prconfig",
+    patchRelPath: "create-pr-configured-reviewers.patch",
+    changedFileSuffix: "-configured-reviewers",
+    submit: "resolved-id",
+    configureOnCreate: true,
+  }),
 ];

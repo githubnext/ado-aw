@@ -16,6 +16,7 @@ import { COMPILER_SOURCES, type CompilerSource } from "./cases.js";
 
 /** Per-run candidate branch prefix (never the base ref). */
 export const CANDIDATE_BRANCH_PREFIX = "ado-aw-smoke-candidate";
+export const BOUNDARY_TARGET_BRANCH_PREFIX = "ado-aw-smoke-boundary-target";
 
 export const DEFAULT_CONCURRENCY = 5;
 export const MIN_CONCURRENCY = 1;
@@ -194,4 +195,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SmokeConfig {
  */
 export function candidateRef(buildId: number, caseId: string): string {
   return `refs/heads/${CANDIDATE_BRANCH_PREFIX}/${buildId}/${caseId}`;
+}
+
+export function boundaryTargetRef(buildId: number, caseId: string): string {
+  return `refs/heads/${BOUNDARY_TARGET_BRANCH_PREFIX}/${buildId}/${caseId}`;
+}
+
+export function boundaryMarker(buildId: number, caseId: string): string {
+  return `ado-aw-boundary-original-${buildId}-${caseId}`;
 }

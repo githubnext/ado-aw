@@ -11,9 +11,8 @@
  * terminal. Note that (c) is NOT by itself proof the orchestration it
  * started is done — an abruptly canceled/killed parent process can reach a
  * terminal ADO build status while the fixture builds it queued are still
- * running. The scanner therefore also queries each configured lane
- * definition on the ref's exact branch (see
- * `listBuildsForDefinitionBranch`) and inspects their statuses directly;
+ * running. The scanner therefore queries all definitions on the source's
+ * exact branch and inspects their statuses directly;
  * only when every child build found there is ALSO terminal (or none exist)
  * is a ref considered `"eligible"` for deletion. Any active child, or any
  * error looking one up, marks the ref `"active"`/`"ambiguous"` instead.
@@ -25,13 +24,15 @@
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import { parseCandidateRef, type RemoteRef } from "./git.js";
+import { parseBoundaryTargetRef, parseCandidateRef, type RemoteRef } from "./git.js";
+import { boundaryTargetRef, candidateRef } from "./config.js";
 
 export type StaleRefOutcome = "eligible" | "too-recent" | "active" | "ambiguous";
 
 export interface StaleRefDecision {
   ref: string;
   sha: string;
+  sourceRef: string;
   outcome: StaleRefOutcome;
   reason: string;
 }
@@ -46,8 +47,7 @@ export interface StaleScanBuild {
 
 export interface StaleScanClient {
   getBuild(buildId: number): Promise<StaleScanBuild>;
-  /** List builds of `definitionId` on the exact candidate `branch` (see {@link AdoRest.listBuildsForDefinitionBranch}). */
-  listBuildsForDefinitionBranch(definitionId: number, branch: string): Promise<StaleScanBuild[]>;
+  listBuildsForBranch(branch: string): Promise<StaleScanBuild[]>;
 }
 
 export interface ScanStaleRefsOptions {
@@ -58,17 +58,10 @@ export interface ScanStaleRefsOptions {
   ownRef: string;
   /** This orchestrator pipeline's own definition id (SYSTEM_DEFINITIONID). */
   definitionId: number;
-  /**
-   * Every fixed fixture ("child") pipeline definition id the orchestrator
-   * queues builds against. An orchestrator run completing (even abruptly,
-   * e.g. cancelled) does NOT prove these have also finished — they are
-   * independently queued builds. A candidate ref is only ever eligible for
-   * deletion once none of these definitions has a still-active build on
-   * that ref's exact branch.
-   */
-  laneDefinitionIds: readonly number[];
   staleRefHours: number;
   client: StaleScanClient;
+  /** Must validate exact repository, source/target and test-marker ownership. */
+  boundaryPrForSource?: (sourceRef: string) => Promise<{ targetRefName: string } | undefined>;
   /** Injectable clock for deterministic tests. */
   now?: () => number;
 }
@@ -88,11 +81,18 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
   for (const { ref, sha } of opts.refs) {
     if (ref === opts.baseRef || ref === opts.ownRef) continue;
 
-    const parsed = parseCandidateRef(ref);
+    const target = parseBoundaryTargetRef(ref);
+    const parsed = target ?? parseCandidateRef(ref);
+    const explicitSource = parsed && opts.refs.some((entry) =>
+      entry.ref === boundaryTargetRef(parsed.buildId, parsed.caseId));
+    const legacyTarget = !target && !explicitSource && parsed?.caseId.endsWith("-target");
+    const sourceRef = target ? candidateRef(target.buildId, target.caseId)
+      : legacyTarget ? ref.slice(0, -"-target".length) : ref;
     if (parsed === undefined) {
       decisions.push({
         ref,
         sha,
+        sourceRef,
         outcome: "ambiguous",
         reason: "ref name does not match the expected <prefix>/<buildId>/<caseId> pattern",
       });
@@ -107,6 +107,7 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
       decisions.push({
         ref,
         sha,
+        sourceRef,
         outcome: "ambiguous",
         reason: `orchestrator build #${buildId} lookup failed: ${
           err instanceof Error ? err.message : String(err)
@@ -119,6 +120,7 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
       decisions.push({
         ref,
         sha,
+        sourceRef,
         outcome: "ambiguous",
         reason: `build #${buildId} belongs to definition ${build.definition?.id ?? "?"}, not this orchestrator's own definition ${opts.definitionId}`,
       });
@@ -129,6 +131,7 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
       decisions.push({
         ref,
         sha,
+        sourceRef,
         outcome: "active",
         reason: `orchestrator build #${buildId} is still ${build.status ?? "in an unknown state"}`,
       });
@@ -140,6 +143,7 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
       decisions.push({
         ref,
         sha,
+        sourceRef,
         outcome: "ambiguous",
         reason: `orchestrator build #${buildId} is completed but has no usable finishTime/queueTime`,
       });
@@ -151,39 +155,57 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
       decisions.push({
         ref,
         sha,
+        sourceRef,
         outcome: "too-recent",
         reason: `orchestrator build #${buildId} finished ${Math.round(ageMs / 3_600_000)}h ago, below the ${opts.staleRefHours}h threshold`,
       });
       continue;
     }
 
+    if (legacyTarget) {
+      // Group an ambiguous legacy suffix with its possible source for retention,
+      // never as proof of ownership or permission to delete.
+      try {
+        const pr = await opts.boundaryPrForSource?.(sourceRef);
+        if (pr?.targetRefName !== ref) {
+          decisions.push({ ref, sha, sourceRef, outcome: "ambiguous",
+            reason: "legacy -target suffix has no corroborating boundary PR identity" });
+          continue;
+        }
+      } catch (error) {
+        decisions.push({ ref, sha, sourceRef, outcome: "ambiguous",
+          reason: `legacy boundary ownership lookup failed: ${error instanceof Error ? error.message : String(error)}` });
+        continue;
+      }
+    }
     // The orchestrator's own run is old enough and terminal, but that alone
     // does not prove the fixture ("child") builds it queued on this
     // exact branch have also finished — an abruptly cancelled orchestrator
     // run can "complete" while its queued children keep running. Check
-    // every fixed child definition on this exact branch before declaring
+    // every child definition on this exact branch before declaring
     // the ref deletable; any lookup failure or non-completed child build
     // fails closed.
     let childLookupError: string | undefined;
     let activeLaneDefinitionId: number | undefined;
-    for (const laneDefinitionId of opts.laneDefinitionIds) {
-      let childBuilds: StaleScanBuild[];
-      try {
-        childBuilds = await opts.client.listBuildsForDefinitionBranch(laneDefinitionId, ref);
-      } catch (err) {
-        childLookupError = `lane definition ${laneDefinitionId} build lookup on ${ref} failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`;
-        break;
-      }
-      if (childBuilds.some((b) => b.status !== "completed")) {
-        activeLaneDefinitionId = laneDefinitionId;
-        break;
-      }
+    for (const branch of new Set([sourceRef, ref])) {
+        let childBuilds: StaleScanBuild[];
+        try {
+          childBuilds = await opts.client.listBuildsForBranch(branch);
+        } catch (err) {
+          childLookupError = `child build lookup on ${branch} failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`;
+          break;
+        }
+        const active = childBuilds.find((b) => b.status !== "completed");
+        if (active) {
+          activeLaneDefinitionId = active.definition?.id ?? 0;
+          break;
+        }
     }
 
     if (childLookupError) {
-      decisions.push({ ref, sha, outcome: "ambiguous", reason: childLookupError });
+      decisions.push({ ref, sha, sourceRef, outcome: "ambiguous", reason: childLookupError });
       continue;
     }
 
@@ -191,8 +213,9 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
       decisions.push({
         ref,
         sha,
+        sourceRef,
         outcome: "active",
-        reason: `lane definition ${activeLaneDefinitionId} still has a non-completed build on ${ref}`,
+        reason: `lane definition ${activeLaneDefinitionId} still has a non-completed build in the group for ${sourceRef}`,
       });
       continue;
     }
@@ -200,8 +223,9 @@ export async function scanStaleRefs(opts: ScanStaleRefsOptions): Promise<StaleRe
     decisions.push({
       ref,
       sha,
+      sourceRef,
       outcome: "eligible",
-      reason: `orchestrator build #${buildId} completed ${Math.round(ageMs / 3_600_000)}h ago and no lane build is active on ${ref}`,
+      reason: `orchestrator build #${buildId} completed ${Math.round(ageMs / 3_600_000)}h ago and no lane build is active in the group for ${sourceRef}`,
     });
   }
 

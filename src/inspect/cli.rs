@@ -294,6 +294,23 @@ pub async fn build_lint(source: &Path) -> Result<lint::LintReport> {
 
     let mut findings = lint::lint(&summary);
     findings.extend(lint::lint_front_matter_tasks(&front_matter)?);
+    let content = tokio::fs::read_to_string(source).await?;
+    let parsed = crate::compile::parse_markdown_detailed(&content)?;
+    let prefix = content.len().saturating_sub(parsed.body_raw.len());
+    let offset = content[..prefix].lines().count().saturating_sub(1);
+    for line in crate::compile::pr_migration::deprecated_pr_prompt_lines(&parsed.body_raw) {
+        findings.push(lint::LintFinding {
+            severity: lint::LintSeverity::Warning,
+            code: "deprecated-tool-reference".to_string(),
+            message: format!(
+                "{}:{}: {}",
+                source.display(),
+                offset + line,
+                crate::compile::pr_migration::PR_PROMPT_GUIDANCE
+            ),
+            location: None,
+        });
+    }
     Ok(lint::report_from_findings(findings))
 }
 

@@ -64,6 +64,20 @@ locally and `git` is added to its bash allow-list automatically.
 
 ## Front-matter surface
 
+### Triggering PR identity for safe outputs
+
+Safe outputs configured with `target: triggering` require the actual triggering
+collection/organization, repository, and PR ID as one trusted identity. Native
+PR validation uses build metadata; synthetic PR runs use the PR selected by the
+trusted Setup resolver. The compiler carries that identity to the approval
+preview and both automatic/reviewed SafeOutputs jobs.
+
+This identity is separate from the compiler-owned `self` repository and from a
+fork's source URI. A matching numeric ID alone does not authorize a different
+repository's PR. Missing or malformed identity fails closed when a
+triggering-target output is executed; fixed targets do not require a trigger.
+Normal repository allowlists and write permissions still apply.
+
 ```yaml
 execution-context:
   enabled: true       # master switch; defaults to true

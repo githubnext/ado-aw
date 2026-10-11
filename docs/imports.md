@@ -209,6 +209,7 @@ Only these imported fields are applied:
 | `permissions-required` | Boolean OR of abstract `read` / `write` requirements |
 | `safe-outputs.jobs` | Custom job names are unique across consumer and imports; duplicates fail |
 | Built-in `safe-outputs` keys | Duplicates across imports fail; consumer configuration replaces imported built-in configuration |
+| `safe-outputs.budget-groups` | Merge by group name; duplicate names across imports fail, and a consumer replaces only the same-named group |
 | `runtimes` | Consumer fields override imported fields; earlier imports fill remaining fields |
 | `env` | Duplicate keys across imports fail; consumer overrides |
 | `repos` | Consumer entries first, then imported entries, deduplicated by alias/name. An import can therefore add a `resources.repositories` entry, including one that references an `endpoint:` service connection — review the compiled `.lock.yml` diff |
@@ -242,6 +243,40 @@ import declares them:
 concrete `permissions`, `variable-groups`, `parameters`, `setup`, `teardown`,
 `execution-context`, `supply-chain`, `ado-aw-debug`, and `inlined-imports`.
 Other unsupported imported fields are also warned and ignored.
+
+### Deprecated PR built-ins
+
+PR tool migrations run in memory after `import-schema` input substitution.
+Old and canonical spellings identify the same built-in during merging: a
+consumer `add-pull-request-comment` with `max: 1` replaces an imported
+`add-pr-comment` with `max: 5`, and vice versa. Two imports declaring those
+spellings still conflict. Declaring both spellings in one manifest is also an
+error, even if a consumer would replace that declaration.
+
+A consumer `update-pr` replaces the **entire** imported legacy declaration,
+not only its overlapping operations. Its migrated children retain
+`legacy-update-pr` metadata and the `update-pr` budget group, so recompiling
+the automatically rewritten consumer does not restore excluded imported
+operations. Current child restrictions remain authoritative; the compiler
+does not rebuild children from stale metadata. Inconsistent family metadata
+or missing/mismatched budget members require an explicit manual correction.
+Unrelated imported budget groups retain their own limits.
+
+Only the winning legacy policy is migrated and validated. An overridden
+component default does not cause an invalid-vote error; an invalid effective
+policy does. Custom job ownership is determined across all manifests first:
+neither names under `safe-outputs.jobs` nor their top-level policy keys are
+renamed or split. A custom name colliding with a canonical built-in remains
+an error.
+
+Imported local files and SHA-cached manifests are never rewritten by these
+migrations. Only locally authored root declarations are rewritten, after a
+successful compilation, with the root's markdown body preserved byte for
+byte. Imported prompt text is preserved too; stale PR-tool references report
+the component origin and body line for manual correction. `compile`, `check`,
+`inspect`, and lint tools use the same effective policy. Read-only commands
+never apply source rewrites; `check` still requires `compile` when the root
+itself has a pending migration.
 
 ## `permissions-required`
 

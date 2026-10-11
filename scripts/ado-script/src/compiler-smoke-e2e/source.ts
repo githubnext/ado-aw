@@ -79,6 +79,7 @@ function parseFrontMatter(yamlText: string): Document {
 export function prepareCaseSource(
   markdown: string,
   values: PipelineArtifactValues | undefined,
+  prBoundary?: "automatic" | "rejected" | "approved",
 ): string {
   const { yamlText, body } = splitFrontMatter(markdown);
   const doc = parseFrontMatter(yamlText);
@@ -112,9 +113,18 @@ export function prepareCaseSource(
   // The orchestrator owns scheduling and queueing for every case, so no staged
   // case may carry a trigger of any kind.
   doc.delete("on");
+  if (prBoundary) {
+    doc.set("on", doc.createNode({ push: "none", pr: { mode: "synthetic" } }));
+    if (prBoundary !== "automatic") {
+      doc.setIn(["safe-outputs", "update-pull-request", "require-approval"], doc.createNode({
+        "timeout-minutes": prBoundary === "rejected" ? 1 : 60,
+        "on-timeout": "reject",
+        "instructions": "Test-only PR update. Approve only the on-demand approved-path case.",
+      }));
+    }
+  }
 
   const rendered = doc.toString({ lineWidth: 0 });
   const frontMatter = rendered.endsWith("\n") ? rendered : `${rendered}\n`;
   return `---\n${frontMatter}---\n${body}`;
 }
-
