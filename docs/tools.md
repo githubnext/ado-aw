@@ -30,6 +30,17 @@ tools:
   bash: []
 ```
 
+Each allow-list entry becomes a Copilot CLI `--allow-tool "shell(<cmd>)"`
+rule. Copilot CLI parses some commands as *stem* commands: a command name
+followed by subcommands, such as `git`, `npm`, `pip`, `dotnet`, `cargo`,
+`curl`, and `wget`. For those, a bare rule would permit only the command with
+no arguments, so the compiler emits `shell(<cmd>:*)` instead, permitting every
+subcommand. The list mirrors gh-aw's and lives in
+`COPILOT_STEM_COMMANDS` (`src/engine.rs`).
+
+To allow only one subcommand of a stem command, write it out, for example
+`"git diff"`. Entries containing `:` or a space are passed through unchanged.
+
 ### Disabling File Writes
 
 By default, the `edit` tool (file writing) is enabled. To disable it:

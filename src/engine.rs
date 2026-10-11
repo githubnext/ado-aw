@@ -530,10 +530,38 @@ fn collect_allowed_tools(
                 cmd
             );
         }
-        allowed_tools.push(format!("shell({})", cmd));
+        allowed_tools.push(copilot_shell_rule(&cmd));
     }
 
     Ok(allowed_tools)
+}
+
+/// Commands Copilot CLI parses as *stem* commands: a command name followed by
+/// subcommands, matched by its tree-sitter shell parser.
+///
+/// For these, `shell(npm)` only permits a bare `npm` with no arguments, so
+/// `npm install` is refused with `denied-no-approval-rule` (observed in a live
+/// AgentPlayground run and reproduced locally). `shell(npm:*)` permits every
+/// invocation. Mirrors gh-aw's `CopilotStemCommands`
+/// (`pkg/constants/engine_constants.go`); keep the two in sync.
+pub(crate) const COPILOT_STEM_COMMANDS: &[&str] = &[
+    "git", "gh", "glab", "npm", "npx", "yarn", "pnpm", "cargo", "go", "composer", "pip",
+    "pipenv", "poetry", "conda", "mvn", "gradle", "gradlew", "dotnet", "bundle", "swift", "sbt",
+    "flutter", "mix", "cabal", "stack", "curl", "wget",
+];
+
+/// The Copilot CLI `--allow-tool` rule for one `tools.bash` entry.
+///
+/// A bare stem command gains `:*` so every subcommand and argument is
+/// permitted. Entries that already carry a `:` (explicit matching) or a space
+/// (the author named a subcommand) are passed through unchanged, as are
+/// non-stem commands, which Copilot CLI already prefix-matches.
+fn copilot_shell_rule(cmd: &str) -> String {
+    if !cmd.contains(':') && !cmd.contains(' ') && COPILOT_STEM_COMMANDS.contains(&cmd) {
+        format!("shell({cmd}:*)")
+    } else {
+        format!("shell({cmd})")
+    }
 }
 
 /// Returns `true` when an MCP server config has a real backing server (container
@@ -1393,6 +1421,54 @@ mod tests {
     #[test]
     fn copilot_engine_command() {
         assert_eq!(Engine::Copilot.command(), "copilot");
+    }
+
+    #[test]
+    fn stem_commands_allow_every_subcommand() {
+        for (cmd, rule) in [
+            ("npm", "shell(npm:*)"),
+            ("dotnet", "shell(dotnet:*)"),
+            ("pip", "shell(pip:*)"),
+            ("git", "shell(git:*)"),
+            ("curl", "shell(curl:*)"),
+            // Explicit matching and named subcommands pass through unchanged.
+            ("npm:*", "shell(npm:*)"),
+            ("git diff", "shell(git diff)"),
+            // Non-stem commands are already prefix-matched.
+            ("node", "shell(node)"),
+            ("az", "shell(az)"),
+            ("pip3", "shell(pip3)"),
+            ("uv", "shell(uv)"),
+        ] {
+            assert_eq!(super::copilot_shell_rule(cmd), rule, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn runtime_package_managers_get_stem_rules() {
+        let (front_matter, _) = parse_markdown(
+            "---\nname: test\ndescription: test\ntools:\n  bash: [cat]\nruntimes:\n  node: true\n  \
+             python: true\n  dotnet: true\n---\n",
+        )
+        .unwrap();
+        let params = Engine::Copilot
+            .args(&front_matter, &declarations_for(&front_matter))
+            .unwrap();
+        for rule in [
+            "shell(npm:*)",
+            "shell(npx:*)",
+            "shell(pip:*)",
+            "shell(dotnet:*)",
+            "shell(node)",
+            "shell(pip3)",
+            "shell(uv)",
+            "shell(cat)",
+        ] {
+            assert!(params.contains(&format!("\"{rule}\"")), "{rule} missing: {params}");
+        }
+        for bare in ["\"shell(npm)\"", "\"shell(pip)\"", "\"shell(dotnet)\""] {
+            assert!(!params.contains(bare), "{bare} would deny every subcommand: {params}");
+        }
     }
 
     #[test]

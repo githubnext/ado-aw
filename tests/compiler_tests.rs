@@ -7702,7 +7702,9 @@ Body.
     // Each of these should appear as a `shell(...)` entry in the
     // agent's --allow-tool list.
     for cmd in [
-        "shell(git)",
+        // `git` is a Copilot CLI stem command: a bare rule would permit only
+        // `git` with no arguments, so it is emitted with `:*`.
+        "shell(git:*)",
         "shell(git diff)",
         "shell(git log)",
         "shell(git show)",
