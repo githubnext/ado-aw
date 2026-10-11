@@ -12,9 +12,6 @@ tools:
     - printenv
     - head
     - ls
-  # `edit` stays enabled (the default): it grants Copilot CLI path
-  # access, without which package managers cannot write their caches or
-  # /tmp and every npm, pip, and dotnet command is refused.
 runtimes:
   node:
     feed: smoke

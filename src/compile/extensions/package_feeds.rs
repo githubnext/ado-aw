@@ -34,11 +34,7 @@ use crate::shell_script;
 /// Package-manager entry points the wrapper is installed under.
 pub const WRAPPED_TOOLS: &[&str] = &["npm", "npx", "pip", "pip3", "uv", "dotnet", "cargo"];
 
-/// File name of the shared wrapper. Each tool name gets its own regular-file
-/// copy of it, never a symlink: Copilot CLI resolves a command's executable
-/// before matching it against `--allow-tool "shell(npm)"`, so a symlink to
-/// this file would be matched as `.ado-aw-package-wrapper` and refused
-/// (observed live).
+/// File name of the shared wrapper; each tool name is a symlink to it.
 const WRAPPER_FILE: &str = ".ado-aw-package-wrapper";
 
 /// File name of the Cargo token helper inside [`PACKAGE_WRAPPER_DIR`].
@@ -146,12 +142,11 @@ printf '%s\n' "$SENTINEL"
 }
 
 shell_script! {
-    /// Install the package-manager wrapper as one regular file per tool name.
+    /// Install the package-manager wrapper and one symlink per tool name.
     ///
     /// The wrapper and helper texts are spliced as fragments because they are
     /// complete scripts, not values; both heredoc delimiters are quoted so the
-    /// installing shell performs no expansion. Copies, not symlinks: see
-    /// [`WRAPPER_FILE`].
+    /// installing shell performs no expansion.
     INSTALL_PACKAGE_WRAPPERS {
         interpreter: Bash,
         bindings: [WRAPPER_DIR, WRAPPER_PATH, CARGO_TOKEN_PATH, TOOLS],
@@ -170,10 +165,7 @@ ADO_AW_CARGO_TOKEN_EOF
 chmod 755 "$CARGO_TOKEN_PATH"
 # shellcheck disable=SC2086 # TOOLS is Binding::words; unquoted expansion is the documented word-list contract.
 for TOOL in $TOOLS; do
-  # Remove first: `cp` onto an existing symlink would write through it.
-  rm -f "$WRAPPER_DIR/$TOOL"
-  cp "$WRAPPER_PATH" "$WRAPPER_DIR/$TOOL"
-  chmod 755 "$WRAPPER_DIR/$TOOL"
+  ln -sf "$WRAPPER_PATH" "$WRAPPER_DIR/$TOOL"
 done
 echo "package-manager wrappers installed in $WRAPPER_DIR"
 "#,
@@ -284,30 +276,11 @@ impl CompilerExtension for PackageFeedsExtension {
         ExtensionPhase::Tool
     }
 
-    fn declarations(&self, ctx: &CompileContext) -> anyhow::Result<Declarations> {
-        let mut warnings = Vec::new();
-        let edit_disabled = ctx
-            .front_matter
-            .tools
-            .as_ref()
-            .and_then(|tools| tools.edit)
-            == Some(false);
-        if edit_disabled {
-            // Observed live: without `--allow-all-paths` Copilot CLI refuses
-            // every npm, pip, and dotnet invocation non-interactively.
-            warnings.push(
-                "permissions.packages is configured but tools.edit is false. Without edit, \
-                 Copilot CLI runs without path permissions and refuses package-manager \
-                 commands, which write caches and temporary files outside the workspace. \
-                 Leave tools.edit enabled for workflows that restore packages."
-                    .to_string(),
-            );
-        }
+    fn declarations(&self, _ctx: &CompileContext) -> anyhow::Result<Declarations> {
         Ok(Declarations {
             agent_prepare_steps: vec![Step::Bash(install_wrappers_step())],
             awf_path_prepends: vec![PACKAGE_WRAPPER_DIR.to_string()],
             prompt_supplement: Some(prompt_supplement(&self.config)),
-            warnings,
             ..Declarations::default()
         })
     }
@@ -344,8 +317,7 @@ mod tests {
         for tool in WRAPPED_TOOLS {
             assert!(step.script.contains(tool), "{tool} missing: {}", step.script);
         }
-        assert!(step.script.contains("cp \"$WRAPPER_PATH\" \"$WRAPPER_DIR/$TOOL\""));
-        assert!(!step.script.contains("ln -s"), "wrappers must be regular files");
+        assert!(step.script.contains("ln -sf \"$WRAPPER_PATH\" \"$WRAPPER_DIR/$TOOL\""));
         assert!(step.script.contains(ADO_MCP_TOKEN_SENTINEL));
     }
 
@@ -365,21 +337,5 @@ mod tests {
         let prompt = decl.prompt_supplement.unwrap();
         assert!(prompt.contains("Feed `internal` (current organization, project `Eng`, view `Release` only): `npm`, `cargo`"), "{prompt}");
         assert!(prompt.contains("`cargo`"));
-        assert!(decl.warnings.is_empty(), "{:?}", decl.warnings);
-    }
-
-    #[test]
-    fn warns_when_edit_is_disabled() {
-        let config = packages("    feeds:\n      - feed: internal\n        upstream: allow\n        protocols: [npm]\n");
-        let fm = crate::compile::parse_markdown(
-            "---\nname: t\ndescription: x\ntools:\n  edit: false\n---\n",
-        )
-        .unwrap()
-        .0;
-        let decl = PackageFeedsExtension::new(config)
-            .declarations(&CompileContext::for_test(&fm))
-            .unwrap();
-        assert_eq!(decl.warnings.len(), 1);
-        assert!(decl.warnings[0].contains("tools.edit is false"), "{:?}", decl.warnings);
     }
 }
