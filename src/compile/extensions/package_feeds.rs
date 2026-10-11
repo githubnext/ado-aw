@@ -99,8 +99,13 @@ case "$TOOL" in
     export npm_config_audit
     ;;
   pip|pip3)
+    # Recent pip verifies through `truststore` (the system trust store), which
+    # does not honour PIP_CERT; on Linux it reads OpenSSL's default paths, so
+    # SSL_CERT_FILE is what takes effect. PIP_CERT covers pip's legacy-certs mode.
     PIP_CERT="$CA_BUNDLE_PATH"
     export PIP_CERT
+    SSL_CERT_FILE="$CA_BUNDLE_PATH"
+    export SSL_CERT_FILE
     ;;
   uv|dotnet)
     SSL_CERT_FILE="$CA_BUNDLE_PATH"
@@ -306,6 +311,12 @@ mod tests {
         assert!(wrapper.contains(&format!("ENGINE_HOST='{ADO_PROXY_CONTAINER_NAME}'")));
         assert!(wrapper.contains(&format!("ENGINE_PORT={ADO_PROXY_LISTEN_PORT}")));
         assert!(wrapper.contains("exec \"$REAL\" \"$@\""));
+        // pip's default truststore context ignores PIP_CERT; SSL_CERT_FILE is
+        // what makes it trust the engine CA (observed live).
+        let pip = &wrapper[wrapper.find("pip|pip3)").unwrap()..];
+        let pip = &pip[..pip.find(";;").unwrap()];
+        assert!(pip.contains("PIP_CERT=\"$CA_BUNDLE_PATH\""), "{pip}");
+        assert!(pip.contains("SSL_CERT_FILE=\"$CA_BUNDLE_PATH\""), "{pip}");
         for forbidden in ["SYSTEM_ACCESSTOKEN", "SC_PACKAGES_TOKEN", "System.AccessToken"] {
             assert!(!wrapper.contains(forbidden), "{forbidden} leaked into wrapper");
         }
