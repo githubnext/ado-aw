@@ -121,7 +121,8 @@ credential from the agent.
 |---|---|
 | `npm`, `npx` | `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS=<proxy CA>`, `npm_config_audit=false` |
 | `pip`, `pip3` | `HTTPS_PROXY`, `PIP_CERT` and `SSL_CERT_FILE` `=<system roots + proxy CA>`. Recent pip verifies through `truststore`, which ignores `PIP_CERT` but honours `SSL_CERT_FILE`. |
-| `uv`, `dotnet` | `HTTPS_PROXY`, `SSL_CERT_FILE=<system roots + proxy CA>` |
+| `uv` | `HTTPS_PROXY`, `SSL_CERT_FILE=<system roots + proxy CA>` |
+| `dotnet` | `HTTPS_PROXY`, `SSL_CERT_FILE=<system roots + proxy CA>`, and `http_proxy`/`HTTP_PROXY` set to the engine, because NuGet takes its proxy from `http_proxy` even for HTTPS feeds |
 | `cargo` | `HTTPS_PROXY`, `CARGO_HTTP_PROXY`, `CARGO_HTTP_CAINFO=<system roots + proxy CA>`, and a credential provider that prints a non-secret placeholder token |
 
 The CA bundle contains public certificates only. The proxy CA's private key

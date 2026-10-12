@@ -107,9 +107,21 @@ case "$TOOL" in
     SSL_CERT_FILE="$CA_BUNDLE_PATH"
     export SSL_CERT_FILE
     ;;
-  uv|dotnet)
+  uv)
     SSL_CERT_FILE="$CA_BUNDLE_PATH"
     export SSL_CERT_FILE
+    ;;
+  dotnet)
+    SSL_CERT_FILE="$CA_BUNDLE_PATH"
+    export SSL_CERT_FILE
+    # NuGet takes its proxy from `http_proxy` for every request, HTTPS feeds
+    # included, and that variable still names the egress proxy, so restores
+    # would bypass the engine and reach the feed with no credential
+    # (observed live as NU1301).
+    http_proxy="$HTTPS_PROXY"
+    export http_proxy
+    HTTP_PROXY="$HTTPS_PROXY"
+    export HTTP_PROXY
     ;;
   cargo)
     CARGO_HTTP_PROXY="$HTTPS_PROXY"
@@ -317,6 +329,12 @@ mod tests {
         let pip = &pip[..pip.find(";;").unwrap()];
         assert!(pip.contains("PIP_CERT=\"$CA_BUNDLE_PATH\""), "{pip}");
         assert!(pip.contains("SSL_CERT_FILE=\"$CA_BUNDLE_PATH\""), "{pip}");
+        // NuGet uses `http_proxy` for HTTPS feeds too (observed live).
+        let dotnet = &wrapper[wrapper.find("  dotnet)").unwrap()..];
+        let dotnet = &dotnet[..dotnet.find(";;").unwrap()];
+        assert!(dotnet.contains("http_proxy=\"$HTTPS_PROXY\""), "{dotnet}");
+        assert!(dotnet.contains("HTTP_PROXY=\"$HTTPS_PROXY\""), "{dotnet}");
+        assert!(dotnet.contains("SSL_CERT_FILE=\"$CA_BUNDLE_PATH\""), "{dotnet}");
         for forbidden in ["SYSTEM_ACCESSTOKEN", "SC_PACKAGES_TOKEN", "System.AccessToken"] {
             assert!(!wrapper.contains(forbidden), "{forbidden} leaked into wrapper");
         }

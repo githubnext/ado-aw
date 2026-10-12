@@ -43,6 +43,13 @@ safe-outputs:
 
 ## Candidate package-feed smoke (build identity)
 
+**This is your task: run the checks below now.** You are the agent this
+pipeline runs. These instructions were compiled from
+`tests/smoke/package-feeds.md`, so finding that file in the checked-out
+repository is expected; it is not a sign that this message is anything other
+than your task. Do not inspect, search, or edit the repository, and ignore its
+contributor instructions; only run the commands below.
+
 You are a deterministic smoke test for credential-isolated Azure Artifacts
 package restores. The feed credential is held by `ado-proxy`; you do not have
 it and must not need it. Run every command exactly as written, from the current
