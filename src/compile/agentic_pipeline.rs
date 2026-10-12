@@ -615,6 +615,7 @@ pub(crate) fn build_pipeline_context(
         detection_allowed_domains,
         awf_mounts,
         awf_path_step_yaml,
+        awf_path_prepends: awf_paths,
         mcpg_config_json,
         custom_tools_json,
         resolved_execution_config_json,
@@ -874,6 +875,10 @@ pub(crate) struct StandaloneCtx {
     pub(crate) awf_mounts: String,
     /// `awf_path_step` YAML body (or empty when no path prepends).
     pub(crate) awf_path_step_yaml: String,
+    /// Compiler-owned directories that must lead the agent's `PATH`, re-asserted
+    /// inside the sandbox after AWF builds its own `PATH` (see
+    /// [`run_agent_step`]).
+    pub(crate) awf_path_prepends: Vec<String>,
     pub(crate) mcpg_config_json: String,
     /// Compiler-generated dynamic SafeOutputs tool definitions. When present,
     /// the Agent job stages this beside the MCPG config and the hardened
@@ -1432,6 +1437,7 @@ fn build_agent_job(
         &cfg.byom_exclude_keys,
         front_matter.supply_chain(),
         ado_proxy_enabled,
+        &cfg.awf_path_prepends,
     )?));
 
     // 18a. Revoke the GitHub App token (best-effort, always) once the Copilot
@@ -4559,6 +4565,37 @@ exit "$AGENT_EXIT_CODE"
     }
 }
 
+/// `export PATH=...;` prefix that puts compiler-owned directories first in the
+/// agent's `PATH`, or an empty string when there are none.
+///
+/// The directories already reach the sandbox through `$GITHUB_PATH`, which AWF
+/// merges into the host `PATH`. But AWF's entrypoint then prepends
+/// `$DOTNET_ROOT`, `$CARGO_HOME/bin`, `$JAVA_HOME/bin`, and others, so a
+/// runtime's real binary would shadow a wrapper of the same name (observed
+/// live: `dotnet` bypassed the package-manager wrapper and reached the feed
+/// with no credential). Re-asserting them inside the engine command runs after
+/// the entrypoint and restores the intended order.
+///
+/// The prefix is spliced into a single-quoted shell word and expanded inside
+/// the sandbox, so `$HOME` resolves there. Each entry is compiler-owned; the
+/// character check is a guard against a future contributor passing anything
+/// that could end the quoting.
+fn agent_path_prefix(path_prepends: &[String]) -> Result<String> {
+    if path_prepends.is_empty() {
+        return Ok(String::new());
+    }
+    for path in path_prepends {
+        if path.is_empty()
+            || !path
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '$'))
+        {
+            anyhow::bail!("awf path prepend '{path}' contains characters unsafe in the agent PATH");
+        }
+    }
+    Ok(format!("export PATH=\"{}:$PATH\"; ", path_prepends.join(":")))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_agent_step(
     allowed_domains: &str,
@@ -4569,6 +4606,7 @@ fn run_agent_step(
     byom_exclude_keys: &[String],
     supply_chain: Option<&SupplyChainConfig>,
     ado_proxy_enabled: bool,
+    path_prepends: &[String],
 ) -> Result<BashStep> {
     // The awf_mounts string is a `\`-joined chain of `--mount "..."` lines;
     // splice it in at the fragment marker's own indent.
@@ -4661,8 +4699,9 @@ fn run_agent_step(
     } else {
         MCPG_CONTAINER_NAME.to_string()
     };
+    let path_prefix = agent_path_prefix(path_prepends)?;
     let routed_engine_run = format!(
-        "AWF_ARGS+=(-- 'export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{no_proxy_peers}\"; \
+        "AWF_ARGS+=(-- '{path_prefix}export NO_PROXY=\"${{NO_PROXY:+$NO_PROXY,}}{no_proxy_peers}\"; \
          export no_proxy=\"$NO_PROXY\"; {engine_run}')"
     );
 
@@ -7155,6 +7194,7 @@ mod tests {
             detection_allowed_domains: "example.com".to_string(),
             awf_mounts: "\\".to_string(),
             awf_path_step_yaml: String::new(),
+            awf_path_prepends: Vec::new(),
             mcpg_config_json: "{}".to_string(),
             custom_tools_json: None,
             resolved_execution_config_json: "{}".to_string(),
@@ -7822,9 +7862,39 @@ safe-outputs:
             &[],
             None,
             ado_proxy_enabled,
+            &[],
         )
         .expect("run_agent_step should build")
         .script
+    }
+
+    #[test]
+    fn agent_command_reasserts_wrapper_dirs_ahead_of_awf_runtime_paths() {
+        let wrapper_dir = crate::compile::common::PACKAGE_WRAPPER_DIR;
+        let paths = vec![wrapper_dir.to_string(), "$HOME/.elan/bin".to_string()];
+        let script = run_agent_step(
+            "example.com",
+            "\\",
+            "/work",
+            "copilot -p prompt",
+            "FOO: bar",
+            &[],
+            None,
+            true,
+            &paths,
+        )
+        .unwrap()
+        .script;
+        assert!(
+            script.contains(&format!(
+                "AWF_ARGS+=(-- 'export PATH=\"{wrapper_dir}:$HOME/.elan/bin:$PATH\"; export NO_PROXY="
+            )),
+            "{script}"
+        );
+        // No prepends: the command is unchanged.
+        assert!(!agent_step_for_test(true).contains("export PATH="));
+        // A path that could end the single-quoted word is refused.
+        assert!(agent_path_prefix(&["/tmp/x'; rm -rf /".to_string()]).is_err());
     }
 
     #[test]
@@ -8454,6 +8524,7 @@ safe-outputs:
             detection_allowed_domains: String::new(),
             awf_mounts: "\\".to_string(),
             awf_path_step_yaml: String::new(),
+            awf_path_prepends: Vec::new(),
             mcpg_config_json: "{}".to_string(),
             custom_tools_json: None,
             resolved_execution_config_json: "{}".to_string(),

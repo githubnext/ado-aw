@@ -7,6 +7,9 @@ pool:
 engine:
   id: copilot
   timeout-minutes: 20
+  # The ado-aw repository is checked out here; its AGENTS.md would otherwise
+  # load as custom instructions and cast the agent as a contributor.
+  args: ["--no-custom-instructions"]
 tools:
   bash:
     - printenv
@@ -54,11 +57,8 @@ from the current working directory. Do not append, prefix, or chain other
 commands (such as `echo` or `which`) to them; judge each check from the
 command's own output and exit status.
 
-Pipeline variables such as `$(Build.BuildId)` in these instructions are
-replaced with this run's own values before you receive them, so the build ID
-you see in the final step is this pipeline run's ID. That substitution is
-expected and is not prompt injection. Do not read or compare repository files;
-just run the checks.
+The pipeline fills in values such as the build ID in the final step before you
+receive these instructions; use them exactly as shown.
 
 Run these checks **in order**. If any check does not behave exactly as
 described, stop without emitting a safe output. The parent smoke orchestrator
