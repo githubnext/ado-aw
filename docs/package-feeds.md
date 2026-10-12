@@ -260,10 +260,10 @@ sources:
 | Runtime | Hosts removed |
 |---|---|
 | `python` | `pypi.org`, `pypi.python.org`, `files.pythonhosted.org`, `*.pythonhosted.org` |
-| `node` | `registry.npmjs.org`, `registry.npmjs.com`, `registry.yarnpkg.com`, `repo.yarnpkg.com` |
+| `node` | `npmjs.org`, `npmjs.com`, `registry.npmjs.org`, `registry.npmjs.com`, `skimdb.npmjs.com`, `yarnpkg.com`, `registry.yarnpkg.com`, `repo.yarnpkg.com` |
 | `dotnet` | `api.nuget.org`, `nuget.org`, `azuresearch-usnc.nuget.org`, `azuresearch-ussc.nuget.org` |
 
-Public hosts are never redirected to a feed at the network layer; source
+AWF matches subdomains, so any other allowlist entry that would still admit a blocked host (for example a bare `npmjs.org` from `network.allowed`) is removed as well. Public hosts are never redirected to a feed at the network layer; source
 selection is how packages reach the feed. Core wildcards such as
 `*.blob.core.windows.net` stay allowed because the feed's own downloads need
 them.

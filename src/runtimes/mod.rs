@@ -34,8 +34,12 @@ pub fn public_registry_hosts(protocol: PackageProtocol) -> &'static [&'static st
             "*.pythonhosted.org",
         ],
         PackageProtocol::Npm => &[
+            "npmjs.org",
+            "npmjs.com",
             "registry.npmjs.org",
             "registry.npmjs.com",
+            "skimdb.npmjs.com",
+            "yarnpkg.com",
             "registry.yarnpkg.com",
             "repo.yarnpkg.com",
         ],

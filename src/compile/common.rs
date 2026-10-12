@@ -4030,6 +4030,18 @@ fn add_user_network_hosts(user_hosts: &[String], hosts: &mut HashSet<String>) ->
 ///
 /// Ecosystem identifiers are expanded so that all domains in the ecosystem
 /// are removed in one call.
+/// Whether AWF allowlist `entry` admits `host`.
+///
+/// AWF matches subdomains: `github.com` admits `api.github.com`, and
+/// `*.github.com` admits any subdomain. `host` may itself be a `*.` pattern,
+/// in which case an entry for its base domain covers it. Deliberately errs
+/// towards "covers": callers use it to remove entries, never to add them.
+fn awf_entry_covers(entry: &str, host: &str) -> bool {
+    let entry = entry.strip_prefix("*.").unwrap_or(entry).to_ascii_lowercase();
+    let host = host.strip_prefix("*.").unwrap_or(host).to_ascii_lowercase();
+    host == entry || host.ends_with(&format!(".{entry}"))
+}
+
 fn remove_blocked_network_hosts(blocked_hosts: &[String], hosts: &mut HashSet<String>) {
     for blocked in blocked_hosts {
         if is_ecosystem_identifier(blocked) {
@@ -4141,9 +4153,16 @@ pub fn generate_allowed_domains_for_engine(
     // `runtimes.<x>.public-registry: block` removes that ecosystem's public
     // package registry hosts last, so neither an extension nor `network.allowed`
     // can re-add them. The agent can then only restore through granted feeds.
-    for host in crate::runtimes::blocked_public_registry_hosts(front_matter) {
-        hosts.remove(host);
-    }
+    //
+    // AWF matches subdomains, so an entry such as `npmjs.org` still admits
+    // `registry.npmjs.org` after the exact host is removed (observed live).
+    // Remove every entry that would cover a blocked host, not just the host.
+    let blocked_registry_hosts = crate::runtimes::blocked_public_registry_hosts(front_matter);
+    hosts.retain(|entry| {
+        !blocked_registry_hosts
+            .iter()
+            .any(|blocked| awf_entry_covers(entry, blocked))
+    });
 
     // Sort for deterministic output
     let mut allowlist: Vec<String> = hosts.into_iter().collect();
@@ -4466,6 +4485,54 @@ mod tests {
             err.contains("pool.demands requires `pool.name`") && err.contains("default 1ES pool"),
             "err: {err}"
         );
+    }
+
+    #[test]
+    fn awf_entry_covers_follows_subdomain_matching() {
+        assert!(awf_entry_covers("npmjs.org", "registry.npmjs.org"));
+        assert!(awf_entry_covers("registry.npmjs.org", "registry.npmjs.org"));
+        assert!(awf_entry_covers("*.pythonhosted.org", "files.pythonhosted.org"));
+        assert!(awf_entry_covers("pythonhosted.org", "*.pythonhosted.org"));
+        assert!(awf_entry_covers("NuGet.org", "api.nuget.org"));
+        assert!(!awf_entry_covers("www.npmjs.com", "registry.npmjs.com"));
+        assert!(!awf_entry_covers("evilnpmjs.org", "registry.npmjs.org"));
+        assert!(!awf_entry_covers("registry.npmjs.org", "npmjs.org"));
+    }
+
+    /// Live run 647446: `npmjs.org` stayed in the allowlist and admitted
+    /// `registry.npmjs.org`. No remaining entry may cover a blocked host.
+    #[test]
+    fn public_registry_block_leaves_no_covering_allowlist_entry() {
+        let (fm, _) = parse_markdown(
+            "---\nname: t\ndescription: x\nnetwork:\n  allowed: [npmjs.org, pythonhosted.org]\n\
+             runtimes:\n  node:\n    public-registry: block\n  python:\n    public-registry: block\n  \
+             dotnet:\n    public-registry: block\n---\n",
+        )
+        .unwrap();
+        let extensions = super::super::extensions::collect_extensions(&fm);
+        let ctx = super::super::extensions::CompileContext::for_test(&fm);
+        let declarations: Vec<_> = extensions
+            .iter()
+            .map(|ext| ext.declarations(&ctx).unwrap())
+            .collect();
+        let allowlist = generate_allowed_domains(&fm, &extensions, &declarations).unwrap();
+        let entries: Vec<&str> = allowlist.split(',').collect();
+
+        for protocol in [
+            crate::compile::types::PackageProtocol::Npm,
+            crate::compile::types::PackageProtocol::Pypi,
+            crate::compile::types::PackageProtocol::Nuget,
+        ] {
+            for blocked in crate::runtimes::public_registry_hosts(protocol) {
+                let covering: Vec<&&str> =
+                    entries.iter().filter(|entry| awf_entry_covers(entry, blocked)).collect();
+                assert!(covering.is_empty(), "{blocked} still admitted by {covering:?}");
+            }
+        }
+        // Package feeds and toolchain downloads stay reachable.
+        for kept in ["pkgs.dev.azure.com", "nodejs.org", "dotnet.microsoft.com"] {
+            assert!(entries.contains(&kept), "{kept} missing: {allowlist}");
+        }
     }
 
     #[test]
