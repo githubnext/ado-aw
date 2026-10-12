@@ -72,9 +72,7 @@ use super::common::{
     HEADER_MARKER, MCPG_CONTAINER_NAME, MCPG_DOMAIN, MCPG_IMAGE, MCPG_PORT, MCPG_VERSION,
     image_ref,
 };
-use super::container_invocation::{
-    DockerMount, DockerRun, DockerTmpfs, ShellWord,
-};
+use super::container_invocation::{DockerMount, DockerRun, DockerTmpfs, ShellWord};
 use super::custom_tools::{CustomToolDefinition, collect_custom_tool_definitions};
 use super::extensions::ado_script as paths;
 use super::extensions::{CompileContext, CompilerExtension, Declarations, Extension, McpgConfig};
@@ -2329,9 +2327,7 @@ fn prepare_custom_agent_output_step(config_path: &str, output_path: &str) -> Bas
 fn agent_temp_filename(path: &str) -> String {
     let prefix = "$(Agent.TempDirectory)/";
     path.strip_prefix(prefix)
-        .unwrap_or_else(|| panic!(
-            "custom-tools config path {path:?} must start with {prefix:?}"
-        ))
+        .unwrap_or_else(|| panic!("custom-tools config path {path:?} must start with {prefix:?}"))
         .to_string()
 }
 
@@ -2502,6 +2498,178 @@ fn warn_create_pr_target_inference(front_matter: &FrontMatter) {
     }
 }
 
+/// Replicates the Agent job's multi-checkout layout into the SafeOutputs job
+/// when `create-pull-request` is configured and there are additional
+/// checked-out repos (issue #1731). Without these checkouts the additional
+/// repo directories don't exist in the SafeOutputs workspace, so
+/// `prepare-pr-base.js` and `ado-aw execute` fail. `self` uses the
+/// compiler-owned `s/self` path in this layout so neither a
+/// repository-resource trigger nor an additional alias can change where the
+/// executor finds the workflow source. Only emitted for the variant that
+/// actually runs `create-pull-request`; other variants (and split-approval
+/// auto-SafeOutputs) don't need them.
+fn push_safeoutputs_multi_checkout_steps(steps: &mut Vec<Step>, front_matter: &FrontMatter) {
+    for repo in &front_matter.checkout {
+        let fetch = front_matter
+            .checkout_fetch
+            .get(repo)
+            .cloned()
+            .unwrap_or_default();
+        steps.push(Step::Checkout(CheckoutStep {
+            repository: CheckoutRepo::Named(repo.clone()),
+            path: Some(format!("s/{repo}")),
+            clean: None,
+            submodules: None,
+            fetch_depth: fetch.depth_for_emit(),
+            fetch_tags: fetch.fetch_tags,
+            persist_credentials: None,
+        }));
+    }
+}
+
+/// Downloads the analyzed Stage-1 outputs artifact, then the compiler itself
+/// (feed-auth'd when a feed mirror is configured), adds it to `PATH`, and
+/// prepares the output staging directory. This is the common bootstrap every
+/// SafeOutputs variant needs before the executor can run.
+fn push_safeoutputs_compiler_bootstrap_steps(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+) {
+    steps.push(Step::Download(DownloadStep {
+        source: "current".to_string(),
+        artifact: "analyzed_outputs_$(Build.BuildId)".to_string(),
+        condition: None,
+    }));
+    // One NuGetAuthenticate@1 for the whole SafeOutputs job (feed mirror).
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
+    steps.push(Step::Bash(
+        ShellScript::new(&ADD_COMPILER_TO_PATH).into_step("Add agentic compiler to path"),
+    ));
+    steps.push(Step::Bash(
+        ShellScript::new(&PREPARE_OUTPUT_DIRECTORY)
+            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+            .into_step("Prepare output directory"),
+    ));
+}
+
+/// When `create-pull-request` is configured, fetches/deepens each target
+/// branch in THIS job's checkout, immediately before the executor runs (issue
+/// #1453). The prepare step also runs in the Agent job (for the containerized
+/// SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
+/// the Agent-job fetch is invisible here — the `create-pull-request` executor
+/// (`ado-aw execute`) builds its worktree from `origin/<target>` in the
+/// SafeOutputs checkout and needs the ref landed locally. Stages the
+/// ado-script bundle in this job (it is otherwise only staged in the
+/// Agent/Setup jobs), then emits the same `prepare-pr-base` step. The bundle
+/// auth projects `System.AccessToken` (the build identity the checkout
+/// persists credentials for), so the git fetch is authenticated regardless of
+/// the write token.
+fn push_safeoutputs_prepare_pr_base_steps(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+    layout: &SafeOutputsCheckoutLayout,
+    github_app_configured: bool,
+) {
+    if variant.runs_create_pull_request || github_app_configured {
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
+    }
+    if !variant.runs_create_pull_request {
+        return;
+    }
+    let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
+    let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+    if !local_repos.is_empty() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+            &local_repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ));
+    }
+    if !cross_org_repos.is_empty() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+            &cross_org_repos,
+            crate::compile::ado_bundle::TokenSource::WriteServiceConnection,
+        ));
+    }
+}
+
+/// Whether the `comment-on-github-issue` safe output needs the GitHub App
+/// actor login (used to skip hiding the actor's own prior comments).
+fn safeoutputs_github_actor_required(
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+) -> Result<bool> {
+    Ok(variant
+        .github_issue_tools
+        .iter()
+        .any(|tool| tool == "comment-on-github-issue")
+        && front_matter
+            .comment_on_github_issue_config()?
+            .is_some_and(|config| config.hide_older_comments))
+}
+
+/// Mints the GitHub App installation token (when a GitHub App is configured
+/// for this variant's tools) immediately before the executor step.
+fn push_safeoutputs_github_app_token_step(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+    github_app: Option<&crate::compile::types::GithubAppTokenConfig>,
+    github_actor_required: bool,
+) -> Result<()> {
+    let Some(app) = github_app else {
+        return Ok(());
+    };
+    let permissions = front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
+    let actor_output_var = github_actor_required
+        .then_some(crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR);
+    steps.push(
+        super::extensions::ado_script::github_app_token_step_typed_for(
+            app,
+            crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+            actor_output_var,
+            "Mint GitHub App token (SafeOutputs)",
+            &permissions,
+        )?,
+    );
+    Ok(())
+}
+
+/// Revokes the GitHub App installation token minted above, unless the app is
+/// configured to skip revocation.
+fn push_safeoutputs_github_app_token_revoke_step(
+    steps: &mut Vec<Step>,
+    github_app: Option<&crate::compile::types::GithubAppTokenConfig>,
+) -> Result<()> {
+    let Some(app) = github_app else {
+        return Ok(());
+    };
+    if app.skip_token_revocation {
+        return Ok(());
+    }
+    steps.push(
+        super::extensions::ado_script::github_app_token_revoke_step_typed_for(
+            app,
+            crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+            "Revoke GitHub App token (SafeOutputs)",
+        )?,
+    );
+    Ok(())
+}
+
 fn build_safeoutputs_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -2522,124 +2690,29 @@ fn build_safeoutputs_job(
         &cfg.self_checkout_fetch,
         layout.multi_checkout,
     ));
-    // When `create-pull-request` is configured and there are additional
-    // checked-out repos, the SafeOutputs job must replicate the Agent job's
-    // multi-checkout layout (issue #1731). Without these checkouts:
-    //   • The additional repo directories don't exist in the SafeOutputs
-    //     workspace, so `prepare-pr-base.js` and `ado-aw execute` fail.
-    // `self` uses the compiler-owned `s/self` path in this layout so neither a
-    // repository-resource trigger nor an additional alias can change where the
-    // executor finds the workflow source.
-    // Only emit these for the variant that actually runs `create-pull-request`;
-    // other variants (and split-approval auto-SafeOutputs) don't need them.
     if variant.runs_create_pull_request {
-        for repo in &front_matter.checkout {
-            let fetch = front_matter
-                .checkout_fetch
-                .get(repo)
-                .cloned()
-                .unwrap_or_default();
-            steps.push(Step::Checkout(CheckoutStep {
-                repository: CheckoutRepo::Named(repo.clone()),
-                path: Some(format!("s/{repo}")),
-                clean: None,
-                submodules: None,
-                fetch_depth: fetch.depth_for_emit(),
-                fetch_tags: fetch.fetch_tags,
-                persist_credentials: None,
-            }));
-        }
+        push_safeoutputs_multi_checkout_steps(&mut steps, front_matter);
     }
     // Acquire write token (when configured)
     if let Some(step) = &cfg.acquire_write_token {
         steps.push(step.clone());
     }
-    // Download analyzed outputs
-    steps.push(Step::Download(DownloadStep {
-        source: "current".to_string(),
-        artifact: "analyzed_outputs_$(Build.BuildId)".to_string(),
-        condition: None,
-    }));
-    // Download compiler
-    //    One NuGetAuthenticate@1 for the whole SafeOutputs job (feed mirror).
-    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
-        steps.push(auth);
-    }
-    steps.extend(download_compiler_step(
-        &cfg.compiler_version,
-        front_matter.supply_chain(),
-    ));
-    // Add compiler to path
-    steps.push(Step::Bash(
-        ShellScript::new(&ADD_COMPILER_TO_PATH).into_step("Add agentic compiler to path"),
-    ));
-    // Prepare output directory
-    steps.push(Step::Bash(
-        ShellScript::new(&PREPARE_OUTPUT_DIRECTORY)
-            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
-            .into_step("Prepare output directory"),
-    ));
-    // When `create-pull-request` is configured, fetch/deepen each target branch
-    // in THIS job's checkout, immediately before the executor runs (issue
-    // #1453). The prepare step also runs in the Agent job (for the containerized
-    // SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
-    // the Agent-job fetch is invisible here — the `create-pull-request` executor
-    // (`ado-aw execute`) builds its worktree from `origin/<target>` in the
-    // SafeOutputs checkout and needs the ref landed locally. Stage the ado-script
-    // bundle in this job (it is otherwise only staged in the Agent/Setup jobs),
-    // then emit the same `prepare-pr-base` step. The bundle auth projects
-    // `System.AccessToken` (the build identity the checkout persists credentials
-    // for), so the git fetch is authenticated regardless of the write token.
-    if variant.runs_create_pull_request || github_app.is_some() {
-        steps.extend(
-            super::extensions::ado_script::install_and_download_steps_typed(
-                front_matter.supply_chain(),
-            ),
-        );
-    }
-    if variant.runs_create_pull_request {
-        let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
-        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
-        if !local_repos.is_empty() {
-            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
-                &local_repos,
-                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
-            ));
-        }
-        if !cross_org_repos.is_empty() {
-            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
-                &cross_org_repos,
-                crate::compile::ado_bundle::TokenSource::WriteServiceConnection,
-            ));
-        }
-    }
-    let github_actor_required = variant
-        .github_issue_tools
-        .iter()
-        .any(|tool| tool == "comment-on-github-issue")
-        && front_matter
-            .comment_on_github_issue_config()?
-            .is_some_and(|config| config.hide_older_comments);
-    if let Some(app) = github_app {
-        let permissions =
-            front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
-        let actor_output_var = if github_actor_required {
-            Some(crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR)
-        } else {
-            None
-        };
-        steps.push(
-            super::extensions::ado_script::github_app_token_step_typed_for(
-                app,
-                crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
-                actor_output_var,
-                "Mint GitHub App token (SafeOutputs)",
-                &permissions,
-            )?,
-        );
-    }
+    push_safeoutputs_compiler_bootstrap_steps(&mut steps, front_matter, cfg);
+    push_safeoutputs_prepare_pr_base_steps(
+        &mut steps,
+        front_matter,
+        variant,
+        &layout,
+        github_app.is_some(),
+    );
+    let github_actor_required = safeoutputs_github_actor_required(front_matter, variant)?;
+    push_safeoutputs_github_app_token_step(
+        &mut steps,
+        front_matter,
+        variant,
+        github_app,
+        github_actor_required,
+    )?;
     let executor_ado_env = common::generate_executor_ado_env(
         front_matter
             .permissions
@@ -2663,17 +2736,7 @@ fn build_safeoutputs_job(
         &executor_ado_env,
         &variant.filter_args,
     )?));
-    if let Some(app) = github_app
-        && !app.skip_token_revocation
-    {
-        steps.push(
-            super::extensions::ado_script::github_app_token_revoke_step_typed_for(
-                app,
-                crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
-                "Revoke GitHub App token (SafeOutputs)",
-            )?,
-        );
-    }
+    push_safeoutputs_github_app_token_revoke_step(&mut steps, github_app)?;
     // Copy logs
     steps.push(Step::Bash(copy_logs_safeoutputs_step(&cfg.engine_log_dir)));
     // Publish
@@ -3234,20 +3297,15 @@ fn build_conclusion_job(
     // defaults (type: Task, no area/iteration path). The global
     // report-failure-as-work-item toggle controls whether it files at all.
     for tool_key in &["noop", "missing-tool", "missing-data"] {
-        conclusion_step =
-            apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
+        conclusion_step = apply_conclusion_tool_config_env(conclusion_step, front_matter, tool_key);
     }
 
     // Pass upstream job results via job-level variables hoist.
     // ADO only evaluates $[...] runtime expressions inside `variables:` and
     // `condition:` — NOT in step env blocks. We hoist to job variables and
     // reference them as $(name) macros in the step env.
-    let (conclusion_variables, conclusion_step) = hoist_conclusion_job_results(
-        conclusion_step,
-        prefix,
-        custom_defs,
-        has_reviewed_job,
-    )?;
+    let (conclusion_variables, conclusion_step) =
+        hoist_conclusion_job_results(conclusion_step, prefix, custom_defs, has_reviewed_job)?;
 
     steps.push(Step::Bash(conclusion_step));
 
@@ -3964,8 +4022,7 @@ fn prepare_mcpg_config_step(
          {mcpg_sentinel}"
     );
     let custom_tools_fragment = if let Some(custom_tools_json) = custom_tools_json {
-        let sentinel =
-            super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
+        let sentinel = super::common::heredoc_sentinel("CUSTOM_TOOLS_JSON_EOF", custom_tools_json)?;
         format!(
             "# Write compiler-generated dynamic SafeOutputs tool definitions\n\
              cat > \"$AGENT_TEMP/staging/custom-tools.json\" << '{sentinel}'\n\
@@ -4743,10 +4800,7 @@ fn execute_safe_outputs_step(
         // no part of it needs separate lowering.
         EnvValue::literal(self_repository_directory),
     );
-    script = script.with_env(
-        "ADO_AW_SELF_REPOSITORY_NAME",
-        self_repository_name.clone(),
-    );
+    script = script.with_env("ADO_AW_SELF_REPOSITORY_NAME", self_repository_name.clone());
     Ok(script)
 }
 
@@ -5183,10 +5237,7 @@ fn start_azure_wif_refresh_steps(front_matter: &FrontMatter) -> Result<Vec<Step>
             .bind_text("REFRESH_BUNDLE", paths::AZURE_WIF_REFRESH_PATH)
             .bind_text("CLIENT_VARIABLE", client_variable.as_str())
             .bind_text("TENANT_VARIABLE", tenant_variable.as_str())
-            .fragment(
-                "run_container",
-                azure_wif_refresh_container_invocation()?,
-            )
+            .fragment("run_container", azure_wif_refresh_container_invocation()?)
             .render();
         let task = AzureCliV3::new(
             AzureCliV3Connection::AzureRm(auth.service_connection.as_str().to_string()),
@@ -5321,23 +5372,14 @@ fn start_ado_proxy_step(front_matter: &FrontMatter) -> BashStep {
             Binding::text(ado_proxy_container_entrypoint_flattened()),
         )
         .fragment("resolve_org", common::resolve_ado_organization_bash())
-        .fragment(
-            "setup_workdir",
-            phase_body(&START_ADO_PROXY_SETUP_WORKDIR),
-        )
+        .fragment("setup_workdir", phase_body(&START_ADO_PROXY_SETUP_WORKDIR))
         .fragment("write_policy", phase_body(&START_ADO_PROXY_WRITE_POLICY))
-        .fragment(
-            "mint_material",
-            phase_body(&START_ADO_PROXY_MINT_MATERIAL),
-        )
+        .fragment("mint_material", phase_body(&START_ADO_PROXY_MINT_MATERIAL))
         .fragment(
             "build_material",
             phase_body(&START_ADO_PROXY_BUILD_MATERIAL),
         )
-        .fragment(
-            "run_container",
-            ado_proxy_run_container_phase(),
-        )
+        .fragment("run_container", ado_proxy_run_container_phase())
         .fragment(
             "handover_material",
             phase_body(&START_ADO_PROXY_HANDOVER_MATERIAL),
@@ -5379,8 +5421,7 @@ fn ado_proxy_run_container_phase() -> String {
 
 fn ado_proxy_container_invocation() -> DockerRun {
     DockerRun::new(
-        ShellWord::variable("PROXY_IMAGE")
-            .expect("compiler-owned shell variable must be valid"),
+        ShellWord::variable("PROXY_IMAGE").expect("compiler-owned shell variable must be valid"),
     )
     .detached()
     .name(
@@ -5388,8 +5429,7 @@ fn ado_proxy_container_invocation() -> DockerRun {
             .expect("compiler-owned shell variable must be valid"),
     )
     .network(
-        ShellWord::variable("PROXY_NETWORK")
-            .expect("compiler-owned shell variable must be valid"),
+        ShellWord::variable("PROXY_NETWORK").expect("compiler-owned shell variable must be valid"),
     )
     .entrypoint(ShellWord::literal("sh").expect("static entrypoint must be valid"))
     .mount(
@@ -5420,8 +5460,7 @@ fn ado_proxy_container_invocation() -> DockerRun {
     )
     .mount(
         DockerMount::read_write(
-            ShellWord::literal("/tmp/gh-aw/ado-proxy-logs")
-                .expect("static log path must be valid"),
+            ShellWord::literal("/tmp/gh-aw/ado-proxy-logs").expect("static log path must be valid"),
             "/var/log/ado-proxy",
         )
         .expect("static ado-proxy log mount must be valid"),
@@ -6681,7 +6720,10 @@ fn verify_mcp_backends_step() -> BashStep {
     ShellScript::new(&VERIFY_MCP_BACKENDS)
         .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
         .into_step("Verify MCP backends")
-        .with_env("MCPG_API_KEY", EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"))
+        .with_env(
+            "MCPG_API_KEY",
+            EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
+        )
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -7755,7 +7797,11 @@ safe-outputs:
             assert_eq!(keys, vec![client.as_str(), tenant.as_str()]);
         }
         let plain = test_front_matter("name: t\ndescription: d\n");
-        assert!(awf_exclude_keys(&plain, true, &plain.engine).unwrap().is_empty());
+        assert!(
+            awf_exclude_keys(&plain, true, &plain.engine)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -7767,12 +7813,20 @@ safe-outputs:
         let keys = awf_exclude_keys(&fm, true, &provider.engine).unwrap();
         assert_eq!(keys.len(), 3);
         assert!(keys.contains(&"COPILOT_PROVIDER_API_KEY".to_string()));
-        assert!(keys.contains(
-            &super::super::mcpg::azure_auth_client_variable("kusto").unwrap().into_inner()
-        ));
-        assert!(keys.contains(
-            &super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap().into_inner()
-        ));
+        assert!(
+            keys.contains(
+                &super::super::mcpg::azure_auth_client_variable("kusto")
+                    .unwrap()
+                    .into_inner()
+            )
+        );
+        assert!(
+            keys.contains(
+                &super::super::mcpg::azure_auth_tenant_variable("kusto")
+                    .unwrap()
+                    .into_inner()
+            )
+        );
     }
 
     #[test]
@@ -7896,9 +7950,9 @@ safe-outputs:
             step.script
         );
         assert!(
-            step.script.contains(
-                "printf '%s' \"$PROXY_MATERIAL\" | docker exec -i \"$PROXY_CONTAINER\""
-            ) && step.script.contains("cat > /tmp/ado-proxy-material"),
+            step.script
+                .contains("printf '%s' \"$PROXY_MATERIAL\" | docker exec -i \"$PROXY_CONTAINER\"")
+                && step.script.contains("cat > /tmp/ado-proxy-material"),
             "material must stream through the container-private FIFO: {}",
             step.script
         );
@@ -7957,8 +8011,7 @@ safe-outputs:
         let copy = copy_logs_step("/tmp/copilot", false);
         assert!(copy.script.contains("/tmp/gh-aw/ado-proxy-logs"));
         assert!(
-            copy.script
-                .contains("AGENT_TEMP='$(Agent.TempDirectory)'")
+            copy.script.contains("AGENT_TEMP='$(Agent.TempDirectory)'")
                 && copy
                     .script
                     .contains(r#""$AGENT_TEMP/staging/logs/ado-proxy""#),
@@ -7995,9 +8048,8 @@ safe-outputs:
         );
         assert!(
             script.contains(&format!("CA_HOST_PATH='{ADO_PROXY_PUBLIC_CA_HOST_PATH}'"))
-                && script.contains(
-                    "##vso[task.setvariable variable=ADO_PROXY_CA_FILE]$CA_HOST_PATH"
-                ),
+                && script
+                    .contains("##vso[task.setvariable variable=ADO_PROXY_CA_FILE]$CA_HOST_PATH"),
             "clients need the published certificate's path: {script}"
         );
         assert!(
@@ -8050,10 +8102,8 @@ safe-outputs:
             "docker run must reuse the bound $PROXY_IMAGE: {script}"
         );
         assert!(
-            script.contains(&format!(
-                "PROXY_SCRIPT_PATH='{}'",
-                paths::ADO_PROXY_PATH
-            )) && script.contains("\"${PROXY_SCRIPT_PATH}:/app/ado-proxy.js:ro\""),
+            script.contains(&format!("PROXY_SCRIPT_PATH='{}'", paths::ADO_PROXY_PATH))
+                && script.contains("\"${PROXY_SCRIPT_PATH}:/app/ado-proxy.js:ro\""),
             "docker run must mount the bound ado-proxy bundle: {script}"
         );
     }
