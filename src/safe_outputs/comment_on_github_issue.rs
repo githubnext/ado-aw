@@ -169,6 +169,16 @@ fn build_comment_body(body: &str, marker: &str, footer: bool, ctx: &ExecutionCon
     sections.join("\n\n")
 }
 
+fn resolve_comment_marker(
+    config: &CommentOnGithubIssueConfig,
+    ctx: &ExecutionContext,
+) -> Result<String, ExecutionResult> {
+    if !config.hide_older_comments {
+        return Ok(GITHUB_COMMENT_MARKER.to_string());
+    }
+    github_pipeline_comment_marker(ctx).map_err(|error| ExecutionResult::failure(error.to_string()))
+}
+
 /// Collects GraphQL node IDs of earlier comments from this pipeline's actor
 /// (identified by `marker`) so they can be minimized before posting.
 async fn find_older_comment_node_ids(
@@ -278,13 +288,9 @@ impl Executor for CommentOnGithubIssueResult {
             Ok(target) => target,
             Err(result) => return Ok(result),
         };
-        let marker = if config.hide_older_comments {
-            match github_pipeline_comment_marker(ctx) {
-                Ok(marker) => marker,
-                Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-            }
-        } else {
-            GITHUB_COMMENT_MARKER.to_string()
+        let marker = match resolve_comment_marker(&config, ctx) {
+            Ok(marker) => marker,
+            Err(result) => return Ok(result),
         };
         let client = GithubClient::new(&ctx.github_api_url, token)?;
         let filters = GithubMutationFilters {
