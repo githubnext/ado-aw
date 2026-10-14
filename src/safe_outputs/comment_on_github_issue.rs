@@ -12,8 +12,8 @@ use super::hide_github_issue_comment::{
 use crate::safe_outputs::{
     ExecutionContext, ExecutionResult, Executor, GITHUB_COMMENT_MARKER, GithubClient,
     GithubIssueComment, GithubIssueNumber, GithubMutationFilters, GithubRepositoryPolicy,
-    GithubTargetCapabilities, GithubUser, Validate, build_github_trace_footer,
-    github_pipeline_comment_marker, resolve_github_issue_target,
+    GithubTargetCapabilities, GithubUser, ResolvedGithubIssueTarget, Validate,
+    build_github_trace_footer, github_pipeline_comment_marker, resolve_github_issue_target,
     validate_github_mutation_filter_config, validate_github_mutation_filters,
     validate_github_repository, validate_github_target_capability,
 };
@@ -169,6 +169,81 @@ fn build_comment_body(body: &str, marker: &str, footer: bool, ctx: &ExecutionCon
     sections.join("\n\n")
 }
 
+/// Collects GraphQL node IDs of earlier comments from this pipeline's actor
+/// (identified by `marker`) so they can be minimized before posting.
+async fn find_older_comment_node_ids(
+    client: &GithubClient,
+    ctx: &ExecutionContext,
+    target: &ResolvedGithubIssueTarget,
+    marker: &str,
+) -> anyhow::Result<Result<Vec<String>, ExecutionResult>> {
+    let authenticated = match ctx.github_actor_login.as_deref() {
+        Some(login) if !login.trim().is_empty() => GithubUser {
+            login: login.trim().to_string(),
+            id: None,
+            node_id: None,
+        },
+        Some(_) => {
+            return Ok(Err(ExecutionResult::failure(
+                "ADO_AW_GITHUB_ACTOR_LOGIN is empty; cannot safely identify older GitHub App comments",
+            )));
+        }
+        None => match client.authenticated_user().await? {
+            Ok(user) => user,
+            Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+        },
+    };
+    let comments = match client
+        .list_issue_comments(&target.repository, target.number)
+        .await?
+    {
+        Ok(comments) => comments,
+        Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+    };
+    let mut node_ids = Vec::new();
+    for comment in comments {
+        if comment.body.contains(marker) && actor_matches(comment.user.as_ref(), &authenticated) {
+            let Some(node_id) = comment.node_id.filter(|node_id| !node_id.is_empty()) else {
+                return Ok(Err(ExecutionResult::failure(format!(
+                    "matching older GitHub comment {} contained no GraphQL node_id",
+                    comment.id
+                ))));
+            };
+            node_ids.push(node_id);
+        }
+    }
+    Ok(Ok(node_ids))
+}
+
+async fn post_comment(
+    client: &GithubClient,
+    target: &ResolvedGithubIssueTarget,
+    comment_body: &str,
+) -> anyhow::Result<Result<GithubIssueComment, ExecutionResult>> {
+    let response = client
+        .send(
+            Method::POST,
+            client.issue_comments_url(&target.repository, target.number)?,
+            Some(&serde_json::json!({ "body": comment_body })),
+        )
+        .await?;
+    let response = match response.require_success("Failed to create GitHub issue comment") {
+        Ok(response) => response,
+        Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+    };
+    let comment: GithubIssueComment =
+        match response.json("Failed to parse GitHub issue comment response") {
+            Ok(comment) => comment,
+            Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+        };
+    if comment.id == 0 {
+        return Ok(Err(ExecutionResult::failure(
+            "GitHub issue comment response contained no positive comment ID",
+        )));
+    }
+    Ok(Ok(comment))
+}
+
 #[async_trait::async_trait]
 impl Executor for CommentOnGithubIssueResult {
     fn dry_run_summary(&self) -> String {
@@ -237,46 +312,14 @@ impl Executor for CommentOnGithubIssueResult {
             return Ok(result);
         }
 
-        let mut older_node_ids = Vec::new();
-        if config.hide_older_comments {
-            let authenticated = match ctx.github_actor_login.as_deref() {
-                Some(login) if !login.trim().is_empty() => GithubUser {
-                    login: login.trim().to_string(),
-                    id: None,
-                    node_id: None,
-                },
-                Some(_) => {
-                    return Ok(ExecutionResult::failure(
-                        "ADO_AW_GITHUB_ACTOR_LOGIN is empty; cannot safely identify older GitHub App comments",
-                    ));
-                }
-                None => match client.authenticated_user().await? {
-                    Ok(user) => user,
-                    Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-                },
-            };
-            let comments = match client
-                .list_issue_comments(&target.repository, target.number)
-                .await?
-            {
-                Ok(comments) => comments,
-                Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-            };
-            for comment in comments {
-                if comment.body.contains(&marker)
-                    && actor_matches(comment.user.as_ref(), &authenticated)
-                {
-                    let Some(node_id) = comment.node_id.filter(|node_id| !node_id.is_empty())
-                    else {
-                        return Ok(ExecutionResult::failure(format!(
-                            "matching older GitHub comment {} contained no GraphQL node_id",
-                            comment.id
-                        )));
-                    };
-                    older_node_ids.push(node_id);
-                }
+        let older_node_ids = if config.hide_older_comments {
+            match find_older_comment_node_ids(&client, ctx, &target, &marker).await? {
+                Ok(ids) => ids,
+                Err(result) => return Ok(result),
             }
-        }
+        } else {
+            Vec::new()
+        };
 
         for node_id in &older_node_ids {
             if let Err(result) =
@@ -293,27 +336,10 @@ impl Executor for CommentOnGithubIssueResult {
             target.number,
             older_node_ids.len()
         );
-        let response = client
-            .send(
-                Method::POST,
-                client.issue_comments_url(&target.repository, target.number)?,
-                Some(&serde_json::json!({ "body": comment_body })),
-            )
-            .await?;
-        let response = match response.require_success("Failed to create GitHub issue comment") {
-            Ok(response) => response,
-            Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
+        let comment = match post_comment(&client, &target, &comment_body).await? {
+            Ok(comment) => comment,
+            Err(result) => return Ok(result),
         };
-        let comment: GithubIssueComment =
-            match response.json("Failed to parse GitHub issue comment response") {
-                Ok(comment) => comment,
-                Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-            };
-        if comment.id == 0 {
-            return Ok(ExecutionResult::failure(
-                "GitHub issue comment response contained no positive comment ID",
-            ));
-        }
 
         info!(
             "Created GitHub comment {} on {}#{}",
