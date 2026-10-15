@@ -304,13 +304,24 @@ role is missing.
 - Workload-identity tokens are not renewed. Runs are bounded by the
   `permissions.read` timeout cap.
 - The Detection job has no package proxy.
-- Partly verified against live Azure Artifacts:
-  - An Entra token authenticates under both `Bearer` and
-    `Basic ado-aw:<token>` on the npm, PyPI, and NuGet endpoints.
-  - Downloads redirect (`303`) to `*.vsblob.vsassets.io`.
-  - The build-identity token over `Basic`, and the end-to-end restore
-    through the proxy, are covered by the package-feed smoke cases (see
-    `tests/smoke/REGISTERED.md`).
+
+## Live coverage
+
+The candidate smoke suite runs the package path against a real Azure Artifacts
+feed on every candidate run: `package-feeds` (build identity) and
+`package-feeds-wif` (workload identity), described in
+`tests/smoke/REGISTERED.md`. Together they prove that:
+
+- no package credential reaches the sandbox;
+- `npm`, `pip`, and `dotnet` restore through the proxy, including the
+  download redirect to `*.vsblob.vsassets.io`;
+- the build identity and an Entra (WIF) token both authenticate with the
+  per-protocol scheme the catalog selects;
+- an ungranted feed is refused with `403`;
+- `public-registry: block` removes the public registry.
+
+Cargo is covered by proxy and unit tests only; there is no Cargo runtime to
+drive it in the smoke.
 
 ## Migrating from `feed-url`
 
