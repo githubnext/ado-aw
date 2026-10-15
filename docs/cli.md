@@ -204,9 +204,7 @@ These commands are not shown in `--help` but are available for contributors work
   - What is written is the *lint source*: the body with declared variables stub-assigned, which is the form that stands alone and the form the shellcheck harness judges. A rendered script needs real bindings, which only the producing call site has.
   - Typical use: `cargo run -- export-bash-scripts --output /tmp/ado-aw-shell && shellcheck /tmp/ado-aw-shell/*.sh`
 
-### Hidden Pipeline-Internal Commands
-
-These commands are started by the pipeline itself (or by AWF on its behalf) and are not part of the authoring surface:
+### Credential-Isolated ADO Proxy (not a subcommand)
 
 > The credential-isolated Azure DevOps policy proxy is **not** an `ado-aw`
 > subcommand. It ships as the `ado-proxy` TypeScript bundle in
@@ -219,6 +217,4 @@ These commands are started by the pipeline itself (or by AWF on its behalf) and 
 
 ## Pipeline IR Reference
 
-The compiler builds typed Azure DevOps pipeline IR and lowers it through one YAML emitter. The canonical Setup → Agent → Detection → (ManualReview?) → Custom_\<tool\>* → SafeOutputs(+SafeOutputs_Reviewed?) → Teardown → Conclusion shape lives in `agentic_pipeline.rs` (shared by every target); `ManualReview` is inserted only when a safe output is configured with `require-approval`, and the `SafeOutputs`/`SafeOutputs_Reviewed` split occurs only when both gated and non-gated outputs are configured. Conclusion runs whenever `safe-outputs:` is configured. Target-specific builders (`standalone_ir.rs`, `onees_ir.rs`, `job_ir.rs`, and `stage_ir.rs`) own only the per-target envelope (pipeline shape, template parameters, 1ES wrapping).
-
-See [`docs/ir.md`](ir.md) for the complete IR reference.
+The compiler builds typed pipeline IR and lowers it through one YAML emitter. See [`docs/ir.md`](ir.md) for the complete reference, including the canonical job shape.
