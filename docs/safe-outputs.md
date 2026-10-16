@@ -922,6 +922,7 @@ field that receives the body.
 - `title` - A concise title for the work item (required, must be more than 5 characters)
 - `description` - Work item description in Markdown format (required, must be more than 30 characters). Markdown is preserved; see [Markdown body sanitization](#markdown-body-sanitization) for the HTML and URL policy applied to it.
 - `tags` - Tags to apply to the work item (optional list; each tag must not contain a semicolon). May be subject to the `allowed-tags` allowlist. Merged with any static `tags` configured in front matter.
+- `priority` - Optional integer from `1` (highest) to `4` (lowest), written to `Microsoft.VSTS.Common.Priority`. Subject to `allowed-priorities`.
 
 On success, the MCP tool returns a generated gh-aw-compatible `#aw_...`
 `temporary_id` in both structured output and its text response. Agents do not
@@ -935,6 +936,7 @@ choose this ID; they use the returned value in later safe-output calls.
 - `assignee` - Static user to assign (email, UPN, or display name). When omitted, the work item is created unassigned.
 - `tags` - Static list of tags always applied to the work item (regardless of agent input)
 - `allowed-tags` - Allowlist of tags the agent is permitted to use via the `tags` parameter. If empty, any agent-provided tags are accepted. Supports `*` wildcards anywhere in the pattern (e.g., `"agent-*"` matches `"agent-created"`; `"copilot:repo=org/project/*@main"` matches any repo name).
+- `allowed-priorities` - Optional list of integers from `1` to `4`. Empty or omitted permits all four agent-supplied priorities. Values outside the list are rejected.
 - `custom-fields` - Map of custom field reference names to values (e.g., `Custom.MyField: "value"`)
 - `max` - Maximum number of create-work-item outputs allowed per run (default: 1)
 - `include-stats` - Whether to append agent execution stats to the work item description (default: true)
@@ -942,6 +944,28 @@ choose this ID; they use the returned value in later safe-output calls.
   - `enabled` - Whether to add an artifact link (default: false)
   - `repository` - Repository name override (defaults to BUILD_REPOSITORY_NAME)
   - `branch` - Branch name to link to (default: "main")
+
+An agent-supplied priority overrides a `Microsoft.VSTS.Common.Priority` entry
+in `custom-fields` (matched case-insensitively). If priority is omitted or
+`null`, the configured custom field or Azure DevOps default is preserved.
+`allowed-priorities` restricts agent input only, not the operator's static fallback.
+
+```yaml
+safe-outputs:
+  create-work-item:
+    allowed-priorities: [1, 2, 3]
+    custom-fields:
+      Microsoft.VSTS.Common.Priority: "3"
+  update-work-item:
+    target: "*"
+    priority: true
+    allowed-priorities: [1, 2, 3]
+```
+
+For example, the agent can create with
+`{"title":"Investigate failure","description":"Detailed failure report long enough for validation.","priority":1}`
+or make a priority-only update with `{"id":12345,"priority":2}`.
+Azure DevOps still applies process-specific field rules.
 
 ### assign-work-item
 
@@ -1001,6 +1025,7 @@ Updates an existing Azure DevOps work item. Each field that can be modified requ
 - `iteration_path` - New iteration path (optional, requires `iteration-path: true` in config)
 - `assignee` - New assignee email or display name (optional, requires `assignee: true` in config)
 - `tags` - New tags, replaces all existing tags (optional, requires `tags: true` in config)
+- `priority` - New integer priority from `1` (highest) to `4` (lowest), written to `Microsoft.VSTS.Common.Priority` (optional, requires `priority: true` in config). Omitted or `null` leaves the existing priority unchanged.
 
 At least one field must be provided for update.
 
@@ -1021,6 +1046,8 @@ safe-outputs:
     assignee: true            # enable assignee updates (default: false)
     tags: true                # enable tag updates (default: false)
     allowed-tags: []          # Optional — restrict which tags the agent can set (empty = any; supports * wildcards anywhere in the pattern, e.g. "agent-*" or "copilot:repo=org/project/*@main")
+    priority: true            # enable priority updates (default: false)
+    allowed-priorities: [1, 2, 3, 4] # Optional — restrict agent priorities (empty/omitted = all four)
 ```
 
 **Note:** The `target` field is required. If omitted, compilation fails with an error. This ensures operators are intentional about which work items agents can update.

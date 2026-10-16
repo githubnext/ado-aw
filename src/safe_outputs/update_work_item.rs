@@ -41,10 +41,15 @@ pub struct UpdateWorkItemParams {
 
     /// New tags (replaces all existing tags; only if enabled in the safe-outputs configuration)
     pub tags: Option<Vec<String>>,
+
+    /// New priority, from 1 (highest) to 4 (lowest); requires priority: true in configuration.
+    #[schemars(range(min = 1, max = 4))]
+    pub priority: Option<u8>,
 }
 
 impl Validate for UpdateWorkItemParams {
     fn validate(&self) -> anyhow::Result<()> {
+        super::create_work_item::validate_priority(self.priority, &[])?;
         if let WorkItemReference::Number(id) = self.id {
             ensure!(id > 0, "Work item ID must be a positive integer");
         }
@@ -55,8 +60,9 @@ impl Validate for UpdateWorkItemParams {
                 || self.area_path.is_some()
                 || self.iteration_path.is_some()
                 || self.assignee.is_some()
-                || self.tags.is_some(),
-            "At least one field must be provided for update (title, body, state, area_path, iteration_path, assignee, or tags)"
+                || self.tags.is_some()
+                || self.priority.is_some(),
+            "At least one field must be provided for update (title, body, state, area_path, iteration_path, assignee, tags, or priority)"
         );
         if let Some(title) = &self.title {
             ensure!(!title.is_empty(), "Title cannot be empty");
@@ -93,6 +99,8 @@ tool_result! {
         iteration_path: Option<String>,
         assignee: Option<String>,
         tags: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
     }
 }
 
@@ -202,6 +210,14 @@ pub struct UpdateWorkItemConfig {
     /// (e.g., `"agent-*"` matches `"agent-created"`, `"agent-review"`, etc.).
     #[serde(default, rename = "allowed-tags")]
     pub allowed_tags: Vec<String>,
+
+    /// Enable agent-supplied priority updates (default: false).
+    #[serde(default)]
+    pub priority: bool,
+
+    /// Priorities the agent may supply (1–4). Empty permits all supported priorities.
+    #[serde(default, rename = "allowed-priorities")]
+    pub allowed_priorities: Vec<u8>,
 }
 
 /// Check that `config.target` permits updating the given work item ID.
@@ -270,6 +286,11 @@ fn check_field_permissions(
             "Tag updates are not enabled in the update-work-item configuration; set 'tags: true' in safe-outputs",
             params.tags.is_some(),
             config.tags,
+        ),
+        (
+            "Priority updates are not enabled in the update-work-item configuration; set 'priority: true' in safe-outputs",
+            params.priority.is_some(),
+            config.priority,
         ),
     ];
     for (msg, field_set, field_enabled) in checks {
@@ -385,6 +406,13 @@ fn build_patch_document(
     }
     if let Some(tags) = &params.tags {
         patch_doc.push(replace_field_op("System.Tags", tags.join("; ")));
+    }
+    if let Some(priority) = params.priority {
+        patch_doc.push(serde_json::json!({
+            "op": "add",
+            "path": "/fields/Microsoft.VSTS.Common.Priority",
+            "value": priority
+        }));
     }
 
     patch_doc
@@ -515,6 +543,11 @@ impl Executor for UpdateWorkItemResult {
         if let Some(result) = check_field_permissions(self, &config) {
             return Ok(result);
         }
+        if let Err(error) =
+            super::create_work_item::validate_priority(self.priority, &config.allowed_priorities)
+        {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         if let Some(assignee) = self.assignee.as_deref()
             && let Err(error) =
                 super::normalize_work_item_assignee(assignee, "update-work-item.assignee")
@@ -614,6 +647,148 @@ mod tests {
     use crate::secure::WorkItemTemporaryId;
 
     #[test]
+    fn priority_only_updates_validate_and_round_trip() {
+        for priority in 1..=4 {
+            let params: UpdateWorkItemParams = serde_json::from_value(serde_json::json!({
+                "id": 42, "priority": priority
+            }))
+            .unwrap();
+            let result: UpdateWorkItemResult = params.try_into().unwrap();
+            let persisted = serde_json::to_value(result).unwrap();
+            assert_eq!(persisted["priority"], priority);
+            let restored: UpdateWorkItemResult = serde_json::from_value(persisted).unwrap();
+            assert_eq!(restored.priority, Some(priority));
+        }
+        let legacy: UpdateWorkItemResult = serde_json::from_value(serde_json::json!({
+            "name": "update-work-item", "id": 42, "state": "Active"
+        }))
+        .unwrap();
+        assert_eq!(legacy.priority, None);
+        assert_eq!(
+            build_patch_document(&legacy, &UpdateWorkItemConfig::default()),
+            vec![replace_field_op("System.State", "Active")]
+        );
+    }
+
+    #[test]
+    fn priority_updates_reject_invalid_agent_values() {
+        for priority in serde_json::json!([-1, 0, 5, 256, "1", 1.5])
+            .as_array()
+            .unwrap()
+        {
+            let params = serde_json::from_value::<UpdateWorkItemParams>(serde_json::json!({
+                "id": 42, "priority": priority
+            }));
+            assert!(
+                params.is_err() || params.unwrap().validate().is_err(),
+                "accepted invalid priority {priority}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn priority_only_update_patches_numeric_field() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/Project/_apis/wit/workitems/42"))
+            .and(body_json(serde_json::json!([{
+                "op": "add",
+                "path": "/fields/Microsoft.VSTS.Common.Priority",
+                "value": 1
+            }])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 42})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_project: Some("Project".to_string()),
+            access_token: Some("token".to_string()),
+            tool_configs: std::collections::HashMap::from([(
+                "update-work-item".to_string(),
+                serde_json::json!({"target": 42, "priority": true, "allowed-priorities": [1, 2]}),
+            )]),
+            ..Default::default()
+        };
+        let params: UpdateWorkItemParams =
+            serde_json::from_value(serde_json::json!({"id": 42, "priority": 1})).unwrap();
+        let result: UpdateWorkItemResult = params.try_into().unwrap();
+        let mut persisted: UpdateWorkItemResult =
+            serde_json::from_value(serde_json::to_value(result).unwrap()).unwrap();
+        let execution = persisted.execute_sanitized(&ctx).await.unwrap();
+        assert!(execution.success, "{}", execution.message);
+    }
+
+    #[tokio::test]
+    async fn priority_updates_enforce_permissions_and_range_before_http() {
+        let server = wiremock::MockServer::start().await;
+        for (priority, config, message) in [
+            (
+                1,
+                serde_json::json!({"target": "*"}),
+                "Priority updates are not enabled",
+            ),
+            (
+                1,
+                serde_json::json!({"target": "*", "allowed-priorities": [1]}),
+                "Priority updates are not enabled",
+            ),
+            (
+                1,
+                serde_json::json!({"priority": true}),
+                "target is not configured",
+            ),
+            (
+                1,
+                serde_json::json!({"target": 43, "priority": true}),
+                "not permitted",
+            ),
+            (
+                2,
+                serde_json::json!({"target": "*", "priority": true, "allowed-priorities": [1]}),
+                "not in allowed-priorities",
+            ),
+            (
+                0,
+                serde_json::json!({"target": "*", "priority": true}),
+                "priority must be",
+            ),
+            (
+                5,
+                serde_json::json!({"target": "*", "priority": true}),
+                "priority must be",
+            ),
+            (
+                1,
+                serde_json::json!({"target": "*", "priority": true, "allowed-priorities": [5]}),
+                "allowed-priorities must contain",
+            ),
+        ] {
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_project: Some("Project".to_string()),
+                access_token: Some("token".to_string()),
+                tool_configs: std::collections::HashMap::from([(
+                    "update-work-item".to_string(),
+                    config,
+                )]),
+                ..Default::default()
+            };
+            let mut result: UpdateWorkItemResult = serde_json::from_value(serde_json::json!({
+                "name": "update-work-item", "id": 42, "priority": priority
+            }))
+            .unwrap();
+            let execution = result.execute_sanitized(&ctx).await.unwrap();
+            assert!(!execution.success);
+            assert!(execution.message.contains(message), "{}", execution.message);
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
     fn temporary_id_deserializes() {
         let params: UpdateWorkItemParams = serde_json::from_value(serde_json::json!({
             "id": "#aw_created1",
@@ -649,6 +824,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         }
         .try_into()
         .unwrap();
@@ -714,6 +890,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         }
         .try_into()
         .unwrap();
@@ -743,6 +920,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
@@ -763,6 +941,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
@@ -783,6 +962,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         let err = result.unwrap_err().to_string();
@@ -803,6 +983,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_ok());
@@ -822,6 +1003,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_ok());
@@ -842,6 +1024,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: Some(vec!["automated".to_string(), "agent".to_string()]),
+            priority: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_ok());
@@ -864,6 +1047,7 @@ mod tests {
                 iteration_path: None,
                 assignee: Some(assignee.to_string()),
                 tags: None,
+                priority: None,
             };
             let error = <UpdateWorkItemResult as TryFrom<UpdateWorkItemParams>>::try_from(params)
                 .unwrap_err();
@@ -882,6 +1066,7 @@ mod tests {
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let result: UpdateWorkItemResult = params.try_into().unwrap();
         let json = serde_json::to_string(&result).unwrap();
@@ -972,6 +1157,7 @@ target: 42
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
         let ctx = ExecutionContext {
@@ -1015,6 +1201,7 @@ target: 42
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
 
@@ -1067,6 +1254,7 @@ target: 42
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
 
@@ -1120,6 +1308,7 @@ target: 42
             iteration_path: None,
             assignee: None,
             tags: None,
+            priority: None,
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
 
@@ -1168,6 +1357,7 @@ target: 42
             iteration_path: None,
             assignee: None,
             tags: Some(vec!["tag-one".to_string(), "tag @two".to_string()]),
+            priority: None,
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
         result.sanitize_content_fields();
@@ -1236,6 +1426,7 @@ target: 42
             iteration_path: None,
             assignee: None,
             tags: Some(vec!["valid".to_string(), "injected; extra-tag".to_string()]),
+            priority: None,
         };
         let result: Result<UpdateWorkItemResult, _> = params.try_into();
         assert!(result.is_err());
@@ -1274,6 +1465,7 @@ allowed-tags:
             iteration_path: None,
             assignee: None,
             tags: Some(vec!["disallowed-tag".to_string()]),
+            priority: None,
         };
         let mut result: UpdateWorkItemResult = params.try_into().unwrap();
 

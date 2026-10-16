@@ -575,6 +575,7 @@ mod tests {
                 title: "Create a real task".to_string(),
                 description: "A detailed work-item description that is long enough.".to_string(),
                 tags: Vec::new(),
+                priority: None,
             },
             temporary_id.clone(),
         )
