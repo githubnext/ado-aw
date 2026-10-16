@@ -3,7 +3,6 @@
 use super::{PYTHON_BASH_COMMANDS, PythonRuntimeConfig};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::ir::step::{Step, TaskStep};
-use crate::compile::ir::tasks::pip_authenticate::PipAuthenticate;
 use crate::compile::ir::tasks::use_python_version::UsePythonVersion;
 use crate::validate;
 use anyhow::Result;
@@ -11,9 +10,11 @@ use anyhow::Result;
 /// Python runtime extension.
 ///
 /// Injects: ecosystem network hosts (python), bash commands (python, pip, uv),
-/// install steps (UsePythonVersion@0), authenticate steps (PipAuthenticate@1),
-/// env vars (PIP_INDEX_URL, UV_DEFAULT_INDEX when feed-url is set), and a
-/// prompt supplement.
+/// install steps (UsePythonVersion@0), env vars (PIP_INDEX_URL,
+/// UV_DEFAULT_INDEX when feed-url is set), and a prompt supplement.
+///
+/// No `PipAuthenticate@1`: it exports a token-bearing index URL as a
+/// non-secret job variable, which AWF's `--env-all` would hand to the agent.
 pub struct PythonExtension {
     config: PythonRuntimeConfig,
 }
@@ -33,12 +34,7 @@ impl CompilerExtension for PythonExtension {
         ExtensionPhase::Runtime
     }
 
-    /// Typed-IR view. Returns:
-    ///
-    /// * a [`Step::Task`] for `UsePythonVersion@0`,
-    /// * an optional [`Step::Task`] for `PipAuthenticate@1` (only
-    ///   when `feed-url:` is set),
-    ///
+    /// Typed-IR view. Returns a [`Step::Task`] for `UsePythonVersion@0`
     /// alongside the static signals (hosts, bash commands, prompt
     /// supplement, agent env vars).
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
@@ -87,12 +83,13 @@ impl CompilerExtension for PythonExtension {
         if let Some(version) = self.config.version() {
             validate::reject_pipeline_injection(version, "runtimes.python.version")?;
         }
-
-        let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(2);
-        agent_prepare_steps.push(Step::Task(python_install_task_step(&self.config)));
         if self.config.feed_url().is_some() {
-            agent_prepare_steps.push(Step::Task(pip_authenticate_task_step()));
+            warnings.push(crate::runtimes::unauthenticated_feed_warning(
+                "runtimes.python.feed-url",
+            ));
         }
+
+        let agent_prepare_steps = vec![Step::Task(python_install_task_step(&self.config))];
         let mut agent_env_vars = Vec::new();
         if let Some(feed_url) = self.config.feed_url() {
             agent_env_vars.push(("PIP_INDEX_URL".to_string(), feed_url.to_string()));
@@ -127,14 +124,6 @@ management, install it first with `pip install uv`.\n"
 fn python_install_task_step(config: &PythonRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("3.x");
     UsePythonVersion::new(version).into_step()
-}
-
-/// Build the typed [`TaskStep`] for pip authentication.
-fn pip_authenticate_task_step() -> TaskStep {
-    PipAuthenticate::new()
-        .artifact_feeds("")
-        .with_display_name("Authenticate pip (build service identity)")
-        .into_step()
 }
 
 #[cfg(test)]
@@ -238,11 +227,11 @@ mod tests {
         assert!(decl.mcpg_servers.is_empty());
     }
 
-    /// When `feed-url:` is set, a second `Step::Task(PipAuthenticate@1)`
-    /// is appended and `PIP_INDEX_URL` / `UV_DEFAULT_INDEX` env vars
-    /// surface on the declarations.
+    /// When `feed-url:` is set, no authenticate task is emitted (its outputs
+    /// would reach the agent), `PIP_INDEX_URL` / `UV_DEFAULT_INDEX` select the
+    /// source, and the author is warned that the agent holds no credential.
     #[test]
-    fn declarations_adds_pip_authenticate_and_env_when_feed_url_set() {
+    fn declarations_feed_url_selects_source_without_authenticate_task() {
         let (fm, _) = parse_markdown(
             "---\nname: t\ndescription: x\nruntimes:\n  python:\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
         )
@@ -250,15 +239,17 @@ mod tests {
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
         let ext = PythonExtension::new(python.clone());
         let decl = ext.declarations(&ctx_from(&fm)).unwrap();
-        assert_eq!(decl.agent_prepare_steps.len(), 2);
-        match &decl.agent_prepare_steps[1] {
-            Step::Task(t) => {
-                assert_eq!(t.task, "PipAuthenticate@1");
-                assert_eq!(t.display_name, "Authenticate pip (build service identity)");
-                assert_eq!(t.inputs.get("artifactFeeds").map(String::as_str), Some(""));
-            }
-            other => panic!("expected Step::Task, got {other:?}"),
-        }
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        assert!(
+            decl.agent_prepare_steps
+                .iter()
+                .all(|s| !matches!(s, Step::Task(t) if t.task.contains("Authenticate")))
+        );
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("no feed credential"))
+        );
         // env vars must include both pip and uv index URLs.
         let keys: Vec<&str> = decl
             .agent_env_vars

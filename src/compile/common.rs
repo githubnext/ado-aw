@@ -816,6 +816,65 @@ fn repository_write_readiness_warning_matrix() {
     assert!(readiness_warnings(&format!("{prefix}{ready}{cross_repo}")).is_empty());
 }
 
+/// Azure Pipelines package-authenticate tasks whose outputs are job-wide.
+///
+/// Each one publishes credentials as job variables or files (for example
+/// `VSS_NUGET_ACCESSTOKEN`, a token-bearing `PIP_EXTRA_INDEX_URL`, or an
+/// authenticated `.npmrc`). AWF launches the agent with `--env-all` from the
+/// same job, so running one of these before AWF would hand the credential to
+/// the untrusted agent.
+const PACKAGE_AUTHENTICATE_TASKS: &[&str] = &[
+    "NuGetAuthenticate",
+    "npmAuthenticate",
+    "PipAuthenticate",
+    "TwineAuthenticate",
+    "CargoAuthenticate",
+    "MavenAuthenticate",
+];
+
+/// Name of a package-authenticate task referenced by a raw step, if any.
+fn package_authenticate_task(step: &serde_yaml::Value) -> Option<&'static str> {
+    let task = step.get("task")?.as_str()?;
+    let name = task.split('@').next().unwrap_or(task).trim();
+    PACKAGE_AUTHENTICATE_TASKS
+        .iter()
+        .copied()
+        .find(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+/// Reject package-authenticate tasks in operator steps that run before AWF.
+///
+/// Top-level `steps:` run in the Agent job before the agent, and
+/// `safe-outputs.threat-detection.steps` run in the Detection job before AI
+/// analysis. Both jobs then start AWF with `--env-all`, so a credential the
+/// task publishes would reach the sandbox. `setup:`, `post-steps:`,
+/// `teardown:`, and Detection `post-steps` run outside that window and are
+/// unaffected.
+pub fn validate_no_package_authenticate_before_awf(
+    front_matter: &FrontMatter,
+    threat_detection: &crate::compile::types::ThreatDetectionConfig,
+) -> Result<()> {
+    let lists: [(&str, &[serde_yaml::Value]); 2] = [
+        ("steps", &front_matter.steps),
+        (
+            "safe-outputs.threat-detection.steps",
+            &threat_detection.steps,
+        ),
+    ];
+    for (field, steps) in lists {
+        if let Some(task) = steps.iter().find_map(package_authenticate_task) {
+            anyhow::bail!(
+                "{field} contains {task}, which publishes package-feed credentials to every \
+                 later step in the job. That job then starts the AWF sandbox with the job's \
+                 environment, so the credential would reach the agent. Move the task to \
+                 `setup:` if only trusted steps need it; credential-isolated feed access for \
+                 the agent is not yet supported."
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Validate the `variable-groups:` front-matter block (issue #1385).
 ///
 /// Enforces two rules before the pipeline is built:
@@ -4281,6 +4340,50 @@ mod tests {
         assert!(
             err.contains("pool.demands requires `pool.name`") && err.contains("default 1ES pool"),
             "err: {err}"
+        );
+    }
+
+    #[test]
+    fn package_authenticate_tasks_are_rejected_only_before_awf() {
+        fn check(source: &str) -> Result<()> {
+            let (fm, _) = parse_markdown(source).unwrap();
+            let threat_detection = fm.threat_detection_config().unwrap();
+            validate_no_package_authenticate_before_awf(&fm, &threat_detection)
+        }
+
+        for task in [
+            "NuGetAuthenticate@1",
+            "npmauthenticate@0",
+            "PipAuthenticate@1",
+            "CargoAuthenticate@0",
+        ] {
+            let agent = format!("---\nname: t\ndescription: x\nsteps:\n  - task: {task}\n---\n");
+            let err = check(&agent).unwrap_err().to_string();
+            assert!(err.starts_with("steps contains"), "{task}: {err}");
+
+            let detection = format!(
+                "---\nname: t\ndescription: x\nsafe-outputs:\n  noop: {{}}\n  \
+                 threat-detection:\n    steps:\n      - task: {task}\n---\n"
+            );
+            let err = check(&detection).unwrap_err().to_string();
+            assert!(
+                err.starts_with("safe-outputs.threat-detection.steps contains"),
+                "{task}: {err}"
+            );
+
+            for field in ["setup", "post-steps", "teardown"] {
+                let outside =
+                    format!("---\nname: t\ndescription: x\n{field}:\n  - task: {task}\n---\n");
+                assert!(
+                    check(&outside).is_ok(),
+                    "{field} must stay allowed for {task}"
+                );
+            }
+        }
+
+        assert!(
+            check("---\nname: t\ndescription: x\nsteps:\n  - task: NuGetCommand@2\n  - bash: echo\n---\n")
+                .is_ok()
         );
     }
 

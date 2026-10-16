@@ -1,10 +1,10 @@
 //! Node.js runtime support for the ado-aw compiler.
 //!
 //! When enabled via `runtimes: node:`, the compiler auto-installs a specific
-//! Node.js version via `UseNode@1`, emits `npmAuthenticate@0` for internal
-//! feed access, adds Node ecosystem domains to the AWF network allowlist,
-//! extends the bash command allow-list, and optionally injects feed URL env
-//! vars for npm.
+//! Node.js version via `UseNode@1`, adds Node ecosystem domains to the AWF
+//! network allowlist, extends the bash command allow-list, and optionally
+//! injects a feed URL env var for npm. The feed URL selects the source only —
+//! the agent never receives a feed credential.
 //!
 //! No AWF mounts or PATH prepends are needed because `UseNode@1` installs
 //! to `/opt/hostedtoolcache` (already mounted read-only by AWF) and publishes
@@ -97,10 +97,11 @@ pub struct NodeOptions {
     #[serde(default)]
     pub version: Option<String>,
 
-    /// Internal npm registry URL. When set, the compiler injects
-    /// `NPM_CONFIG_REGISTRY` env var into the agent environment so npm
-    /// uses this feed without .npmrc changes (which would conflict with
-    /// AWF's credential overlay of `~/.npmrc`).
+    /// npm registry URL. When set, the compiler injects `NPM_CONFIG_REGISTRY`
+    /// into the agent environment so npm uses this feed without .npmrc
+    /// changes (which would conflict with AWF's credential overlay of
+    /// `~/.npmrc`). No credential is attached, so registries that require
+    /// authentication reject the agent's requests.
     #[serde(default, rename = "feed-url")]
     pub feed_url: Option<String>,
 

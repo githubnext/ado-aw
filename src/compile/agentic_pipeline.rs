@@ -158,12 +158,34 @@ fn copilot_byom_exclude_keys(is_copilot: bool, engine_config: &EngineConfig) -> 
     keys
 }
 
+/// Job variables that Azure Pipelines package-authenticate tasks export as
+/// **non-secret** variables (they must, so their client tools can read them),
+/// which Azure Pipelines therefore maps into every later step's environment.
+///
+/// The compiler no longer emits those tasks in AWF jobs and rejects them in
+/// operator steps that run before AWF, so none of these should be present.
+/// Excluding them from `--env-all` is defense in depth for anything else that
+/// sets them (for example a pipeline-level variable or an inherited template).
+/// `CARGO_REGISTRIES_<NAME>_TOKEN` is name-dependent and cannot be listed
+/// statically; the operator-step guard covers it.
+const PACKAGE_CREDENTIAL_ENV_KEYS: &[&str] = &[
+    "CARGO_REGISTRY_TOKEN",
+    "PIP_EXTRA_INDEX_URL",
+    "VSS_NUGET_ACCESSTOKEN",
+    "VSS_NUGET_EXTERNAL_FEED_ENDPOINTS",
+];
+
 fn awf_exclude_keys(
     front_matter: &FrontMatter,
     is_copilot: bool,
     engine_config: &EngineConfig,
 ) -> Result<Vec<String>> {
     let mut keys = copilot_byom_exclude_keys(is_copilot, engine_config);
+    keys.extend(
+        PACKAGE_CREDENTIAL_ENV_KEYS
+            .iter()
+            .map(|key| (*key).to_string()),
+    );
     for (server_name, _, _) in front_matter.azure_authenticated_mcp_servers() {
         keys.push(super::mcpg::azure_auth_client_variable(server_name)?.into_inner());
         keys.push(super::mcpg::azure_auth_tenant_variable(server_name)?.into_inner());
@@ -194,6 +216,7 @@ fn validate_pipeline_front_matter(
         common::validate_proxied_timeout(front_matter, minutes)?;
     }
     common::validate_variable_groups(front_matter)?;
+    common::validate_no_package_authenticate_before_awf(front_matter, threat_detection)?;
     common::validate_safe_outputs_keys(front_matter)?;
     front_matter.validate_threat_detection_config(threat_detection, detection_engine_config)?;
     front_matter.validate_require_approval()?;
@@ -1228,12 +1251,11 @@ fn build_agent_job(
     //    until a typed `Engine::install_steps_typed` lands.
     push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
 
-    // 5. Download agentic pipeline compiler
-    //    Hoist one NuGetAuthenticate@1 for the whole job when the feed mirror
-    //    is active, ahead of the compiler/AWF DownloadPackage@1 steps.
-    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
-        steps.push(auth);
-    }
+    // 5. Download agentic pipeline compiler.
+    //    No NuGetAuthenticate@1 here: DownloadPackage@1 authenticates itself
+    //    with the job's SYSTEMVSSCONNECTION token, and NuGetAuthenticate@1
+    //    would export `VSS_NUGET_ACCESSTOKEN` as a plain job variable that the
+    //    AWF `--env-all` passthrough hands to the agent.
     steps.extend(download_compiler_step(
         &cfg.compiler_version,
         front_matter.supply_chain(),
@@ -1578,9 +1600,8 @@ fn build_detection_job(
     if cfg.threat_detection.is_enabled() {
         // Detection gets its own effective engine install/config path.
         push_raw_yaml_if_nonempty(&mut steps, &cfg.detection_engine_install_steps_yaml)?;
-        if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
-            steps.push(auth);
-        }
+        // No NuGetAuthenticate@1: this job also runs AWF with `--env-all`
+        // (see the Agent job's download step).
         steps.extend(download_compiler_step(
             &cfg.compiler_version,
             front_matter.supply_chain(),
@@ -3519,7 +3540,7 @@ fn provider_token_mint_step(token: &ProviderToken) -> TaskStep {
 /// `NuGetAuthenticate@1` step. When a service connection is resolved it is
 /// passed via `nuGetServiceConnections` (cross-org/external feeds); otherwise
 /// the task authenticates the build identity with `$(System.AccessToken)`.
-pub(crate) fn nuget_authenticate_step(connection: Option<&str>) -> TaskStep {
+fn nuget_authenticate_step(connection: Option<&str>) -> TaskStep {
     let mut auth = NuGetAuthenticate::new().with_display_name("Authenticate to internal feed");
     if let Some(conn) = connection {
         auth = auth.nuget_service_connections(conn);
@@ -3746,11 +3767,15 @@ fn extract_package_payload_bash(
         .render()
 }
 
-/// `NuGetAuthenticate@1` step to emit **once per job** when the feed mirror is
-/// active. Hoisting a single auth step (keyed on the resolved feed connection)
-/// keeps the per-artifact `DownloadPackage@1` calls authenticated without
-/// repeating the (idempotent) auth task for every binary. Returns `None` when
-/// no feed is configured.
+/// `NuGetAuthenticate@1` step for the feed mirror in jobs that do **not** run
+/// AWF (SafeOutputs and custom safe-output jobs). Returns `None` when no feed
+/// is configured.
+///
+/// Never emit this in the Agent or Detection job: the task exports
+/// `VSS_NUGET_ACCESSTOKEN` as a non-secret job variable, which Azure Pipelines
+/// maps into every later step's environment and AWF's `--env-all` forwards
+/// into the sandbox. `DownloadPackage@1` does not need it there — it
+/// authenticates itself with the job's `SYSTEMVSSCONNECTION` token.
 fn feed_auth_step(supply_chain: Option<&SupplyChainConfig>) -> Option<Step> {
     let sc = supply_chain?;
     sc.feed
@@ -7745,17 +7770,37 @@ safe-outputs:
         .0
     }
 
+    fn package_credential_keys() -> Vec<String> {
+        PACKAGE_CREDENTIAL_ENV_KEYS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn package_credential_keys_are_always_excluded_from_both_awf_runs() {
+        let plain = test_front_matter("name: t\ndescription: d\n");
+        for is_copilot in [true, false] {
+            assert_eq!(
+                awf_exclude_keys(&plain, is_copilot, &plain.engine).unwrap(),
+                package_credential_keys()
+            );
+        }
+    }
+
     #[test]
     fn azure_auth_identity_exclusions_are_independent_of_the_engine() {
         let fm = azure_auth_fm();
         let client = super::super::mcpg::azure_auth_client_variable("kusto").unwrap();
         let tenant = super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap();
+        let mut expected = package_credential_keys();
+        expected.push(client.into_inner());
+        expected.push(tenant.into_inner());
+        expected.sort();
         for is_copilot in [true, false] {
             let keys = awf_exclude_keys(&fm, is_copilot, &fm.engine).unwrap();
-            assert_eq!(keys, vec![client.as_str(), tenant.as_str()]);
+            assert_eq!(keys, expected);
         }
-        let plain = test_front_matter("name: t\ndescription: d\n");
-        assert!(awf_exclude_keys(&plain, true, &plain.engine).unwrap().is_empty());
     }
 
     #[test]
@@ -7765,14 +7810,22 @@ safe-outputs:
             "name: t\ndescription: d\nengine:\n  id: copilot\n  env:\n    COPILOT_PROVIDER_API_KEY: fake-key\n",
         );
         let keys = awf_exclude_keys(&fm, true, &provider.engine).unwrap();
-        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.len(), 3 + PACKAGE_CREDENTIAL_ENV_KEYS.len());
         assert!(keys.contains(&"COPILOT_PROVIDER_API_KEY".to_string()));
-        assert!(keys.contains(
-            &super::super::mcpg::azure_auth_client_variable("kusto").unwrap().into_inner()
-        ));
-        assert!(keys.contains(
-            &super::super::mcpg::azure_auth_tenant_variable("kusto").unwrap().into_inner()
-        ));
+        assert!(
+            keys.contains(
+                &super::super::mcpg::azure_auth_client_variable("kusto")
+                    .unwrap()
+                    .into_inner()
+            )
+        );
+        assert!(
+            keys.contains(
+                &super::super::mcpg::azure_auth_tenant_variable("kusto")
+                    .unwrap()
+                    .into_inner()
+            )
+        );
     }
 
     #[test]
