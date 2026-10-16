@@ -176,6 +176,87 @@ fn imported_completion_preferences_migrate_without_rewriting_the_component() {
 }
 
 #[test]
+fn imported_root_pr_migrations_finish_in_one_compile() {
+    let dir = fresh_git_temp_dir();
+    let component = "---\n# Imported custom tool ownership\nsafe-outputs:\n  jobs:\n    add-pr-labels:\n      description: Custom labels\n      steps:\n        - bash: echo custom\n---\nImported instructions.\n";
+    let component_path = dir.path().join("shared.md");
+    fs::write(&component_path, component).unwrap();
+    let original = "---\n# Workflow rationale\nname: imported-root-policy\ndescription: test\nimports: [./shared.md]\nsafe-outputs:\n  add-pr-comment:\n    target-repo: self # Keep the destination\n    allowed-repositories: [self]\n    max: 2\n    require-approval: true\n    staged: true\n  add-pr-labels:\n    max: 3\n  budget-groups:\n    comments:\n      max: 1\n      tools: [add-pr-comment]\n---\nKeep `add-pr-comment` in the prompt unchanged.\n";
+    let source = write_source(dir.path(), original);
+
+    let compiled = run_compile(&source);
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let lock = source.with_extension("lock.yml");
+    let checked = run_check(&lock);
+    assert!(
+        checked.status.success(),
+        "first compilation must finish downstream migrations: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let rewritten = fs::read_to_string(&source).unwrap();
+    let generated = fs::read(&lock).unwrap();
+    let fm: serde_yaml::Value =
+        serde_yaml::from_str(rewritten.split("---").nth(1).unwrap()).unwrap();
+    let outputs = &fm["safe-outputs"];
+    let comment = &outputs["add-pull-request-comment"];
+    assert_eq!(comment["default-repository"], "self");
+    assert!(comment.get("target-repo").is_none());
+    assert_eq!(comment["target"], "*");
+    assert_eq!(comment["allowed-repositories"][0], "self");
+    assert_eq!(comment["max"], 2);
+    assert_eq!(comment["require-approval"], true);
+    assert_eq!(comment["staged"], true);
+    assert_eq!(outputs["budget-groups"]["comments"]["max"], 1);
+    assert_eq!(
+        outputs["budget-groups"]["comments"]["tools"][0],
+        "add-pull-request-comment"
+    );
+    assert_eq!(
+        outputs["add-pr-labels"],
+        serde_yaml::from_str::<serde_yaml::Value>("max: 3").unwrap()
+    );
+    assert!(outputs.get("add-pull-request-labels").is_none());
+    assert!(outputs.get("jobs").is_none(), "imported content must not be inlined into the source");
+    assert_eq!(fm["imports"][0], "./shared.md");
+    assert!(rewritten.contains("# Workflow rationale"));
+    assert!(rewritten.contains("# Keep the destination"));
+    assert!(rewritten.ends_with("\nKeep `add-pr-comment` in the prompt unchanged.\n"));
+    assert_eq!(fs::read_to_string(&component_path).unwrap(), component);
+
+    let repeated = run_compile(&source);
+    assert!(repeated.status.success(), "{}", String::from_utf8_lossy(&repeated.stderr));
+    assert_eq!(fs::read_to_string(&source).unwrap(), rewritten);
+    assert_eq!(fs::read(&lock).unwrap(), generated);
+    assert_eq!(fs::read_to_string(component_path).unwrap(), component);
+    assert!(run_check(&lock).status.success());
+}
+
+#[test]
+fn imported_root_migration_conflicts_leave_source_and_lock_untouched() {
+    let dir = fresh_git_temp_dir();
+    let component_path = dir.path().join("shared.md");
+    let component = "---\nsafe-outputs:\n  noop: {}\n---\nShared body\n";
+    fs::write(&component_path, component).unwrap();
+    let original = "---\nname: conflicting-root\ndescription: test\nimports: [./shared.md]\nsafe-outputs:\n  add-pr-comment:\n    target-repo: self\n    default-repository: other\n---\nBody\n";
+    let source = write_source(dir.path(), original);
+    let lock = source.with_extension("lock.yml");
+    let previous_lock = "# @ado-aw source=\"agent.md\" version=0.53.0\n# Existing output must survive a failed compile.\n";
+    fs::write(&lock, previous_lock).unwrap();
+
+    let output = run_compile(&source);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("target-repo") && error.contains("default-repository"), "{error}");
+    assert_eq!(fs::read_to_string(source).unwrap(), original);
+    assert_eq!(fs::read_to_string(lock).unwrap(), previous_lock);
+    assert_eq!(fs::read_to_string(component_path).unwrap(), component);
+}
+
+#[test]
 fn repository_default_migration_preserves_an_independent_repository_grant() {
     let dir = fresh_git_temp_dir();
     let source = write_source(dir.path(),

@@ -199,6 +199,8 @@ pub struct ParsedSource {
     pub body_raw: String,
     /// SHA-256 of the original source bytes (lost-update protection).
     pub source_sha256: [u8; 32],
+    /// Root source provenance for post-import codemods, not the age of imported components.
+    source_compiler_version: Option<String>,
 }
 
 /// Raw markdown split result used by both the typed workflow parser and
@@ -373,6 +375,7 @@ pub(crate) fn parse_markdown_detailed_with_registry(
         leading_whitespace: parts.leading_whitespace,
         body_raw: parts.body_raw,
         source_sha256,
+        source_compiler_version: source_compiler_version.map(str::to_owned),
     })
 }
 
@@ -380,16 +383,17 @@ fn is_import_deferred_codemod(id: &str) -> bool {
     matches!(id, "split_update_pr" | "pull_request_tool_names")
 }
 
-/// Finish root-only source migration after imported custom-job ownership is known.
+/// Finish root-only source migration and its dependants after import ownership is known.
 pub(crate) fn finish_import_codemods(
     parsed: &mut ParsedSource,
     registry: &[&'static super::codemods::Codemod],
 ) -> Result<()> {
-    let deferred: Vec<_> = registry
+    // Later migrations may consume shapes produced by a deferred migration.
+    // Replay the ordered suffix once; idempotent migrations need no fixed-point loop.
+    let deferred_start = registry
         .iter()
-        .copied()
-        .filter(|codemod| is_import_deferred_codemod(codemod.id))
-        .collect();
+        .position(|codemod| is_import_deferred_codemod(codemod.id))
+        .unwrap_or(registry.len());
     let mut mapping = parsed.front_matter_mapping.clone();
     let mut custom = Vec::new();
     if let Some(serde_yaml::Value::Mapping(outputs)) = mapping.get_mut("safe-outputs") {
@@ -400,7 +404,11 @@ pub(crate) fn finish_import_codemods(
             }
         }
     }
-    let report = super::codemods::apply_codemods_with(&mut mapping, &deferred, None)?;
+    let report = super::codemods::apply_codemods_with(
+        &mut mapping,
+        &registry[deferred_start..],
+        parsed.source_compiler_version.as_deref(),
+    )?;
     if report.changed() {
         if let Some(serde_yaml::Value::Mapping(outputs)) = mapping.get_mut("safe-outputs") {
             outputs.extend(custom);
@@ -4724,6 +4732,61 @@ mod tests {
     }
 
     // ─── parse_markdown_detailed ──────────────────────────────────────────────
+
+    #[test]
+    fn post_import_migrations_keep_root_provenance_for_downstream_codemods() {
+        fn downstream(
+            mapping: &mut serde_yaml::Mapping,
+            ctx: &super::super::codemods::CodemodContext,
+        ) -> Result<bool> {
+            let Some(config) = mapping
+                .get_mut("safe-outputs")
+                .and_then(|outputs| outputs.get_mut("add-pull-request-comment"))
+                .and_then(serde_yaml::Value::as_mapping_mut)
+            else {
+                return Ok(false);
+            };
+            let value = serde_yaml::Value::String(
+                ctx.source_compiler_version.as_deref().unwrap_or("new").to_string(),
+            );
+            if config.get("required-title-prefix") == Some(&value) {
+                return Ok(false);
+            }
+            config.insert("required-title-prefix".into(), value);
+            Ok(true)
+        }
+        static DOWNSTREAM: super::super::codemods::Codemod = super::super::codemods::Codemod {
+            id: "post_import_provenance_probe",
+            summary: "exercise source provenance after a deferred rename",
+            introduced_in: "test",
+            apply: downstream,
+        };
+        let rename = super::super::codemods::CODEMODS
+            .iter()
+            .copied()
+            .find(|codemod| codemod.id == "pull_request_tool_names")
+            .unwrap();
+        let registry = [rename, &DOWNSTREAM];
+        let source = "---\nname: provenance\ndescription: test\nimports: [./component.md]\nsafe-outputs:\n  add-pr-comment: {}\n---\nBody\n";
+
+        for version in [None, Some("0.53.0"), Some("unknown-version")] {
+            let mut parsed = parse_markdown_detailed_with_registry(source, &registry, version).unwrap();
+            assert!(!parsed.codemods.changed());
+            finish_import_codemods(&mut parsed, &registry).unwrap();
+            assert_eq!(
+                parsed.front_matter_mapping["safe-outputs"]["add-pull-request-comment"]["required-title-prefix"],
+                version.unwrap_or("new")
+            );
+            assert_eq!(
+                parsed.codemods.applied_ids(),
+                ["pull_request_tool_names", "post_import_provenance_probe"]
+            );
+            let after = parsed.front_matter_mapping.clone();
+            finish_import_codemods(&mut parsed, &registry).unwrap();
+            assert_eq!(parsed.front_matter_mapping, after);
+            assert_eq!(parsed.codemods.applied.len(), 2);
+        }
+    }
 
     fn reconstruct(parsed: &ParsedSource) -> String {
         reconstruct_source(

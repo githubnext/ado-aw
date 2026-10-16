@@ -52,6 +52,13 @@ recompiled, its own output records the new version and it stops firing.
 2. The runner walks the registered codemod registry in order. Each
    codemod returns `Ok(true)` if it modified the mapping, `Ok(false)`
    if it didn't, or `Err` to abort the whole compile.
+   When imports exist, migrations that need imported custom-tool ownership
+   are deferred. Once ownership is known, the root source receives one
+   ordered pass from the first deferred migration through the end of the
+   registry, including its downstream transformations. This is a bounded
+   second phase, not a repeat-until-stable loop. The pass retains the root's
+   original compiler-version provenance, protects custom-tool policies and
+   never treats that version as the age of an imported component.
 3. The compiler runs all the usual validation and codegen against
    the rewritten, typed `FrontMatter`.
 4. **Only on a fully successful compile** AND **only if at least one
