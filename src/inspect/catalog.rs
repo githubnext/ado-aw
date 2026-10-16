@@ -381,7 +381,6 @@ fn models() -> Vec<String> {
     // prompts/create-ado-agentic-workflow.md step 2.
     vec![
         "claude-haiku-4.5".to_string(),
-        "claude-opus-4.7".to_string(),
         "claude-opus-4.8".to_string(),
         "claude-opus-4.8-fast".to_string(),
         "claude-opus-5".to_string(),
