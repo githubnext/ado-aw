@@ -54,7 +54,16 @@ pub(crate) fn rename_declarations(
                 value = Value::Mapping(Mapping::new());
             }
             if let Some(config) = value.as_mapping_mut() {
+                crate::compile::codemods::validate_legacy_literal_names(old, config)?;
+                crate::compile::codemods::preserve_legacy_grants(new, config);
+                if let Some(value) = config.remove("allow-temporary-ids") {
+                    ensure!(value.as_bool().is_some(), "allow-temporary-ids must be a boolean before migration");
+                }
                 config.entry(Value::String("target".into())).or_insert(Value::String("*".into()));
+                if *old == "set-pr-auto-complete" {
+                    config.entry(Value::String("merge-strategy".into())).or_insert(Value::String("squash".into()));
+                    config.entry(Value::String("delete-source-branch".into())).or_insert(Value::Bool(true));
+                }
             }
             renamed.insert(Value::String((*new).to_string()), value);
         }

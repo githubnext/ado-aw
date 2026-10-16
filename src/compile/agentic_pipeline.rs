@@ -472,7 +472,12 @@ pub(crate) fn build_pipeline_context(
 
     // MCPG config + compiler-generated dynamic SafeOutputs tool definitions.
     let custom_tool_schemas = super::custom_tools::generate_custom_tool_schemas(front_matter)?;
-    let custom_tools_json = if custom_tool_schemas.is_empty() {
+    let pr_policy = crate::mcp_admission::PrAdmissionPolicy::from_front_matter(front_matter)?;
+    let custom_tools_json = if let Some(policy) = pr_policy {
+        let definitions: serde_json::Value = serde_json::from_str(
+            &super::custom_tools::custom_tools_json(&custom_tool_schemas)?)?;
+        Some(serde_json::to_string(&serde_json::json!({"customTools": definitions, "prPolicy": policy}))?)
+    } else if custom_tool_schemas.is_empty() {
         None
     } else {
         Some(super::custom_tools::custom_tools_json(
@@ -4968,17 +4973,28 @@ fn approval_summary_pr_policies(
     let mut policies = serde_json::Map::new();
     for tool in front_matter.safe_outputs.keys() {
         let mut policy = match tool.as_str() {
+            "create-pull-request" => {
+                let config = front_matter.typed_safe_output_config::<crate::safe_outputs::CreatePrConfig>(tool)?
+                    .unwrap_or_default();
+                serde_json::json!({"target":{"kind":"created"}, "creation": {
+                    "draft":config.draft, "auto-complete":config.auto_complete,
+                    "merge-strategy":config.completion.merge_strategy,
+                    "delete-source-branch":config.completion.delete_source_branch,
+                    "reviewers":config.reviewers, "labels":config.labels, "work-items":config.work_items,
+                }})
+            }
             "update-pull-request" => {
                 let config = front_matter
                     .update_pull_request_config()?
                     .unwrap_or_default();
-                serde_json::json!({"target": config.target_policy()?, "operation": config.operation, "target-repo": config.target_repo})
+                serde_json::json!({"target": config.target_policy()?, "operation": config.effective_default_operation(),
+                    "allowed-operations": config.allowed_operations, "default-repository": config.target_repo})
             }
             "abandon-pull-request" => {
                 let config = front_matter
                     .abandon_pull_request_config()?
                     .unwrap_or_default();
-                serde_json::json!({"target": config.target_policy()?, "target-repo": config.target_repo})
+                serde_json::json!({"target": config.target_policy()?, "default-repository": config.target_repo})
             }
             "add-pull-request-reviewers"
             | "add-pull-request-labels"
@@ -4993,7 +5009,7 @@ fn approval_summary_pr_policies(
             | "reply-to-pull-request-comment"
             | "resolve-pull-request-thread" => {
                 let config = PrMutationPolicy::parse(&front_matter.safe_outputs[tool])?;
-                serde_json::json!({"target": config.target_policy()?, "target-repo": config.target_repo})
+                serde_json::json!({"target": config.target_policy()?, "default-repository": config.target_repo})
             }
             _ => continue,
         };

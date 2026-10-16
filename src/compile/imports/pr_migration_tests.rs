@@ -501,7 +501,8 @@ async fn mixed_custom_ownership_survives_unrelated_builtin_root_rewrite() {
     assert_eq!(after.safe_outputs["add-pr-labels"], json!({"max": 3}));
     assert_eq!(
         after.safe_outputs["add-pull-request-comment"],
-        json!({"max": 1, "target": "*"})
+        json!({"max": 1, "target": "*", "allowed-repositories":["*"], "include-stats":true,
+            "allowed-statuses":["active","fixed","wont-fix","closed","by-design"]})
     );
     let rewritten = fs::read_to_string(&source).unwrap();
     assert!(rewritten.contains("echo add-pr-labels"));
@@ -517,7 +518,7 @@ async fn legacy_consumer_provenance_does_not_grant_new_import_wildcard_authority
     write(&source.with_extension("lock.yml"),
         "# @ado-aw source=\"agent.md\" version=0.52.0\n");
     let (fm, _) = compile::build_pipeline_ir(&source).await.unwrap();
-    assert_eq!(fm.safe_outputs["add-pull-request-comment"]["target"], "*");
+    assert_eq!(fm.safe_outputs["add-pull-request-comment"]["target"], "triggering");
     assert_eq!(fm.safe_outputs["add-pull-request-labels"]["target"], "triggering");
     compile_source(&source).await.unwrap();
     let (again, _) = compile::build_pipeline_ir(&source).await.unwrap();

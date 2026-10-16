@@ -280,6 +280,10 @@ pub fn resolved_execution_config_json(
                 "staged".to_string(),
                 Value::Bool(front_matter.tool_is_staged(&tool)),
             );
+        config.as_object_mut()
+            .ok_or_else(|| anyhow!("failed to normalize resolved config for tool '{tool}'"))?
+            .insert("require-approval".to_string(),
+                Value::Bool(front_matter.tool_requires_approval(&tool).is_some()));
     }
     let repositories: Vec<Value> = front_matter
         .repositories
@@ -1121,6 +1125,20 @@ safe-outputs:
         assert_eq!(config["toolConfigs"]["noop"]["staged"], true);
         assert_eq!(config["toolConfigs"]["notify"]["staged"], true);
         assert_eq!(config["customTools"][0]["name"], "notify");
+    }
+
+    #[test]
+    fn resolved_config_and_admission_share_effective_approval_lanes() {
+        let fm = parse_front_matter(
+            "name: Test\ndescription: Test\nsafe-outputs:\n  require-approval: true\n  create-pull-request: {}\n  add-pull-request-labels:\n    target: '*'\n    require-approval: false\n",
+        );
+        let runtime: Value = serde_json::from_str(&resolved_execution_config_json(&fm, &[]).unwrap()).unwrap();
+        let admission = crate::mcp_admission::PrAdmissionPolicy::from_front_matter(&fm).unwrap().unwrap();
+        for tool in ["create-pull-request", "add-pull-request-labels"] {
+            assert_eq!(runtime["toolConfigs"][tool]["require-approval"], admission.tools[tool]["require-approval"]);
+        }
+        assert_eq!(runtime["toolConfigs"]["create-pull-request"]["require-approval"], true);
+        assert_eq!(runtime["toolConfigs"]["add-pull-request-labels"]["require-approval"], false);
     }
 
     #[test]

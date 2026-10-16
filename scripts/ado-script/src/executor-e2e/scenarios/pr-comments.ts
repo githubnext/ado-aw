@@ -28,7 +28,7 @@ async function seed(ctx: ScenarioContext, id: string, mutation?: "edit" | "reply
     const run = await runExecute({
       adoAwBin: ctx.adoAwBin, scenarioDir: join(ctx.workDir, `${id}-seed`),
       tool: "add-pull-request-comment", config: { target: "*", "include-stats": false, "comment-key": "owned-report" },
-      entry: { pull_request_id: pr.prId, repository: pr.repo, content: original, status: "active" },
+      entry: { pull_request_id: pr.prId, repository: pr.repo, body: original, status: "active" },
       adoRepo: pr.repo, orgUrl: ctx.orgUrl, project: ctx.project, token: ctx.token, log: ctx.log,
       extraEnv: { BUILD_BUILDID: "1" },
     });
@@ -68,7 +68,7 @@ const update: Scenario<OwnedState> = {
   setup: (ctx) => seed(ctx, "update-owned-comment"),
   ndjson: async (_ctx, state) => ({
     pull_request_id: state.prId, repository: state.repo,
-    thread_id: state.threadId, comment_id: state.commentId, content: replacement,
+    thread_id: state.threadId, comment_id: state.commentId, body: replacement,
   }),
   assert: async (ctx, state) => {
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
@@ -104,7 +104,7 @@ const supersession: Scenario<OwnedState>[] = [false, true].map((withReply): Scen
     "supersede-older-comments": true, "max-superseded-comments": 2,
   }),
   setup: (ctx) => seed(ctx, withReply ? "preserve-owned-conversation" : "supersede-owned-comment", withReply ? "reply" : undefined),
-  ndjson: async (_ctx, state) => ({ pull_request_id: state.prId, repository: state.repo, content: replacement, status: "active" }),
+  ndjson: async (_ctx, state) => ({ pull_request_id: state.prId, repository: state.repo, body: replacement, status: "active" }),
   assert: async (ctx, state, record) => {
     const thread = await ctx.rest.getThread(state.repo, state.prId, state.threadId);
     const content = thread.comments?.find((comment) => comment.id === state.commentId)?.content;
@@ -173,7 +173,7 @@ const inlineCases: Scenario<InlineState>[] = (["right", "left", "stale"] as cons
     pull_request_id: state.prId, repository: state.repo, file_path: state.file,
     side: mode === "left" ? "left" : "right", line: 1,
     expected_head_sha: mode === "stale" ? "f".repeat(40) : state.head,
-    content: "Comment on the exact reviewed file revision.", status: "active",
+    body: "Comment on the exact reviewed file revision.", status: "active",
   }),
   ...(mode === "stale" ? { expectedFailure: { error: /head changed/ } } : {}),
   assertFailure: async (ctx, state) => {
@@ -223,9 +223,9 @@ const batches: Scenario<InlineState>[] = (["valid", "invalid-last", "not-enabled
     pull_request_id: state.prId, repository: state.repo, event: "comment",
     body: "Consolidated review summary without a vote.", expected_head_sha: state.head,
     comments: [
-      { file_path: state.file, side: "right", line: 1, content: "First inline finding in this review." },
+      { file_path: state.file, side: "right", line: 1, body: "First inline finding in this review." },
       { file_path: state.file, side: "right", line: mode === "invalid-last" ? 99999 : 1,
-        content: "Second inline finding in this review." },
+        body: "Second inline finding in this review." },
     ],
   }),
   ...(mode !== "valid" ? {

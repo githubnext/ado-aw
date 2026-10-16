@@ -14,6 +14,7 @@ use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, Validate}
 use crate::sanitize::{SanitizeContent, sanitize_config, sanitize_markdown};
 use crate::tool_result;
 use ado_aw_derive::SanitizeConfig;
+use super::ToolResult;
 
 const MAX_COMMENT_LEN: usize = 4_000;
 
@@ -22,6 +23,7 @@ pub enum AbandonPullRequestTarget {
     #[default]
     Triggering,
     Any,
+    Created,
     Id(u64),
 }
 
@@ -33,6 +35,7 @@ impl Serialize for AbandonPullRequestTarget {
         match self {
             Self::Triggering => serializer.serialize_str("triggering"),
             Self::Any => serializer.serialize_str("*"),
+            Self::Created => serializer.serialize_str("created"),
             Self::Id(id) => serializer.serialize_u64(*id),
         }
     }
@@ -79,6 +82,7 @@ impl<'de> Deserialize<'de> for AbandonPullRequestTarget {
                 match value {
                     "triggering" => Ok(AbandonPullRequestTarget::Triggering),
                     "*" => Ok(AbandonPullRequestTarget::Any),
+                    "created" => Ok(AbandonPullRequestTarget::Created),
                     other => {
                         let id = other.parse::<u64>().map_err(|_| {
                             E::custom("target must be \"triggering\", \"*\", or a positive pull request ID")
@@ -100,7 +104,7 @@ impl<'de> Deserialize<'de> for AbandonPullRequestTarget {
 #[serde(deny_unknown_fields)]
 pub struct AbandonPullRequestParams {
     /// Positive Azure DevOps PR ID or same-run temporary ID. Required when target is "*".
-    #[serde(default, alias = "pull_request_number")]
+    #[serde(default)]
     pub pull_request_id: Option<PullRequestReference>,
     /// Optional abandonment comment.
     #[serde(default)]
@@ -141,7 +145,7 @@ tool_result! {
     /// Result of abandoning an Azure DevOps pull request.
     #[serde(deny_unknown_fields)]
     pub struct AbandonPullRequestResult {
-        #[serde(default, alias = "pull_request_number")]
+        #[serde(default)]
         pull_request_id: Option<PullRequestReference>,
         #[serde(default)]
         body: Option<String>,
@@ -160,16 +164,16 @@ impl SanitizeContent for AbandonPullRequestResult {
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AbandonPullRequestConfig {
-    #[serde(default = "default_true", rename = "include-stats")]
+    #[serde(default, rename = "include-stats")]
     #[sanitize_config(skip)]
     pub include_stats: bool,
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: AbandonPullRequestTarget,
     /// Default repository alias/name when the agent does not pass `repository`.
-    #[serde(default, rename = "target-repo", alias = "repository")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
-    #[serde(default, rename = "allowed-repositories", alias = "allowed-repos")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories", alias = "allowed-repos")]
     pub allowed_repositories: Vec<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
@@ -183,10 +187,10 @@ pub struct AbandonPullRequestConfig {
 impl Default for AbandonPullRequestConfig {
     fn default() -> Self {
         Self {
-            include_stats: true,
+            include_stats: false,
             target: AbandonPullRequestTarget::Triggering,
             target_repo: None,
-            allowed_repositories: Vec::new(),
+            allowed_repositories: super::pr_policy::unrestricted_names(),
             required_labels: Vec::new(),
             required_title_prefix: None,
             max: None,
@@ -194,13 +198,10 @@ impl Default for AbandonPullRequestConfig {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
 pub(crate) fn validate_abandon_pull_request_config(
     config: &AbandonPullRequestConfig,
 ) -> anyhow::Result<()> {
+    super::pr_policy::validate_names(&config.allowed_repositories, "allowed-repositories")?;
     if let AbandonPullRequestTarget::Id(id) = config.target {
         ensure!(id > 0, "target pull request ID must be positive");
     }
@@ -236,13 +237,19 @@ impl AbandonPullRequestConfig {
             AbandonPullRequestTarget::Id(id) => PrTargetPolicy::fixed(id),
             AbandonPullRequestTarget::Triggering => Ok(PrTargetPolicy::Triggering),
             AbandonPullRequestTarget::Any => Ok(PrTargetPolicy::Explicit),
+            AbandonPullRequestTarget::Created => Ok(PrTargetPolicy::Created),
         }
     }
 }
 
 impl AbandonPullRequestResult {
     fn repository_selector<'a>(&'a self, config: &'a AbandonPullRequestConfig) -> Option<&'a str> {
-        self.repository.as_deref().or(config.target_repo.as_deref())
+        self.repository.as_deref().or_else(|| {
+            if config.target == AbandonPullRequestTarget::Triggering
+                || matches!(self.pull_request_id, Some(PullRequestReference::Temporary(_))) {
+                None
+            } else { config.target_repo.as_deref() }
+        })
     }
 
     fn validate_filters(
@@ -354,10 +361,10 @@ async fn post_comment(
     }
     let status = response.status();
     let body = response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
-    Ok(Err(ExecutionResult::failure(format!(
+    Ok(Err(ExecutionResult::failure_with_data(format!(
         "Failed to add abandonment comment to PR #{} (HTTP {}): {}",
         pull_request_id, status, body
-    ))))
+    ), serde_json::json!({"delivery":if status.is_server_error() {"uncertain"} else {"rejected"}}))))
 }
 
 async fn abandon_pr(
@@ -392,6 +399,10 @@ async fn abandon_pr(
 
 #[async_trait::async_trait]
 impl Executor for AbandonPullRequestResult {
+    async fn execute_sanitized(&mut self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        super::result::execute_pr_sanitized(self, ctx).await
+    }
+
     fn dry_run_summary(&self) -> String {
         let target = self
             .pull_request_id
@@ -421,8 +432,12 @@ impl Executor for AbandonPullRequestResult {
             )
         })?;
         let config: AbandonPullRequestConfig = ctx.get_tool_config("abandon-pull-request")?;
+        super::pr_common::validate_created_dependency(Self::NAME, self.pull_request_id.as_ref(), ctx)?;
         if let Err(error) = validate_abandon_pull_request_config(&config) {
             return Ok(ExecutionResult::failure(error.to_string()));
+        }
+        if config.allowed_repositories.is_empty() {
+            return Ok(ExecutionResult::failure("allowed-repositories permits no PR destination"));
         }
 
         let (pull_request_id, target) = match resolve_pr_policy_target(
@@ -528,7 +543,7 @@ impl Executor for AbandonPullRequestResult {
                 return Ok(abandoned_comment_warning(
                     pull_request_id,
                     &repo_name,
-                    "failed",
+                    if result.delivery_uncertain() { "uncertain" } else { "failed" },
                     &result.message,
                 ));
             }
@@ -684,16 +699,16 @@ mod tests {
         }))
         .unwrap();
         let execution = result.execute_sanitized(&ctx).await.unwrap();
-        assert!(execution.success && execution.is_warning());
+        assert!(!execution.success && !execution.is_warning());
         let data = execution.data.unwrap();
         assert_eq!(data["abandoned"], true);
         assert_eq!(data["comment_posted"], false);
-        assert_eq!(data["comment_status"], "failed");
+        assert_eq!(data["comment_status"], "uncertain");
         assert_eq!(data["pull_request_id"], 7);
     }
 
     #[tokio::test]
-    async fn transport_failure_after_abandon_is_warning_without_retry() {
+    async fn transport_failure_after_abandon_is_uncertain_failure_without_retry() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let uri = format!("http://{}", listener.local_addr().unwrap());
@@ -767,10 +782,12 @@ mod tests {
         .unwrap()
         .unwrap();
         server.await.unwrap();
-        assert!(execution.success && execution.is_warning());
+        assert!(!execution.success && !execution.is_warning());
         let data = execution.data.unwrap();
         assert_eq!(data["abandoned"], true);
         assert_eq!(data["comment_status"], "uncertain");
+        assert_eq!(data["effects"][0]["state"], "applied");
+        assert_eq!(data["effects"][1]["state"], "uncertain");
     }
 
     #[tokio::test]
@@ -853,7 +870,7 @@ mod tests {
 
     #[test]
     fn abandonment_markdown_and_stats_respect_final_utf16_limit() {
-        assert!(AbandonPullRequestConfig::default().include_stats);
+        assert!(!AbandonPullRequestConfig::default().include_stats);
         for (body, valid) in [("😀".repeat(2000), true), ("😀".repeat(2001), false)] {
             assert_eq!(
                 AbandonPullRequestParams {
@@ -892,7 +909,7 @@ mod tests {
                 .expect(if expected_success { 1 } else { 0 })
                 .mount(&server)
                 .await;
-            let mut ctx = context(&server, serde_json::json!({"target": "*"}));
+            let mut ctx = context(&server, serde_json::json!({"target": "*", "include-stats":true}));
             ctx.agent_stats = Some(crate::agent_stats::AgentStats {
                 agent_name: "review-agent".into(),
                 model: None,

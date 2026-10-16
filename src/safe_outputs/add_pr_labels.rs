@@ -64,15 +64,15 @@ pub struct AddPrLabelsConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
     pub required_title_prefix: Option<String>,
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
-    #[serde(default, rename = "allowed-labels")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-labels")]
     pub allowed_labels: Vec<String>,
     #[serde(default, rename = "blocked-labels")]
     pub blocked_labels: Vec<String>,
@@ -91,7 +91,7 @@ impl Default for AddPrLabelsConfig {
         Self {
             target: Default::default(), target_repo: None,
             required_labels: Vec::new(), required_title_prefix: None,
-            allowed_repositories: Vec::new(), allowed_labels: Vec::new(),
+            allowed_repositories: super::pr_policy::unrestricted_names(), allowed_labels: super::pr_policy::unrestricted_names(),
             blocked_labels: Vec::new(), max_labels: default_max_labels(), max: None,
         }
     }
@@ -110,13 +110,15 @@ pub(crate) fn normalize_label_batch<T: AsRef<str>>(
     labels: &[T], allowed: &[String], blocked: &[String], max_labels: usize,
 ) -> anyhow::Result<Vec<String>> {
     validate_label_input(labels)?;
+    super::pr_policy::validate_names(allowed, "allowed-labels")?;
+    super::pr_policy::validate_names(blocked, "blocked-labels")?;
     ensure!(max_labels > 0 && max_labels <= 1_000, "max-labels must be between 1 and 1000");
     let mut normalized = Vec::<String>::new();
     for label in labels {
         let label = label.as_ref().trim();
-        ensure!(!blocked.iter().any(|item| item.trim().eq_ignore_ascii_case(label)),
+        ensure!(!super::pr_policy::permits_name(blocked, label),
             "Label '{label}' is blocked by blocked-labels");
-        ensure!(allowed.is_empty() || allowed.iter().any(|item| item.trim().eq_ignore_ascii_case(label)),
+        ensure!(super::pr_policy::permits_name(allowed, label),
             "Label '{label}' is not in allowed-labels");
         if !normalized.iter().any(|item| item.eq_ignore_ascii_case(label)) {
             normalized.push(label.to_string());
@@ -127,6 +129,9 @@ pub(crate) fn normalize_label_batch<T: AsRef<str>>(
 }
 
 pub(crate) fn validate_add_pr_labels_config(config: &AddPrLabelsConfig) -> anyhow::Result<()> {
+    super::pr_policy::validate_names(&config.allowed_labels, "allowed-labels")?;
+    super::pr_policy::validate_names(&config.blocked_labels, "blocked-labels")?;
+    super::pr_policy::validate_names(&config.allowed_repositories, "allowed-repositories")?;
     ensure!(config.max_labels > 0 && config.max_labels <= 1_000, "max-labels must be between 1 and 1000");
     for label in config.allowed_labels.iter().chain(&config.blocked_labels) {
         crate::secure::PrLabelName::parse(label)?;
@@ -211,14 +216,16 @@ mod tests {
     fn label_policy_limits_are_exact_and_blocking_wins() {
         for count in [0,1,10,11] {
             let labels=(0..count).map(|i|format!("label-{i}")).collect::<Vec<_>>();
-            assert_eq!(normalize_label_batch(&labels,&[],&[],10).is_ok(),(1..=10).contains(&count));
+            assert_eq!(normalize_label_batch(&labels,&["*".into()],&[],10).is_ok(),(1..=10).contains(&count));
         }
         assert!(normalize_label_batch(&vec!["label".to_string();1_001],&[],&[],10).is_err());
         assert_eq!(normalize_label_batch(&[" Label ".to_string(),"label".to_string()],&["LABEL".into()],&[],1).unwrap(),vec!["Label"]);
         assert!(normalize_label_batch(&["label"],&["label".into()],&["LABEL".into()],10).is_err());
         assert!(normalize_label_batch(&["other"],&["label".into()],&[],10).is_err());
         let labels=(0..11).map(|i|format!("label-{i}")).collect::<Vec<_>>();
-        assert!(normalize_label_batch(&labels,&[],&[],11).is_ok());
+        assert!(normalize_label_batch(&labels,&["*".into()],&[],11).is_ok());
+        assert!(normalize_label_batch(&["label"], &[], &[], 1).is_err());
+        assert!(normalize_label_batch(&["label"], &["*".into()], &["*".into()], 1).is_err());
         for name in [""," ","bad\nlabel","##vso[task.complete]x"] {
             assert!(validate_label_input(&[name]).is_err());
         }

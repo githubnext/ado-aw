@@ -20,6 +20,7 @@ mod logging;
 mod mcp;
 mod mcp_author;
 mod mcp_custom_tools;
+mod mcp_admission;
 mod ndjson;
 mod remove;
 mod run;
@@ -1096,6 +1097,8 @@ async fn build_execution_context(
             _ => serde_json::Map::new(),
         };
         config.insert("staged".to_string(), serde_json::Value::Bool(staged));
+        config.insert("require-approval".to_string(),
+            serde_json::Value::Bool(front_matter.tool_requires_approval(&tool).is_some()));
         ctx.tool_configs
             .insert(tool, serde_json::Value::Object(config));
     }

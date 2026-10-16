@@ -47,6 +47,11 @@ pub const DEBUG_ONLY_TOOLS: &[&str] = &[];
 
 /// Public tools exposed only when explicitly configured in `safe-outputs:`.
 pub const CONFIGURED_ONLY_TOOLS: &[&str] = tool_names![
+    CreatePrResult,
+    AddPrCommentResult,
+    ReplyToPrCommentResult,
+    ResolvePrThreadResult,
+    SubmitPrReviewResult,
     AddPrReviewersResult,
     AddPrLabelsResult,
     RemovePullRequestLabelsResult,
@@ -823,6 +828,8 @@ mod missing_data;
 mod missing_tool;
 mod noop;
 pub(crate) mod pr_common;
+pub(crate) mod pr_policy;
+pub(crate) mod pr_completion;
 pub(crate) mod pr_mutations;
 mod queue_build;
 mod remove_github_issue_labels;

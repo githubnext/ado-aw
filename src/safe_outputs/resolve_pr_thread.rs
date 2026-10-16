@@ -112,33 +112,39 @@ impl SanitizeContent for ResolvePrThreadResult {
 ///       - fixed
 ///       - wont-fix
 /// ```
-#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvePrThreadConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
     pub required_title_prefix: Option<String>,
-    #[serde(default, rename = "allow-temporary-ids")]
-    #[sanitize_config(skip)]
-    pub allow_temporary_ids: bool,
     /// Restrict which repositories the agent can operate on.
-    /// If empty, all repositories in the checkout list (plus "self") are allowed.
-    #[serde(default, rename = "allowed-repositories")]
+    /// Omission adds no restriction; an explicit empty list permits no repository.
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
 
     /// Restrict which thread statuses can be set.
     /// REQUIRED — empty list rejects all status transitions.
-    #[serde(default, rename = "allowed-statuses")]
+    #[serde(default = "super::pr_policy::resolution_statuses", rename = "allowed-statuses")]
     pub allowed_statuses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
+}
+
+impl Default for ResolvePrThreadConfig {
+    fn default() -> Self {
+        Self { target: Default::default(), target_repo: None,
+            required_labels: Vec::new(), required_title_prefix: None,
+            allowed_repositories: super::pr_policy::unrestricted_names(),
+            allowed_statuses: super::pr_policy::resolution_statuses(), max: None }
+    }
 }
 
 #[async_trait::async_trait]
@@ -200,7 +206,6 @@ impl Executor for ResolvePrThreadResult {
             }
         };
 
-        super::pr_common::validate_temporary_opt_in(self.pull_request_id.as_ref(), config.allow_temporary_ids)?;
         let client = super::pr_http::client()?;
         let (pull_request_id, target) = match resolve_configured_pr_target(
             Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(),             ctx,
@@ -395,8 +400,8 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = ResolvePrThreadConfig::default();
-        assert!(config.allowed_repositories.is_empty());
-        assert!(config.allowed_statuses.is_empty());
+        assert_eq!(config.allowed_repositories, ["*"]);
+        assert_eq!(config.allowed_statuses, ["fixed"]);
     }
 
     #[test]

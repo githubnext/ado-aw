@@ -4,7 +4,6 @@ use super::pr_common::{
     PullRequestReference, legacy_policy, validate_reference,
 };
 use super::pr_mutations::{UpdatePrContext, execute_set_auto_complete};
-use super::update_pr::UpdatePrConfig;
 use super::{ExecutionContext, ExecutionResult, Executor, Validate};
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
@@ -50,31 +49,23 @@ impl SanitizeContent for SetPrAutoCompleteResult {
         self.repository = self.repository.as_deref().map(sanitize_config);
     }
 }
-fn default_true() -> bool {
-    true
-}
-fn default_merge_strategy() -> String {
-    "squash".into()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct SetPrAutoCompleteConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
     pub required_title_prefix: Option<String>,
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
-    #[serde(default = "default_true", rename = "delete-source-branch")]
-    pub delete_source_branch: bool,
-    #[serde(default = "default_merge_strategy", rename = "merge-strategy")]
-    pub merge_strategy: String,
+    #[serde(flatten)]
+    #[sanitize_config(skip)]
+    pub completion: super::pr_completion::CompletionPreferences,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
@@ -86,9 +77,8 @@ impl Default for SetPrAutoCompleteConfig {
             target_repo: None,
             required_labels: Vec::new(),
             required_title_prefix: None,
-            allowed_repositories: Vec::new(),
-            delete_source_branch: true,
-            merge_strategy: default_merge_strategy(),
+            allowed_repositories: super::pr_policy::unrestricted_names(),
+            completion: Default::default(),
             max: None,
         }
     }
@@ -96,12 +86,7 @@ impl Default for SetPrAutoCompleteConfig {
 pub(crate) fn validate_set_pr_auto_complete_config(
     config: &SetPrAutoCompleteConfig,
 ) -> anyhow::Result<()> {
-    ensure!(
-        ["squash", "noFastForward", "rebase", "rebaseMerge"]
-            .contains(&config.merge_strategy.as_str()),
-        "Invalid merge-strategy '{}'",
-        config.merge_strategy
-    );
+    config.completion.validate()?;
     for repository in &config.allowed_repositories {
         ensure!(
             !repository.trim().is_empty(),
@@ -134,12 +119,6 @@ impl Executor for SetPrAutoCompleteResult {
         let config: SetPrAutoCompleteConfig =
             ctx.get_tool_config("set-pull-request-auto-complete")?;
         validate_set_pr_auto_complete_config(&config)?;
-        let policy = UpdatePrConfig {
-            allowed_repositories: config.allowed_repositories,
-            delete_source_branch: config.delete_source_branch,
-            merge_strategy: config.merge_strategy,
-            ..Default::default()
-        };
         let client = super::pr_http::client()?;
         let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
             Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx, &client,
@@ -166,7 +145,7 @@ impl Executor for SetPrAutoCompleteResult {
                     .context("No access token available")?,
                 connection_type: ctx.write_connection_type,
             },
-            legacy.as_ref().unwrap_or(&policy),
+            &config.completion,
         )
         .await
     }
@@ -225,13 +204,15 @@ mod tests {
     }
 
     #[test]
-    fn completion_defaults_and_validation_match_legacy() {
+    fn completion_defaults_preserve_omitted_preferences() {
         let config = SetPrAutoCompleteConfig::default();
-        assert!(config.delete_source_branch);
-        assert_eq!(config.merge_strategy, "squash");
+        assert!(config.completion.is_empty());
         assert!(
             validate_set_pr_auto_complete_config(&SetPrAutoCompleteConfig {
-                merge_strategy: "merge-immediately".into(),
+                completion: super::super::pr_completion::CompletionPreferences {
+                    merge_strategy: Some("merge-immediately".into()),
+                    ..Default::default()
+                },
                 ..config
             })
             .is_err()
@@ -239,18 +220,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrated_completion_uses_target_actor_and_exact_legacy_options() {
+    async fn migrated_completion_uses_target_actor_and_current_explicit_options() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
         use wiremock::{
             Mock, MockServer, ResponseTemplate,
             matchers::{body_json, header, method, path},
         };
         let server = MockServer::start().await;
+        let actor = "01234567-89ab-cdef-0123-456789abcdef";
+        let applied = Arc::new(AtomicBool::new(false));
+        let read = applied.clone();
+        Mock::given(method("GET")).and(path(
+            "/Other/_apis/git/repositories/repo-id/pullRequests/4294967296",
+        )).respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(
+            if read.load(Ordering::SeqCst) {
+                serde_json::json!({"status":"active","isDraft":false,
+                    "autoCompleteSetBy":{"id":actor},
+                    "completionOptions":{"deleteSourceBranch":false,"mergeStrategy":"rebase"}})
+            } else { serde_json::json!({"status":"active","isDraft":false}) }
+        )).expect(2).mount(&server).await;
         Mock::given(method("GET"))
             .and(path("/_apis/connectiondata"))
             .and(header("authorization", "Bearer token"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({"authenticatedUser": {"id": "target-actor"}}),
+                    serde_json::json!({"authenticatedUser": {"id": actor}}),
                 ),
             )
             .expect(1)
@@ -262,10 +256,13 @@ mod tests {
             ))
             .and(header("authorization", "Bearer token"))
             .and(body_json(serde_json::json!({
-                "autoCompleteSetBy": {"id": "target-actor"},
+                "autoCompleteSetBy": {"id": actor},
                 "completionOptions": {"deleteSourceBranch": false, "mergeStrategy": "rebase"}
             })))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(move |_: &wiremock::Request| {
+                applied.store(true, Ordering::SeqCst);
+                ResponseTemplate::new(200)
+            })
             .expect(1)
             .mount(&server)
             .await;
@@ -274,7 +271,7 @@ mod tests {
             "set-pull-request-auto-complete",
             serde_json::json!({
                 "delete-source-branch": false, "merge-strategy": "rebase",
-                "legacy-update-pr": {"delete-source-branch": false, "merge-strategy": "rebase"}
+                "legacy-update-pr": {"delete-source-branch": true, "merge-strategy": "squash"}
             }),
         );
         ctx.write_connection_type = Some(crate::compile::types::WriteConnectionType::AzureDevOps);

@@ -216,6 +216,25 @@ function installDedupAwareWitMock() {
 }
 
 describe("conclusion/main", () => {
+  it("retains confirmed effects and explicit uncertainty in a failure report", async () => {
+    applyEnv({ AW_SAFEOUTPUTS_RESULT: "Failed" });
+    setManifestEntries([{
+      name: "create_pull_request", status: "failed", context: "proposal_example",
+      result: { pull_request_id: 42, effects: [
+        { operation: "create-pull-request", state: "applied" },
+        { operation: "initialize-reviewer", state: "uncertain" },
+        { operation: "enable-auto-complete", state: "unattempted" },
+      ] },
+    }]);
+    await main();
+    const body = String(fileOrAppendWorkItem.mock.calls[0]?.[3]);
+    expect(body).toContain("applied: 1");
+    expect(body).toContain("uncertain: 1");
+    expect(body).toContain("unattempted: 1");
+    expect(body).toContain("PR references recorded by the executor: 42");
+    expect(body).toContain("inspection before any retry");
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     applyEnv();

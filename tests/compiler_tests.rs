@@ -1474,9 +1474,9 @@ fn test_compile_auto_discover_skips_missing_source() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that submit-pull-request-review fails compilation when allowed-events is missing
+/// An omitted event grant permits comment-only review.
 #[test]
-fn test_submit_pr_review_requires_allowed_events() {
+fn test_submit_pr_review_defaults_to_comment_events() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agentic-pipeline-spr-events-{}",
         std::process::id()
@@ -1514,22 +1514,22 @@ Submit PR reviews.
         .expect("Failed to run compiler");
 
     assert!(
-        !output.status.success(),
-        "Compiler should fail when submit-pull-request-review lacks allowed-events"
+        output.status.success(),
+        "Compiler should accept the comment-only default: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let compiled = fs::read_to_string(&output_path).unwrap();
     assert!(
-        stderr.contains("allowed-events"),
-        "Error message should mention allowed-events: {stderr}"
+        compiled_has_enabled_tool(&compiled, "submit-pull-request-review"),
+        "The usable comment-only tool must be exposed"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that submit-pull-request-review fails compilation when allowed-events is an empty list
+/// An explicit empty event grant is valid but exposes no usable review tool.
 #[test]
-fn test_submit_pr_review_requires_nonempty_allowed_events() {
+fn test_submit_pr_review_empty_events_disable_tool_exposure() {
     let temp_dir =
         std::env::temp_dir().join(format!("agentic-pipeline-spr-empty-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
@@ -1564,14 +1564,15 @@ Submit PR reviews.
         .expect("Failed to run compiler");
 
     assert!(
-        !output.status.success(),
-        "Compiler should fail when submit-pull-request-review has empty allowed-events"
+        output.status.success(),
+        "Compiler should preserve an empty grant: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let compiled = fs::read_to_string(&output_path).unwrap();
     assert!(
-        stderr.contains("allowed-events"),
-        "Error message should mention allowed-events: {stderr}"
+        !compiled_has_enabled_tool(&compiled, "submit-pull-request-review"),
+        "An empty event grant must not advertise a usable tool"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -1706,10 +1707,9 @@ permissions:
 safe-outputs:
   create-pull-request:
     require-approval: true
-  update-pr:
+  update-pull-request:
+    target: created
     require-approval: false
-    allowed-operations:
-      - update-description
 ---
 
 ## PR Lane Agent
@@ -1769,8 +1769,8 @@ fn test_temporary_id_tools_require_matching_staged_settings() {
             "pull-request",
             "create-pull-request",
             "",
-            "update-pr",
-            "    allowed-operations:\n      - update-description\n",
+            "update-pull-request",
+            "    target: created\n",
             "temporary pull-request IDs",
         ),
     ];

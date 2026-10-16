@@ -30,6 +30,7 @@ mod path_layout_check;
 pub(crate) mod pr_filters;
 pub mod shell;
 pub mod source_path_guard;
+mod source_rewrite;
 mod stage;
 mod stage_ir;
 mod standalone;
@@ -171,13 +172,17 @@ async fn compile_pipeline_inner(
     // changed default need it to tell an old source from a new one, and
     // it also drives the version upgrade note below.
     let yaml_output_path = resolve_output_path(input_path, output_path)?;
-    let (existing_version, current_pr_policy) = read_existing_pipeline_provenance(&yaml_output_path).await;
+    let existing_version = read_existing_pipeline_version(&yaml_output_path).await;
+    if existing_version.as_deref().is_some_and(|version| crate::version::is_older_than(version, "0.54.0")) {
+        eprintln!("note: upgrading the ADO PR tool contract: use body and pull_request_id in client calls; \
+            substantive reviews require the reviewed expected_head_sha. Runtime aliases are not accepted, \
+            and prompt/client text is not rewritten automatically.");
+    }
 
-    let mut parsed = common::parse_markdown_detailed_with_policy(
+    let mut parsed = common::parse_markdown_detailed_with_registry(
         &content,
         registry,
         existing_version.as_deref(),
-        current_pr_policy,
     )?;
     pr_migration::warn_prompt_references(input_path, &content, &parsed.body_raw);
     let (imported_prompt_body, merged_body) =
@@ -381,8 +386,12 @@ async fn perform_source_rewrite_if_needed(
     if !report.changed() {
         return Ok(false);
     }
-    let new_content =
-        common::reconstruct_source(leading_whitespace, front_matter_mapping, body_raw)?;
+    let preserved = source_rewrite::preserve_comments(original_content, front_matter_mapping)?;
+    let comments_preserved = preserved.is_some();
+    let new_content = match preserved {
+        Some(content) => content,
+        None => common::reconstruct_source(leading_whitespace, front_matter_mapping, body_raw)?,
+    };
     if new_content == original_content {
         // Codemods ran but their net effect is a no-op on disk — skip
         // the rewrite to avoid gratuitous diffs.
@@ -422,10 +431,11 @@ async fn perform_source_rewrite_if_needed(
     for applied in &report.applied {
         eprintln!("  - {}: {}", applied.id, applied.summary);
     }
-    eprintln!(
-        "note: front-matter comments are not preserved when codemods rewrite the source. \
-         Renamed keys may move to the end of the front-matter block."
-    );
+    if comments_preserved {
+        eprintln!("note: front-matter comments were preserved; codemod changes were checked against the compiled policy.");
+    } else {
+        eprintln!("note: renamed keys may move to the end of the front-matter block.");
+    }
 
     Ok(true)
 }
@@ -636,11 +646,10 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             )
         })?;
 
-    let mut parsed = common::parse_markdown_detailed_with_policy(
+    let mut parsed = common::parse_markdown_detailed_with_registry(
         &content,
         codemods::CODEMODS,
         Some(header_meta.version.as_str()).filter(|v| !v.is_empty()),
-        common::has_current_pr_policy(&existing),
     )?;
     pr_migration::warn_prompt_references(&source_path, &content, &parsed.body_raw);
     let (imported_prompt_body, markdown_body) =
@@ -810,20 +819,14 @@ fn format_diff(existing: &str, expected: &str, pipeline_path: &Path) -> String {
 /// header written by every compilation. Returns the version string when found,
 /// `None` when the file does not exist, is unreadable, or has no recognisable
 /// header.
-async fn read_existing_pipeline_provenance(path: &Path) -> (Option<String>, bool) {
-    let Ok(content) = tokio::fs::read_to_string(path).await else { return (None, false); };
-    let version = content
+async fn read_existing_pipeline_version(path: &Path) -> Option<String> {
+    let Ok(content) = tokio::fs::read_to_string(path).await else { return None; };
+    content
         .lines()
         .take(5)
         .find_map(crate::detect::parse_header_line)
         .filter(|meta| !meta.version.is_empty())
-        .map(|meta| meta.version);
-    (version, common::has_current_pr_policy(&content))
-}
-
-#[cfg(test)]
-async fn read_existing_pipeline_version(path: &Path) -> Option<String> {
-    read_existing_pipeline_provenance(path).await.0
+        .map(|meta| meta.version)
 }
 
 /// Map a [`CompileTarget`] to the corresponding boxed [`Compiler`] implementation.
@@ -1065,9 +1068,9 @@ pub async fn prepare_source_front_matter(input_path: &Path) -> Result<FrontMatte
     let content = tokio::fs::read_to_string(input_path)
         .await
         .with_context(|| format!("Failed to read source file: {}", input_path.display()))?;
-    let (version, current_pr_policy) = read_existing_pipeline_provenance(&input_path.with_extension("lock.yml")).await;
-    let mut parsed = common::parse_markdown_detailed_with_policy(
-        &content, codemods::CODEMODS, version.as_deref(), current_pr_policy,
+    let version = read_existing_pipeline_version(&input_path.with_extension("lock.yml")).await;
+    let mut parsed = common::parse_markdown_detailed_with_registry(
+        &content, codemods::CODEMODS, version.as_deref(),
     )?;
     prepare_parsed_source(&mut parsed, input_path, codemods::CODEMODS).await?;
     if parsed.codemods.changed() {
@@ -1103,10 +1106,10 @@ pub async fn build_pipeline_ir(input_path: &Path) -> Result<(FrontMatter, ir::Pi
     // Match `compile`'s view of the source: codemods that migrate a changed
     // default are gated on the version recorded in the committed output, so
     // reading the IR without it would diverge from what `compile` produces.
-    let (existing_version, current_pr_policy) =
-        read_existing_pipeline_provenance(&input_path.with_extension("lock.yml")).await;
-    let mut parsed = common::parse_markdown_detailed_with_policy(
-        &content, codemods::CODEMODS, existing_version.as_deref(), current_pr_policy,
+    let existing_version =
+        read_existing_pipeline_version(&input_path.with_extension("lock.yml")).await;
+    let mut parsed = common::parse_markdown_detailed_with_registry(
+        &content, codemods::CODEMODS, existing_version.as_deref(),
     )?;
 
     // Resolve + merge `imports:` so `inspect`/`graph`/`whatif`/`lint`/`trace`

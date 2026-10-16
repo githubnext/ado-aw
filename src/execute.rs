@@ -692,6 +692,10 @@ where
     {
         object.remove("context");
     }
+    if crate::safe_outputs::pr_policy::is_pr_tool(tool_name) {
+        crate::safe_outputs::pr_policy::validate_proposal(tool_name, &payload)
+            .map_err(|error| anyhow::anyhow!("Failed to parse {tool_name}: {error}"))?;
+    }
     let mut output: T = serde_json::from_value(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", tool_name, e))?;
     output.execute_sanitized(ctx).await
@@ -720,6 +724,13 @@ pub async fn execute_safe_output(
         .ok_or_else(|| anyhow::anyhow!("Safe output missing 'name' field"))?;
 
     debug!("Dispatching tool: {}", tool_name);
+    if crate::safe_outputs::pr_policy::is_pr_tool(tool_name)
+        && !ctx.tool_configs.contains_key(tool_name)
+    {
+        return Ok((tool_name.to_string(), ExecutionResult::failure(format!(
+            "{tool_name} is not configured for this workflow"
+        ))));
+    }
 
     // Dispatch based on tool name. All registered tools go through `dispatch_tool`,
     // which handles deserialization and sanitized execution uniformly.
@@ -999,6 +1010,7 @@ mod tests {
         ).unwrap();
         let ctx = ExecutionContext {
             dry_run: true,
+            tool_configs: HashMap::from([("submit-pull-request-review".into(), serde_json::json!({"allowed-events":["comment"]}))]),
             ..Default::default()
         };
         let results = execute_safe_outputs(temp.path(), &ctx, &ToolFilter::default())
@@ -1090,23 +1102,30 @@ mod tests {
 
     #[tokio::test]
     async fn autocomplete_failures_do_not_report_success_or_write_without_identity() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
         for (lookup_status, patch_status, body) in [
             (401, 200, "{}"),
             (403, 200, "{}"),
             (500, 200, "{}"),
             (200, 200, "invalid"),
             (200, 200, "{}"),
-            (200, 403, "{\"authenticatedUser\":{\"id\":\"actor\"}}"),
-            (200, 500, "{\"authenticatedUser\":{\"id\":\"actor\"}}"),
+            (200, 403, "{\"authenticatedUser\":{\"id\":\"01234567-89ab-cdef-0123-456789abcdef\"}}"),
+            (200, 500, "{\"authenticatedUser\":{\"id\":\"01234567-89ab-cdef-0123-456789abcdef\"}}"),
         ] {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
+                .and(path("/_apis/connectiondata"))
                 .respond_with(ResponseTemplate::new(lookup_status).set_body_string(body))
                 .expect(1)
                 .mount(&server)
                 .await;
-            let writes = u64::from(body.contains("actor"));
+            let writes = u64::from(body.contains("01234567"));
+            Mock::given(method("GET"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/7"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"status":"active","isDraft":false})))
+                .expect(writes)
+                .mount(&server).await;
             Mock::given(method("PATCH"))
                 .respond_with(ResponseTemplate::new(patch_status))
                 .expect(writes)
@@ -1137,7 +1156,7 @@ mod tests {
             );
             assert_eq!(
                 server.received_requests().await.unwrap().len(),
-                1 + writes as usize
+                1 + 2 * writes as usize
             );
         }
     }
@@ -1148,9 +1167,9 @@ mod tests {
             Mock, MockServer, ResponseTemplate,
             matchers::{body_json, method},
         };
-        for first_status in [200, 403] {
+        for (first_status, second_status) in [(200, 403), (403, 403), (200, 500), (403, 500)] {
             let server = MockServer::start().await;
-            for (label, status) in [("one", first_status), ("two", 500)] {
+            for (label, status) in [("one", first_status), ("two", second_status)] {
                 Mock::given(method("POST"))
                     .and(body_json(serde_json::json!({"name":label})))
                     .respond_with(ResponseTemplate::new(status))
@@ -1178,11 +1197,13 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(result.success, first_status == 200);
+            assert_eq!(result.success, first_status == 200 && second_status != 500);
+            assert_eq!(result.is_warning(), first_status == 200 && second_status != 500);
             if first_status == 200 {
                 let data = result.data.unwrap();
                 assert_eq!(data["added"], serde_json::json!(["one"]));
-                assert!(data["failed"][0].as_str().unwrap().contains("two"));
+                let key = if second_status == 500 { "uncertain" } else { "failed" };
+                assert!(data[key][0].as_str().unwrap().contains("two"));
             }
             assert_eq!(server.received_requests().await.unwrap().len(), 2);
         }
@@ -1351,9 +1372,15 @@ mod tests {
             assert!(
                 String::from_utf8_lossy(&buffer[..read]).starts_with("GET /_apis/connectiondata")
             );
-            let body = r#"{"authenticatedUser":{"id":"actor"}}"#;
+            let body = r#"{"authenticatedUser":{"id":"01234567-89ab-cdef-0123-456789abcdef"}}"#;
             lookup.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
             drop(lookup);
+            let (mut current, _) = listener.accept().await.unwrap();
+            let read = current.read(&mut buffer).await.unwrap();
+            assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("GET /P/_apis/git/repositories/repo/pullRequests/7"));
+            let body = r#"{"status":"active","isDraft":false}"#;
+            current.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            drop(current);
             let (mut write, _) = listener.accept().await.unwrap();
             let read = write.read(&mut buffer).await.unwrap();
             assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("PATCH "));
@@ -1375,7 +1402,9 @@ mod tests {
             &ctx,
         )
         .await;
-        assert!(result.is_err());
+        let (_, result) = result.unwrap();
+        assert!(!result.success && !result.is_warning());
+        assert_eq!(result.data.unwrap()["effects"][0]["state"], "uncertain");
         tokio::time::timeout(std::time::Duration::from_secs(5), server)
             .await
             .unwrap()
@@ -1520,6 +1549,12 @@ mod tests {
         for (vote_status, comment_status) in [(403, 200), (500, 200), (200, 500)] {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
+                .and(path("/P/_apis/git/repositories/repo/pullRequests/7/iterations"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value":[{"id":1,"sourceRefCommit":{"commitId":"a".repeat(40)},
+                        "commonRefCommit":{"commitId":"b".repeat(40)}}]
+                }))).expect(if comment_status == 200 {2} else {1}).mount(&server).await;
+            Mock::given(method("GET"))
                 .and(path("/_apis/connectiondata"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "authenticatedUser":{"id":"actor"}
@@ -1555,36 +1590,38 @@ mod tests {
             let (_, result) = execute_safe_output(
                 &serde_json::json!({
                     "name":"submit-pull-request-review","pull_request_id":7,"event":"request-changes",
-                    "body":"A review rationale."
+                    "body":"A review rationale.","expected_head_sha":"a".repeat(40)
                 }),
                 &ctx,
             )
             .await
             .unwrap();
-            assert!(!result.success);
+            assert_eq!(result.success, vote_status == 403 && comment_status == 200);
+            assert_eq!(result.is_warning(), vote_status == 403 && comment_status == 200);
             assert!(result.message.contains(if vote_status == 200 {
                 "comment"
             } else {
                 "vote"
             }));
             let requests = server.received_requests().await.unwrap();
-            assert_eq!(requests.len(), if comment_status == 200 { 3 } else { 2 });
+            assert_eq!(requests.len(), if comment_status == 200 { 5 } else { 3 });
             assert_eq!(requests[0].method.as_str(), "GET");
-            assert_eq!(requests[1].method.as_str(), "POST");
+            let writes: Vec<_> = requests.iter().filter(|request| request.method.as_str() != "GET").collect();
+            assert_eq!(writes[0].method.as_str(), "POST");
             let data = result.data.as_ref().unwrap();
             if comment_status == 200 {
-                assert_eq!(requests[2].method.as_str(), "PUT");
+                assert_eq!(writes[1].method.as_str(), "PUT");
                 assert_eq!(data["thread_id"],12);
                 assert_eq!(data["comment_status"],"posted");
-                assert_eq!(data["vote_status"],"failed");
+                assert_eq!(data["vote_status"], if vote_status == 500 { "uncertain" } else { "failed" });
             } else {
-                assert_eq!(data["comment_status"],"failed");
+                assert_eq!(data["comment_status"],"uncertain");
                 assert_eq!(data["vote_status"],"not-attempted");
             }
             let directory = tempfile::tempdir().unwrap();
             append_execution_record(directory.path(),"submit-pull-request-review",&result,Some("review")).await;
             let record = read_executed_manifest(&directory).await;
-            assert_eq!(record[0]["status"],"failed");
+            assert_eq!(record[0]["status"], if result.is_warning() { "warning" } else { "failed" });
             assert_eq!(record[0]["result"], *data);
         }
     }
@@ -1630,12 +1667,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.success);
-        assert!(result.message.contains("1 failed"));
+        assert!(!result.success && !result.is_warning());
+        assert!(result.message.contains("uncertain"));
         let data = result.data.unwrap();
         assert_eq!(data["added"], serde_json::json!(["first"]));
         assert!(
-            data["failed"][0]
+            data["uncertain"][0]
                 .as_str()
                 .unwrap()
                 .contains("second (delivery uncertain)")
@@ -2369,7 +2406,7 @@ mod tests {
         let create = serde_json::json!({
             "name": "create-pull-request",
             "title": "Update test file",
-            "description": "Update the test file before following up.",
+            "body": "Update the test file before following up.",
             "source_branch": "agent/update-test-file-abc123",
             "patch_file": "change.patch",
             "repository": "self",

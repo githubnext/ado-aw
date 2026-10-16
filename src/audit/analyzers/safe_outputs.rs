@@ -291,12 +291,12 @@ fn build_execution_items(
     for proposal in proposals {
         if let Some(context) = proposal.context.clone() {
             context_index
-                .entry((proposal.name.clone(), context))
+                .entry((execution_tool_key(&proposal.name), context))
                 .or_default()
                 .push_back(proposal.index);
         } else {
             context_free_index
-                .entry(proposal.name.clone())
+                .entry(execution_tool_key(&proposal.name))
                 .or_default()
                 .push_back(proposal.index);
         }
@@ -307,7 +307,7 @@ fn build_execution_items(
             continue;
         };
         let Some(proposal_indexes) =
-            context_index.get_mut(&(execution.record.name.clone(), context))
+            context_index.get_mut(&(execution_tool_key(&execution.record.name), context))
         else {
             continue;
         };
@@ -331,7 +331,7 @@ fn build_execution_items(
             };
             if proposal_to_execution[proposal.index].is_none()
                 && proposal.context.is_none()
-                && proposal.name == execution.record.name
+                && execution_tool_key(&proposal.name) == execution_tool_key(&execution.record.name)
             {
                 proposal_to_execution[proposal.index] = Some(execution.index);
                 execution_matched[execution.index] = true;
@@ -339,7 +339,7 @@ fn build_execution_items(
             continue;
         }
 
-        let Some(proposal_indexes) = context_free_index.get_mut(&execution.record.name) else {
+        let Some(proposal_indexes) = context_free_index.get_mut(&execution_tool_key(&execution.record.name)) else {
             continue;
         };
         while let Some(proposal_index) = proposal_indexes.pop_front() {
@@ -370,6 +370,11 @@ fn build_execution_items(
     }
 
     items
+}
+
+fn execution_tool_key(name: &str) -> String {
+    // Stage 3 writes underscore names; proposals retain the canonical hyphen spelling.
+    name.trim().replace('-', "_")
 }
 
 fn build_item_from_execution(
@@ -1216,6 +1221,38 @@ mod tests {
             analysis.rollup.is_none(),
             "no rejection rollup should be emitted for a warning-only run"
         );
+    }
+
+    #[tokio::test]
+    async fn pr_receipt_ids_correlate_partial_and_uncertain_effects_without_losing_created_ids() {
+        let directory = TempDir::new().unwrap();
+        let proposals = [
+            json!({"name":"create-pull-request","context":"proposal_partial","body":"A"}),
+            json!({"name":"create-pull-request","context":"proposal_uncertain","body":"B"}),
+        ];
+        let partial = json!({"pull_request_id":42,"effects":[
+            {"operation":"create-pull-request","state":"applied"},
+            {"operation":"initialize-reviewer","state":"failed"},
+            {"operation":"enable-auto-complete","state":"unattempted"}
+        ]});
+        let uncertain = json!({"pull_request_id":43,"effects":[
+            {"operation":"create-pull-request","state":"applied"},
+            {"operation":"initialize-reviewer","state":"uncertain"}
+        ]});
+        write_ndjson(&directory.path().join("agent_outputs_77").join("staging").join(SAFE_OUTPUT_FILENAME),
+            &proposals);
+        write_ndjson(&directory.path().join("safe_outputs").join(EXECUTED_NDJSON_FILENAME), &[
+            json!({"name":"create_pull_request","context":"proposal_partial","status":"warning","result":partial}),
+            json!({"name":"create_pull_request","context":"proposal_uncertain","status":"failed","result":uncertain,"error":"delivery uncertain"}),
+        ]);
+        let analysis = analyze_safe_outputs(directory.path()).await.unwrap();
+        let execution = analysis.execution.unwrap();
+        assert_eq!(execution.items[0].context.as_deref(), Some("proposal_partial"));
+        assert_eq!(execution.items[0].status, SafeOutputStatus::Warning);
+        assert_eq!(execution.items[0].result, Some(partial));
+        assert_eq!(execution.items[1].context.as_deref(), Some("proposal_uncertain"));
+        assert_eq!(execution.items[1].status, SafeOutputStatus::RejectedByExecution);
+        assert_eq!(execution.items[1].result, Some(uncertain));
     }
 
     #[tokio::test]

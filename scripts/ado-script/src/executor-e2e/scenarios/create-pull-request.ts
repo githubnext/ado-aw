@@ -435,7 +435,7 @@ function createPullRequestScenario(
     },
     ndjson: async (ctx, state) => ({
       title: `${ctx.prefix(options.id)} (do not merge)`,
-      description: detBody(ctx, options.id),
+      body: detBody(ctx, options.id),
       source_branch: state.sourceBranch,
       patch_file: state.patchRelPath,
       repository: state.repositorySelector,
@@ -633,7 +633,7 @@ export const createPullRequestTemporaryIdHandoff: Scenario<CreatePrState> = {
       },
       entry: {
         title: `${ctx.prefix("create-pull-request-temporary-id-handoff")} (do not merge)`,
-        description: detBody(ctx, "create-pull-request-temporary-id-handoff"),
+        body: detBody(ctx, "create-pull-request-temporary-id-handoff"),
         source_branch: state.sourceBranch,
         patch_file: state.patchRelPath,
         repository: state.repositorySelector,
@@ -738,7 +738,7 @@ function createPullRequestAddReviewersScenario(
         },
         entry: {
           title: `${ctx.prefix(options.id)} (do not merge)`,
-          description: detBody(ctx, options.id),
+          body: detBody(ctx, options.id),
           source_branch: state.sourceBranch,
           patch_file: state.patchRelPath,
           repository: state.repositorySelector,

@@ -4,7 +4,7 @@ use serde_yaml::{Mapping, Value};
 use super::{Codemod, CodemodContext};
 
 /// Keep in sync with the release introducing triggering-only defaults.
-pub(crate) const INTRODUCED_IN: &str = "0.53.0";
+pub(crate) const INTRODUCED_IN: &str = "0.54.0";
 
 pub static CODEMOD: Codemod = Codemod {
     id: "explicit_pr_policy",
@@ -13,7 +13,7 @@ pub static CODEMOD: Codemod = Codemod {
     apply,
 };
 
-fn apply(front_matter: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
+fn apply(front_matter: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
     if !crate::safe_outputs::pr_common::PR_MUTATION_TOOLS
         .iter()
         .any(|tool| {
@@ -29,10 +29,6 @@ fn apply(front_matter: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
     let Some(Value::Mapping(outputs)) = front_matter.get_mut("safe-outputs") else {
         return Ok(false);
     };
-    let old = ctx
-        .source_compiler_version
-        .as_deref()
-        .is_some_and(|version| crate::version::is_older_than(version, INTRODUCED_IN));
     let mut changed = false;
     for tool in crate::safe_outputs::pr_common::PR_MUTATION_TOOLS {
         if custom.contains(*tool) {
@@ -48,26 +44,9 @@ fn apply(front_matter: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
             continue;
         };
         if !config.contains_key("target") {
-            let was_explicit = matches!(
-                *tool,
-                "add-pull-request-reviewers"
-                    | "add-pull-request-labels"
-                    | "set-pull-request-auto-complete"
-                    | "submit-pull-request-review"
-                    | "add-pull-request-comment"
-                    | "reply-to-pull-request-comment"
-                    | "resolve-pull-request-thread"
-            );
             config.insert(
                 Value::String("target".into()),
-                Value::String(
-                    if old && was_explicit {
-                        "*"
-                    } else {
-                        "triggering"
-                    }
-                    .into(),
-                ),
+                Value::String("triggering".into()),
             );
             changed = true;
         }
@@ -83,11 +62,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_pr_policy_preserves_old_scope_and_pins_new_defaults_idempotently() {
+    fn explicit_pr_policy_never_infers_old_scope_for_new_canonical_names() {
         for (version, expected) in [
             (None, "triggering"),
-            (Some("0.52.1"), "*"),
+            (Some("0.52.1"), "triggering"),
             (Some("0.53.0"), "triggering"),
+            (Some(INTRODUCED_IN), "triggering"),
+            (Some("not-a-version"), "triggering"),
         ] {
             let mut mapping: Mapping = serde_yaml::from_str(
                 "safe-outputs:\n  add-pull-request-comment: {}\n  update-pull-request:\n    sync-stack: true\n"

@@ -56,15 +56,15 @@ impl SanitizeContent for MarkPullRequestReadyResult {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, SanitizeConfig)]
+#[derive(Debug, Clone, Serialize, Deserialize, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct MarkPullRequestReadyConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
@@ -73,6 +73,14 @@ pub struct MarkPullRequestReadyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
+}
+
+impl Default for MarkPullRequestReadyConfig {
+    fn default() -> Self {
+        Self { target: Default::default(), target_repo: None,
+            allowed_repositories: super::pr_policy::unrestricted_names(),
+            required_labels: Vec::new(), required_title_prefix: None, max: None }
+    }
 }
 
 #[derive(Deserialize)]

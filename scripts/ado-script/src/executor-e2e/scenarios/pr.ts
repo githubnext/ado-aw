@@ -18,6 +18,7 @@ export interface PrState {
   prId: number;
   branch: string;
   threadId?: number;
+  reviewedHead?: string;
 }
 
 export async function setupPr(
@@ -76,6 +77,23 @@ export async function setupPr(
   return state;
 }
 
+async function setupReviewedPr(ctx: ScenarioContext, tool: string): Promise<PrState> {
+  const state = await setupPr(ctx, tool, false);
+  try {
+    const head = await ctx.rest.getRefObjectId(state.repo, `heads/${state.branch}`);
+    if (!head || !/^[a-fA-F0-9]{40}$/.test(head)) throw new Error("Review fixture source snapshot is unavailable");
+    return { ...state, reviewedHead: head };
+  } catch (error) {
+    await teardownPr(ctx, state);
+    throw error;
+  }
+}
+
+function reviewedHead(state: PrState): string {
+  if (!state.reviewedHead) throw new Error("Review fixture did not capture its source snapshot during setup");
+  return state.reviewedHead;
+}
+
 export async function teardownPr(ctx: ScenarioContext, state: PrState): Promise<void> {
   // Attempt both cleanups independently: if abandoning the PR throws (e.g. a
   // transient network error), the source branch must still be deleted so it is
@@ -115,7 +133,7 @@ export const addPrComment: Scenario<PrState> = {
   setup: (ctx) => setupPr(ctx, "add-pull-request-comment", false),
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId,
-    content: detBody(ctx, "add-pull-request-comment"),
+    body: detBody(ctx, "add-pull-request-comment"),
     repository: ctx.adoRepo,
     status: "active",
   }),
@@ -139,7 +157,7 @@ export const replyToPrComment: Scenario<PrState> = {
     return {
       pull_request_id: state.prId,
       thread_id: state.threadId,
-      content: detBody(ctx, "reply-to-pull-request-comment"),
+      body: detBody(ctx, "reply-to-pull-request-comment"),
       repository: ctx.adoRepo,
     };
   },
@@ -196,7 +214,7 @@ export const submitPrReview: Scenario<PrState> = {
     "allowed-repositories": [ctx.adoRepo],
     max: 1,
   }),
-  setup: (ctx) => setupPr(ctx, "submit-pull-request-review", false),
+  setup: (ctx) => setupReviewedPr(ctx, "submit-pull-request-review"),
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId,
     // Use "request-changes" (vote=-5), not a positive vote: the executor's
@@ -205,6 +223,7 @@ export const submitPrReview: Scenario<PrState> = {
     // creates and reviews the PR with the SAME identity. A negative vote
     // exercises the same submit path without tripping the guard.
     event: "request-changes",
+    expected_head_sha: reviewedHead(state),
     body: detBody(ctx, "submit-pull-request-review"),
     repository: ctx.adoRepo,
   }),
@@ -274,7 +293,7 @@ export const updatePullRequestIsland: Scenario<PrState> = {
   config: (ctx) => ({
     target: "*",
     "allowed-repositories": [ctx.adoRepo],
-    operation: "replace-island",
+    "allowed-operations": ["replace-island"],
     "include-stats": false,
     max: 2,
   }),
@@ -283,7 +302,7 @@ export const updatePullRequestIsland: Scenario<PrState> = {
     tool: "update-pull-request",
     config: {
       target: "*", "allowed-repositories": [ctx.adoRepo],
-      operation: "replace-island", "include-stats": false, max: 2,
+      "allowed-operations": ["replace-island"], "include-stats": false, max: 2,
     },
     entry: { pull_request_id: state.prId, repository: ctx.adoRepo, body: "first island report" },
   }],
@@ -363,6 +382,10 @@ export const updatePullRequestUnicodeOversized: Scenario<PrState> = {
 export const updatePullRequestComposedOversized: Scenario<PrState> = {
   ...updatePullRequestOversized,
   id: "update-pull-request-composed-oversized",
+  config: (ctx) => ({
+    target: "*", "allowed-repositories": [ctx.adoRepo],
+    "allowed-operations": ["append"], "include-stats": false,
+  }),
   setup: (ctx) => setupPr(ctx, "update-pull-request-composed-oversized", false),
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId, repository: ctx.adoRepo,
@@ -556,12 +579,12 @@ const reviewVoteScenarios: Scenario<PrState>[] = (["comment", "reset"] as const)
     target: "*", "allowed-repositories": [ctx.adoRepo],
     "allowed-events": ["request-changes", event], max: 2,
   }),
-  setup: (ctx) => setupPr(ctx, `pr-review-${event}-vote`, false),
+  setup: (ctx) => setupReviewedPr(ctx, `pr-review-${event}-vote`),
   priorEntries: async (ctx, state) => [{
     tool: "submit-pull-request-review",
     config: { target: "*", "allowed-events": ["request-changes", event], max: 2 },
     entry: { pull_request_id: state.prId, repository: state.repo, event: "request-changes",
-      body: detBody(ctx, "seed negative review vote") },
+      body: detBody(ctx, "seed negative review vote"), expected_head_sha: reviewedHead(state) },
   }],
   ndjson: async (ctx, state) => ({
     pull_request_id: state.prId, repository: state.repo, event,

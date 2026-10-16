@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use super::pr_mutations::UpdatePrContext;
 use super::{ExecutionResult, authenticate_ado_request};
+use super::result::{ActionEffect, EffectState};
 use crate::secure::Guid;
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +73,7 @@ pub(crate) async fn remove_labels(
     let labels = read_labels(ctx).await?;
     let mut removed = Vec::new();
     let mut absent = Vec::new();
+    let mut effects = Vec::new();
     let mut data = serde_json::json!({"pull_request_id":ctx.pr_id,"repository":ctx.target.qualified_repository()});
     for name in names {
         let Some(label) = labels
@@ -79,6 +81,7 @@ pub(crate) async fn remove_labels(
             .find(|label| label.name.eq_ignore_ascii_case(name))
         else {
             absent.push(name);
+            effects.push(ActionEffect::new("remove-label", name, EffectState::AlreadySatisfied));
             continue;
         };
         let response = authenticate_ado_request(
@@ -96,14 +99,16 @@ pub(crate) async fn remove_labels(
         let (status, message) = match response {
             Ok(response) if response.status().is_success() => {
                 removed.push(name);
+                effects.push(ActionEffect::new("remove-label", name, EffectState::Applied));
                 continue;
             }
             Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
                 absent.push(name);
+                effects.push(ActionEffect::new("remove-label", name, EffectState::AlreadySatisfied));
                 continue;
             }
             Ok(response) => (
-                "failed",
+                if response.status().is_server_error() { "uncertain" } else { "failed" },
                 format!(
                     "Failed to remove label '{name}' (HTTP {})",
                     response.status()
@@ -118,14 +123,20 @@ pub(crate) async fn remove_labels(
         data["already_absent"] = serde_json::json!(absent);
         data["failed_label"] = serde_json::json!(name);
         data["removal_status"] = serde_json::json!(status);
-        return Ok(ExecutionResult::failure_with_data(message, data));
+        effects.push(ActionEffect::new("remove-label", name,
+            if status == "uncertain" { EffectState::Uncertain } else { EffectState::Failed })
+            .detail(&message));
+        for unattempted in &names[effects.len()..] {
+            effects.push(ActionEffect::new("remove-label", unattempted, EffectState::Unattempted));
+        }
+        return Ok(ExecutionResult::failure_with_data(message, data).with_effects(effects));
     }
     data["removed"] = serde_json::json!(removed);
     data["already_absent"] = serde_json::json!(absent);
     Ok(ExecutionResult::success_with_data(
         "PR label removal completed",
         data,
-    ))
+    ).with_effects(effects))
 }
 
 #[cfg(test)]
@@ -317,7 +328,8 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(result.success, delete_status == 204);
+            assert!(result.success);
+            assert_eq!(result.is_warning(), delete_status != 204);
             assert_eq!(result.data.as_ref().unwrap()["addition_status"], "applied");
             let requests = server.received_requests().await.unwrap();
             assert_eq!(requests[0].method.as_str(), "GET");

@@ -99,9 +99,18 @@ fn build_custom_route(def: CustomToolDef) -> ToolRoute<SafeOutputs> {
         let output = output.clone();
         let output_path = ctx.service.custom_output_path();
         let proposal_lock = ctx.service.custom_proposal_lock();
+        let groups = ctx.service.shared_budget_groups();
         let arguments = ctx.arguments.clone();
         Box::pin(async move {
             let _guard = proposal_lock.lock().await;
+            let entries = crate::ndjson::read_ndjson_file(&output_path).await
+                .map_err(|error| McpError::internal_error(format!("Cannot read queue budgets: {error:#}"), None))?;
+            let remaining = crate::mcp_admission::shared_budget_remaining(&groups, &tool_name, &entries)
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+            if remaining.values().any(|value| *value == 0) {
+                return Ok(crate::mcp_admission::rejected("budget-exhausted",
+                    "Shared execution budget is exhausted", serde_json::json!({"groups":remaining})));
+            }
             record_custom_proposal(
                 &output_path,
                 &tool_name,
@@ -178,32 +187,14 @@ async fn append_custom_proposal(
     let mut entry = arguments;
     // The `name` tag is compiler-owned and always wins over any agent input.
     entry.insert("name".to_string(), Value::String(tool_name.to_string()));
-    let line = serde_json::to_string(&Value::Object(entry))? + "\n";
-
-    use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(output_path)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to open NDJSON for append: {}",
-                output_path.display()
-            )
-        })?;
-    file.write_all(line.as_bytes()).await?;
-    file.flush().await?;
-    Ok(())
+    crate::ndjson::append_record(output_path, &Value::Object(entry)).await
 }
 
 async fn count_custom_proposals(output_path: &Path, tool_name: &str) -> Result<usize> {
-    if !tokio::fs::metadata(output_path)
-        .await
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false)
-    {
-        return Ok(0);
+    match tokio::fs::metadata(output_path).await {
+        Ok(metadata) => anyhow::ensure!(metadata.is_file(), "Custom proposal queue must be a file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error).context("Cannot inspect custom proposal queue"),
     }
     Ok(crate::ndjson::read_ndjson_file(output_path)
         .await?
@@ -399,7 +390,7 @@ description: Test
         assert!(
             error
                 .message
-                .contains("Failed to record custom safe-output proposal")
+                .contains("Failed to inspect custom safe-output proposal")
         );
         assert!(
             !error.message.contains(&output_path.display().to_string()),

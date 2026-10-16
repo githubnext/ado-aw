@@ -128,11 +128,20 @@ pub fn merge_resolved_imported_body(
     })?;
     let policy_report = crate::compile::codemods::apply_codemods_with(
         &mut state.merged,
-        &[&crate::compile::codemods::PR_POLICY_DEFAULTS],
+        &[
+            &crate::compile::codemods::PR_POLICY_DEFAULTS,
+            &crate::compile::codemods::PR_COMPLETION_PREFERENCES,
+            &crate::compile::codemods::PR_DEFAULT_REPOSITORY,
+            &crate::compile::codemods::PR_ALLOWLIST_SEMANTICS,
+            &crate::compile::codemods::PR_CREATED_HANDOFFS,
+            &crate::compile::codemods::PR_VOCABULARY,
+        ],
         None,
     )?;
     if policy_report.changed() {
-        log::warn!("Imported PR policies use triggering-only defaults when no legacy target provenance is available; sync-stack has no ADO effect and is removed");
+        for applied in &policy_report.applied {
+            log::warn!("Imported PR policy migration {}: {}", applied.id, applied.summary);
+        }
     }
     dedupe_repos(&mut state.merged)?;
     state.merged.remove(Value::String("imports".to_string()));

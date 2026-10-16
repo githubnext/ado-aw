@@ -42,6 +42,15 @@ URL-encoded project segments are decoded before the ADO context is resolved. `t=
 - Analyzer failures are soft. The command records a warning, keeps any successfully-derived sections, and still renders the report.
 - When multiple local directories share one recognized prefix, the lexicographically last match is used.
 
+PR receipts correlate to executed records through `context` (the queued
+`proposal_id`). The executed record's `result.effects` retains individual
+applied, already-satisfied, failed, unattempted and uncertain portions, plus
+confirmed resource and snapshot data when available. Known partial effects use
+`warning`; uncertain delivery uses `failed`, even if earlier effects succeeded.
+Do not interpret a failed multi-effect action as rollback or a queue receipt
+as proof of execution. Historical artifacts remain readable independently of
+the canonical input schemas required by newly compiled workflows.
+
 ## Output layout
 
 ```text

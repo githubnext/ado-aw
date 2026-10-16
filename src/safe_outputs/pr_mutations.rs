@@ -3,6 +3,8 @@
 use super::pr_http::BoundedPrResponse;
 #[cfg(test)]
 use super::pr_common::PullRequestReference;
+#[cfg(test)]
+use super::pr_completion::VALID_MERGE_STRATEGIES;
 use super::pr_common::repository_api_base;
 #[cfg(test)]
 use super::pr_common::resolve_pr_target;
@@ -10,6 +12,7 @@ use super::result::AdoRepositoryTarget;
 #[cfg(test)]
 use crate::safe_outputs::ExecutionContext;
 use crate::safe_outputs::ExecutionResult;
+use super::result::{ActionEffect, EffectState};
 use crate::secure::Guid;
 #[cfg(test)]
 use crate::secure::PullRequestTemporaryId;
@@ -19,8 +22,6 @@ use anyhow::{Context, ensure};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 
-/// Valid merge strategy values accepted by ADO's completionOptions.mergeStrategy
-const VALID_MERGE_STRATEGIES: &[&str] = &["squash", "noFastForward", "rebase", "rebaseMerge"];
 const DEFAULT_MAX_REVIEWERS: usize = 3;
 const MAX_REVIEWER_LEN: usize = 256;
 
@@ -136,6 +137,7 @@ pub(crate) enum ReviewerAddResult {
     Added,
     AlreadyPresent,
     Failed(String),
+    Uncertain(String),
 }
 
 #[derive(Default, Serialize)]
@@ -143,6 +145,7 @@ pub(crate) struct ReviewerChanges {
     pub added: Vec<String>,
     pub already_present: Vec<String>,
     pub failed: Vec<String>,
+    pub uncertain: Vec<String>,
 }
 
 impl ReviewerChanges {
@@ -154,7 +157,22 @@ impl ReviewerChanges {
                 warn!("Reviewer '{}' was not confirmed: {}", reviewer, reason);
                 self.failed.push(format!("{reviewer} ({reason})"));
             }
+            ReviewerAddResult::Uncertain(reason) => {
+                warn!("Reviewer '{}' has uncertain delivery: {}", reviewer, reason);
+                self.uncertain.push(format!("{reviewer} ({reason})"));
+            }
         }
+    }
+
+    pub(crate) fn effects(&self) -> Vec<ActionEffect> {
+        [
+            (&self.added, EffectState::Applied),
+            (&self.already_present, EffectState::AlreadySatisfied),
+            (&self.failed, EffectState::Failed),
+            (&self.uncertain, EffectState::Uncertain),
+        ].into_iter().flat_map(|(reviewers, state)| {
+            reviewers.iter().map(move |reviewer| ActionEffect::new("add-reviewer", reviewer, state))
+        }).collect()
     }
 }
 
@@ -163,7 +181,10 @@ fn reviewer_execution_result(
     added: Vec<String>,
     already_present: Vec<String>,
     failed: Vec<String>,
+    uncertain: Vec<String>,
 ) -> ExecutionResult {
+    let changes = ReviewerChanges { added: added.clone(), already_present: already_present.clone(),
+        failed: failed.clone(), uncertain: uncertain.clone() };
     let mut message = if added.is_empty() && !already_present.is_empty() {
         format!("{} reviewer(s) already present on PR #{}", already_present.len(), pr_id)
     } else {
@@ -176,19 +197,18 @@ fn reviewer_execution_result(
             failed.join(", ")
         ));
     }
-    let has_failures = !failed.is_empty();
+    if !uncertain.is_empty() {
+        message.push_str(&format!("; uncertain: {}", uncertain.join(", ")));
+    }
     let data = serde_json::json!({
         "pull_request_id": pr_id,
         "operation": "add-reviewers",
         "added": added,
         "already_present": already_present,
         "failed": failed,
+        "uncertain": uncertain,
     });
-    if has_failures {
-        ExecutionResult::warning_with_data(message, data)
-    } else {
-        ExecutionResult::success_with_data(message, data)
-    }
+    ExecutionResult::success_with_data(message, data).with_effects(changes.effects())
 }
 
 pub(crate) fn validate_and_normalize_reviewers(
@@ -244,16 +264,9 @@ pub(crate) fn validate_and_normalize_reviewers(
 /// Uses the agent's own identity (not the PR creator) for proper audit trail.
 pub(crate) async fn execute_set_auto_complete(
     operation_ctx: &UpdatePrContext<'_>,
-    config: &UpdatePrConfig,
+    preferences: &super::pr_completion::CompletionPreferences,
 ) -> anyhow::Result<ExecutionResult> {
-    // Validate merge_strategy before any network I/O
-    if !VALID_MERGE_STRATEGIES.contains(&config.merge_strategy.as_str()) {
-        return Ok(ExecutionResult::failure(format!(
-            "Invalid merge-strategy '{}'. Must be one of: {}",
-            config.merge_strategy,
-            VALID_MERGE_STRATEGIES.join(", ")
-        )));
-    }
+    preferences.validate()?;
 
     // Resolve the agent's identity via connection data
     let connection_url = format!(
@@ -293,54 +306,11 @@ pub(crate) async fn execute_set_auto_complete(
         .context("Connection data response missing authenticatedUser.id")?;
     debug!("Agent user ID for auto-complete: {}", agent_user_id);
 
-    // PATCH to set auto-complete using the agent's identity
-    let patch_url = format!(
-        "{}/pullRequests/{}?api-version=7.1",
-        operation_ctx.repository_api_base(),
-        operation_ctx.pr_id
-    );
-    let patch_body = serde_json::json!({
-        "autoCompleteSetBy": {
-            "id": agent_user_id
-        },
-        "completionOptions": {
-            "deleteSourceBranch": config.delete_source_branch,
-            "mergeStrategy": config.merge_strategy
-        }
-    });
-
-    info!("Setting auto-complete on PR #{}", operation_ctx.pr_id);
-    let response = crate::safe_outputs::authenticate_ado_request(
-        operation_ctx.client.patch(&patch_url),
-        operation_ctx.token,
-        operation_ctx.connection_type,
-    )
-    .header("Content-Type", "application/json")
-    .json(&patch_body)
-    .send()
-    .await
-    .context("Failed to set auto-complete on PR")?;
-
-    if response.status().is_success() {
-        info!("Auto-complete set on PR #{}", operation_ctx.pr_id);
-        Ok(ExecutionResult::success_with_data(
-            format!("Auto-complete set on PR #{}", operation_ctx.pr_id),
-            serde_json::json!({
-                "pull_request_id": operation_ctx.pr_id,
-                "operation": "set-auto-complete",
-            }),
-        ))
-    } else {
-        let status = response.status();
-        let error_body = response
-            .bounded_text()
-            .await
-            .unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
-        Ok(ExecutionResult::failure(format!(
-            "Failed to set auto-complete on PR #{} (HTTP {}): {}",
-            operation_ctx.pr_id, status, error_body
-        )))
-    }
+    let effect = super::pr_completion::apply(operation_ctx, preferences, Some(agent_user_id)).await;
+    Ok(ExecutionResult::success_with_data(
+        effect.detail.clone().unwrap_or_else(|| format!("Auto-complete confirmed on PR #{}", operation_ctx.pr_id)),
+        serde_json::json!({"pull_request_id":operation_ctx.pr_id,"operation":"set-auto-complete"}),
+    ).with_effects(vec![effect]))
 }
 
 /// Add reviewers to a pull request.
@@ -390,6 +360,7 @@ pub(crate) async fn execute_add_reviewers(
         changes.added,
         changes.already_present,
         changes.failed,
+        changes.uncertain,
     ))
 }
 
@@ -408,6 +379,8 @@ pub(crate) async fn execute_add_labels(
 
     let mut added = Vec::new();
     let mut failed = Vec::new();
+    let mut uncertain = Vec::new();
+    let mut effects = Vec::new();
 
     for label in labels {
         let label_body = serde_json::json!({
@@ -429,6 +402,7 @@ pub(crate) async fn execute_add_labels(
             Ok(resp) if resp.status().is_success() => {
                 info!("Added label '{}' to PR #{}", label, operation_ctx.pr_id);
                 added.push(label.clone());
+                effects.push(ActionEffect::new("add-label", label, EffectState::Applied));
             }
             Ok(resp) => {
                 let status = resp.status();
@@ -440,47 +414,53 @@ pub(crate) async fn execute_add_labels(
                     "Failed to add label '{}' to PR #{} (HTTP {}): {}",
                     label, operation_ctx.pr_id, status, error_body
                 );
-                failed.push(format!("{} (HTTP {})", label, status));
+                if status.is_server_error() {
+                    uncertain.push(format!("{label} (HTTP {status}; delivery uncertain)"));
+                    effects.push(ActionEffect::new("add-label", label, EffectState::Uncertain)
+                        .detail(format!("HTTP {status}")));
+                } else {
+                    failed.push(format!("{label} (HTTP {status})"));
+                    effects.push(ActionEffect::new("add-label", label, EffectState::Failed)
+                        .detail(format!("HTTP {status}")));
+                }
             }
             Err(e) => {
                 warn!(
                     "Request failed for label '{}' on PR #{}: {}",
                     label, operation_ctx.pr_id, e
                 );
-                failed.push(format!("{} (delivery uncertain)", label));
+                uncertain.push(format!("{} (delivery uncertain)", label));
+                effects.push(ActionEffect::new("add-label", label, EffectState::Uncertain)
+                    .detail(e.to_string()));
             }
         }
     }
 
-    if added.is_empty() && !failed.is_empty() {
-        Ok(ExecutionResult::failure(format!(
-            "Failed to add any labels to PR #{}: {}",
-            operation_ctx.pr_id,
-            failed.join(", ")
-        )))
-    } else {
-        let mut message = format!(
+    let mut message = format!(
             "Added {} label(s) to PR #{}",
             added.len(),
             operation_ctx.pr_id
         );
-        if !failed.is_empty() {
+    if !failed.is_empty() {
             message.push_str(&format!(
                 " ({} failed: {})",
                 failed.len(),
                 failed.join(", ")
             ));
-        }
-        Ok(ExecutionResult::success_with_data(
+    }
+    if !uncertain.is_empty() {
+        message.push_str(&format!("; uncertain: {}", uncertain.join(", ")));
+    }
+    Ok(ExecutionResult::success_with_data(
             message,
             serde_json::json!({
                 "pull_request_id": operation_ctx.pr_id,
                 "operation": "add-labels",
                 "added": added,
                 "failed": failed,
+                "uncertain": uncertain,
             }),
-        ))
-    }
+        ).with_effects(effects))
 }
 
 /// Update the description of a pull request.
@@ -764,8 +744,8 @@ pub(crate) async fn add_reviewer_to_pr(
                     info!("Added reviewer '{}' to PR #{}", reviewer, pr_id);
                     ReviewerAddResult::Added
                 }
-                Ok(_) => ReviewerAddResult::Failed("addition accepted but membership is unconfirmed; no retry".into()),
-                Err(error) => ReviewerAddResult::Failed(format!("addition accepted but membership is unconfirmed; no retry: {error:#}")),
+                Ok(_) => ReviewerAddResult::Uncertain("addition accepted but membership is unconfirmed; no retry".into()),
+                Err(error) => ReviewerAddResult::Uncertain(format!("addition accepted but membership is unconfirmed; no retry: {error:#}")),
             }
         }
         Ok(resp) => {
@@ -778,14 +758,18 @@ pub(crate) async fn add_reviewer_to_pr(
                 "Failed to add reviewer '{}' to PR #{} (HTTP {}): {}",
                 reviewer, pr_id, status, error_body
             );
-            ReviewerAddResult::Failed(format!("HTTP {}", status))
+            if status.is_server_error() {
+                ReviewerAddResult::Uncertain(format!("HTTP {status}; delivery unconfirmed"))
+            } else {
+                ReviewerAddResult::Failed(format!("HTTP {status}"))
+            }
         }
         Err(e) => {
             warn!(
                 "Request failed for reviewer '{}' on PR #{}: {}",
                 reviewer, pr_id, e
             );
-            ReviewerAddResult::Failed("delivery uncertain".to_string())
+            ReviewerAddResult::Uncertain("delivery uncertain".to_string())
         }
     }
 }
@@ -985,7 +969,11 @@ mod tests {
             Mock::given(method("POST")).respond_with(response).expect(1).mount(&server).await;
             let client = reqwest::Client::builder().timeout(std::time::Duration::from_millis(300)).build().unwrap();
             let result = add_reviewer_to_pr(&client, &server.uri(), 42, actor, actor, "test-token", None).await;
-            let ReviewerAddResult::Failed(reason) = result else { panic!("unexpected {result:?}") };
+            let reason = match result {
+                ReviewerAddResult::Failed(reason) if mode == "forbidden" => reason,
+                ReviewerAddResult::Uncertain(reason) if mode != "forbidden" => reason,
+                other => panic!("unexpected {other:?}"),
+            };
             assert!(reason.contains(match mode { "timeout" => "uncertain", "forbidden" => "403", _ => "unconfirmed" }), "{reason}");
             assert_eq!(reads.load(Ordering::SeqCst), if matches!(mode, "timeout" | "forbidden") {1} else {2});
         }
@@ -1077,12 +1065,13 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_results_warn_for_partial_and_total_failures() {
+    fn reviewer_results_distinguish_partial_total_and_uncertain_failures() {
         let partial = reviewer_execution_result(
             42,
             vec!["added@example.com".to_string()],
             vec!["existing@example.com".to_string()],
             vec!["failed@example.com (HTTP 403)".to_string()],
+            Vec::new(),
         );
         assert!(partial.success);
         assert!(partial.is_warning());
@@ -1096,9 +1085,10 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec!["failed@example.com (identity not found)".to_string()],
+            Vec::new(),
         );
-        assert!(total.success);
-        assert!(total.is_warning());
+        assert!(!total.success);
+        assert!(!total.is_warning());
         assert_eq!(
             total.data.as_ref().unwrap()["failed"]
                 .as_array()
@@ -1108,13 +1098,16 @@ mod tests {
         );
 
         let success =
-            reviewer_execution_result(42, vec!["added@example.com".to_string()], Vec::new(), Vec::new());
+            reviewer_execution_result(42, vec!["added@example.com".to_string()], Vec::new(), Vec::new(), Vec::new());
         assert!(success.success);
         assert!(!success.is_warning());
-        let noop = reviewer_execution_result(42, vec![], vec!["existing".into()], vec![]);
+        let noop = reviewer_execution_result(42, vec![], vec!["existing".into()], vec![], vec![]);
         assert!(noop.success && !noop.is_warning());
         assert!(!noop.message.contains("Added"));
         assert_eq!(noop.data.unwrap()["already_present"], serde_json::json!(["existing"]));
+        let uncertain = reviewer_execution_result(42, vec!["confirmed".into()], vec![],
+            vec![], vec!["unconfirmed".into()]);
+        assert!(!uncertain.success && !uncertain.is_warning());
     }
 
     #[test]
@@ -1133,6 +1126,7 @@ mod tests {
         ctx.register_resolved_pull_request(
             &temporary_id,
             crate::safe_outputs::ResolvedPullRequest {
+                creation_snapshot: None,
                 id: 42,
                 url: "https://example.test/pr/42".to_string(),
                 target: target.clone(),
@@ -1179,6 +1173,7 @@ mod tests {
         ctx.register_resolved_pull_request(
             &temporary_id,
             crate::safe_outputs::ResolvedPullRequest {
+                creation_snapshot: None,
                 id: 42,
                 url: "https://example.test/pr/42".to_string(),
                 target: AdoRepositoryTarget {
@@ -1219,6 +1214,7 @@ mod tests {
         ctx.register_resolved_pull_request(
             &temporary_id,
             crate::safe_outputs::ResolvedPullRequest {
+                creation_snapshot: None,
                 id: 42,
                 url: "https://example.test/pr/42".to_string(),
                 target: AdoRepositoryTarget {

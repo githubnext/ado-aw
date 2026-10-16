@@ -481,9 +481,18 @@ pub(crate) async fn supersede(
 ) -> anyhow::Result<Value> {
     let mut completed = Vec::new();
     let mut failures = 0;
+    let mut uncertain = 0;
     for thread in candidates {
-        let root = owned_root(thread, owner, actor)?;
-        let old = visible_content(thread, root)?;
+        let preparation = owned_root(thread, owner, actor)
+            .and_then(|root| visible_content(thread, root).map(|body| (root, body)));
+        let (root, old) = match preparation {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                failures += 1;
+                skipped.push(json!({"thread_id":thread.id,"reason":format!("{error:#}"),"state":"failed"}));
+                continue;
+            }
+        };
         let content = format!(
             "{old}\n\n_Superseded by the newer automated report in thread #{replacement}._"
         );
@@ -501,6 +510,9 @@ pub(crate) async fn supersede(
             Ok(result) if result.success => completed.push(thread.id),
             Ok(result) => {
                 failures += 1;
+                if result.data.is_some() {
+                    uncertain += 1;
+                }
                 skipped.push(
                     json!({"thread_id":thread.id,"reason":result.message,"partial":result.data}),
                 );
@@ -511,7 +523,7 @@ pub(crate) async fn supersede(
             }
         }
     }
-    Ok(json!({"superseded":completed,"not_superseded":skipped,"failures":failures}))
+    Ok(json!({"superseded":completed,"not_superseded":skipped,"failures":failures,"uncertain":uncertain}))
 }
 
 #[cfg(test)]

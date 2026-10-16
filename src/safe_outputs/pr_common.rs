@@ -15,7 +15,12 @@ use super::{
 use crate::sanitize::SanitizeConfig;
 use crate::secure::PullRequestTemporaryId;
 
+/// Existing client-side description bound; Microsoft describes 4,000 characters
+/// publicly without specifying a Unicode counting unit.
 pub(crate) const MAX_DESCRIPTION_UTF16: usize = 4_000;
+/// Compiler resource bound inherited from the widest existing assembled-title check.
+/// This is not a claim about an undocumented Azure DevOps server maximum.
+pub(crate) const MAX_TITLE_SCALARS: usize = 400;
 
 pub(crate) const PR_MUTATION_TOOLS: &[&str] = &[
     "update-pull-request", "abandon-pull-request", "add-pull-request-reviewers",
@@ -28,18 +33,26 @@ pub(crate) const PR_MUTATION_TOOLS: &[&str] = &[
 ];
 
 /// Shared projection of an already closed, tool-specific configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct PrMutationPolicy {
     #[serde(default)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
     pub required_title_prefix: Option<String>,
+}
+
+impl Default for PrMutationPolicy {
+    fn default() -> Self {
+        Self { target: Default::default(), target_repo: None,
+            allowed_repositories: super::pr_policy::unrestricted_names(),
+            required_labels: Vec::new(), required_title_prefix: None }
+    }
 }
 
 impl PrMutationPolicy {
@@ -50,8 +63,9 @@ impl PrMutationPolicy {
             serde_json::from_value(value.clone()).context("invalid PR target policy")?
         };
         policy.target_policy()?;
+        super::pr_policy::validate_names(&policy.allowed_repositories, "allowed-repositories")?;
         for (field, values) in [
-            ("target-repo", policy.target_repo.iter().collect::<Vec<_>>()),
+            ("default-repository", policy.target_repo.iter().collect::<Vec<_>>()),
             ("allowed-repositories", policy.allowed_repositories.iter().collect()),
             ("required-labels", policy.required_labels.iter().collect()),
             ("required-title-prefix", policy.required_title_prefix.iter().collect()),
@@ -76,12 +90,48 @@ pub(crate) fn describe_pr_reference(reference: Option<&PullRequestReference>) ->
     reference.map(|id| format!("#{id}")).unwrap_or_else(|| "the configured PR".into())
 }
 
-pub(crate) fn validate_temporary_opt_in(reference: Option<&PullRequestReference>, allowed: bool) -> anyhow::Result<()> {
-    ensure!(
-        allowed || !matches!(reference, Some(PullRequestReference::Temporary(_))),
-        "temporary PR references require allow-temporary-ids: true",
-    );
+pub(crate) fn validate_created_dependency(
+    tool: &str,
+    reference: Option<&PullRequestReference>,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<()> {
+    if !matches!(reference, Some(PullRequestReference::Temporary(_))) { return Ok(()) }
+    let creator = ctx.tool_configs.get("create-pull-request")
+        .context("Creation handle requires configured create-pull-request")?;
+    let consumer = ctx.tool_configs.get(tool).context("PR consumer is not configured")?;
+    let lane = |config: &serde_json::Value| -> anyhow::Result<(bool, bool)> {
+        let reviewed = match config.get("require-approval") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(value)) => *value,
+            Some(serde_json::Value::Object(_)) => true,
+            Some(_) => anyhow::bail!("Invalid require-approval policy"),
+        };
+        let staged = config.get("staged").map(|value| value.as_bool().context("Invalid staged policy"))
+            .transpose()?.unwrap_or(false);
+        Ok((reviewed, staged))
+    };
+    ensure!(lane(creator)? == lane(consumer)?,
+        "Creation handle and consumer must use the same approval and staged lanes");
     Ok(())
+}
+
+pub(crate) fn reviewed_head(
+    reference: Option<&PullRequestReference>,
+    supplied: Option<&crate::secure::CommitSha>,
+    required: bool,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<Option<crate::secure::CommitSha>> {
+    if let Some(PullRequestReference::Temporary(handle)) = reference
+        && (required || supplied.is_some())
+    {
+        let resolved = ctx.resolve_pull_request(handle)?.context("Creation handle has no successful producer")?;
+        let snapshot = resolved.creation_snapshot.context("Created PR has no validated creation snapshot; head-bound action is blocked")?;
+        ensure!(supplied.is_none_or(|sha| sha.eq_ignore_ascii_case(snapshot.commit.as_str())),
+            "expected_head_sha contradicts the immutable creation snapshot");
+        return Ok(Some(snapshot.commit));
+    }
+    ensure!(!required || supplied.is_some(), "expected_head_sha is required for this action");
+    Ok(supplied.cloned())
 }
 
 pub(crate) async fn resolve_configured_pr_target(
@@ -92,9 +142,15 @@ pub(crate) async fn resolve_configured_pr_target(
     client: &reqwest::Client,
 ) -> anyhow::Result<Result<(u64, AdoRepositoryTarget), ExecutionResult>> {
     let raw = ctx.tool_configs.get(tool).with_context(|| format!("{tool} is not configured"))?;
+    validate_created_dependency(tool, reference, ctx)?;
     let policy = PrMutationPolicy::parse(raw)?;
+    if policy.allowed_repositories.is_empty() {
+        return Ok(Err(ExecutionResult::failure("allowed-repositories permits no PR destination")));
+    }
+    let target_policy = policy.target_policy()?;
     let resolved = match resolve_pr_policy_target(
-        &policy.target_policy()?, reference, repository.or(policy.target_repo.as_deref()),
+        &target_policy, reference,
+        repository_selection(&target_policy, reference, repository, policy.target_repo.as_deref()),
         &policy.allowed_repositories, ctx,
     )? {
         Ok(resolved) => resolved,
@@ -133,6 +189,16 @@ pub(crate) async fn resolve_configured_pr_target(
         }
     }
     Ok(Ok(resolved))
+}
+
+pub(crate) fn repository_selection<'a>(
+    policy: &PrTargetPolicy,
+    reference: Option<&PullRequestReference>,
+    supplied: Option<&'a str>,
+    fallback: Option<&'a str>,
+) -> Option<&'a str> {
+    supplied.or(if matches!(policy, PrTargetPolicy::Triggering)
+        || matches!(reference, Some(PullRequestReference::Temporary(_))) { None } else { fallback })
 }
 
 pub(crate) async fn fetch_pr_labels(
@@ -184,6 +250,7 @@ pub(crate) async fn fetch_pr_labels(
 pub(crate) enum PrTargetPolicy {
     Triggering,
     Explicit,
+    Created,
     Fixed { id: String },
 }
 
@@ -192,10 +259,11 @@ impl PrTargetPolicy {
         match value {
             "triggering" => Ok(Self::Triggering),
             "*" => Ok(Self::Explicit),
+            "created" => Ok(Self::Created),
             value => Self::fixed(
                 value
                     .parse::<u64>()
-                    .context("target must be triggering, *, or a positive PR ID")?,
+                    .context("target must be triggering, created, *, or a positive PR ID")?,
             ),
         }
     }
@@ -408,6 +476,12 @@ pub(crate) fn resolve_pr_policy_target(
     let failure = |message: String| Ok(Err(ExecutionResult::failure(message)));
     let (expected, triggering) = match policy {
         PrTargetPolicy::Explicit => (None, None),
+        PrTargetPolicy::Created => {
+            if !matches!(reference, Some(PullRequestReference::Temporary(_))) {
+                return failure("target 'created' requires the exact handle returned by create-pull-request".into());
+            }
+            (None, None)
+        }
         PrTargetPolicy::Fixed { id } => (Some(id.parse::<u64>()?), None),
         PrTargetPolicy::Triggering => {
             let Some(identity) = &ctx.triggering_pr else {
@@ -559,7 +633,7 @@ pub(crate) fn repository_api_base(target: &AdoRepositoryTarget) -> String {
 fn repository_is_allowed(allowed: &[String], alias: &str, ctx: &ExecutionContext) -> bool {
     allowed.is_empty()
         || allowed.iter().any(|allowed| {
-            allowed.eq_ignore_ascii_case(alias)
+            allowed == "*" || allowed.eq_ignore_ascii_case(alias)
                 || canonical_repository_alias(allowed, ctx)
                     .is_some_and(|candidate| candidate.eq_ignore_ascii_case(alias))
         })
@@ -699,10 +773,19 @@ pub(crate) fn legacy_policy(
     Ok(Some(config))
 }
 
+pub(crate) fn validate_title(title: &str) -> anyhow::Result<()> {
+    ensure!(!title.trim().is_empty(), "PR title must not be blank");
+    ensure!(
+        title.chars().take(MAX_TITLE_SCALARS + 1).count() <= MAX_TITLE_SCALARS,
+        "PR title exceeds the compiler resource limit of {MAX_TITLE_SCALARS} Unicode scalar values"
+    );
+    Ok(())
+}
+
 pub(crate) fn validate_description(body: &str) -> anyhow::Result<()> {
     ensure!(
-        body.encode_utf16().count() <= MAX_DESCRIPTION_UTF16,
-        "updated body exceeds Azure DevOps' {MAX_DESCRIPTION_UTF16}-UTF-16-unit limit"
+        body.encode_utf16().take(MAX_DESCRIPTION_UTF16 + 1).count() <= MAX_DESCRIPTION_UTF16,
+        "PR body exceeds the {MAX_DESCRIPTION_UTF16}-UTF-16-unit limit"
     );
     Ok(())
 }
@@ -711,6 +794,62 @@ pub(crate) fn validate_description(body: &str) -> anyhow::Result<()> {
 pub(crate) mod tests {
     use super::*;
     use crate::safe_outputs::{AbandonPullRequestResult, Executor, UpdatePullRequestResult};
+
+    #[test]
+    fn create_and_update_title_validation_agree_for_ascii_and_unicode() {
+        use crate::safe_outputs::{CreatePrParams, UpdatePullRequestParams, Validate};
+
+        for title in [
+            String::new(),
+            " \t".into(),
+            "A".into(),
+            "a".repeat(200),
+            "a".repeat(201),
+            "a".repeat(256),
+            "a".repeat(257),
+            "a".repeat(400),
+            "a".repeat(401),
+            "\u{00e9}".repeat(200),
+            "\u{1f600}".repeat(200),
+            "\u{1f600}".repeat(201),
+        ] {
+            let create = CreatePrParams {
+                title: title.clone(),
+                description: "Body".into(),
+                repository: None,
+                labels: Vec::new(),
+            };
+            let update = UpdatePullRequestParams {
+                title: Some(title.clone()),
+                body: None,
+                operation: None,
+                pull_request_id: None,
+                repository: None,
+            };
+            assert_eq!(
+                create.validate().is_ok(),
+                update.validate().is_ok(),
+                "create/update disagree for {} UTF-8 bytes / {} UTF-16 units",
+                title.len(),
+                title.encode_utf16().count()
+            );
+        }
+    }
+
+    #[test]
+    fn title_resource_bound_counts_unicode_scalars_without_truncation() {
+        for unit in ["a", "\u{00e9}", "\u{1f600}"] {
+            assert!(validate_title(&unit.repeat(MAX_TITLE_SCALARS)).is_ok());
+            let oversized = unit.repeat(MAX_TITLE_SCALARS + 1);
+            let error = validate_title(&oversized).unwrap_err().to_string();
+            assert!(error.contains("compiler resource limit"));
+            assert!(error.contains("Unicode scalar values"));
+            assert_eq!(oversized.chars().count(), MAX_TITLE_SCALARS + 1);
+        }
+        assert!(validate_description(&"\u{1f600}".repeat(MAX_DESCRIPTION_UTF16 / 2)).is_ok());
+        assert!(validate_description(&("\u{1f600}".repeat(MAX_DESCRIPTION_UTF16 / 2) + "x")).is_err());
+        assert!(validate_description("").is_ok(), "empty bodies must still support description clearing");
+    }
 
     #[test]
     fn pr_tool_schemas_and_deserializers_are_closed() {
@@ -774,12 +913,12 @@ pub(crate) mod tests {
             "remove-pull-request-labels" => serde_json::json!({"labels":["label"]}),
             "replace-pull-request-label" => serde_json::json!({"from":"old","to":"new"}),
             "mark-pull-request-as-ready-for-review" => serde_json::json!({}),
-            "update-pull-request-comment" => serde_json::json!({"thread_id":1,"comment_id":1,"content":"Replacement owned content."}),
+            "update-pull-request-comment" => serde_json::json!({"thread_id":1,"comment_id":1,"body":"Replacement owned content."}),
             "push-to-pull-request-branch" => serde_json::json!({"repository":"target","expected_head_sha":"a".repeat(40),"patch_file":"patch.diff","patch_sha256":"hash"}),
             "set-pull-request-auto-complete" => serde_json::json!({}),
             "submit-pull-request-review" => serde_json::json!({"event":"comment","body":"Informational feedback."}),
-            "add-pull-request-comment" => serde_json::json!({"content":"Informational feedback.","status":"active","repository":null}),
-            "reply-to-pull-request-comment" => serde_json::json!({"thread_id":1,"content":"Informational feedback."}),
+            "add-pull-request-comment" => serde_json::json!({"body":"Informational feedback.","status":"active","repository":null}),
+            "reply-to-pull-request-comment" => serde_json::json!({"thread_id":1,"body":"Informational feedback."}),
             "resolve-pull-request-thread" => serde_json::json!({"thread_id":1,"status":"fixed"}),
             _ => panic!("missing test fields for {tool}"),
         }
@@ -839,7 +978,7 @@ pub(crate) mod tests {
         for tool in ["update-pull-request","add-pull-request-labels","add-pull-request-reviewers",
             "set-pull-request-auto-complete","submit-pull-request-review"] {
             ctx.tool_configs.insert(tool.into(), serde_json::json!({
-                "target":"*", "target-repo":"other", "legacy-update-pr":{"allowed-repositories":["self"]}
+                "target":"*", "default-repository":"other", "legacy-update-pr":{"allowed-repositories":["self"]}
             }));
             let mut fields = mutation_fields(tool);
             fields["name"] = serde_json::json!(tool);
@@ -986,6 +1125,9 @@ pub(crate) mod tests {
         ctx: &ExecutionContext,
         fields: serde_json::Value,
     ) -> ExecutionResult {
+        let mut context = ctx.clone();
+        context.tool_configs.entry("create-pull-request".into()).or_insert(serde_json::json!({}));
+        let ctx = &context;
         let mut value = fields;
         value["name"] = serde_json::json!(tool);
         if tool == "update-pull-request" {
@@ -1103,6 +1245,7 @@ pub(crate) mod tests {
                 ctx.register_resolved_pull_request(
                     &PullRequestTemporaryId::parse("#aw_known").unwrap(),
                     crate::safe_outputs::ResolvedPullRequest {
+                        creation_snapshot: None,
                         id: 42,
                         url: "unused".into(),
                         target: resolve_repository_write_target(Some("trigger"), &ctx).unwrap(),
@@ -1143,6 +1286,7 @@ pub(crate) mod tests {
                 ctx.register_resolved_pull_request(
                     &PullRequestTemporaryId::parse("#aw_foreign").unwrap(),
                     crate::safe_outputs::ResolvedPullRequest {
+                        creation_snapshot: None,
                         id: 42,
                         url: "unused".into(),
                         target,
@@ -1251,9 +1395,15 @@ pub(crate) mod tests {
             object.entry("target").or_insert(serde_json::json!("*"));
         }
         ctx.tool_configs.insert(tool.into(), config);
+        ctx.tool_configs.insert("create-pull-request".into(), serde_json::json!({}));
         ctx.register_resolved_pull_request(
             &PullRequestTemporaryId::parse("#aw_pr123").unwrap(),
             super::super::ResolvedPullRequest {
+                creation_snapshot: Some(super::super::result::CreatedPullRequestSnapshot {
+                    commit: crate::secure::CommitSha::parse("a".repeat(40)).unwrap(),
+                    tree: crate::secure::CommitSha::parse("b".repeat(40)).unwrap(),
+                    patch_sha256: "c".repeat(64),
+                }),
                 id: 4_294_967_296,
                 url: format!("{organization_url}/pullrequest/4294967296"),
                 target: AdoRepositoryTarget {
@@ -1379,5 +1529,30 @@ pub(crate) mod tests {
             );
         }
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn created_targets_require_exact_handles_and_immutable_snapshot_claims() {
+        let mut ctx = registered_context("https://dev.azure.com/other-org",
+            "submit-pull-request-review", serde_json::json!({"target":"created","allowed-events":["comment"]}));
+        let handle = PullRequestReference::Temporary(PullRequestTemporaryId::parse("#aw_pr123").unwrap());
+        let head = crate::secure::CommitSha::parse("a".repeat(40)).unwrap();
+        assert_eq!(reviewed_head(Some(&handle), None, true, &ctx).unwrap(), Some(head.clone()));
+        assert!(reviewed_head(Some(&handle), Some(&crate::secure::CommitSha::parse("c".repeat(40)).unwrap()), true, &ctx).is_err());
+        assert!(resolve_pr_policy_target(&PrTargetPolicy::Created, None, None, &["*".into()], &ctx).unwrap().is_err());
+        assert!(resolve_pr_policy_target(&PrTargetPolicy::Created,
+            Some(&PullRequestReference::Number(4_294_967_296)), None, &["*".into()], &ctx).unwrap().is_err());
+        assert!(resolve_pr_policy_target(&PrTargetPolicy::Created, Some(&handle), None, &["*".into()], &ctx).unwrap().is_ok());
+        let unknown = PullRequestReference::Temporary(PullRequestTemporaryId::parse("#aw_unknown").unwrap());
+        assert!(reviewed_head(Some(&unknown), None, true, &ctx).is_err());
+        ctx.tool_configs.get_mut("create-pull-request").unwrap()["staged"] = serde_json::json!(true);
+        assert!(validate_created_dependency("submit-pull-request-review", Some(&handle), &ctx).is_err());
+        assert!(validate_created_dependency("submit-pull-request-review",
+            Some(&PullRequestReference::Number(7)), &ctx).is_ok());
+        let mut unproven = ctx.resolve_pull_request(&PullRequestTemporaryId::parse("#aw_pr123").unwrap()).unwrap().unwrap();
+        unproven.creation_snapshot = None;
+        ctx.register_resolved_pull_request(&PullRequestTemporaryId::parse("#aw_unproven").unwrap(), unproven).unwrap();
+        let unproven = PullRequestReference::Temporary(PullRequestTemporaryId::parse("#aw_unproven").unwrap());
+        assert!(reviewed_head(Some(&unproven), Some(&head), true, &ctx).is_err());
     }
 }

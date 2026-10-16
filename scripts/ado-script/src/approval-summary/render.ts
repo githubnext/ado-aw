@@ -61,14 +61,16 @@ export interface TrustedRepositoryContext {
 export type PrTargetPolicy =
   | { kind: "triggering" }
   | { kind: "explicit" }
+  | { kind: "created" }
   | { kind: "fixed"; id: string };
 
 export interface PrPolicy {
   target: PrTargetPolicy;
   operation?: string;
-  "target-repo"?: string;
+  "default-repository"?: string;
   "supersede-older-comments"?: boolean;
   "comment-key"?: string;
+  creation?: Record<string, unknown>;
 }
 
 interface RepositoryResolution {
@@ -175,7 +177,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "Source branch", key: "source_branch" },
       { label: "Repository", key: "repository" },
     ],
-    body: "description",
+    body: "body",
   },
   "add-pull-request-comment": {
     title: "Comment on pull request",
@@ -186,7 +188,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "Side", key: "side" },
       { label: "Reviewed head", key: "expected_head_sha" },
     ],
-    body: "content",
+    body: "body",
   },
   "reply-to-pull-request-comment": {
     title: "Reply to PR comment",
@@ -194,7 +196,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "PR", key: "pull_request_id" },
       { label: "Thread", key: "thread_id" },
     ],
-    body: "content",
+    body: "body",
   },
   "update-pull-request-comment": {
     title: "Update verified owned PR comment",
@@ -203,7 +205,7 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
       { label: "Thread", key: "thread_id" },
       { label: "Comment", key: "comment_id" },
     ],
-    body: "content",
+    body: "body",
   },
   "submit-pull-request-review": {
     title: "Submit PR review",
@@ -952,6 +954,9 @@ function renderProposal(
   lines.push(`#### ${sanitizeInline(title)} \`${safeName}\``);
 
   const rows: string[] = [];
+  if (typeof p.record.context === "string" && p.record.context.startsWith("proposal_")) {
+    rows.push(`| Proposal ID | ${sanitizeInline(p.record.context)} |`);
+  }
   for (const f of fields) {
     if (f.key === "repository" && spec?.githubRepository) {
       const repository = repositoryResolutions.get(p.index) ?? {
@@ -995,6 +1000,11 @@ function renderProposal(
   if (["add-pull-request-comment", "submit-pull-request-review", "update-pull-request-comment"].includes(p.name)) {
     lines.push("", `Owned-comment policy: ${sanitizeInline(p.record._trusted_comment_policy)}.`);
   }
+  if (p.name === "create-pull-request") {
+    lines.push("", "Author-configured creation effects (not yet applied):", "```text",
+      sanitizeBlock(p.record._trusted_creation_policy ?? "<unresolved: trusted creation policy unavailable>"),
+      "```", "Auto-complete, when configured, runs only after required initialization is confirmed. It never publishes a draft automatically.");
+  }
   if (p.name === "submit-pull-request-review") {
     lines.push("", p.record.event === "comment" ? "Vote effect: none; existing votes are preserved."
       : p.record.event === "reset" ? "Vote effect: explicitly clear the authenticated actor's vote."
@@ -1011,7 +1021,7 @@ function renderProposal(
         }
         const comment = value as Record<string, unknown>;
         lines.push("", `Finding ${index + 1}: ${sanitizeInline(comment.file_path)}; side ${sanitizeInline(comment.side ?? "right")}; lines ${sanitizeInline(comment.start_line ?? comment.line)}-${sanitizeInline(comment.line)}`,
-          "```text", sanitizeBlock(comment.content), "```");
+          "```text", sanitizeBlock(comment.body), "```");
       }
       if (comments.length > 100) lines.push("Additional findings omitted; execution rejects more than 100.");
     }
@@ -1065,7 +1075,11 @@ export function renderSummary(
       producers.set(record.temporary_id.replace(/^#/, ""), proposal);
     }
     const policy = repositoryContext?.prPolicies?.get(proposal.name);
-    if (policy) renderPrTarget(proposal.name, record, policy, repositoryContext?.triggeringPr, producers);
+    if (proposal.name === "create-pull-request") {
+      record._trusted_creation_policy = policy?.creation;
+    } else if (policy) {
+      renderPrTarget(proposal.name, record, policy, repositoryContext?.triggeringPr, producers);
+    }
     return { ...proposal, record };
   });
 
@@ -1118,9 +1132,7 @@ function renderPrTarget(
     producers: ReadonlyMap<string, Proposal>,
   ): void {
     record.operation ??= policy.operation;
-    const keys = tool === "update-pull-request"
-      ? ["pull_request_id", "pullRequestId", "pull_request_number", "pullRequestNumber", "pr_number", "prNumber", "pr", "id"]
-      : tool === "abandon-pull-request" ? ["pull_request_id", "pull_request_number"] : ["pull_request_id"];
+    const keys = ["pull_request_id"];
     const refs = keys
       .map((key) => record[key]).filter((value) => value !== undefined && value !== null);
     const normalized = refs.map((value) => {
@@ -1132,7 +1144,10 @@ function renderPrTarget(
       return positivePrId(value) ?? "<invalid PR reference>";
     });
     const reference = normalized[0];
-    const selector = record.repository ?? policy["target-repo"];
+    const selector = record.repository
+      ?? (policy.target.kind === "triggering"
+        || refs.some((value) => typeof value === "string" && /^#?aw_/.test(value.trim()))
+        ? undefined : policy["default-repository"]);
     const explicitSelector = selector !== undefined && selector !== null;
     record.repository = explicitSelector ? selector : "self";
     if (normalized.some((value) => value !== reference)) {
@@ -1141,6 +1156,10 @@ function renderPrTarget(
     }
     if (reference === "<invalid PR reference>") {
       record.pull_request_id = reference;
+      return;
+    }
+    if (policy.target.kind === "created" && !reference?.startsWith("#aw_")) {
+      record.pull_request_id = "<invalid: created target requires an explicit creation handle>";
       return;
     }
     if (explicitSelector && (typeof selector !== "string" || selector.trim().length === 0)) {

@@ -25,7 +25,8 @@ pub struct ReplyToPrCommentParams {
     /// The thread ID to reply to
     pub thread_id: i32,
 
-    /// Reply text in markdown format. Ensure adequate content > 10 characters.
+    /// Nonblank reply body in Markdown.
+    #[serde(rename = "body")]
     pub content: String,
 
     /// Repository alias: "self" for pipeline repo, or an alias from the checkout list.
@@ -40,10 +41,6 @@ impl Validate for ReplyToPrCommentParams {
             validate_reference(reference)?;
         }
         ensure!(self.thread_id > 0, "thread_id must be positive");
-        ensure!(
-            self.content.len() >= 10,
-            "content must be at least 10 characters"
-        );
         super::pr_comments::validate_body(&self.content)?;
         if let Some(repository) = &self.repository {
             reject_pipeline_injection(repository, "repository")?;
@@ -62,6 +59,7 @@ tool_result! {
         #[serde(default)]
         pull_request_id: Option<PullRequestReference>,
         thread_id: i32,
+        #[serde(rename = "body")]
         content: String,
         repository: Option<String>,
     }
@@ -85,32 +83,38 @@ impl SanitizeContent for ReplyToPrCommentResult {
 ///       - self
 ///       - other-repo
 /// ```
-#[derive(Debug, Clone, Default, SanitizeConfig, Serialize, Deserialize)]
+#[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplyToPrCommentConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
     pub required_title_prefix: Option<String>,
-    #[serde(default, rename = "allow-temporary-ids")]
-    #[sanitize_config(skip)]
-    pub allow_temporary_ids: bool,
     /// Prefix prepended to all replies (e.g., `"[Agent] "`)
     #[serde(default, rename = "comment-prefix")]
     pub comment_prefix: Option<String>,
 
     /// Restrict which repositories the agent can reply on.
-    /// If empty, all repositories in the checkout list (plus "self") are allowed.
-    #[serde(default, rename = "allowed-repositories")]
+    /// Omission adds no restriction; an explicit empty list permits no repository.
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
+}
+
+impl Default for ReplyToPrCommentConfig {
+    fn default() -> Self {
+        Self { target: Default::default(), target_repo: None,
+            required_labels: Vec::new(), required_title_prefix: None,
+            comment_prefix: None,
+            allowed_repositories: super::pr_policy::unrestricted_names(), max: None }
+    }
 }
 
 #[async_trait::async_trait]
@@ -140,7 +144,6 @@ impl Executor for ReplyToPrCommentResult {
             ctx.get_tool_config("reply-to-pull-request-comment")?;
         debug!("Config: {:?}", config);
 
-        super::pr_common::validate_temporary_opt_in(self.pull_request_id.as_ref(), config.allow_temporary_ids)?;
         let client = super::pr_http::client()?;
         let (pull_request_id, target) = match resolve_configured_pr_target(
             Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(),             ctx,
@@ -236,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_params_deserializes() {
-        let json = r#"{"pull_request_id": 42, "thread_id": 7, "content": "This is a reply to the review comment."}"#;
+        let json = r#"{"pull_request_id": 42, "thread_id": 7, "body": "This is a reply to the review comment."}"#;
         let params: ReplyToPrCommentParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.pull_request_id, Some(PullRequestReference::Number(42)));
         assert_eq!(params.thread_id, 7);
@@ -295,20 +298,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_rejects_short_content() {
-        let params = ReplyToPrCommentParams {
+    fn test_validation_accepts_short_content_but_rejects_blank_body() {
+        let mut params = ReplyToPrCommentParams {
             pull_request_id: Some(PullRequestReference::Number(42)),
             thread_id: 7,
             content: "Too short".to_string(),
             repository: Some("self".to_string()),
         };
-        let result: Result<ReplyToPrCommentResult, _> = params.try_into();
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("content must be at least 10 characters"),
-            "unexpected error: {err}"
-        );
+        assert!(params.validate().is_ok());
+        params.content = " \n\t ".into();
+        assert!(params.validate().is_err());
     }
 
     #[test]
@@ -351,7 +350,7 @@ mod tests {
     fn test_config_defaults() {
         let config = ReplyToPrCommentConfig::default();
         assert!(config.comment_prefix.is_none());
-        assert!(config.allowed_repositories.is_empty());
+        assert_eq!(config.allowed_repositories, ["*"]);
     }
 
     #[test]

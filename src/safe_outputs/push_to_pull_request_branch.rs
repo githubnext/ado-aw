@@ -85,9 +85,9 @@ pub struct PushToPullRequestBranchConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
@@ -125,7 +125,7 @@ impl Default for PushToPullRequestBranchConfig {
             max_patch_size: Default::default(),
             target: Default::default(),
             target_repo: None,
-            allowed_repositories: vec![],
+            allowed_repositories: super::pr_policy::unrestricted_names(),
             required_labels: vec![],
             required_title_prefix: None,
             allowed_branches: vec![],
@@ -138,6 +138,8 @@ impl Default for PushToPullRequestBranchConfig {
     }
 }
 pub(crate) fn validate_push_config(config: &PushToPullRequestBranchConfig) -> anyhow::Result<()> {
+    ensure!(!matches!(&config.target, super::update_pull_request::UpdatePullRequestTarget::Named(name) if name == "created"),
+        "push-to-pull-request-branch requires its independently captured source snapshot, not target: created");
     ensure!(
         !config.allowed_branches.is_empty(),
         "push-to-pull-request-branch requires explicit allowed-branches"
@@ -927,9 +929,9 @@ mod tests {
         }
         let entries = [
             json!({"name":"push-to-pull-request-branch","pull_request_id":42,"repository":"self","unexpected":true}),
-            json!({"name":"submit-pull-request-review","pull_request_id":42,"event":"approve"}),
+            json!({"name":"submit-pull-request-review","pull_request_id":42,"event":"approve","expected_head_sha":"a".repeat(40)}),
             json!({"name":"mark-pull-request-as-ready-for-review","pull_request_id":42}),
-            json!({"name":"submit-pull-request-review","pull_request_id":43,"event":"approve"}),
+            json!({"name":"submit-pull-request-review","pull_request_id":43,"event":"approve","expected_head_sha":"a".repeat(40)}),
             json!({"name":"noop","context":"Diagnostic output still runs."}),
         ];
         std::fs::write(

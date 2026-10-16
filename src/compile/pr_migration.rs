@@ -86,6 +86,9 @@ pub fn migrate_safe_outputs(outputs: &mut Map<String, Value>) -> Result<bool> {
         Value::Object(config) => config.clone(),
         _ => bail!("safe-outputs.update-pr must be an object or null before migration"),
     };
+    crate::compile::codemods::validate_legacy_literal_names(
+        "update-pr", &serde_yaml::from_value(serde_yaml::to_value(&original)?)?,
+    )?;
     let operations: Vec<String> = original
         .get("allowed-operations")
         .cloned()
@@ -161,17 +164,18 @@ pub fn migrate_safe_outputs(outputs: &mut Map<String, Value>) -> Result<bool> {
                     if let Some(value) = original.get(key) {
                         config.insert(key.to_string(), value.clone());
                     }
+                    config.entry("merge-strategy").or_insert(json!("squash"));
+                    config.entry("delete-source-branch").or_insert(json!(true));
                 }
             }
             "vote" => {
                 config.insert("allowed-events".to_string(), json!(votes));
-                config.insert("allow-temporary-ids".to_string(), Value::Bool(true));
             }
             "update-description" => {
                 config.insert("title".to_string(), Value::Bool(false));
                 config.insert("body".to_string(), Value::Bool(true));
                 config.insert("target".to_string(), json!("*"));
-                config.insert("operation".to_string(), json!("replace"));
+                config.insert("allowed-operations".to_string(), json!(["replace"]));
                 config.insert("include-stats".to_string(), Value::Bool(false));
             }
             _ => {}
@@ -180,7 +184,9 @@ pub fn migrate_safe_outputs(outputs: &mut Map<String, Value>) -> Result<bool> {
             LEGACY_PR_CONFIG.to_string(),
             Value::Object(original.clone()),
         );
-        migrated.insert((*tool).to_string(), Value::Object(config));
+        let mut yaml_config = serde_yaml::from_value(serde_yaml::to_value(&config)?)?;
+        crate::compile::codemods::preserve_legacy_grants(tool, &mut yaml_config);
+        migrated.insert((*tool).to_string(), serde_json::to_value(yaml_config)?);
     }
     groups.insert(
         "update-pr".to_string(),
@@ -332,7 +338,9 @@ pub const PR_PROMPT_GUIDANCE: &str = "PR tools now use pull-request, not pr. Use
      add-pull-request-comment, reply-to-pull-request-comment and resolve-pull-request-thread. \
      For former update-pr operations use update-pull-request for content, \
      add-pull-request-reviewers for reviewers, add-pull-request-labels for labels, set-pull-request-auto-complete \
-     for auto-complete, and submit-pull-request-review for votes. Update the prompt manually; \
+     for auto-complete, and submit-pull-request-review for votes. PR bodies use body, not \
+     content/description; references use pull_request_id, not aliases. Substantive votes \
+     require expected_head_sha or a validated creation handle. Update the prompt manually; \
      its text has not been rewritten.";
 
 pub fn warn_prompt_references(source: &std::path::Path, content: &str, body: &str) {
@@ -419,6 +427,21 @@ mod tests {
             assert!(rename_pr_tools(&mut outputs).unwrap());
             let mut expected = config;
             expected["target"] = json!("*");
+            match *new {
+                "add-pull-request-comment" => {
+                    expected["allowed-statuses"] = json!(["active","fixed","wont-fix","closed","by-design"]);
+                    expected["include-stats"] = json!(true);
+                }
+                "resolve-pull-request-thread" => expected["allowed-statuses"] = json!([]),
+                "submit-pull-request-review" => expected["allowed-events"] = json!([]),
+                "add-pull-request-labels" => expected["allowed-labels"] = json!(["*"]),
+                "add-pull-request-reviewers" => expected["allowed-reviewers"] = json!(["*"]),
+                "set-pull-request-auto-complete" => {
+                    expected["merge-strategy"] = json!("squash");
+                    expected["delete-source-branch"] = json!(true);
+                }
+                _ => {}
+            }
             assert_eq!(outputs.get(*new), Some(&expected));
             assert!(!outputs.contains_key(*old));
             let snapshot = outputs.clone();
@@ -565,7 +588,8 @@ mod tests {
             config["allowed-events"],
             json!(["wait-for-author", "reject", "reset"])
         );
-        assert_eq!(config["allow-temporary-ids"], true);
+        assert!(config.get("allow-temporary-ids").is_none());
+        assert_eq!(config["target"], "*");
         assert_eq!(config[LEGACY_PR_CONFIG]["max"], 2);
     }
 

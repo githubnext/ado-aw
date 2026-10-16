@@ -69,16 +69,16 @@ pub struct AddPrReviewersConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
     pub required_title_prefix: Option<String>,
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
-    /// Empty or literal "*" permits any otherwise-valid reviewer.
-    #[serde(default, rename = "allowed-reviewers")]
+    /// Omission permits any otherwise-valid reviewer; an explicit empty list permits none.
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-reviewers")]
     pub allowed_reviewers: Vec<String>,
     #[serde(default = "default_max_reviewers", rename = "max-reviewers")]
     #[sanitize_config(skip)]
@@ -95,8 +95,8 @@ impl Default for AddPrReviewersConfig {
             target_repo: None,
             required_labels: Vec::new(),
             required_title_prefix: None,
-            allowed_repositories: Vec::new(),
-            allowed_reviewers: Vec::new(),
+            allowed_repositories: super::pr_policy::unrestricted_names(),
+            allowed_reviewers: super::pr_policy::unrestricted_names(),
             max_reviewers: default_max_reviewers(),
             max: None,
         }
@@ -106,6 +106,8 @@ impl Default for AddPrReviewersConfig {
 pub(crate) fn validate_add_pr_reviewers_config(
     config: &AddPrReviewersConfig,
 ) -> anyhow::Result<()> {
+    super::pr_policy::validate_names(&config.allowed_reviewers, "allowed-reviewers")?;
+    super::pr_policy::validate_names(&config.allowed_repositories, "allowed-repositories")?;
     ensure!(
         config.max_reviewers > 0,
         "add-pull-request-reviewers.max-reviewers must be greater than zero"
@@ -152,6 +154,9 @@ impl Executor for AddPrReviewersResult {
         );
         let config: AddPrReviewersConfig = ctx.get_tool_config("add-pull-request-reviewers")?;
         validate_add_pr_reviewers_config(&config)?;
+        if config.allowed_reviewers.is_empty() {
+            return Ok(ExecutionResult::failure("allowed-reviewers permits no reviewers"));
+        }
         let policy = UpdatePrConfig {
             allowed_repositories: config.allowed_repositories,
             allowed_reviewers: config.allowed_reviewers,

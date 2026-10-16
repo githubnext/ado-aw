@@ -26,6 +26,7 @@ pub struct PrInlineComment {
     pub line: u32,
     #[serde(default)]
     pub start_line: Option<u32>,
+    #[serde(rename = "body")]
     pub content: String,
 }
 

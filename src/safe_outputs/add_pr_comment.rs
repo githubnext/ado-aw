@@ -28,7 +28,8 @@ pub struct AddPrCommentParams {
     #[serde(default)]
     pub pull_request_id: Option<PullRequestReference>,
 
-    /// Comment text in markdown format. Ensure adequate content > 10 characters.
+    /// Nonblank comment body in Markdown.
+    #[serde(rename = "body")]
     pub content: String,
 
     /// Repository alias: "self" for pipeline repo, or an alias from the checkout list.
@@ -79,10 +80,6 @@ impl Validate for AddPrCommentParams {
         if let Some(reference) = &self.pull_request_id {
             validate_reference(reference)?;
         }
-        ensure!(
-            self.content.len() >= 10,
-            "content must be at least 10 characters"
-        );
         super::pr_comments::validate_body(&self.content)?;
         ensure!(
             status_to_int(&self.status).is_some(),
@@ -110,7 +107,8 @@ impl Validate for AddPrCommentParams {
             validate_file_path(fp)?;
             RelativeSafePath::parse(fp)?;
             ensure!(
-                self.expected_head_sha.is_some(),
+                self.expected_head_sha.is_some()
+                    || matches!(self.pull_request_id, Some(PullRequestReference::Temporary(_))),
                 "expected_head_sha is required for inline comments"
             );
             PrInlineComment {
@@ -144,6 +142,7 @@ tool_result! {
     pub struct AddPrCommentResult {
         #[serde(default)]
         pull_request_id: Option<PullRequestReference>,
+        #[serde(rename = "body")]
         content: String,
         repository: Option<String>,
         file_path: Option<String>,
@@ -202,31 +201,28 @@ pub struct AddPrCommentConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
     pub required_title_prefix: Option<String>,
-    #[serde(default, rename = "allow-temporary-ids")]
-    #[sanitize_config(skip)]
-    pub allow_temporary_ids: bool,
     /// Prefix prepended to all comments (e.g., "[Agent Review] ")
     #[serde(default, rename = "comment-prefix")]
     pub comment_prefix: Option<String>,
 
     /// Restrict which repositories the agent can comment on.
-    /// If empty, all repositories in the checkout list (plus "self") are allowed.
-    #[serde(default, rename = "allowed-repositories")]
+    /// Omission adds no restriction; an explicit empty list permits no repository.
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
 
     /// Restrict which thread statuses can be set.
-    /// If empty, all valid statuses are allowed.
-    #[serde(default, rename = "allowed-statuses")]
+    /// Omission permits active only; an explicit empty list permits no status.
+    #[serde(default = "super::pr_policy::comment_statuses", rename = "allowed-statuses")]
     pub allowed_statuses: Vec<String>,
-    /// Whether to include agent execution stats in the output (default: true).
+    /// Whether to include optional execution stats (default: false).
     #[serde(
-        default = "crate::agent_stats::default_include_stats",
+        default,
         rename = "include-stats"
     )]
     pub include_stats: bool,
@@ -245,11 +241,10 @@ impl Default for AddPrCommentConfig {
             target_repo: None,
             required_labels: Vec::new(),
             required_title_prefix: None,
-            allow_temporary_ids: false,
             comment_prefix: None,
-            allowed_repositories: Vec::new(),
-            allowed_statuses: Vec::new(),
-            include_stats: true,
+            allowed_repositories: super::pr_policy::unrestricted_names(),
+            allowed_statuses: super::pr_policy::comment_statuses(),
+            include_stats: false,
             max: None,
         }
     }
@@ -307,8 +302,7 @@ impl AddPrCommentResult {
     /// file_path shape). Returns the resolved ADO status integer on success,
     /// or a human-readable failure message on the first violated rule.
     fn validate_against_config(&self, config: &AddPrCommentConfig) -> Result<i32, String> {
-        if !config.allowed_statuses.is_empty()
-            && !config
+        if !config
                 .allowed_statuses
                 .iter()
                 .any(|s| s.eq_ignore_ascii_case(&self.status))
@@ -379,6 +373,12 @@ impl Executor for AddPrCommentResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        let expected_head_sha = match super::pr_common::reviewed_head(
+            self.pull_request_id.as_ref(), self.expected_head_sha.as_ref(), self.file_path.is_some(), ctx,
+        ) {
+            Ok(head) => head,
+            Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
+        };
         if let Err(error) = (AddPrCommentParams {
             pull_request_id: self.pull_request_id.clone(),
             repository: self.repository.clone(),
@@ -387,7 +387,7 @@ impl Executor for AddPrCommentResult {
             line: self.line,
             start_line: self.start_line,
             side: self.side,
-            expected_head_sha: self.expected_head_sha.clone(),
+            expected_head_sha: expected_head_sha.clone(),
             status: self.status.clone(),
         })
         .validate()
@@ -408,10 +408,6 @@ impl Executor for AddPrCommentResult {
             Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
 
-        super::pr_common::validate_temporary_opt_in(
-            self.pull_request_id.as_ref(),
-            config.allow_temporary_ids,
-        )?;
         let client = super::pr_http::client()?;
         let (pull_request_id, target) = match resolve_configured_pr_target(
             Self::NAME,
@@ -448,8 +444,7 @@ impl Executor for AddPrCommentResult {
             connection_type: ctx.write_connection_type,
         };
         if let Some(file_path) = &self.file_path {
-            let head = self
-                .expected_head_sha
+            let head = expected_head_sha
                 .as_ref()
                 .context("Inline comments require expected_head_sha")?;
             let inline = PrInlineComment {
@@ -484,7 +479,7 @@ impl Executor for AddPrCommentResult {
         };
 
         info!("Sending comment thread to PR #{}", pull_request_id);
-        if let Some(head) = &self.expected_head_sha {
+        if let Some(head) = &expected_head_sha {
             super::pr_inline::verify_head(&operation, head).await?;
         }
         let response =
@@ -537,6 +532,12 @@ impl Executor for AddPrCommentResult {
                             > 0;
                         data["supersession"] = details;
                         if failed {
+                            if data["supersession"]["uncertain"].as_u64().is_some_and(|count| count > 0) {
+                                return Ok(ExecutionResult::failure_with_data(
+                                    "New comment posted, but older comment mutations have uncertain delivery",
+                                    data,
+                                ));
+                            }
                             return Ok(ExecutionResult::warning_with_data(
                                 "New comment posted, but some older comments could not be superseded",
                                 data,
@@ -584,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_params_deserializes() {
-        let json = r#"{"pull_request_id": 42, "content": "This is a review comment on the PR."}"#;
+        let json = r#"{"pull_request_id": 42, "body": "This is a review comment on the PR."}"#;
         let params: AddPrCommentParams = serde_json::from_str(json).unwrap();
         assert_eq!(
             params.pull_request_id,
@@ -641,8 +642,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_rejects_short_content() {
-        let params = AddPrCommentParams {
+    fn test_validation_accepts_short_content_but_rejects_blank_body() {
+        let mut params = AddPrCommentParams {
             pull_request_id: Some(PullRequestReference::Number(42)),
             content: "Too short".to_string(),
             repository: Some("self".to_string()),
@@ -653,12 +654,9 @@ mod tests {
             expected_head_sha: None,
             status: "active".to_string(),
         };
-        let err: Result<AddPrCommentResult, _> = params.try_into();
-        let err = err.unwrap_err().to_string();
-        assert!(
-            err.contains("content must be at least 10 characters"),
-            "got: {err}"
-        );
+        assert!(params.validate().is_ok());
+        params.content = " \n\t ".into();
+        assert!(params.validate().is_err());
     }
 
     #[test]
@@ -755,8 +753,8 @@ mod tests {
     fn test_config_defaults() {
         let config = AddPrCommentConfig::default();
         assert!(config.comment_prefix.is_none());
-        assert!(config.allowed_repositories.is_empty());
-        assert!(config.allowed_statuses.is_empty());
+        assert_eq!(config.allowed_repositories, ["*"]);
+        assert_eq!(config.allowed_statuses, ["active"]);
     }
 
     #[test]

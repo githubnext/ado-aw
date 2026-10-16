@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, PATH_SEGMENT, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, PATH_SEGMENT, ToolResult, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::secure::PullRequestTemporaryId;
 use crate::tool_result;
@@ -233,11 +233,12 @@ fn identity_picker_url(organization: &str) -> String {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePrParams {
-    /// Title for the pull request; should be concise and descriptive
+    /// Nonblank title, at most 400 Unicode scalar values including the configured title-prefix.
     pub title: String,
 
     /// Description of the changes in the pull request. Use markdown formatting.
     /// Explain what changes were made and why.
+    #[serde(rename = "body")]
     pub description: String,
 
     /// Repository to create the PR in. Use "self" for the pipeline's own repository,
@@ -254,18 +255,12 @@ pub struct CreatePrParams {
 
 impl Validate for CreatePrParams {
     fn validate(&self) -> anyhow::Result<()> {
+        super::pr_common::validate_title(&self.title)?;
         ensure!(
-            self.title.len() >= 5,
-            "PR title must be at least 5 characters"
+            !self.description.trim().is_empty(),
+            "PR body must not be blank"
         );
-        ensure!(
-            self.title.len() <= 200,
-            "PR title must be at most 200 characters"
-        );
-        ensure!(
-            self.description.len() >= 10,
-            "PR description must be at least 10 characters"
-        );
+        super::pr_common::validate_description(&self.description)?;
         if let Some(repository) = &self.repository {
             reject_pipeline_injection(repository, "repository")?;
         }
@@ -279,6 +274,7 @@ impl Validate for CreatePrParams {
 #[derive(Deserialize, JsonSchema)]
 struct CreatePrResultFields {
     title: String,
+    #[serde(rename = "body")]
     description: String,
     source_branch: String,
     patch_file: String,
@@ -304,6 +300,7 @@ tool_result! {
         /// Title for the pull request
         title: String,
         /// Description/body of the pull request (markdown)
+        #[serde(rename = "body")]
         description: String,
         /// Source branch name (generated or provided)
         source_branch: String,
@@ -406,7 +403,7 @@ pub struct CreatePrConfig {
     #[sanitize_config(skip)]
     pub max_patch_size: super::pr_patch::PatchSizeKiB,
     /// Optional restriction within the compiler-authorized checkout destinations.
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     /// Target branch to merge into (default: "main"). This is the literal
     /// fallback applied to every repo unless overridden by `target_branches`
@@ -440,13 +437,10 @@ pub struct CreatePrConfig {
     #[serde(default, rename = "auto-complete")]
     pub auto_complete: bool,
 
-    /// Whether to delete source branch after merge (default: true)
-    #[serde(default = "default_true", rename = "delete-source-branch")]
-    pub delete_source_branch: bool,
-
-    /// Whether to squash commits on merge (default: true)
-    #[serde(default = "default_true", rename = "squash-merge")]
-    pub squash_merge: bool,
+    /// Optional initial completion preferences, independent of enabling completion.
+    #[serde(flatten)]
+    #[sanitize_config(skip)]
+    pub completion: super::pr_completion::CompletionPreferences,
 
     /// Prefix to prepend to all PR titles
     #[serde(default, rename = "title-prefix")]
@@ -470,8 +464,8 @@ pub struct CreatePrConfig {
     pub excluded_files: Vec<String>,
 
     /// Allowlist of labels the agent is permitted to use.
-    /// If empty, any labels are accepted.
-    #[serde(default, rename = "allowed-labels")]
+    /// Omission adds no name restriction; an explicit empty list permits no agent labels.
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-labels")]
     pub allowed_labels: Vec<String>,
 
     /// Reviewers to add to the PR (email addresses or user IDs)
@@ -492,12 +486,24 @@ pub struct CreatePrConfig {
     #[serde(default = "default_true", rename = "fallback-record-branch")]
     pub fallback_record_branch: bool,
 
-    /// Whether to include agent execution stats in the PR description (default: true).
-    #[serde(default = "default_true", rename = "include-stats")]
+    /// Whether to include optional execution stats in the PR body (default: false).
+    #[serde(default, rename = "include-stats")]
     pub include_stats: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
+}
+
+pub(crate) fn validate_create_pr_config(config: &CreatePrConfig) -> anyhow::Result<()> {
+    config.completion.validate()?;
+    super::pr_policy::validate_names(&config.allowed_repositories, "allowed-repositories")?;
+    super::pr_policy::validate_names(&config.allowed_labels, "allowed-labels")?;
+    anyhow::ensure!(config.work_items.iter().all(|id| *id > 0), "Creation work-items must contain positive IDs");
+    anyhow::ensure!(
+        !config.draft || !config.auto_complete,
+        "safe-outputs.create-pull-request cannot combine draft: true with auto-complete: true; explicitly set draft: false or disable auto-complete"
+    );
+    Ok(())
 }
 
 fn default_target_branch() -> String {
@@ -579,25 +585,24 @@ impl Default for CreatePrConfig {
     fn default() -> Self {
         Self {
             max_patch_size: Default::default(),
-            allowed_repositories: Vec::new(),
+            allowed_repositories: super::pr_policy::unrestricted_names(),
             target_branch: default_target_branch(),
             target_branches: std::collections::HashMap::new(),
             infer_target_from_checkout_ref: false,
             draft: true,
             auto_complete: false,
-            delete_source_branch: true,
-            squash_merge: true,
+            completion: Default::default(),
             title_prefix: None,
             if_no_changes: default_if_no_changes(),
             max_files: default_max_files(),
             protected_files: default_protected_files(),
             excluded_files: Vec::new(),
-            allowed_labels: Vec::new(),
+            allowed_labels: super::pr_policy::unrestricted_names(),
             reviewers: Vec::new(),
             labels: Vec::new(),
             work_items: Vec::new(),
             fallback_record_branch: true,
-            include_stats: true,
+            include_stats: false,
             max: None,
         }
     }
@@ -648,6 +653,15 @@ impl Executor for CreatePrResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        if !ctx.tool_configs.contains_key(Self::NAME) {
+            return Ok(ExecutionResult::failure("create-pull-request is not configured for this workflow"));
+        }
+        if let Err(error) = (CreatePrParams {
+            title: self.title.clone(), description: self.description.clone(),
+            repository: Some(self.repository.clone()), labels: self.agent_labels.clone(),
+        }).validate() {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         info!(
             "Creating PR: '{}' in repository '{}'",
             self.title, self.repository
@@ -664,12 +678,9 @@ impl Executor for CreatePrResult {
         debug!("Target branch from config: {}", config.target_branch);
         debug!("Draft: {}", config.draft);
         debug!("Auto-complete: {}", config.auto_complete);
-        debug!("Squash merge: {}", config.squash_merge);
-
-        if config.draft && config.auto_complete {
-            warn!(
-                "auto-complete cannot be set on a draft PR; set draft: false to enable auto-complete"
-            );
+        validate_create_pr_config(&config)?;
+        if config.allowed_repositories.is_empty() {
+            return Ok(ExecutionResult::failure("allowed-repositories permits no PR destination"));
         }
 
         // Apply title prefix if configured
@@ -679,12 +690,9 @@ impl Executor for CreatePrResult {
             self.title.clone()
         };
 
-        // ADO PR titles have a 400-character limit
-        let title_char_count = effective_title.chars().count();
-        if title_char_count > 400 {
+        if let Err(error) = super::pr_common::validate_title(&effective_title) {
             return Ok(ExecutionResult::failure(format!(
-                "PR title too long after applying title-prefix ({} chars, max 400)",
-                title_char_count
+                "PR title after applying title-prefix is invalid: {error}"
             )));
         }
 
@@ -907,6 +915,7 @@ impl Executor for CreatePrResult {
             Ok(applied) => applied,
             Err(result) => return Ok(result),
         };
+        let expected_tree = applied.tree;
         let changes = applied.changes;
         let skipped_symlinks = applied.skipped_symlinks;
         let omitted_paths = applied.omitted;
@@ -914,6 +923,16 @@ impl Executor for CreatePrResult {
             let mut result = handle_no_changes(&config, &skipped_symlinks);
             result.data = Some(serde_json::json!({"omitted_operations":omitted_paths}));
             return Ok(result);
+        }
+
+        let description_with_stats =
+            crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
+        let description_final =
+            append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
+        if let Err(error) = super::pr_common::validate_description(&description_final) {
+            return Ok(ExecutionResult::failure(format!(
+                "Assembled PR body is invalid before publishing the branch: {error}"
+            )));
         }
 
         let base_commit = base_sha.to_string();
@@ -976,7 +995,7 @@ impl Executor for CreatePrResult {
         let push_url = format!("{}/pushes?api-version=7.1", repository_api_base(&target));
         debug!("Push URL: {}", push_url);
 
-        (source_branch, source_ref) = match push_new_branch(PushBranchParams {
+        let pushed = match push_new_branch(PushBranchParams {
             client: &client,
             push_url: &push_url,
             token,
@@ -989,20 +1008,12 @@ impl Executor for CreatePrResult {
         })
         .await?
         {
-            Ok(pair) => pair,
+            Ok(pushed) => pushed,
             Err(result) => return Ok(result),
         };
+        source_branch = pushed.branch;
+        source_ref = pushed.reference;
         debug!("Changes pushed successfully");
-
-        // If any symlinks were skipped during file collection, surface that in the
-        // PR description so the agent/PR author can see that some intended file
-        // content was dropped for safety (otherwise the warning only appears in
-        // Stage 3 infrastructure logs).
-        let description_with_stats =
-            crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
-        let description_with_symlink_notice =
-            append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
-        let description_final = description_with_symlink_notice;
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -1125,31 +1136,66 @@ impl Executor for CreatePrResult {
                 "Azure DevOps create-pull-request response contained no positive pull request ID",
             ));
         }
-        if let Err(error) = ctx.register_resolved_pull_request(
-            &self.temporary_id,
-            crate::safe_outputs::ResolvedPullRequest {
-                id: pr_id,
-                url: pr_web_url.to_string(),
-                target: target.clone(),
-            },
-        ) {
-            return Ok(ExecutionResult::failure_with_data(
-                format!(
-                    "Created pull request #{} but failed to register temporary_id '{}': {}",
-                    pr_id,
-                    self.temporary_id.canonical(),
-                    crate::sanitize::neutralize_pipeline_commands(&error.to_string())
-                ),
-                serde_json::json!({
-                    "pull_request_id": pr_id,
-                    "url": pr_web_url,
-                    "temporary_id": self.temporary_id.canonical(),
-                    "repository": target.display_name(),
-                }),
-            ));
-        }
-        set_pr_completion_options(&pr_ctx, pr_data["createdBy"]["id"].as_str()).await;
+        use super::result::{ActionEffect, EffectState};
+        let mut effects = vec![ActionEffect::new("create-pull-request", pr_id.to_string(), EffectState::Applied)];
+        let snapshot = match verified_creation_snapshot(
+            &pr_ctx, pushed.commit, expected_tree.as_ref(), self.base_commit.as_deref(),
+            &self.patch_sha256, &source_ref, &pr_data,
+        ).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                effects.push(ActionEffect::new("bind-created-snapshot", pr_id.to_string(), EffectState::Failed)
+                    .detail(format!("Creation snapshot unavailable; head-bound consumers are blocked: {error:#}")));
+                None
+            }
+        };
         let reviewer_changes = add_reviewers_to_pr(&pr_ctx).await;
+        effects.extend(reviewer_changes.effects());
+        if !all_labels.is_empty() {
+            let labels = super::pr_common::fetch_pr_labels(
+                &client, &repository_api_base(&target), pr_id, token, ctx,
+            ).await;
+            match labels {
+                Ok(Ok(actual)) => {
+                    for label in &all_labels {
+                        let state = if actual.iter().any(|name| name.eq_ignore_ascii_case(label)) {
+                            EffectState::Applied
+                        } else {
+                            EffectState::Failed
+                        };
+                        effects.push(ActionEffect::new("initialize-label", label, state));
+                    }
+                }
+                Ok(Err(failure)) => effects.push(ActionEffect::new("initialize-labels", pr_id.to_string(),
+                    EffectState::Uncertain).detail(failure.message)),
+                Err(error) => effects.push(ActionEffect::new("initialize-labels", pr_id.to_string(),
+                    EffectState::Uncertain).detail(format!("Label initialization could not be confirmed: {error:#}"))),
+            }
+        }
+        if !config.work_items.is_empty() {
+            match confirm_initial_work_items(&pr_ctx).await {
+                Ok(ids) => {
+                    for id in &config.work_items {
+                        effects.push(ActionEffect::new("initialize-work-item", id.to_string(),
+                            if ids.contains(&id.to_string()) { EffectState::Applied } else { EffectState::Failed }));
+                    }
+                }
+                Err(error) => effects.push(ActionEffect::new("initialize-work-items", pr_id.to_string(),
+                    EffectState::Uncertain).detail(format!("Work-item initialization could not be confirmed: {error:#}"))),
+            }
+        }
+        let initialized = effects.iter().all(|effect| {
+            matches!(effect.state, EffectState::Applied | EffectState::AlreadySatisfied)
+        });
+        if !config.completion.is_empty() || (config.auto_complete && initialized) {
+            effects.push(set_pr_completion_options(
+                &pr_ctx, pr_data["createdBy"]["id"].as_str(), config.auto_complete && initialized,
+            ).await);
+        }
+        if config.auto_complete && !initialized {
+            effects.push(ActionEffect::new("enable-auto-complete", pr_id.to_string(), EffectState::Unattempted)
+                .detail("Auto-complete was not enabled because required PR initialization was not confirmed"));
+        }
 
         info!(
             "PR #{} created successfully: {} -> {}{}",
@@ -1168,16 +1214,36 @@ impl Executor for CreatePrResult {
             "draft": config.draft,
             "temporary_id": self.temporary_id.canonical(),
             "omitted_operations": omitted_paths,
+            "creation_snapshot": snapshot,
         });
         if !config.reviewers.is_empty() {
             data["reviewers"] = serde_json::to_value(&reviewer_changes)?;
         }
-        if reviewer_changes.failed.is_empty() {
-            Ok(ExecutionResult::success_with_data(message, data))
-        } else {
-            message.push_str(&format!("; reviewer additions were not all confirmed: {}", reviewer_changes.failed.join(", ")));
-            Ok(ExecutionResult::warning_with_data(message, data))
+        if !initialized {
+            message.push_str("; initialization was not fully confirmed; auto-complete was not enabled");
         }
+        for effect in &effects {
+            if let Some(detail) = &effect.detail {
+                message.push_str(&format!("; {}: {detail}", effect.operation));
+            }
+        }
+        let mut result = ExecutionResult::success_with_data(message, data).with_effects(effects);
+        if result.success
+            && let Err(error) = ctx.register_resolved_pull_request(
+                &self.temporary_id,
+                crate::safe_outputs::ResolvedPullRequest {
+                    creation_snapshot: snapshot,
+                    id: pr_id,
+                    url: pr_web_url.to_string(),
+                    target,
+                },
+            ) {
+                return Ok(ExecutionResult::failure_with_data(
+                    format!("Created PR #{pr_id}, but its handle could not be registered: {error:#}"),
+                    result.data.take().context("Creation result lacks its effect data")?,
+                ));
+        }
+        Ok(result)
     }
 }
 
@@ -1360,9 +1426,83 @@ struct PushBranchParams<'a> {
 ///
 /// Returns `Ok((source_branch, source_ref))` with the (possibly-renamed) branch on
 /// success. Returns `Err(ExecutionResult)` on push failure.
+struct PushedBranch {
+    branch: String,
+    reference: String,
+    commit: Result<crate::secure::CommitSha, String>,
+}
+
+async fn capture_pushed_commit(
+    response: reqwest::Response,
+    reference: &str,
+) -> anyhow::Result<crate::secure::CommitSha> {
+    let value: serde_json::Value = response.bounded_json().await?;
+    anyhow::ensure!(value["commits"].as_array().is_some_and(|values| values.len() == 1)
+        && value["refUpdates"].as_array().is_some_and(|values| values.len() == 1),
+        "Push receipt must identify exactly one commit and ref update");
+    let commit = crate::secure::CommitSha::parse(value["commits"][0]["commitId"].as_str().context("Push receipt lacks commitId")?)?;
+    let update = &value["refUpdates"][0];
+    anyhow::ensure!(update["name"].as_str() == Some(reference)
+        && update["oldObjectId"].as_str() == Some("0000000000000000000000000000000000000000")
+        && update["newObjectId"].as_str().is_some_and(|sha| sha.eq_ignore_ascii_case(commit.as_str())),
+        "Push receipt does not bind the exact newly created source ref");
+    Ok(commit)
+}
+
+async fn verified_creation_snapshot(
+    ctx: &PrContext<'_>,
+    commit: Result<crate::secure::CommitSha, String>,
+    tree: Option<&crate::secure::CommitSha>,
+    base: Option<&str>,
+    patch_sha256: &str,
+    source_ref: &str,
+    created: &serde_json::Value,
+) -> anyhow::Result<super::result::CreatedPullRequestSnapshot> {
+    let commit = commit.map_err(anyhow::Error::msg)?;
+    let tree = tree.context("Selected output has no exact Git tree proof")?;
+    let base = base.context("Queued creation did not capture its base commit")?;
+    let base_url = repository_api_base(ctx.target);
+    let response = crate::safe_outputs::authenticate_ado_request(
+        ctx.client.get(format!("{base_url}/commits/{}?api-version=7.1", commit.as_str())),
+        ctx.token, ctx.connection_type,
+    ).send().await.context("Could not read the immutable created commit")?;
+    anyhow::ensure!(response.status().is_success(), "Created commit verification returned HTTP {}", response.status());
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CommitProof {
+        commit_id: crate::secure::CommitSha,
+        tree_id: crate::secure::CommitSha,
+        parents: Vec<crate::secure::CommitSha>,
+    }
+    let proof: CommitProof = response.bounded_json().await?;
+    anyhow::ensure!(proof.commit_id.eq_ignore_ascii_case(commit.as_str())
+        && proof.tree_id.eq_ignore_ascii_case(tree.as_str())
+        && proof.parents.len() == 1 && proof.parents[0].eq_ignore_ascii_case(base),
+        "Created commit does not match the validated queued tree and base");
+    let owned;
+    let pr = if created.pointer("/lastMergeSourceCommit/commitId").is_some() {
+        created
+    } else {
+        let response = crate::safe_outputs::authenticate_ado_request(
+            ctx.client.get(format!("{base_url}/pullRequests/{}?api-version=7.1", ctx.pr_id)),
+            ctx.token, ctx.connection_type,
+        ).send().await.context("Could not verify the created PR source")?;
+        anyhow::ensure!(response.status().is_success(), "Created PR verification returned HTTP {}", response.status());
+        owned = response.bounded_json::<serde_json::Value>().await?;
+        &owned
+    };
+    anyhow::ensure!(pr["sourceRefName"].as_str() == Some(source_ref)
+        && pr.pointer("/lastMergeSourceCommit/commitId").and_then(serde_json::Value::as_str)
+            .is_some_and(|sha| sha.eq_ignore_ascii_case(commit.as_str())),
+        "Created PR source does not match its captured creation commit");
+    Ok(super::result::CreatedPullRequestSnapshot {
+        commit, tree: tree.clone(), patch_sha256: patch_sha256.to_string(),
+    })
+}
+
 async fn push_new_branch(
     p: PushBranchParams<'_>,
-) -> anyhow::Result<Result<(String, String), ExecutionResult>> {
+) -> anyhow::Result<Result<PushedBranch, ExecutionResult>> {
     let PushBranchParams {
         client,
         push_url,
@@ -1392,7 +1532,8 @@ async fn push_new_branch(
     .context("Failed to push changes")?;
 
     if push_response.status().is_success() {
-        return Ok(Ok((source_branch, source_ref)));
+        let commit = capture_pushed_commit(push_response, &source_ref).await.map_err(|error| format!("{error:#}"));
+        return Ok(Ok(PushedBranch { branch: source_branch, reference: source_ref, commit }));
     }
 
     let status = push_response.status();
@@ -1432,7 +1573,8 @@ async fn push_new_branch(
                 retry_status, retry_body_text
             ))));
         }
-        return Ok(Ok((source_branch, source_ref)));
+        let commit = capture_pushed_commit(retry_response, &source_ref).await.map_err(|error| format!("{error:#}"));
+        return Ok(Ok(PushedBranch { branch: source_branch, reference: source_ref, commit }));
     }
 
     warn!("Failed to push changes: {} - {}", status, body);
@@ -1513,14 +1655,11 @@ fn validate_and_build_labels(
         return Ok(all_labels);
     }
 
-    if !config.allowed_labels.is_empty() {
+    {
         let disallowed: Vec<_> = agent_labels
             .iter()
             .filter(|l| {
-                !config
-                    .allowed_labels
-                    .iter()
-                    .any(|al| al.eq_ignore_ascii_case(l))
+                !super::pr_policy::permits_name(&config.allowed_labels, l)
             })
             .collect();
         if !disallowed.is_empty() {
@@ -1558,58 +1697,47 @@ struct PrContext<'a> {
     reviewers: &'a [String],
 }
 
-/// Set PR completion options (delete-source-branch, squash-merge) and optionally
-/// enable auto-complete. Logs a warning on failure but does not propagate the error
-/// because these are best-effort settings that do not affect the PR's existence.
-async fn set_pr_completion_options(ctx: &PrContext<'_>, pr_created_by_id: Option<&str>) {
-    debug!(
-        "Setting PR completion options: delete_source_branch={}, squash_merge={}, auto_complete={}",
-        ctx.config.delete_source_branch, ctx.config.squash_merge, ctx.config.auto_complete
-    );
-    let pr_update_url = format!(
-        "{}/pullrequests/{}?api-version=7.1",
-        repository_api_base(ctx.target),
-        ctx.pr_id
-    );
-
-    let mut update_body = serde_json::json!({
-        "completionOptions": {
-            "deleteSourceBranch": ctx.config.delete_source_branch,
-            "squashMerge": ctx.config.squash_merge
-        }
-    });
-
-    // Only set autoCompleteSetBy if auto_complete is enabled and PR is not a draft
-    // (ADO silently ignores auto-complete on draft PRs, so skip the API call)
-    if ctx.config.auto_complete && !ctx.config.draft {
-        if let Some(creator_id) = pr_created_by_id {
-            update_body["autoCompleteSetBy"] = serde_json::json!({ "id": creator_id });
-        } else {
-            warn!(
-                "auto_complete requested but creator ID is unavailable; skipping autoCompleteSetBy"
-            );
-        }
+async fn set_pr_completion_options(
+    ctx: &PrContext<'_>,
+    pr_created_by_id: Option<&str>,
+    enable: bool,
+) -> super::result::ActionEffect {
+    if enable && pr_created_by_id.is_none() {
+        return super::result::ActionEffect::new("enable-auto-complete", ctx.pr_id.to_string(),
+            super::result::EffectState::Failed).detail("Created PR response lacks the auto-complete actor identity");
     }
+    super::pr_completion::apply(
+        &super::pr_mutations::UpdatePrContext {
+            client: ctx.client,
+            target: ctx.target.clone(),
+            pr_id: ctx.pr_id,
+            token: ctx.token,
+            connection_type: ctx.connection_type,
+        },
+        &ctx.config.completion,
+        pr_created_by_id.filter(|_| enable),
+    ).await
+}
 
-    match crate::safe_outputs::authenticate_ado_request(
-        ctx.client.patch(&pr_update_url),
-        ctx.token,
-        ctx.connection_type,
-    )
-    .json(&update_body)
-    .send()
-    .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            debug!("PR completion options set successfully");
-        }
-        Ok(resp) => {
-            warn!("Failed to set PR completion options: {}", resp.status());
-        }
-        Err(e) => {
-            warn!("Failed to set PR completion options: {}", e);
-        }
+async fn confirm_initial_work_items(ctx: &PrContext<'_>) -> anyhow::Result<std::collections::HashSet<String>> {
+    let response = crate::safe_outputs::authenticate_ado_request(
+        ctx.client.get(format!("{}/pullRequests/{}/workitems?api-version=7.1",
+            repository_api_base(ctx.target), ctx.pr_id)),
+        ctx.token, ctx.connection_type,
+    ).send().await.context("Failed to read initialized PR work items")?;
+    ensure!(response.status().is_success(), "PR work-item read returned HTTP {}", response.status());
+    #[derive(Deserialize)]
+    struct Reference { id: String }
+    #[derive(Deserialize)]
+    struct References { value: Vec<Reference>, count: Option<usize> }
+    let references: References = response.bounded_json().await?;
+    ensure!(references.count.is_none_or(|count| count == references.value.len()), "Incomplete PR work-item references");
+    let mut ids = std::collections::HashSet::new();
+    for reference in references.value {
+        ensure!(reference.id.parse::<u64>().is_ok_and(|id| id > 0), "Invalid PR work-item reference");
+        ids.insert(reference.id);
     }
+    Ok(ids)
 }
 
 /// Add configured reviewers to a pull request.
@@ -1790,6 +1918,35 @@ mod tests {
     use super::*;
     use crate::safe_outputs::ToolResult;
 
+    fn pushed_tree(repo: &std::path::Path, request: &serde_json::Value) -> String {
+        use base64::Engine;
+        let scratch = tempfile::tempdir().unwrap();
+        let index = scratch.path().join("index");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").arg("-C").arg(repo)
+                .args(args).env("GIT_INDEX_FILE", &index).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["read-tree", request["commits"][0]["parents"][0].as_str().unwrap()]);
+        for change in request["commits"][0]["changes"].as_array().unwrap() {
+            let path = change["item"]["path"].as_str().unwrap().strip_prefix('/').unwrap();
+            if change["changeType"] == "delete" {
+                git(&["update-index", "--force-remove", "--", path]);
+            } else {
+                let content = change["newContent"]["content"].as_str().unwrap();
+                let bytes = if change["newContent"]["contentType"] == "base64encoded" {
+                    base64::engine::general_purpose::STANDARD.decode(content).unwrap()
+                } else { content.as_bytes().to_vec() };
+                let blob = scratch.path().join("blob");
+                std::fs::write(&blob, bytes).unwrap();
+                let oid = git(&["hash-object", "-w", "--no-filters", blob.to_str().unwrap()]);
+                git(&["update-index", "--add", "--cacheinfo", "100644", &oid, path]);
+            }
+        }
+        git(&["write-tree"])
+    }
+
     #[tokio::test]
     async fn creation_uses_shared_patch_selection_blobs_and_verified_parent() {
         use crate::safe_outputs::pr_patch::tests::{command, movement, repository};
@@ -1859,14 +2016,37 @@ mod tests {
                 }))).mount(&server).await;
             let pushes = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
             let observed = pushes.clone();
+            let server_tree = Arc::new(Mutex::new(None::<String>));
+            let captured_tree = server_tree.clone();
+            let repository_path = repo.path().to_path_buf();
+            let new_commit = "a".repeat(40);
+            let captured_commit = new_commit.clone();
             Mock::given(method("POST")).and(path(format!("{api}/pushes")))
                 .respond_with(move |request: &wiremock::Request| {
-                    observed.lock().unwrap().push(serde_json::from_slice(&request.body).unwrap());
-                    ResponseTemplate::new(201).set_body_json(serde_json::json!({"pushId":1}))
+                    let pushed: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    *captured_tree.lock().unwrap() = Some(pushed_tree(&repository_path, &pushed));
+                    observed.lock().unwrap().push(pushed.clone());
+                    ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                        "commits":[{"commitId":captured_commit}],
+                        "refUpdates":[{"name":pushed["refUpdates"][0]["name"],
+                            "oldObjectId":"0000000000000000000000000000000000000000",
+                            "newObjectId":captured_commit}]
+                    }))
                 }).mount(&server).await;
+            let proof_base = base.clone();
+            let proof_commit = new_commit.clone();
+            Mock::given(method("GET")).and(path(format!("{api}/commits/{new_commit}")))
+                .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"commitId":proof_commit,
+                        "treeId":server_tree.lock().unwrap().clone().unwrap(),"parents":[proof_base]})))
+                .expect(if matches!(case,"unrelated-base"|"mode-up") {0} else {1})
+                .mount(&server).await;
             Mock::given(method("POST")).and(path(format!("{api}/pullrequests")))
                 .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "pullRequestId":7,"url":"https://example.test/pr/7"
+                    "pullRequestId":7,"url":"https://example.test/pr/7",
+                    "createdBy":{"id":"01234567-89ab-cdef-0123-456789abcdef"},
+                    "sourceRefName":format!("refs/heads/agent/{case}"),
+                    "lastMergeSourceCommit":{"commitId":new_commit}
                 }))).mount(&server).await;
             let reviewer = "01234567-89ab-cdef-0123-456789abcdef";
             let present = Arc::new(std::sync::atomic::AtomicBool::new(case == "reviewer-existing"));
@@ -1887,6 +2067,24 @@ mod tests {
                     present.store(true, std::sync::atomic::Ordering::SeqCst);
                     ResponseTemplate::new(200)
                 }).expect(usize::from(case == "reviewer-missing") as u64).mount(&server).await;
+            let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed_complete = complete.clone();
+            let enables_completion = matches!(case, "reviewer-existing" | "reviewer-missing");
+            Mock::given(method("GET")).and(path(format!("{api}/pullRequests/7")))
+                .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "status":"active","isDraft":false,
+                        "autoCompleteSetBy": if observed_complete.load(std::sync::atomic::Ordering::SeqCst) {
+                            serde_json::json!({"id":reviewer})
+                        } else { serde_json::Value::Null }
+                    })))
+                .expect(if enables_completion {2} else {0}).mount(&server).await;
+            Mock::given(method("PATCH")).and(path(format!("{api}/pullRequests/7")))
+                .and(wiremock::matchers::body_json(serde_json::json!({"autoCompleteSetBy":{"id":reviewer}})))
+                .respond_with(move |_: &wiremock::Request| {
+                    complete.store(true,std::sync::atomic::Ordering::SeqCst);
+                    ResponseTemplate::new(200)
+                }).expect(u64::from(enables_completion)).mount(&server).await;
             let output = tempfile::tempdir().unwrap();
             std::fs::write(output.path().join("changes.patch"), &text).unwrap();
             let mut ctx = ExecutionContext {
@@ -1901,9 +2099,11 @@ mod tests {
             }));
             if case.starts_with("reviewer-") {
                 ctx.tool_configs.get_mut("create-pull-request").unwrap()["reviewers"] = serde_json::json!([reviewer]);
+                ctx.tool_configs.get_mut("create-pull-request").unwrap()["draft"] = serde_json::json!(false);
+                ctx.tool_configs.get_mut("create-pull-request").unwrap()["auto-complete"] = serde_json::json!(true);
             }
             let result = crate::execute::execute_safe_output(&serde_json::json!({
-                "name":"create-pull-request", "title":"Patch fixture", "description":"A validated code change.",
+                "name":"create-pull-request", "title":"Patch fixture", "body":"A validated code change.",
                 "source_branch":format!("agent/{case}"), "repository":"self", "temporary_id":"#aw_fixture",
                 "patch_file":"changes.patch", "patch_sha256":crate::hash::sha256_hex(text.as_bytes()),
                 "base_commit":recorded
@@ -1930,6 +2130,15 @@ mod tests {
                 };
                 assert_eq!(data["reviewers"][key].as_array().unwrap().len(), 1);
                 assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() != "PUT"));
+                let effects = data["effects"].as_array().unwrap();
+                let completion = effects.iter().find(|effect| effect["operation"] == "enable-auto-complete").unwrap();
+                assert_eq!(completion["state"], if enables_completion { "applied" } else { "unattempted" });
+                if enables_completion {
+                    let requests = server.received_requests().await.unwrap();
+                    let setup = requests.iter().rposition(|request| request.url.path().ends_with("/reviewers")).unwrap();
+                    let completion = requests.iter().position(|request| request.method.as_str() == "PATCH").unwrap();
+                    assert!(setup < completion, "configured reviewers must be confirmed before enabling completion");
+                }
             }
             let pushes = pushes.lock().unwrap();
             assert_eq!(pushes.len(), 1, "{case}");
@@ -1960,23 +2169,53 @@ mod tests {
 
     #[test]
     fn test_validate_params_short_title() {
-        let params = CreatePrParams {
+        let mut params = CreatePrParams {
             title: "Fix".to_string(),
             description: "This PR fixes a critical bug in the parser module.".to_string(),
             repository: None,
             labels: vec![],
         };
+        assert!(params.validate().is_ok());
+        params.title = " \t".into();
         assert!(params.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn executor_rejects_oversized_prefixed_titles_before_any_remote_write() {
+        let server = wiremock::MockServer::start().await;
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("token".into()),
+            tool_configs: std::collections::HashMap::from([(
+                "create-pull-request".into(),
+                serde_json::json!({"title-prefix":"x".repeat(super::super::pr_common::MAX_TITLE_SCALARS)}),
+            )]),
+            ..Default::default()
+        };
+        let mut proposal: CreatePrResult = serde_json::from_value(serde_json::json!({
+            "name":"create-pull-request", "title":"A", "body":"Body",
+            "source_branch":"agent/title", "repository":"self", "temporary_id":"#aw_title",
+            "patch_file":"unused.patch", "patch_sha256":"a".repeat(64)
+        })).unwrap();
+        let outcome = proposal.execute_sanitized(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(outcome.message.contains("title-prefix"));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
     fn test_validate_params_short_description() {
-        let params = CreatePrParams {
+        let mut params = CreatePrParams {
             title: "Fix bug in parser".to_string(),
             description: "Fix bug".to_string(),
             repository: None,
             labels: vec![],
         };
+        assert!(params.validate().is_ok());
+        params.description = " \n".into();
         assert!(params.validate().is_err());
     }
 
@@ -1985,7 +2224,7 @@ mod tests {
         assert!(
             serde_json::from_value::<CreatePrParams>(serde_json::json!({
                 "title": "Valid title",
-                "description": "A sufficiently long description.",
+                "body": "A sufficiently long description.",
                 "temporary_id": "#aw_pr123"
             }))
             .is_err()
@@ -1993,7 +2232,7 @@ mod tests {
         assert!(
             serde_json::from_value::<CreatePrParams>(serde_json::json!({
                 "title": "Valid title",
-                "description": "A sufficiently long description.",
+                "body": "A sufficiently long description.",
                 "reviewers": ["owner@example.com"]
             }))
             .is_err()
@@ -2040,13 +2279,13 @@ mod tests {
         assert_eq!(config.target_branch, "main");
         assert!(config.draft);
         assert!(!config.auto_complete);
-        assert!(config.delete_source_branch);
-        assert!(config.squash_merge);
+        assert!(config.completion.delete_source_branch.is_none());
+        assert!(config.completion.merge_strategy.is_none());
         assert_eq!(config.if_no_changes, IfNoChanges::Warn);
         assert_eq!(config.max_files, 100);
         assert_eq!(config.protected_files, ProtectedFiles::Blocked);
         assert!(config.excluded_files.is_empty());
-        assert!(config.allowed_labels.is_empty());
+        assert_eq!(config.allowed_labels, ["*"]);
         assert!(config.fallback_record_branch);
         assert!(config.target_branches.is_empty());
         assert!(!config.infer_target_from_checkout_ref);
@@ -2155,6 +2394,7 @@ mod tests {
             ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
             ado_organization: Some("current-org".to_string()),
             ado_project: Some("Current Project".to_string()),
+            tool_configs: std::collections::HashMap::from([("create-pull-request".into(), serde_json::json!({}))]),
             ..Default::default()
         };
         let scopes = allow.then(|| {
@@ -2298,6 +2538,7 @@ mod tests {
             ado_organization: Some("current-org".to_string()),
             ado_project: Some("Current Project".to_string()),
             dry_run: true,
+            tool_configs: std::collections::HashMap::from([("create-pull-request".into(), serde_json::json!({}))]),
             ..Default::default()
         };
         let allow = vec![crate::compile::types::AdoOrganizationScope {
@@ -2907,6 +3148,7 @@ index 0000000..abcdef0
         let server = MockServer::start().await;
         let temporary_id = PullRequestTemporaryId::parse("#aw_duplicate1").unwrap();
         let registered_pull_request = crate::safe_outputs::ResolvedPullRequest {
+            creation_snapshot: None,
             id: 42,
             url: "https://example.test/pr/42".to_string(),
             target: crate::safe_outputs::result::AdoRepositoryTarget {
@@ -2926,6 +3168,7 @@ index 0000000..abcdef0
             access_token: Some("fake-token".to_string()),
             repository_id: Some("repo-id".to_string()),
             repository_name: Some("test-repo".to_string()),
+            tool_configs: std::collections::HashMap::from([("create-pull-request".into(), serde_json::json!({}))]),
             ..Default::default()
         };
         ctx.register_resolved_pull_request(&temporary_id, registered_pull_request.clone())
@@ -3001,7 +3244,7 @@ index 0000000..abcdef0
             source_directory: dir.path().to_path_buf(),
             self_repository_directory: dir.path().to_path_buf(),
             working_directory: dir.path().to_path_buf(),
-            tool_configs: std::collections::HashMap::new(),
+            tool_configs: std::collections::HashMap::from([("create-pull-request".into(), serde_json::json!({}))]),
             repository_id: Some("repo-id".to_string()),
             repository_name: Some("test-repo".to_string()),
             repository_provider: Some("TfsGit".to_string()),

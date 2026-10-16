@@ -1105,10 +1105,25 @@ impl PreparedPatch {
             changed_paths.len() <= self.max_files,
             "Resulting PR changes exceed max-files"
         );
+        let tree = if skipped_symlinks.is_empty() {
+            let mut command = git_without_filters(repo).await?;
+            if let Some(tip) = tip {
+                command.args(["rev-parse", "--verify", &format!("{tip}^{{tree}}")]);
+            } else {
+                command.arg("write-tree");
+                if let Some(index) = index { command.env("GIT_INDEX_FILE", index); }
+            }
+            let output = bounded_output(&mut command, MAX_SOURCE_BYTES, None).await?;
+            ensure!(output.status.success(), "Could not identify the validated PR tree");
+            Some(CommitSha::parse(std::str::from_utf8(&output.stdout)?.trim())?)
+        } else {
+            None
+        };
         Ok(IndexChanges {
             changes,
             skipped_symlinks,
             omitted: self.omitted.clone(),
+            tree,
         })
     }
 }
@@ -1163,6 +1178,7 @@ pub(crate) struct IndexChanges {
     pub changes: Vec<Value>,
     pub skipped_symlinks: Vec<String>,
     pub omitted: Vec<OmittedOperation>,
+    pub tree: Option<CommitSha>,
 }
 
 #[derive(Clone, Debug, Serialize)]

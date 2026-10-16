@@ -70,37 +70,60 @@ pub struct PrLabelTransition {
     pub to: PrLabelName,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, SanitizeConfig)]
+#[derive(Debug, Clone, Serialize, Deserialize, SanitizeConfig)]
 #[serde(deny_unknown_fields)]
 pub struct ReplacePullRequestLabelConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
     #[serde(default, rename = "required-title-prefix")]
     pub required_title_prefix: Option<String>,
-    #[serde(default, rename = "allowed-add")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-add")]
     pub allowed_add: Vec<String>,
-    #[serde(default, rename = "allowed-remove")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-remove")]
     pub allowed_remove: Vec<String>,
     #[serde(default, rename = "blocked-labels")]
     pub blocked_labels: Vec<String>,
-    #[serde(default, rename = "allowed-transitions")]
+    #[serde(default, rename = "allowed-transitions", skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_transitions")]
     #[sanitize_config(skip)]
-    pub allowed_transitions: Vec<PrLabelTransition>,
+    pub allowed_transitions: Option<Vec<PrLabelTransition>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[sanitize_config(skip)]
     pub max: Option<u32>,
 }
 
+fn deserialize_transitions<'de, D: serde::Deserializer<'de>>(deserializer: D)
+    -> Result<Option<Vec<PrLabelTransition>>, D::Error> {
+    Vec::<PrLabelTransition>::deserialize(deserializer).map(Some)
+}
+
+impl Default for ReplacePullRequestLabelConfig {
+    fn default() -> Self {
+        Self { target: Default::default(), target_repo: None,
+            allowed_repositories: super::pr_policy::unrestricted_names(),
+            required_labels: Vec::new(), required_title_prefix: None,
+            allowed_add: super::pr_policy::unrestricted_names(),
+            allowed_remove: super::pr_policy::unrestricted_names(),
+            blocked_labels: Vec::new(), allowed_transitions: None, max: None }
+    }
+}
+
 pub(crate) fn validate_replace_pr_label_config(
     config: &ReplacePullRequestLabelConfig,
 ) -> anyhow::Result<()> {
+    for (field, names) in [
+        ("allowed-add", &config.allowed_add), ("allowed-remove", &config.allowed_remove),
+        ("blocked-labels", &config.blocked_labels), ("allowed-repositories", &config.allowed_repositories),
+    ] {
+        super::pr_policy::validate_names(names, field)?;
+    }
     for label in config
         .allowed_add
         .iter()
@@ -109,7 +132,7 @@ pub(crate) fn validate_replace_pr_label_config(
     {
         PrLabelName::parse(label)?;
     }
-    for transition in &config.allowed_transitions {
+    for transition in config.allowed_transitions.iter().flatten() {
         ensure!(
             !transition
                 .from
@@ -123,6 +146,10 @@ pub(crate) fn validate_replace_pr_label_config(
 
 #[async_trait::async_trait]
 impl Executor for ReplacePullRequestLabelResult {
+    async fn execute_sanitized(&mut self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        super::result::execute_pr_sanitized(self, ctx).await
+    }
+
     fn dry_run_summary(&self) -> String {
         format!(
             "replace label '{}' with '{}' on {}",
@@ -156,14 +183,10 @@ impl Executor for ReplacePullRequestLabelResult {
         let from = self.from.trim();
         let to = self.to.trim();
         ensure!(
-            config.allowed_transitions.is_empty()
-                || config
-                    .allowed_transitions
-                    .iter()
-                    .any(
+            config.allowed_transitions.as_ref().is_none_or(|transitions| transitions.iter().any(
                         |transition| transition.from.trim().eq_ignore_ascii_case(from)
                             && transition.to.trim().eq_ignore_ascii_case(to)
-                    ),
+                    )),
             "Label transition is not in allowed-transitions"
         );
         let client = super::pr_http::client()?;
@@ -226,10 +249,10 @@ impl Executor for ReplacePullRequestLabelResult {
             .await;
             match response {
                 Ok(response) if response.status().is_success() => {
-                    data["addition_status"] = serde_json::json!("applied")
+                    data["addition_status"] = serde_json::json!("uncertain")
                 }
                 Ok(response) => {
-                    data["addition_status"] = serde_json::json!("failed");
+                    data["addition_status"] = serde_json::json!(if response.status().is_server_error() {"uncertain"} else {"failed"});
                     return Ok(ExecutionResult::failure_with_data(
                         format!(
                             "Replacement label addition failed (HTTP {})",
@@ -267,6 +290,7 @@ impl Executor for ReplacePullRequestLabelResult {
                 data,
             ));
         }
+        if !has_to { data["addition_status"] = serde_json::json!("applied"); }
         let removed = match super::pr_labels::remove_labels(&operation, &[from.to_string()]).await {
             Ok(result) => result,
             Err(error) => {
@@ -285,6 +309,7 @@ impl Executor for ReplacePullRequestLabelResult {
         let after = match super::pr_labels::read_labels(&operation).await {
             Ok(labels) => labels,
             Err(error) => {
+                data["removal_status"] = serde_json::json!("uncertain");
                 return Ok(ExecutionResult::failure_with_data(
                     format!("Replacement writes completed but readback is uncertain: {error:#}"),
                     data,
@@ -298,6 +323,7 @@ impl Executor for ReplacePullRequestLabelResult {
                 .iter()
                 .any(|label| label.name.eq_ignore_ascii_case(to))
         {
+            data["removal_status"] = serde_json::json!("uncertain");
             return Ok(ExecutionResult::failure_with_data(
                 "Concurrent label changes prevented confirmation of the replacement",
                 data,

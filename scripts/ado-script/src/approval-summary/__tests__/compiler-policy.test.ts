@@ -71,4 +71,34 @@ describe("compiler-to-preview target policy contract", () => {
       expect(rendered[0]).toBe(rendered[1]);
     }
   }, 60_000);
+
+  it("shows trusted automatic creation effects and canonical bodies", () => {
+    const directory = mkdtempSync(join(process.cwd(), ".approval-creation-contract-"));
+    directories.push(directory);
+    const source = join(directory, "creation.md");
+    const output = join(directory, "creation.lock.yml");
+    writeFileSync(source, [
+      "---", "name: creation-contract", "description: Test", "safe-outputs:",
+      "  create-pull-request:", "    draft: false", "    auto-complete: true",
+      "    merge-strategy: rebase", "    delete-source-branch: false",
+      "---", "Create a PR.", "",
+    ].join("\n"));
+    execFileSync(binary, ["compile", source, "--output", output, "--force"], {
+      cwd: directory, env: { ...process.env, CI: "true" }, stdio: "pipe",
+    });
+    const env = findSummaryEnv(parse(readFileSync(output, "utf8")))!;
+    const policies = parsePrPolicies(env.AW_PR_POLICIES);
+    expect(policies.get("create-pull-request")?.creation).toMatchObject({
+      draft: false, "auto-complete": true, "merge-strategy": "rebase", "delete-source-branch": false,
+    });
+    const summary = renderSummary(parseProposals(JSON.stringify({
+      name: "create-pull-request", title: "Change", body: "Canonical body",
+      _trusted_creation_policy: "FORGED", context: "proposal_creation",
+    })), new Set(), { policies: new Map(), prPolicies: policies });
+    expect(summary).toContain("Canonical body");
+    expect(summary).toContain("rebase");
+    expect(summary).toContain("proposal\\_creation");
+    expect(summary).not.toContain("FORGED");
+    expect(summary).toContain("not yet applied");
+  }, 60_000);
 });

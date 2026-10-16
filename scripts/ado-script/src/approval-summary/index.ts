@@ -126,7 +126,7 @@ export function parsePrPolicies(value: string | undefined): Map<string, PrPolicy
       const candidate = policy as Record<string, unknown>;
       const target = candidate.target as Record<string, unknown> | undefined;
       if (!target || typeof target !== "object" || Array.isArray(target)
-        || !["triggering", "explicit", "fixed"].includes(String(target.kind))
+        || !["triggering", "explicit", "created", "fixed"].includes(String(target.kind))
         || (target.kind === "fixed" && (typeof target.id !== "string" || !positivePrId(target.id)))) {
         logWarning(`approval-summary: invalid normalized PR target policy for ${tool}`);
         continue;
@@ -134,11 +134,13 @@ export function parsePrPolicies(value: string | undefined): Map<string, PrPolicy
       policies.set(tool, {
         target: target.kind === "fixed"
           ? { kind: "fixed", id: positivePrId(target.id)! }
-          : { kind: target.kind as "triggering" | "explicit" },
+          : { kind: target.kind as "triggering" | "explicit" | "created" },
         operation: typeof candidate.operation === "string" ? candidate.operation : undefined,
-        "target-repo": typeof candidate["target-repo"] === "string" ? candidate["target-repo"] : undefined,
+        "default-repository": typeof candidate["default-repository"] === "string" ? candidate["default-repository"] : undefined,
         "supersede-older-comments": candidate["supersede-older-comments"] === true,
         "comment-key": typeof candidate["comment-key"] === "string" ? candidate["comment-key"] : undefined,
+        creation: candidate.creation !== null && typeof candidate.creation === "object"
+          && !Array.isArray(candidate.creation) ? candidate.creation as Record<string, unknown> : undefined,
       });
     } else {
       logWarning(`approval-summary: invalid trusted policy for ${tool}`);

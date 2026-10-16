@@ -21,6 +21,7 @@ pub struct UpdatePullRequestCommentParams {
     pub repository: Option<String>,
     pub thread_id: i32,
     pub comment_id: i32,
+    #[serde(rename = "body")]
     pub content: String,
 }
 
@@ -52,6 +53,7 @@ tool_result! {
         repository:Option<String>,
         thread_id:i32,
         comment_id:i32,
+        #[serde(rename = "body")]
         content:String,
     }
 }
@@ -69,9 +71,9 @@ pub struct UpdatePullRequestCommentConfig {
     #[serde(default)]
     #[sanitize_config(skip)]
     pub target: super::update_pull_request::UpdatePullRequestTarget,
-    #[serde(default, rename = "target-repo")]
+    #[serde(default, rename = "default-repository")]
     pub target_repo: Option<String>,
-    #[serde(default, rename = "allowed-repositories")]
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
     pub allowed_repositories: Vec<String>,
     #[serde(default, rename = "required-labels")]
     pub required_labels: Vec<String>,
@@ -93,7 +95,7 @@ impl Default for UpdatePullRequestCommentConfig {
         Self {
             target: Default::default(),
             target_repo: None,
-            allowed_repositories: Vec::new(),
+            allowed_repositories: super::pr_policy::unrestricted_names(),
             required_labels: Vec::new(),
             required_title_prefix: None,
             comment_key: super::pr_comments::default_comment_key(),
@@ -204,7 +206,7 @@ mod tests {
 
     fn proposal() -> Value {
         json!({"name":"update-pull-request-comment","pull_request_id":42,
-                "thread_id":3,"comment_id":1,"content":REPLACEMENT})
+                "thread_id":3,"comment_id":1,"body":REPLACEMENT})
     }
 
     fn owned_thread(ctx: &ExecutionContext, key: &str) -> Value {

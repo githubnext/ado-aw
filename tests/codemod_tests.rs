@@ -84,6 +84,113 @@ fn copy_fixture(dir: &Path, fixture_name: &str) -> PathBuf {
 }
 
 #[test]
+fn compiler_version_alone_preserves_new_pr_defaults_after_source_edits() {
+    let dir = fresh_git_temp_dir();
+    let initial = "---\nname: policy\ndescription: d\nsafe-outputs:\n  add-pull-request-comment: {}\n---\nBody\n";
+    let source = write_source(dir.path(), initial);
+    let first = run_compile(&source);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    let lock = source.with_extension("lock.yml");
+    let generated = fs::read_to_string(&lock).unwrap();
+    assert!(!generated.contains("ado-aw-pr-policy"));
+    assert!(generated.lines().take(5).any(|line| {
+        line.contains(&format!("version={}", env!("CARGO_PKG_VERSION")))
+    }));
+
+    // Omit the pinned target and add another tool under the same new compiler.
+    fs::write(&source, initial.replace(
+        "  add-pull-request-comment: {}",
+        "  add-pull-request-comment: {}\n  add-pull-request-labels: {}",
+    )).unwrap();
+    let second = run_compile(&source);
+    assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stderr));
+    let rewritten = fs::read_to_string(&source).unwrap();
+    let fm: serde_yaml::Value =
+        serde_yaml::from_str(rewritten.split("---").nth(1).unwrap()).unwrap();
+    for tool in ["add-pull-request-comment", "add-pull-request-labels"] {
+        assert_eq!(fm["safe-outputs"][tool]["target"], "triggering");
+    }
+    let check = run_check(&lock);
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+    assert!(run_compile(&source).status.success());
+    assert_eq!(fs::read_to_string(&source).unwrap(), rewritten);
+}
+
+#[test]
+fn legacy_compiler_scope_is_preserved_without_a_feature_marker_override() {
+    let dir = fresh_git_temp_dir();
+    let source = write_source(dir.path(),
+        "---\nname: old-policy\ndescription: d\nsafe-outputs:\n  add-pr-comment: {}\n---\nBody\n");
+    fs::write(source.with_extension("lock.yml"),
+        "# @ado-aw source=\"agent.md\" version=0.53.0\n# ado-aw-pr-policy: triggering-v1\n").unwrap();
+    let output = run_compile(&source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let rewritten = fs::read_to_string(&source).unwrap();
+    let fm: serde_yaml::Value =
+        serde_yaml::from_str(rewritten.split("---").nth(1).unwrap()).unwrap();
+    assert_eq!(fm["safe-outputs"]["add-pull-request-comment"]["target"], "*");
+    assert!(run_check(&source.with_extension("lock.yml")).status.success());
+}
+
+#[test]
+fn completion_migration_preserves_legacy_drafts_and_rejects_new_conflicts() {
+    let original = "---\nname: completion\ndescription: d\nsafe-outputs:\n  create-pull-request:\n    draft: true\n    auto-complete: true\n---\nKeep these instructions.\n";
+    let current = fresh_git_temp_dir();
+    let new_source = write_source(current.path(), original);
+    let rejected = run_compile(&new_source);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("cannot combine draft: true"));
+    assert_eq!(fs::read_to_string(&new_source).unwrap(), original);
+    assert!(!new_source.with_extension("lock.yml").exists());
+
+    let legacy = fresh_git_temp_dir();
+    let source = write_source(legacy.path(), original);
+    fs::write(source.with_extension("lock.yml"), "# @ado-aw source=\"agent.md\" version=0.53.0\n").unwrap();
+    let result = run_compile(&source);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("ineffective legacy draft auto-complete"));
+    let rewritten = fs::read_to_string(&source).unwrap();
+    assert!(rewritten.ends_with("\nKeep these instructions.\n"));
+    let fm: serde_yaml::Value = serde_yaml::from_str(rewritten.split("---").nth(1).unwrap()).unwrap();
+    let config = &fm["safe-outputs"]["create-pull-request"];
+    assert_eq!(config["draft"], true);
+    assert_eq!(config["auto-complete"], false);
+    assert_eq!(config["merge-strategy"], "squash");
+    assert_eq!(config["delete-source-branch"], true);
+    assert!(run_check(&source.with_extension("lock.yml")).status.success());
+    assert!(run_compile(&source).status.success());
+    assert_eq!(fs::read_to_string(&source).unwrap(), rewritten);
+}
+
+#[test]
+fn imported_completion_preferences_migrate_without_rewriting_the_component() {
+    let dir = fresh_git_temp_dir();
+    let component = "---\nsafe-outputs:\n  create-pull-request:\n    draft: false\n    auto-complete: true\n    squash-merge: false\n    delete-source-branch: false\n---\nImported body.\n";
+    let component_path = dir.path().join("shared.md");
+    fs::write(&component_path, component).unwrap();
+    let source = write_source(dir.path(), "---\nname: imported-completion\ndescription: d\nimports: [./shared.md]\n---\nBody\n");
+    let output = run_compile(&source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read_to_string(component_path).unwrap(), component);
+    assert!(run_check(&source.with_extension("lock.yml")).status.success());
+}
+
+#[test]
+fn repository_default_migration_preserves_an_independent_repository_grant() {
+    let dir = fresh_git_temp_dir();
+    let source = write_source(dir.path(),
+        "---\nname: defaults\ndescription: d\nsafe-outputs:\n  add-pull-request-comment:\n    target-repo: self\n    allowed-repositories: [other]\n---\nDo not rewrite target-repo in this prompt.\n");
+    let output = run_compile(&source);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let rewritten = fs::read_to_string(&source).unwrap();
+    assert!(rewritten.ends_with("\nDo not rewrite target-repo in this prompt.\n"));
+    let fm: serde_yaml::Value = serde_yaml::from_str(rewritten.split("---").nth(1).unwrap()).unwrap();
+    assert_eq!(fm["safe-outputs"]["add-pull-request-comment"]["default-repository"], "self");
+    assert_eq!(fm["safe-outputs"]["add-pull-request-comment"]["allowed-repositories"][0], "other");
+    assert!(run_check(&source.with_extension("lock.yml")).status.success());
+}
+
+#[test]
 fn compile_migrates_pr_tools_and_keeps_prompt_warning_until_fixed() {
     let dir = fresh_git_temp_dir();
     let original = "---\r\nname: pr-migration\r\ndescription: d\r\nsafe-outputs:\r\n  update-pr:\r\n    allowed-operations: [add-reviewers, update-description]\r\n    allowed-reviewers: [owner@example.test]\r\n    max: 1\r\n---\r\nCall `update-pr` to add reviewers.\r\n";
@@ -127,6 +234,24 @@ fn conflicting_pr_migration_does_not_rewrite_source_or_lock() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("manual migration required"));
     assert_eq!(fs::read_to_string(&source).unwrap(), original);
     assert!(!source.with_extension("lock.yml").exists());
+}
+
+#[test]
+fn pr_migrations_preserve_comments_and_round_trip_through_check() {
+    let dir = fresh_git_temp_dir();
+    let original = "---\n# Workflow rationale\nname: 'commented'\ndescription: test\nsafe-outputs:\n  # Keep this report readable\n  add-pr-comment:\n    target-repo: self # destination\n    max: 2 # original budget\n---\nUnchanged # prompt\n";
+    let source = write_source(dir.path(), original);
+    let compiled = run_compile(&source);
+    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    let rewritten = fs::read_to_string(&source).unwrap();
+    for text in ["# Workflow rationale", "name: 'commented'", "# Keep this report readable", "# destination", "# original budget"] {
+        assert!(rewritten.contains(text), "{rewritten}");
+    }
+    assert!(rewritten.ends_with("\nUnchanged # prompt\n"));
+    assert!(String::from_utf8_lossy(&compiled.stderr).contains("comments were preserved"));
+    assert!(run_check(&source.with_extension("lock.yml")).status.success());
+    assert!(run_compile(&source).status.success());
+    assert_eq!(fs::read_to_string(&source).unwrap(), rewritten);
 }
 
 #[test]
