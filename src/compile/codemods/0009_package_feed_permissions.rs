@@ -184,7 +184,21 @@ fn entry_handle(entry: &Mapping) -> Option<String> {
 }
 
 /// Find or add the grant for `parsed`, returning its handle.
-fn upsert_grant(feeds: &mut Sequence, parsed: &ParsedFeed, protocol: &str) -> Result<String> {
+/// Grant `protocol` on the feed `parsed` names, reusing an existing grant for
+/// the same feed or creating one. Returns the grant's handle.
+///
+/// A reused grant keeps its own `upstream` setting: an explicit grant is the
+/// author's policy. When that grant is narrower than the old `feed-url`
+/// behaviour (no `upstream: allow`), a migration note says so; if it is also
+/// invalid (`upstream: deny`, no `view`, Collaborator role), validation then
+/// rejects it with the actionable error.
+fn upsert_grant(
+    feeds: &mut Sequence,
+    parsed: &ParsedFeed,
+    protocol: &str,
+    runtime: &str,
+    ctx: &CodemodContext,
+) -> Result<String> {
     let identity = parsed.identity();
     for entry in feeds.iter_mut() {
         let Some(entry) = entry.as_mapping_mut() else {
@@ -202,8 +216,21 @@ fn upsert_grant(feeds: &mut Sequence, parsed: &ParsedFeed, protocol: &str) -> Re
         if !protocols.iter().any(|value| value.as_str() == Some(protocol)) {
             protocols.push(Value::String(protocol.to_string()));
         }
-        return entry_handle(entry)
-            .ok_or_else(|| anyhow::anyhow!("cannot migrate runtime feed-url: feed has no name"));
+        let handle = entry_handle(entry)
+            .ok_or_else(|| anyhow::anyhow!("cannot migrate runtime feed-url: feed has no name"))?;
+        let allows_upstream = entry.get(key("upstream")).and_then(Value::as_str) == Some("allow");
+        // A `feed@view` URL never saved upstream packages (views don't), so
+        // only a view-less grant can narrow the old behaviour.
+        if !allows_upstream && parsed.view.is_none() {
+            ctx.warn(format!(
+                "runtimes.{runtime}.feed-url was migrated onto your existing \
+                 permissions.packages grant '{handle}', which does not set `upstream: allow`. \
+                 Before 0.54.0 the agent's reads could save new upstream packages into this \
+                 feed; with your grant they cannot. Add `upstream: allow` to '{handle}' if \
+                 the agent needs packages not yet in the feed."
+            ));
+        }
+        return Ok(handle);
     }
 
     let taken: Vec<String> = feeds
@@ -247,7 +274,7 @@ fn upsert_grant(feeds: &mut Sequence, parsed: &ParsedFeed, protocol: &str) -> Re
     Ok(handle)
 }
 
-fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
+fn apply_codemod(fm: &mut Mapping, ctx: &CodemodContext) -> Result<bool> {
     // Collect first: the runtimes and permissions subtrees are both mutated.
     let mut pending: Vec<(&'static str, &'static str, ParsedFeed)> = Vec::new();
     if let Some(runtimes) = fm.get(key("runtimes")).and_then(Value::as_mapping) {
@@ -278,7 +305,7 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
     {
         let feeds = feeds_sequence(fm)?;
         for (runtime, protocol, parsed) in &pending {
-            handles.push((*runtime, upsert_grant(feeds, parsed, protocol)?));
+            handles.push((*runtime, upsert_grant(feeds, parsed, protocol, runtime, ctx)?));
         }
     }
 
@@ -305,6 +332,7 @@ mod tests {
         CodemodContext {
             compiler_version: INTRODUCED_IN,
             source_compiler_version: None,
+            warnings: Default::default(),
         }
     }
 
@@ -343,6 +371,52 @@ mod tests {
         let typed: crate::compile::types::PermissionsConfig =
             serde_yaml::from_value(fm["permissions"].clone()).unwrap();
         typed.packages.unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn reusing_an_authored_grant_without_upstream_allow_records_a_note() {
+        let ctx = ctx();
+        let mut fm = map(
+            "permissions:\n  packages:\n    identity-role: reader\n    feeds:\n      - name: shared\n        \
+             organization: contoso\n        feed: internal\n        protocols: [pypi]\n\
+             runtimes:\n  node:\n    feed-url: https://pkgs.dev.azure.com/contoso/_packaging/internal/npm/registry/\n",
+        );
+        assert!(apply_codemod(&mut fm, &ctx).unwrap());
+
+        // The author's grant is reused unchanged apart from the new protocol.
+        assert_eq!(fm["runtimes"]["node"]["feed"], "shared");
+        let grant = &fm["permissions"]["packages"]["feeds"][0];
+        assert!(grant.get("upstream").is_none());
+        assert_eq!(grant["protocols"], Value::Sequence(vec![key("pypi"), key("npm")]));
+
+        let notes = ctx.warnings.into_inner();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("runtimes.node.feed-url"), "{}", notes[0]);
+        assert!(notes[0].contains("'shared'"), "{}", notes[0]);
+        assert!(notes[0].contains("upstream: allow"), "{}", notes[0]);
+    }
+
+    #[test]
+    fn grants_the_codemod_creates_or_that_allow_upstream_record_no_note() {
+        for yaml in [
+            // Two runtimes sharing a feed: the second reuses a grant the
+            // codemod just created with `upstream: allow`.
+            "runtimes:\n  python:\n    feed-url: https://pkgs.dev.azure.com/contoso/_packaging/internal/pypi/simple/\n  \
+             node:\n    feed-url: https://pkgs.dev.azure.com/contoso/_packaging/internal/npm/registry/\n",
+            // An authored grant that already allows upstream.
+            "permissions:\n  packages:\n    feeds:\n      - organization: contoso\n        feed: internal\n        \
+             upstream: allow\n        protocols: [pypi]\n\
+             runtimes:\n  node:\n    feed-url: https://pkgs.dev.azure.com/contoso/_packaging/internal/npm/registry/\n",
+            // A view: views never saved upstream packages, so nothing narrows.
+            "permissions:\n  packages:\n    feeds:\n      - organization: contoso\n        feed: internal\n        \
+             view: Release\n        protocols: [pypi]\n\
+             runtimes:\n  node:\n    feed-url: https://pkgs.dev.azure.com/contoso/_packaging/internal@Release/npm/registry/\n",
+        ] {
+            let ctx = ctx();
+            let mut fm = map(yaml);
+            assert!(apply_codemod(&mut fm, &ctx).unwrap());
+            assert!(ctx.warnings.into_inner().is_empty(), "{yaml}");
+        }
     }
 
     #[test]

@@ -437,6 +437,9 @@ async fn perform_source_rewrite_if_needed(
     for applied in &report.applied {
         eprintln!("  - {}: {}", applied.id, applied.summary);
     }
+    for note in &report.warnings {
+        eprintln!("warning: {note}");
+    }
     eprintln!(
         "note: front-matter comments are not preserved when codemods rewrite the source. \
          Renamed keys may move to the end of the front-matter block."

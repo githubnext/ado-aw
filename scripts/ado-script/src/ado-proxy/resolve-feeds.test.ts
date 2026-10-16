@@ -310,6 +310,31 @@ describe("resolveFeeds", () => {
     expect(readFileSync(policyFile, "utf8")).toBe(raw);
   });
 
+  it("reports a stdin read failure as a structured error, not a rejection", async () => {
+    const raw = writePolicy({
+      ...BASE_POLICY,
+      packages: {
+        hosts: ["pkgs.dev.azure.com"],
+        feeds: [{ organization: "contoso", feed: "shared", protocols: ["npm"] }],
+      },
+    });
+    const { deps, requests, stderr } = harness(() => json({ id: FEED_ID }));
+    const failing: ResolveFeedsDeps = {
+      ...deps,
+      readStdin: () => {
+        throw new Error("EAGAIN: resource temporarily unavailable, read");
+      },
+    };
+
+    expect(await resolveFeeds(["--policy-file", policyFile], failing)).toBe(1);
+
+    expect(requests).toHaveLength(0);
+    expect(stderr[0]).toMatch(/^##vso\[task\.logissue type=error\]/);
+    expect(stderr.join("\n")).toContain("cannot read the package credential from stdin");
+    expect(stderr.join("\n")).toContain("EAGAIN");
+    expect(readFileSync(policyFile, "utf8")).toBe(raw);
+  });
+
   it("refuses an empty stdin and a missing --policy-file", async () => {
     writePolicy({
       ...BASE_POLICY,

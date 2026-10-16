@@ -225,7 +225,12 @@ review + per-codemod tests:
    `ConflictPolicy::Error` (the default) to get this for free.
 4. **Pure.** No I/O, no env, no time/randomness. (Convention; not
    type-enforced.) Anything ambient a codemod needs is read by the
-   *caller* and handed over on `CodemodContext`.
+   *caller* and handed over on `CodemodContext`. To tell the author
+   something about a migration (for example, that it kept a narrower
+   setting they wrote), call `ctx.warn("…")` rather than printing. The
+   runner returns the notes in `CodemodReport::warnings`, and `compile`
+   prints each one as a `warning:` line under the "applied codemods"
+   list.
 5. **Mapping-only.** Cannot inspect the markdown body, the file
    path, or git state. The one piece of outside information
    available is `CodemodContext::source_compiler_version` — the
@@ -554,6 +559,12 @@ runtimes:
 - Runtimes that point at the same feed share a single grant and contribute
   their protocols to it. Distinct feeds that would get the same handle are
   disambiguated with a `-2`, `-3`, … suffix.
+- If you already wrote a `permissions.packages` grant for the same feed, the
+  codemod adds the protocol to it and keeps your `upstream` setting. When that
+  grant has no `view` and does not set `upstream: allow`, the agent can no
+  longer pull new upstream packages, so compile prints a note saying so. A
+  grant that is also invalid (`upstream: deny`, no `view`, `collaborator`
+  role) then fails validation with the usual actionable error.
 - A URL that names a view (`feed@Release`) keeps it as `view:`. Without a view,
   the codemod adds `upstream: allow`, which keeps the previous behavior: the
   build identity could save packages from upstream sources. Tighten that after

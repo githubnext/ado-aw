@@ -144,7 +144,13 @@ export async function resolveFeeds(
     return 0;
   }
 
-  token = deps.readStdin().trim();
+  try {
+    token = deps.readStdin().trim();
+  } catch (caught) {
+    return error(
+      `ado-proxy resolve-feeds: cannot read the package credential from stdin: ${printable((caught as Error).message)}`,
+    );
+  }
   if (token === "") {
     return error(
       "ado-proxy resolve-feeds: no package credential on stdin; the host step must pipe it in",
