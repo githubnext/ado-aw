@@ -2830,7 +2830,7 @@ fn normalize_relative_path(path: &std::path::Path) -> Option<String> {
 ///
 /// Returns the first ancestor directory that contains `.git`, or `None` if the
 /// traversal reaches the filesystem root without finding one.
-fn find_git_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(crate) fn find_git_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
     // Start from the file's parent directory (or the path itself if it is a dir).
     let start: &std::path::Path = if path.is_dir() { path } else { path.parent()? };
 

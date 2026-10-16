@@ -367,6 +367,31 @@ pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> anyhow::Result<Vec
     .collect())
 }
 
+/// Committed package-manager config at the repository root that names the
+/// legacy `{org}.pkgs.visualstudio.com` Azure Artifacts host.
+///
+/// The package proxy only authenticates `pkgs.dev.azure.com`, so such a
+/// restore fails with `401`. Emitted as `legacy-feed-url` warnings, only when
+/// the workflow can restore packages (`permissions.packages` or a node,
+/// python, or dotnet runtime). `location` is `None`; the file and line are in
+/// the message.
+pub fn lint_package_configs(front_matter: &FrontMatter, source: &std::path::Path) -> Vec<LintFinding> {
+    use crate::compile::package_config_check;
+    let packages_configured = front_matter
+        .permissions
+        .as_ref()
+        .is_some_and(|permissions| permissions.packages.is_some());
+    package_config_check::check_source(front_matter, source)
+        .iter()
+        .map(|finding| LintFinding {
+            severity: LintSeverity::Warning,
+            code: "legacy-feed-url".to_string(),
+            message: finding.message(packages_configured),
+            location: None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +408,32 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "unused-output");
         assert_eq!(findings[0].severity, LintSeverity::Warning);
+    }
+
+    #[test]
+    fn legacy_feed_url_in_committed_config_is_a_lint_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join("nuget.config"),
+            "<add value=\"https://contoso.pkgs.visualstudio.com/_packaging/x/nuget/v3/index.json\" />\n",
+        )
+        .unwrap();
+        let (fm, _) = crate::compile::parse_markdown(
+            "---\nname: t\ndescription: x\nruntimes:\n  dotnet: true\n---\n",
+        )
+        .unwrap();
+        let findings = lint_package_configs(&fm, &dir.path().join("agent.md"));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "legacy-feed-url");
+        assert_eq!(findings[0].severity, LintSeverity::Warning);
+        assert!(
+            findings[0]
+                .message
+                .contains("https://pkgs.dev.azure.com/contoso/_packaging/x/nuget/v3/index.json"),
+            "{}",
+            findings[0].message
+        );
     }
 
     #[test]

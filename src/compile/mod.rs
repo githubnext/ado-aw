@@ -26,6 +26,7 @@ mod job_ir;
 pub(crate) mod mcpg;
 mod onees;
 mod onees_ir;
+pub(crate) mod package_config_check;
 mod path_layout_check;
 pub(crate) mod pr_filters;
 pub mod shell;
@@ -234,6 +235,12 @@ async fn compile_pipeline_inner(
     // hand-written paths that won't exist under the resolved checkout
     // layout, plus deprecated directory markers left in the agent body.
     for warning in path_layout_check::collect_path_layout_warnings(&front_matter, &markdown_body) {
+        eprintln!("Warning: {warning}");
+    }
+
+    // Committed package-manager config that names the legacy Azure Artifacts
+    // host bypasses the package proxy and fails with 401 (warning-only).
+    for warning in package_config_check::collect_warnings(&front_matter, input_path) {
         eprintln!("Warning: {warning}");
     }
 

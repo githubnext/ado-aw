@@ -294,8 +294,19 @@ role is missing.
 
 - Azure DevOps Services only: no Azure DevOps Server or sovereign clouds.
 - The legacy `{org}.pkgs.visualstudio.com` host is not intercepted. Requests
-  to it carry no credential and fail. Use the canonical `pkgs.dev.azure.com`
-  URL.
+  to it carry no credential and fail with `401`. Use the canonical
+  `pkgs.dev.azure.com` URL:
+  - Codemod 0009 rewrites legacy `runtimes.<x>.feed-url` values in front
+    matter.
+  - For package-manager config committed at the repository root, `compile`
+    and `ado-aw lint` print a `legacy-feed-url` warning with the canonical
+    replacement:
+    - files scanned: `nuget.config` (any casing), `.npmrc`, `.yarnrc.yml`,
+      `pip.conf`, `pip.ini`, `uv.toml`, `pyproject.toml`,
+      `.cargo/config.toml`, `.cargo/config`;
+    - only when the workflow can restore packages (`permissions.packages` or
+      a node/python/dotnet runtime);
+    - config files in subdirectories are not scanned.
 - External feeds behind service connections (the authenticate tasks'
   `externalFeedCredentials` / endpoint inputs), Maven, and Universal Packages
   are not supported.
