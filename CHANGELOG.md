@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.53.1](https://github.com/githubnext/ado-aw/compare/v0.53.0...v0.53.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **compile:** keep package-feed credentials out of the AWF sandbox ([#2310](https://github.com/githubnext/ado-aw/issues/2310)) ([09915d5](https://github.com/githubnext/ado-aw/commit/09915d542f10c2470d99c2680c995d60857d3861))
+* **engine:** allow every subcommand of Copilot CLI stem commands ([#2325](https://github.com/githubnext/ado-aw/issues/2325)) ([6ceaf9c](https://github.com/githubnext/ado-aw/commit/6ceaf9ccaf69ecf5e3e2ffc84958f38ecf5d738c))
+
 ## [0.53.0](https://github.com/githubnext/ado-aw/compare/v0.52.1...v0.53.0) (2026-10-06)
 
 
