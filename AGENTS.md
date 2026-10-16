@@ -86,7 +86,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   │   ├── gitattributes.rs # .gitattributes management for compiled pipelines
 │   │   ├── filter_ir.rs  # Filter expression IR: Fact/Predicate types, lowering, validation, codegen
 │   │   ├── pr_filters.rs # PR trigger filter generation (native ADO + gate steps)
-│   │   ├── package_config_check.rs # Warning-only scan of committed package-manager config at the repo root (nuget.config, .npmrc, pip.conf, .cargo/config.toml, …) for legacy {org}.pkgs.visualstudio.com Azure Artifacts URLs; surfaced by compile and as \legacy-feed-url\ lint findings
+│   │   ├── package_config_check.rs # Warning-only scan of committed package-manager config at the repo root (nuget.config, .npmrc, pip.conf, .cargo/config.toml, …) for legacy {org}.pkgs.visualstudio.com Azure Artifacts URLs and pkgs.dev.azure.com feed URLs not covered by permissions.packages (mirrors the proxy's feed/view/protocol matching); surfaced by compile and as `legacy-feed-url` / `ungranted-feed-url` lint findings
 │   │   ├── path_layout_check.rs # Warning-only checkout-aware path validation: $(Build.SourcesDirectory)/<seg> refs in steps, runtime-import targets, deprecated directory markers in the body
 │   │   ├── custom_tools.rs # Typed custom safe-output job model, closed MCP schemas, resolved execution config, and shared argument validation
 │   │   ├── mcpg.rs        # Typed MCPG compilation result + deterministic launch env shared by BashStep env and Docker passthrough

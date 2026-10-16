@@ -173,7 +173,7 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
 - `lint <source> [--json]` - Run structural lint checks over an agent source file without writing YAML.
   - `<source>` - Path to the agent markdown file.
   - `--json` - Emit lint findings as structured JSON instead of the human-readable report.
-  - Besides graph checks, it reports `task-input-invalid` for authored task steps with bad inputs. It also reports `legacy-feed-url` for package-manager config committed at the repository root (`nuget.config`, `.npmrc`, `pip.conf`, `.cargo/config.toml`, …) that names the legacy `{org}.pkgs.visualstudio.com` Azure Artifacts host. `compile` prints the same `legacy-feed-url` warning.
+  - Besides graph checks, it reports `task-input-invalid` for authored task steps with bad inputs. It also checks package-manager config committed at the repository root (`nuget.config`, `.npmrc`, `pip.conf`, `.cargo/config.toml`, …). It reports `legacy-feed-url` for the legacy `{org}.pkgs.visualstudio.com` Azure Artifacts host, and `ungranted-feed-url` for `pkgs.dev.azure.com` feed URLs that `permissions.packages` does not cover (feed, view, or protocol). `compile` prints the same package-config warnings.
 
 - `catalog [--kind <safe-outputs|runtimes|tools|engines|models|versions|ado-proxy>] [--json]` - List the compiler's in-tree registries for scripting or discovery.
   - `--kind <...>` - Restrict output to one category. When omitted, emits every category.

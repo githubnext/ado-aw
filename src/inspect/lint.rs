@@ -367,28 +367,42 @@ pub fn lint_front_matter_tasks(front_matter: &FrontMatter) -> anyhow::Result<Vec
     .collect())
 }
 
-/// Committed package-manager config at the repository root that names the
-/// legacy `{org}.pkgs.visualstudio.com` Azure Artifacts host.
+/// Committed package-manager config at the repository root that the package
+/// proxy would not serve.
 ///
-/// The package proxy only authenticates `pkgs.dev.azure.com`, so such a
-/// restore fails with `401`. Emitted as `legacy-feed-url` warnings, only when
-/// the workflow can restore packages (`permissions.packages` or a node,
-/// python, or dotnet runtime). `location` is `None`; the file and line are in
-/// the message.
+/// - `legacy-feed-url`: the legacy `{org}.pkgs.visualstudio.com` host. The
+///   proxy only authenticates `pkgs.dev.azure.com`, so the restore fails with
+///   `401`.
+/// - `ungranted-feed-url`: a `pkgs.dev.azure.com` feed URL that
+///   `permissions.packages` does not cover (feed, view, or protocol), or any
+///   feed URL when `permissions.packages` is absent.
+///
+/// Emitted only when the workflow can restore packages (`permissions.packages`
+/// or a node, python, or dotnet runtime). `location` is `None`; the file and
+/// line are in the message.
 pub fn lint_package_configs(front_matter: &FrontMatter, source: &std::path::Path) -> Vec<LintFinding> {
     use crate::compile::package_config_check;
     let packages_configured = front_matter
         .permissions
         .as_ref()
         .is_some_and(|permissions| permissions.packages.is_some());
-    package_config_check::check_source(front_matter, source)
+    let findings = package_config_check::check_source(front_matter, source);
+    let warning = |code: &str, message: String| LintFinding {
+        severity: LintSeverity::Warning,
+        code: code.to_string(),
+        message,
+        location: None,
+    };
+    findings
+        .legacy
         .iter()
-        .map(|finding| LintFinding {
-            severity: LintSeverity::Warning,
-            code: "legacy-feed-url".to_string(),
-            message: finding.message(packages_configured),
-            location: None,
-        })
+        .map(|finding| warning("legacy-feed-url", finding.message(packages_configured)))
+        .chain(
+            findings
+                .ungranted
+                .iter()
+                .map(|finding| warning("ungranted-feed-url", finding.message())),
+        )
         .collect()
 }
 

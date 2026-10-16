@@ -290,23 +290,41 @@ to the `ado-proxy` decision log with `family: packages` and the protocol:
 finding for `upstream-unauthorized`, which usually means the identity's feed
 role is missing.
 
+## Checking committed package config
+
+Package-manager config committed in the repository can name feeds the proxy
+won't serve. `compile` prints a warning and `ado-aw lint` (and the
+`lint_workflow` MCP tool) reports a finding for each such URL, so the problem
+shows up before a run rather than as a `401` or `403` mid-restore.
+
+| Lint code | Meaning |
+|---|---|
+| `legacy-feed-url` | The URL uses the legacy `{org}.pkgs.visualstudio.com` host, which the proxy does not intercept. The message gives the `pkgs.dev.azure.com` replacement. |
+| `ungranted-feed-url` | A `pkgs.dev.azure.com` feed URL the proxy would refuse. The message says which of these applies: no grant matches the organization, project, and feed (`feed-not-granted`); the grant is pinned to another view (`view-not-granted`); the grant does not list the protocol (`protocol-not-granted`); the path is not npm, PyPI, NuGet v3, or Cargo (`unknown-route`); or `permissions.packages` is absent. |
+
+Scope:
+
+- Files scanned, at the repository root only: `nuget.config` (any casing),
+  `.npmrc`, `.yarnrc.yml`, `pip.conf`, `pip.ini`, `uv.toml`,
+  `pyproject.toml`, `.cargo/config.toml`, `.cargo/config`. Config in
+  subdirectories is not scanned.
+- It runs only when the workflow can restore packages: `permissions.packages`
+  or a node, python, or dotnet runtime.
+- It never reports a URL the proxy would allow. Two cases are therefore
+  skipped:
+  - a URL that names a feed, project, or view by GUID, which can only be
+    matched after the pipeline resolves it;
+  - a grant without `organization`, which is treated as matching any
+    organization because it takes the pipeline's organization at runtime.
+
 ## Limitations
 
 - Azure DevOps Services only: no Azure DevOps Server or sovereign clouds.
 - The legacy `{org}.pkgs.visualstudio.com` host is not intercepted. Requests
   to it carry no credential and fail with `401`. Use the canonical
-  `pkgs.dev.azure.com` URL:
-  - Codemod 0009 rewrites legacy `runtimes.<x>.feed-url` values in front
-    matter.
-  - For package-manager config committed at the repository root, `compile`
-    and `ado-aw lint` print a `legacy-feed-url` warning with the canonical
-    replacement:
-    - files scanned: `nuget.config` (any casing), `.npmrc`, `.yarnrc.yml`,
-      `pip.conf`, `pip.ini`, `uv.toml`, `pyproject.toml`,
-      `.cargo/config.toml`, `.cargo/config`;
-    - only when the workflow can restore packages (`permissions.packages` or
-      a node/python/dotnet runtime);
-    - config files in subdirectories are not scanned.
+  `pkgs.dev.azure.com` URL. Codemod 0009 rewrites legacy
+  `runtimes.<x>.feed-url` values in front matter. For committed config, see
+  [Checking committed package config](#checking-committed-package-config).
 - External feeds behind service connections (the authenticate tasks'
   `externalFeedCredentials` / endpoint inputs), Maven, and Universal Packages
   are not supported.
