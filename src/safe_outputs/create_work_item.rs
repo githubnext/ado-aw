@@ -30,10 +30,16 @@ pub struct CreateWorkItemParams {
     /// semicolon (ADO uses semicolons as tag separators).
     #[serde(default)]
     pub tags: Vec<String>,
+
+    /// Optional work item priority, from 1 (highest) to 4 (lowest).
+    /// Subject to the operator's allowed-priorities configuration.
+    #[schemars(range(min = 1, max = 4))]
+    pub priority: Option<u8>,
 }
 
 impl Validate for CreateWorkItemParams {
     fn validate(&self) -> anyhow::Result<()> {
+        validate_priority(self.priority, &[])?;
         ensure!(self.title.len() > 5, "title must be more than 5 characters");
         ensure!(
             self.description.len() > 30,
@@ -63,6 +69,8 @@ pub struct CreateWorkItemResult {
     /// Agent-provided tags (validated against allowed-tags at execution time).
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
     pub temporary_id: WorkItemTemporaryId,
 }
 
@@ -83,6 +91,7 @@ impl TryFrom<(CreateWorkItemParams, WorkItemTemporaryId)> for CreateWorkItemResu
             title: params.title,
             description: params.description,
             tags: params.tags,
+            priority: params.priority,
             temporary_id,
         })
     }
@@ -153,6 +162,10 @@ pub struct CreateWorkItemConfig {
     /// (e.g., `"agent-*"` matches `"agent-created"`, `"agent-review"`, etc.).
     #[serde(default, rename = "allowed-tags")]
     pub allowed_tags: Vec<String>,
+
+    /// Priorities the agent may supply (1–4). Empty permits all supported priorities.
+    #[serde(default, rename = "allowed-priorities")]
+    pub allowed_priorities: Vec<u8>,
 
     /// Additional custom fields as key-value pairs
     /// Keys should be the full field reference name (e.g., "Custom.MyField")
@@ -231,6 +244,7 @@ impl Default for CreateWorkItemConfig {
             assignee: None,
             tags: Vec::new(),
             allowed_tags: Vec::new(),
+            allowed_priorities: Vec::new(),
             custom_fields: std::collections::HashMap::new(),
             artifact_link: ArtifactLinkConfig::default(),
             include_stats: true,
@@ -244,6 +258,25 @@ fn default_work_item_type() -> String {
 
 const SYSTEM_DESCRIPTION_FIELD: &str = "System.Description";
 const BUG_REPRO_STEPS_FIELD: &str = "Microsoft.VSTS.TCM.ReproSteps";
+const PRIORITY_FIELD: &str = "Microsoft.VSTS.Common.Priority";
+
+pub(super) fn validate_priority(priority: Option<u8>, allowed: &[u8]) -> anyhow::Result<()> {
+    ensure!(
+        allowed.iter().all(|value| (1..=4).contains(value)),
+        "allowed-priorities must contain only integers from 1 to 4"
+    );
+    if let Some(priority) = priority {
+        ensure!(
+            (1..=4).contains(&priority),
+            "priority must be an integer from 1 (highest) to 4 (lowest)"
+        );
+        ensure!(
+            allowed.is_empty() || allowed.contains(&priority),
+            "priority {priority} is not in allowed-priorities"
+        );
+    }
+    Ok(())
+}
 
 fn default_description_field_for(work_item_type: &str) -> &'static str {
     if work_item_type.eq_ignore_ascii_case("Bug") {
@@ -406,10 +439,17 @@ fn build_patch_document(
     title: &str,
     description_with_stats: &str,
     all_tags: &[String],
+    priority: Option<u8>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    validate_priority(priority, &config.allowed_priorities).map_err(|error| error.to_string())?;
     let description_field = description_field_for(config);
     validate_patch_fields(config, description_field, !all_tags.is_empty())
         .map_err(|error| error.to_string())?;
+    if priority.is_some() && description_field.eq_ignore_ascii_case(PRIORITY_FIELD) {
+        return Err(
+            "priority duplicates description-field Microsoft.VSTS.Common.Priority".to_string(),
+        );
+    }
 
     let mut patch_doc = vec![
         field_op("System.Title", title),
@@ -441,7 +481,16 @@ fn build_patch_document(
 
     // Add any custom fields
     for (field, value) in sorted_custom_fields(&config.custom_fields) {
-        patch_doc.push(field_op(field, value));
+        if priority.is_none() || !field.eq_ignore_ascii_case(PRIORITY_FIELD) {
+            patch_doc.push(field_op(field, value));
+        }
+    }
+    if let Some(priority) = priority {
+        patch_doc.push(serde_json::json!({
+            "op": "add",
+            "path": format!("/fields/{PRIORITY_FIELD}"),
+            "value": priority
+        }));
     }
 
     Ok(patch_doc)
@@ -698,11 +747,16 @@ impl Executor for CreateWorkItemResult {
         // Build the patch document for work item creation
         let description_with_stats =
             crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
-        let mut patch_doc =
-            match build_patch_document(&config, &self.title, &description_with_stats, &all_tags) {
-                Ok(patch_doc) => patch_doc,
-                Err(message) => return Ok(ExecutionResult::failure(message)),
-            };
+        let mut patch_doc = match build_patch_document(
+            &config,
+            &self.title,
+            &description_with_stats,
+            &all_tags,
+            self.priority,
+        ) {
+            Ok(patch_doc) => patch_doc,
+            Err(message) => return Ok(ExecutionResult::failure(message)),
+        };
 
         // Create HTTP client (needed for both work item creation and optional repo lookup)
         let client = reqwest::Client::new();
@@ -759,6 +813,173 @@ impl Executor for CreateWorkItemResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn priority_validates_and_round_trips_in_proposals() {
+        for priority in [None, Some(1), Some(2), Some(3), Some(4)] {
+            let params: CreateWorkItemParams = serde_json::from_value(serde_json::json!({
+                "title": "Investigate failure",
+                "description": "A detailed failure report long enough for validation.",
+                "priority": priority
+            }))
+            .unwrap();
+            let result = CreateWorkItemResult::try_from((
+                params,
+                WorkItemTemporaryId::parse("#aw_priority").unwrap(),
+            ))
+            .unwrap();
+            let persisted = serde_json::to_value(&result).unwrap();
+            assert_eq!(persisted.get("priority").is_some(), priority.is_some());
+            let restored: CreateWorkItemResult = serde_json::from_value(persisted).unwrap();
+            assert_eq!(restored.priority, priority);
+        }
+        let legacy: CreateWorkItemResult = serde_json::from_value(serde_json::json!({
+            "name": "create-work-item",
+            "title": "Investigate failure",
+            "description": "A detailed failure report long enough for validation.",
+            "temporary_id": "#aw_priority"
+        }))
+        .unwrap();
+        assert_eq!(legacy.priority, None);
+    }
+
+    #[test]
+    fn priority_rejects_invalid_agent_values() {
+        for priority in serde_json::json!([-1, 0, 5, 256, "1", 1.5])
+            .as_array()
+            .unwrap()
+        {
+            let params = serde_json::from_value::<CreateWorkItemParams>(serde_json::json!({
+                "title": "Investigate failure",
+                "description": "A detailed failure report long enough for validation.",
+                "priority": priority
+            }));
+            assert!(
+                params.is_err() || params.unwrap().validate().is_err(),
+                "accepted invalid priority {priority}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn priority_creation_uses_agent_value_or_static_fallback() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (priority, custom_field, expected_field, expected_value) in [
+            (Some(1), None, PRIORITY_FIELD, serde_json::json!(1)),
+            (Some(4), None, PRIORITY_FIELD, serde_json::json!(4)),
+            (
+                Some(1),
+                Some(PRIORITY_FIELD),
+                PRIORITY_FIELD,
+                serde_json::json!(1),
+            ),
+            (
+                Some(1),
+                Some("microsoft.vsts.common.priority"),
+                PRIORITY_FIELD,
+                serde_json::json!(1),
+            ),
+            (
+                None,
+                Some(PRIORITY_FIELD),
+                PRIORITY_FIELD,
+                serde_json::json!("3"),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/Project/_apis/wit/workitems/$Task"))
+                .and(body_json(serde_json::json!([
+                    {"op": "add", "path": "/fields/System.Title", "value": "Investigate failure"},
+                    {"op": "add", "path": "/fields/System.Description", "value": "A detailed failure report long enough for validation."},
+                    {"op": "add", "path": "/multilineFieldsFormat/System.Description", "value": "Markdown"},
+                    {"op": "add", "path": format!("/fields/{expected_field}"), "value": expected_value}
+                ])))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 42})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut config = serde_json::json!({
+                "include-stats": false,
+                "allowed-priorities": [1, 4]
+            });
+            if let Some(field) = custom_field {
+                config["custom-fields"] = serde_json::json!({field: "3"});
+            }
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_project: Some("Project".to_string()),
+                access_token: Some("token".to_string()),
+                tool_configs: std::collections::HashMap::from([(
+                    "create-work-item".to_string(),
+                    config,
+                )]),
+                ..Default::default()
+            };
+            let params: CreateWorkItemParams = serde_json::from_value(serde_json::json!({
+                "title": "Investigate failure",
+                "description": "A detailed failure report long enough for validation.",
+                "priority": priority
+            }))
+            .unwrap();
+            let result = CreateWorkItemResult::try_from((
+                params,
+                WorkItemTemporaryId::parse("#aw_priority").unwrap(),
+            ))
+            .unwrap();
+            let mut persisted: CreateWorkItemResult =
+                serde_json::from_value(serde_json::to_value(result).unwrap()).unwrap();
+            let execution = persisted.execute_sanitized(&ctx).await.unwrap();
+            assert!(execution.success, "{}", execution.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn priority_creation_rejects_invalid_or_disallowed_persisted_values_before_http() {
+        let server = wiremock::MockServer::start().await;
+        for (priority, allowed, message) in [
+            (0, vec![], "priority must be"),
+            (5, vec![], "priority must be"),
+            (2, vec![1, 4], "not in allowed-priorities"),
+            (1, vec![0], "allowed-priorities must contain"),
+        ] {
+            let ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()),
+                ado_project: Some("Project".to_string()),
+                access_token: Some("token".to_string()),
+                tool_configs: std::collections::HashMap::from([(
+                    "create-work-item".to_string(),
+                    serde_json::json!({"allowed-priorities": allowed}),
+                )]),
+                ..Default::default()
+            };
+            let mut result: CreateWorkItemResult = serde_json::from_value(serde_json::json!({
+                "name": "create-work-item",
+                "title": "Investigate failure",
+                "description": "A detailed failure report long enough for validation.",
+                "temporary_id": "#aw_priority",
+                "priority": priority
+            }))
+            .unwrap();
+            let execution = result.execute_sanitized(&ctx).await.unwrap();
+            assert!(!execution.success);
+            assert!(execution.message.contains(message), "{}", execution.message);
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn priority_creation_rejects_description_field_collision() {
+        let config = CreateWorkItemConfig {
+            description_field: Some(AdoWorkItemFieldRef::parse(PRIORITY_FIELD).unwrap()),
+            ..Default::default()
+        };
+        let error =
+            build_patch_document(&config, "Title", "Description", &[], Some(1)).unwrap_err();
+        assert!(error.contains("duplicates description-field"), "{error}");
+    }
     use crate::safe_outputs::ToolResult;
 
     #[test]
@@ -791,6 +1012,7 @@ mod tests {
             title: "Implement feature".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
             tags: vec![],
+            priority: None,
         };
         let result: CreateWorkItemResult =
             (params, WorkItemTemporaryId::parse("#aw_test1").unwrap())
@@ -807,6 +1029,7 @@ mod tests {
             title: "Hi".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
             tags: vec![],
+            priority: None,
         };
         let result: Result<CreateWorkItemResult, _> =
             (params, WorkItemTemporaryId::parse("#aw_test1").unwrap()).try_into();
@@ -823,6 +1046,7 @@ mod tests {
             title: "Valid title here".to_string(),
             description: "Too short".to_string(),
             tags: vec![],
+            priority: None,
         };
         let result: Result<CreateWorkItemResult, _> =
             (params, WorkItemTemporaryId::parse("#aw_test1").unwrap()).try_into();
@@ -839,6 +1063,7 @@ mod tests {
             title: "Valid title here".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
             tags: vec!["tag-one; tag-two".to_string()],
+            priority: None,
         };
         let result: Result<CreateWorkItemResult, _> =
             (params, WorkItemTemporaryId::parse("#aw_test1").unwrap()).try_into();
@@ -855,6 +1080,7 @@ mod tests {
             title: "Implement feature".to_string(),
             description: "This is a sufficiently long description for the work item.".to_string(),
             tags: vec!["agent-created".to_string(), "automated".to_string()],
+            priority: None,
         };
         let result: CreateWorkItemResult =
             (params, WorkItemTemporaryId::parse("#aw_test1").unwrap())
@@ -870,6 +1096,7 @@ mod tests {
             description: "A description that is definitely longer than thirty characters."
                 .to_string(),
             tags: vec![],
+            priority: None,
         };
         let result: CreateWorkItemResult =
             (params, WorkItemTemporaryId::parse("#aw_test1").unwrap())
@@ -942,6 +1169,7 @@ custom-fields:
             assignee: Some("assignee##vso[task.logissue]".to_string()),
             tags: vec!["tag##[warning]".to_string()],
             allowed_tags: vec!["allowed##vso[task.complete]".to_string()],
+            allowed_priorities: Vec::new(),
             custom_fields,
             artifact_link: ArtifactLinkConfig {
                 enabled: true,
@@ -1165,6 +1393,7 @@ custom-fields:
             description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
             tags: Vec::new(),
             temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+            priority: None,
         };
 
         result.sanitize_content_fields();
@@ -1229,6 +1458,7 @@ custom-fields:
             description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
             tags: Vec::new(),
             temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+            priority: None,
         };
 
         let execution = result.execute_sanitized(&ctx).await.unwrap();
@@ -1295,6 +1525,7 @@ custom-fields:
             description: rendering_corpus::input(),
             tags: Vec::new(),
             temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+            priority: None,
         };
 
         let execution = result.execute_sanitized(&ctx).await.unwrap();
@@ -1329,6 +1560,7 @@ custom-fields:
                 .to_string(),
             tags: Vec::new(),
             temporary_id: WorkItemTemporaryId::parse("#aw_test1").unwrap(),
+            priority: None,
         };
 
         let execution = result.execute_sanitized(&ctx).await.unwrap();
