@@ -294,6 +294,7 @@ pub async fn build_lint(source: &Path) -> Result<lint::LintReport> {
 
     let mut findings = lint::lint(&summary);
     findings.extend(lint::lint_front_matter_tasks(&front_matter)?);
+    findings.extend(lint::lint_package_configs(&front_matter, source));
     Ok(lint::report_from_findings(findings))
 }
 

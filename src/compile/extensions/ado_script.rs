@@ -384,6 +384,11 @@ pub struct AdoScriptExtension {
     /// Whether any user-defined stdio MCP server configures `azure-auth`.
     /// Drives Agent-job bundle delivery for `azure-wif-refresh.js`.
     pub azure_mcp_auth_active: bool,
+    /// Whether the `ado-proxy` engine runs (`permissions.read` and/or
+    /// `permissions.packages`). Drives Agent-job bundle delivery for
+    /// `ado-proxy.js`, which the start step both mounts into the container and
+    /// runs on the host to resolve package feeds.
+    pub ado_proxy_active: bool,
     /// PR trigger config required to build `PR_SYNTH_SPEC`. `Some(_)`
     /// is the single source of truth for "synthetic-from-ci path is
     /// active for this agent" — `is_some()` replaces what used to be a
@@ -1165,6 +1170,7 @@ impl CompilerExtension for AdoScriptExtension {
             || self.github_app_token_active
             || self.prepare_pr_base_active
             || self.azure_mcp_auth_active
+            || self.ado_proxy_active
         {
             agent_prepare_steps
                 .extend(install_and_download_steps_typed(self.supply_chain.as_ref()));
@@ -1373,6 +1379,7 @@ mod tests {
             github_app_token_active: false,
             prepare_pr_base_active: false,
             azure_mcp_auth_active: false,
+            ado_proxy_active: false,
             pr_trigger_for_synth: None,
             supply_chain: None,
         }
@@ -1453,6 +1460,7 @@ mod tests {
             github_app_token_active: false,
             prepare_pr_base_active: false,
             azure_mcp_auth_active: false,
+            ado_proxy_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -1513,6 +1521,7 @@ mod tests {
             github_app_token_active: false,
             prepare_pr_base_active: false,
             azure_mcp_auth_active: false,
+            ado_proxy_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -2274,6 +2283,7 @@ mod tests {
             github_app_token_active: false,
             prepare_pr_base_active: false,
             azure_mcp_auth_active: false,
+            ado_proxy_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],
@@ -2824,6 +2834,7 @@ mod tests {
             github_app_token_active: false,
             prepare_pr_base_active: false,
             azure_mcp_auth_active: false,
+            ado_proxy_active: false,
             pr_trigger_for_synth: Some(PrTriggerConfig {
                 branches: Some(BranchFilter {
                     include: vec!["main".into()],

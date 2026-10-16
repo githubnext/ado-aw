@@ -16,6 +16,12 @@
  * The canary bearer is asserted absent from every response body the client
  * sees, so a future refactor that echoes upstream detail back to the agent
  * fails here.
+ *
+ * A second set of proxies runs with a `packages` policy section, proving the
+ * package-feed family end to end: the package credential (and only it) reaches
+ * the package host, the REST bearer never does, writes and out-of-scope feeds
+ * are refused before upstream contact, and redirects are relayed only to
+ * allowlisted blob hosts.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -70,6 +76,7 @@ function ensureOpenssl(): boolean {
 }
 
 const CANARY = "canary-bearer-8f2c1d4e9a7b";
+const PACKAGE_CANARY = "canary-package-3b7e5a1c6d2f";
 const SENTINEL = "ado-proxy-sentinel-not-a-credential";
 const ORGANIZATION = "contoso";
 
@@ -85,6 +92,31 @@ const POLICY: ProxyPolicy = {
   allowed_resource_areas: [],
 };
 
+const PACKAGE_HOST = "pkgs.dev.azure.com";
+const FEED_PATH = `/${ORGANIZATION}/Engineering/_packaging/internal@Release`;
+
+const PACKAGES = {
+  hosts: [PACKAGE_HOST],
+  feeds: [
+    {
+      organization: ORGANIZATION,
+      project: "Engineering",
+      feed: "internal",
+      view: "Release",
+      protocols: ["npm" as const, "nuget" as const],
+    },
+  ],
+};
+
+/** REST capabilities plus a package feed grant. */
+const PACKAGE_POLICY: ProxyPolicy = { ...POLICY, packages: PACKAGES };
+
+/** A packages-only workflow: no REST capability at all. */
+const PACKAGES_ONLY_POLICY: ProxyPolicy = { ...POLICY, capabilities: [], packages: PACKAGES };
+
+/** Byte budget for the package proxies, small enough to exercise the cut-off. */
+const TEST_PACKAGE_LIMIT = 64 * 1024;
+
 interface UpstreamCall {
   readonly method: string;
   readonly url: string;
@@ -99,6 +131,19 @@ interface Harness {
   readonly upstreamCalls: UpstreamCall[];
   readonly tunnelTargets: string[];
   readonly materialDocument: string;
+  /** Requests the fake package host received, tunnelled or intercepted. */
+  readonly packageCalls: UpstreamCall[];
+  /** CA of the fake upstreams, for clients proving a connection was not intercepted. */
+  readonly upstreamCaPem: string;
+  /** Proxy with REST capabilities *and* a packages section. */
+  readonly packageProxyPort: number;
+  readonly packageDirectTlsPort: number;
+  /** Proxy with a packages section and no REST capability or REST token. */
+  readonly packagesOnlyProxyPort: number;
+  /** Proxy with REST capabilities but no REST token supplied. */
+  readonly noRestTokenProxyPort: number;
+  /** CA the package proxies intercept with. */
+  readonly packageProxyCaPem: string;
 }
 
 let workdir: string;
@@ -123,7 +168,11 @@ function listen(server: { listen: (...args: never[]) => void }): Promise<number>
  * form for the harness's own servers, and the raw document for feeding the
  * engine.
  */
-function mintForTest(directory: string, hosts: readonly string[]): {
+function mintForTest(
+  directory: string,
+  hosts: readonly string[],
+  credentials: { token?: string; packageToken?: string } = { token: CANARY },
+): {
   materials: CaMaterials;
   document: string;
 } {
@@ -157,10 +206,14 @@ function mintForTest(directory: string, hosts: readonly string[]): {
     leaves[host] = { key: b64("leaf.key"), cert: b64("leaf.pem") };
   }
 
+  const encode = (value: string): string => Buffer.from(value, "utf8").toString("base64");
   const document = JSON.stringify({
     schema: MATERIAL_SCHEMA,
     ca_cert: b64("ca.pem"),
-    token: Buffer.from(CANARY, "utf8").toString("base64"),
+    ...(credentials.token === undefined ? {} : { token: encode(credentials.token) }),
+    ...(credentials.packageToken === undefined
+      ? {}
+      : { package_token: encode(credentials.packageToken) }),
     leaves,
   });
 
@@ -225,6 +278,80 @@ async function startFakeAdo(ca: CaMaterials, calls: UpstreamCall[]): Promise<num
 
   const options: TlsOptions = { key: leaf.key, cert: leaf.cert };
   const tls = createTlsServer(options);
+  tls.on("secureConnection", (socket) => app.emit("connection", socket));
+  servers.push(tls);
+  return listen(tls as never);
+}
+
+/**
+ * A TLS server standing in for `pkgs.dev.azure.com`.
+ *
+ * Every response that must *not* reach the client carries a recognizable body
+ * (`upstream-…-body`), so a relay that leaks it fails loudly.
+ */
+async function startFakePkgs(ca: CaMaterials, calls: UpstreamCall[]): Promise<number> {
+  const leaf = ca.leaves.get(PACKAGE_HOST);
+  if (leaf === undefined) throw new Error("fake package host has no leaf");
+
+  const app = createHttpServer((request, response) => {
+    calls.push({
+      method: request.method ?? "",
+      url: request.url ?? "",
+      authorization: request.headers.authorization,
+      headerNames: Object.keys(request.headers),
+    });
+    const url = request.url ?? "";
+    const leafName = url.split("?")[0]?.split("/").pop() ?? "";
+    const common = {
+      "set-cookie": "UserAuthentication=should-not-reach-the-agent",
+      "x-vss-userdata": "secret-identity",
+    };
+    switch (leafName) {
+      case "redirect-ok":
+        response.writeHead(302, {
+          ...common,
+          location: "https://account.blob.core.windows.net/c/lodash.tgz?sig=abc",
+        });
+        response.end("upstream-redirect-body");
+        return;
+      case "redirect-bad":
+        response.writeHead(302, {
+          ...common,
+          location: "https://account.blob.core.windows.net.attacker.test/x",
+        });
+        response.end("upstream-redirect-body");
+        return;
+      case "unauthorized":
+        response.writeHead(401, { ...common, "www-authenticate": "Bearer realm=x" });
+        response.end("upstream-401-body");
+        return;
+      case "big-declared": {
+        const body = Buffer.alloc(TEST_PACKAGE_LIMIT * 2, "a");
+        response.writeHead(200, { "content-type": "application/octet-stream", "content-length": body.length });
+        response.end(body);
+        return;
+      }
+      case "big-chunked": {
+        response.writeHead(200, { "content-type": "application/octet-stream" });
+        const chunk = Buffer.alloc(8 * 1024, "b");
+        for (let index = 0; index < 32; index += 1) response.write(chunk);
+        response.end();
+        return;
+      }
+      default: {
+        const body = JSON.stringify({ name: leafName, served: "pkg-ok" });
+        response.writeHead(200, {
+          ...common,
+          "content-type": "application/json",
+          etag: '"pkg-etag"',
+          "content-length": Buffer.byteLength(body),
+        });
+        response.end(body);
+      }
+    }
+  });
+
+  const tls = createTlsServer({ key: leaf.key, cert: leaf.cert });
   tls.on("secureConnection", (socket) => app.emit("connection", socket));
   servers.push(tls);
   return listen(tls as never);
@@ -454,7 +581,10 @@ beforeAll(async () => {
   if (!hasOpenssl) return;
   workdir = mkdtempSync(join(tmpdir(), "ado-proxy-e2e-"));
 
-  const upstreamCa = mintForTest(join(workdir, "upstream-ca"), ["dev.azure.com"]).materials;
+  const upstreamCa = mintForTest(join(workdir, "upstream-ca"), [
+    "dev.azure.com",
+    PACKAGE_HOST,
+  ]).materials;
   const plainCa = mintForTest(join(workdir, "plain-ca"), ["example.test"]).materials;
   const proxyMaterial = mintForTest(join(workdir, "proxy-ca"), POLICY.protected_hosts);
   const proxyCa = proxyMaterial.materials;
@@ -462,13 +592,16 @@ beforeAll(async () => {
 
   const upstreamCalls: UpstreamCall[] = [];
   const tunnelTargets: string[] = [];
+  const packageCalls: UpstreamCall[] = [];
   const adoPort = await startFakeAdo(upstreamCa, upstreamCalls);
+  const pkgsPort = await startFakePkgs(upstreamCa, packageCalls);
   const plainPort = await startPlainHost(plainCa);
   const plainHttpPort = await startPlainHttpOrigin();
   const squidPort = await startFakeSquid(
     new Map([
       ["dev.azure.com:443", adoPort],
       ["example.test:443", plainPort],
+      [`${PACKAGE_HOST}:443`, pkgsPort],
     ]),
     tunnelTargets,
     plainHttpPort,
@@ -508,6 +641,51 @@ beforeAll(async () => {
   servers.push(tlsServer);
   const directTlsPort = await listen(tlsServer as never);
 
+  // The package family. One interception CA, minted the way the host step
+  // will mint it once packages are enabled: a leaf for the package host too,
+  // and both credentials in the material.
+  const packageMaterial = mintForTest(
+    join(workdir, "proxy-package-ca"),
+    [...POLICY.protected_hosts, PACKAGE_HOST],
+    { token: CANARY, packageToken: PACKAGE_CANARY },
+  ).materials;
+  const packageServerDeps = (
+    policy: ProxyPolicy,
+    credentials: { tokens?: TokenSource; packageTokens?: TokenSource },
+  ) => ({
+    config: { ...config, policy },
+    ca: packageMaterial,
+    ...credentials,
+    packageResponseLimit: TEST_PACKAGE_LIMIT,
+    scopes: ScopeIndex.from(policy),
+    log: new DecisionLog(join(workdir, "decisions")),
+    upstreamCa: upstreamCa.caCertPem,
+  });
+  const bothTokens = {
+    tokens: new TokenSource(CANARY),
+    packageTokens: new TokenSource(PACKAGE_CANARY),
+  };
+
+  const packageServer = createProxyServer(packageServerDeps(PACKAGE_POLICY, bothTokens));
+  servers.push(packageServer);
+  const packageProxyPort = await listen(packageServer as never);
+
+  const packageTlsServer = createDirectTlsServer(packageServerDeps(PACKAGE_POLICY, bothTokens));
+  servers.push(packageTlsServer);
+  const packageDirectTlsPort = await listen(packageTlsServer as never);
+
+  const packagesOnlyServer = createProxyServer(
+    packageServerDeps(PACKAGES_ONLY_POLICY, { packageTokens: new TokenSource(PACKAGE_CANARY) }),
+  );
+  servers.push(packagesOnlyServer);
+  const packagesOnlyProxyPort = await listen(packagesOnlyServer as never);
+
+  const noRestTokenServer = createProxyServer(
+    packageServerDeps(PACKAGE_POLICY, { packageTokens: new TokenSource(PACKAGE_CANARY) }),
+  );
+  servers.push(noRestTokenServer);
+  const noRestTokenProxyPort = await listen(noRestTokenServer as never);
+
   harness = {
     proxyPort,
     directTlsPort,
@@ -515,6 +693,13 @@ beforeAll(async () => {
     upstreamCalls,
     tunnelTargets,
     materialDocument: proxyCaDocument,
+    packageCalls,
+    upstreamCaPem: upstreamCa.caCertPem,
+    packageProxyPort,
+    packageDirectTlsPort,
+    packagesOnlyProxyPort,
+    noRestTokenProxyPort,
+    packageProxyCaPem: packageMaterial.caCertPem,
   };
 
   // Keep the plain CA reachable for the tunnel assertion.
@@ -747,6 +932,29 @@ suite("ado-proxy end to end", () => {
     expect(harness.upstreamCalls.length).toBe(before);
   });
 
+  it("tunnels the package host untouched when the policy has no packages section", async () => {
+    // Without a packages grant the package host keeps its historical
+    // behaviour: no interception, no credential, the client's own headers.
+    const before = harness.packageCalls.length;
+    const restBefore = harness.upstreamCalls.length;
+    const response = await requestThroughProxy(
+      harness.proxyPort,
+      PACKAGE_HOST,
+      `${FEED_PATH}/npm/registry/lodash`,
+      {
+        // Trusting only the upstream's own CA proves the proxy did not
+        // terminate the connection.
+        ca: harness.upstreamCaPem,
+        headers: { Authorization: `Bearer ${SENTINEL}` },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(harness.tunnelTargets).toContain(`${PACKAGE_HOST}:443`);
+    const call = harness.packageCalls[before];
+    expect(call?.authorization).toBe(`Bearer ${SENTINEL}`);
+    expect(harness.upstreamCalls.length).toBe(restBefore);
+  });
+
   it("answers the readiness probe without revealing policy detail", async () => {
     const response = await plainHttpThroughProxy(harness.proxyPort, HEALTH_PATH);
     expect(response.status).toBe(200);
@@ -823,5 +1031,314 @@ suite("ado-proxy end to end", () => {
     // process table or /proc.
     expect(process.argv.join(" ")).not.toContain(CANARY);
     expect(JSON.stringify(process.env)).not.toContain(CANARY);
+  });
+});
+
+/** Every response the package suite saw, checked for canaries at the end. */
+const packageResponses: ClientResponse[] = [];
+
+function recordResponse(response: ClientResponse): ClientResponse {
+  packageResponses.push(response);
+  return response;
+}
+
+function packageRequest(
+  port: number,
+  path: string,
+  options: { method?: string; headers?: Record<string, string> } = {},
+  host = PACKAGE_HOST,
+): Promise<ClientResponse> {
+  return requestThroughProxy(port, host, path, {
+    ...options,
+    ca: harness.packageProxyCaPem,
+  }).then(recordResponse);
+}
+
+/** Open a CONNECT and return Squid-style status line the proxy answered with. */
+function connectStatus(port: number, target: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = netConnect({ host: "127.0.0.1", port }, () => {
+      socket.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`);
+    });
+    let raw = "";
+    socket.on("data", (chunk: Buffer) => {
+      raw += chunk.toString("latin1");
+      const end = raw.indexOf("\r\n");
+      if (end !== -1) {
+        socket.destroy();
+        resolve(raw.slice(0, end));
+      }
+    });
+    socket.on("error", reject);
+  });
+}
+
+suite("ado-proxy package family end to end", () => {
+  it("injects only the package credential on an allowed npm read", async () => {
+    const before = harness.packageCalls.length;
+    const restBefore = harness.upstreamCalls.length;
+    const response = await packageRequest(harness.packageProxyPort, `${FEED_PATH}/npm/registry/lodash`, {
+      headers: {
+        Authorization: `Bearer ${SENTINEL}`,
+        Cookie: "a=b",
+        "npm-command": "install",
+        "X-Forwarded-For": "1.2.3.4",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ name: "lodash", served: "pkg-ok" });
+    const call = harness.packageCalls[before];
+    expect(call?.authorization).toBe(`Bearer ${PACKAGE_CANARY}`);
+    expect(call?.authorization).not.toContain(CANARY);
+    expect(call?.authorization).not.toContain(SENTINEL);
+    expect(call?.headerNames).not.toContain("cookie");
+    expect(call?.headerNames).not.toContain("x-forwarded-for");
+    expect(call?.headerNames).toContain("npm-command");
+    // Response headers are allowlisted: caching survives, session material does not.
+    expect(response.headers.etag).toBe('"pkg-etag"');
+    expect(response.headers["set-cookie"]).toBeUndefined();
+    expect(response.headers["x-vss-userdata"]).toBeUndefined();
+    expect(harness.upstreamCalls.length).toBe(restBefore);
+  });
+
+  it("serves HEAD and the direct-TLS ingress with the same policy", async () => {
+    const before = harness.packageCalls.length;
+    const head = await packageRequest(harness.packageProxyPort, `${FEED_PATH}/npm/registry/lodash`, {
+      method: "HEAD",
+    });
+    expect(head.status).toBe(200);
+    expect(head.body).toBe("");
+
+    // A HEAD only declares the artifact's size; it must not trip the byte cap.
+    const bigHead = await packageRequest(
+      harness.packageProxyPort,
+      `${FEED_PATH}/npm/registry/big-declared`,
+      { method: "HEAD" },
+    );
+    expect(bigHead.status).toBe(200);
+    expect(bigHead.headers["content-length"]).toBe(String(TEST_PACKAGE_LIMIT * 2));
+
+    const direct = recordResponse(
+      await directTlsRequest(
+        harness.packageDirectTlsPort,
+        PACKAGE_HOST,
+        `${FEED_PATH}/npm/registry/lodash`,
+        { ca: harness.packageProxyCaPem },
+      ),
+    );
+    expect(direct.status).toBe(200);
+    expect(harness.packageCalls.slice(before).map((call) => call.authorization)).toEqual([
+      `Bearer ${PACKAGE_CANARY}`,
+      `Bearer ${PACKAGE_CANARY}`,
+      `Bearer ${PACKAGE_CANARY}`,
+    ]);
+  });
+
+  it("presents the package credential as Basic for NuGet", async () => {
+    const before = harness.packageCalls.length;
+    const response = await packageRequest(harness.packageProxyPort, `${FEED_PATH}/nuget/v3/index.json`);
+    expect(response.status).toBe(200);
+    expect(harness.packageCalls[before]?.authorization).toBe(
+      `Basic ${Buffer.from(`ado-aw:${PACKAGE_CANARY}`).toString("base64")}`,
+    );
+  });
+
+  it("never sends the package credential to a REST host", async () => {
+    const before = harness.upstreamCalls.length;
+    const response = await packageRequest(
+      harness.packageProxyPort,
+      `/${ORGANIZATION}/_apis/projects?api-version=7.1&stateFilter=all&$top=1&$skip=0`,
+      {},
+      "dev.azure.com",
+    );
+    expect(response.status).toBe(200);
+    const call = harness.upstreamCalls[before];
+    expect(call?.authorization).toBe(`Bearer ${CANARY}`);
+    expect(call?.authorization).not.toContain(PACKAGE_CANARY);
+  });
+
+  it("refuses writes, out-of-scope feeds, and the management API before upstream contact", async () => {
+    const before = harness.packageCalls.length;
+    const refused: [string, string, string][] = [
+      ["PUT", `${FEED_PATH}/npm/registry/my-package`, "method-not-read"],
+      ["POST", `${FEED_PATH}/npm/registry/-/npm/v1/security/audits`, "method-not-read"],
+      ["DELETE", `${FEED_PATH}/npm/registry/my-package/-rev/1`, "method-not-read"],
+      ["GET", `/${ORGANIZATION}/Engineering/_packaging/private@Release/npm/registry/x`, "feed-not-granted"],
+      ["GET", `/${ORGANIZATION}/Engineering/_packaging/internal/npm/registry/x`, "view-not-granted"],
+      ["GET", `${FEED_PATH}/pypi/simple/requests/`, "protocol-not-granted"],
+      ["GET", `/${ORGANIZATION}/_apis/packaging/feeds`, "unknown-route"],
+      ["GET", `${FEED_PATH}/npm/registry/%2e%2e/x`, "path-traversal"],
+    ];
+    for (const [method, path, reason] of refused) {
+      const response = await packageRequest(harness.packageProxyPort, path, { method });
+      expect(response.status, `${method} ${path}`).toBe(403);
+      expect((JSON.parse(response.body) as { typeKey: string }).typeKey).toBe(reason);
+    }
+    expect(harness.packageCalls.length).toBe(before);
+  });
+
+  it("relays a redirect to an allowlisted blob host, without the upstream body", async () => {
+    const response = await packageRequest(harness.packageProxyPort, `${FEED_PATH}/npm/registry/redirect-ok`);
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toBe("https://account.blob.core.windows.net/c/lodash.tgz?sig=abc");
+    expect(response.body).not.toContain("upstream-redirect-body");
+    expect(response.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("replaces a redirect to a look-alike host with a denial", async () => {
+    const response = await packageRequest(harness.packageProxyPort, `${FEED_PATH}/npm/registry/redirect-bad`);
+    expect(response.status).toBe(403);
+    expect((JSON.parse(response.body) as { typeKey: string }).typeKey).toBe("redirect-denied");
+    expect(response.headers.location).toBeUndefined();
+    expect(response.body).not.toContain("attacker.test");
+    expect(response.body).not.toContain("upstream-redirect-body");
+  });
+
+  it("maps an upstream 401 to a terminal 502 naming the fix", async () => {
+    const response = await packageRequest(harness.packageProxyPort, `${FEED_PATH}/npm/registry/unauthorized`);
+    expect(response.status).toBe(502);
+    const body = JSON.parse(response.body) as { typeKey: string; message: string };
+    expect(body.typeKey).toBe("upstream-unauthorized");
+    expect(body.message).toContain("Feed Reader");
+    expect(response.body).not.toContain("upstream-401-body");
+    expect(response.headers["www-authenticate"]).toBeUndefined();
+  });
+
+  it("refuses a body declared larger than the limit before relaying any of it", async () => {
+    const response = await packageRequest(harness.packageProxyPort, `${FEED_PATH}/npm/registry/big-declared`);
+    expect(response.status).toBe(502);
+    expect((JSON.parse(response.body) as { typeKey: string }).typeKey).toBe("response-too-large");
+  });
+
+  it("cuts off a streamed body that passes the limit", async () => {
+    // The headers are already sent by then, so the only honest signal is a
+    // truncated connection; the client must never see the whole artifact.
+    const decisionLog = join(workdir, "decisions", "ado-proxy-decisions.jsonl");
+    const tooLarge = (): number =>
+      readFileSync(decisionLog, "utf8")
+        .trim()
+        .split("\n")
+        .filter((line) => line.includes('"response-too-large"')).length;
+    const before = tooLarge();
+    const fullBody = 32 * 8 * 1024;
+
+    const outcome = await requestThroughProxy(
+      harness.packageProxyPort,
+      PACKAGE_HOST,
+      `${FEED_PATH}/npm/registry/big-chunked`,
+      { ca: harness.packageProxyCaPem },
+    ).then(
+      (response) => ({ kind: "response" as const, response }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+
+    if (outcome.kind === "response") {
+      // A close after a partial body: well short of the upstream payload, and
+      // no more than the limit plus chunk framing.
+      expect(outcome.response.body.length).toBeLessThan(fullBody);
+      expect(outcome.response.body.length).toBeLessThanOrEqual(TEST_PACKAGE_LIMIT + 16 * 1024);
+    } else {
+      // A reset is the other honest signal; anything else is a harness bug.
+      expect(String(outcome.error)).toMatch(/ECONNRESET|socket hang up|closed|aborted/i);
+    }
+
+    // Either way the proxy must have recorded why it stopped.
+    for (let attempt = 0; attempt < 50 && tooLarge() === before; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(tooLarge()).toBe(before + 1);
+  });
+
+  it("refuses cleartext to an intercepted package host", async () => {
+    const before = harness.packageCalls.length;
+    const tunnels = harness.tunnelTargets.length;
+    const response = recordResponse(
+      await plainHttpThroughProxy(
+        harness.packageProxyPort,
+        `http://${PACKAGE_HOST}${FEED_PATH}/npm/registry/lodash`,
+      ),
+    );
+    expect(response.status).toBe(403);
+    expect(response.body).toContain("HTTPS");
+    expect(harness.packageCalls.length).toBe(before);
+    expect(harness.tunnelTargets.length).toBe(tunnels);
+  });
+
+  it("refuses CONNECT to an intercepted package host on another port", async () => {
+    const tunnels = harness.tunnelTargets.length;
+    expect(await connectStatus(harness.packageProxyPort, `${PACKAGE_HOST}:8443`)).toContain("403");
+    expect(harness.tunnelTargets.length).toBe(tunnels);
+  });
+
+  it("denies every REST request under a packages-only policy", async () => {
+    const before = harness.upstreamCalls.length;
+    const response = await packageRequest(
+      harness.packagesOnlyProxyPort,
+      `/${ORGANIZATION}/_apis/projects?api-version=7.1&stateFilter=all&$top=1&$skip=0`,
+      {},
+      "dev.azure.com",
+    );
+    expect(response.status).toBe(403);
+    expect(harness.upstreamCalls.length).toBe(before);
+
+    const packageBefore = harness.packageCalls.length;
+    const npm = await packageRequest(harness.packagesOnlyProxyPort, `${FEED_PATH}/npm/registry/lodash`);
+    expect(npm.status).toBe(200);
+    expect(harness.packageCalls[packageBefore]?.authorization).toBe(`Bearer ${PACKAGE_CANARY}`);
+  });
+
+  it("fails an allowed REST request closed when no REST token was supplied", async () => {
+    // Never forwarded unauthenticated, and never with the package credential.
+    const before = harness.upstreamCalls.length;
+    const response = await packageRequest(
+      harness.noRestTokenProxyPort,
+      `/${ORGANIZATION}/_apis/projects?api-version=7.1&stateFilter=all&$top=1&$skip=0`,
+      {},
+      "dev.azure.com",
+    );
+    expect(response.status).toBe(502);
+    expect((JSON.parse(response.body) as { typeKey: string }).typeKey).toBe("credential-unavailable");
+    expect(harness.upstreamCalls.length).toBe(before);
+  });
+
+  it("logs package decisions with their family and protocol, never paths or credentials", () => {
+    const lines = readFileSync(join(workdir, "decisions", "ado-proxy-decisions.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const packageRecords = lines.filter((record) => record.family === "packages");
+    expect(packageRecords.length).toBeGreaterThan(5);
+    expect(packageRecords.some((record) => record.protocol === "npm" && record.decision === "allow")).toBe(true);
+    expect(packageRecords.some((record) => record.reason === "redirect-denied")).toBe(true);
+    expect(packageRecords.some((record) => record.reason === "response-too-large")).toBe(true);
+    expect(packageRecords.some((record) => record.reason === "upstream-unauthorized")).toBe(true);
+    // Every REST-path record is tagged too, so `ado-aw audit` can split them.
+    expect(lines.some((record) => record.family === "rest")).toBe(true);
+
+    const serialized = JSON.stringify(packageRecords);
+    // Constant guidance text may name the route *template*; nothing from an
+    // actual request path, query, or redirect target may appear.
+    for (const forbidden of [
+      CANARY,
+      PACKAGE_CANARY,
+      SENTINEL,
+      "npm/registry",
+      "lodash",
+      "private",
+      "sig=abc",
+      "attacker.test",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it("never returns either credential in any response", () => {
+    expect(packageResponses.length).toBeGreaterThan(10);
+    for (const response of packageResponses) {
+      const serialized = `${response.body}\n${JSON.stringify(response.headers)}`;
+      expect(serialized).not.toContain(CANARY);
+      expect(serialized).not.toContain(PACKAGE_CANARY);
+    }
   });
 });

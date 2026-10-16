@@ -82,6 +82,7 @@ mod tests {
         CodemodContext {
             compiler_version: version,
             source_compiler_version: None,
+            warnings: Default::default(),
         }
     }
 

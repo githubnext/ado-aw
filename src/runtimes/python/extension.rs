@@ -63,6 +63,19 @@ impl CompilerExtension for PythonExtension {
                  Use one or the other."
             );
         }
+        crate::runtimes::validate_feed_exclusivity(
+            "python",
+            self.config.feed(),
+            self.config.feed_url(),
+            self.config.config(),
+        )?;
+        warnings.extend(crate::runtimes::public_registry_warning(
+            ctx.front_matter,
+            "python",
+            self.config.public_registry(),
+            self.config.feed(),
+            self.config.feed_url().is_some() || self.config.config().is_some(),
+        ));
 
         // Warn if config: is set — accepted but not yet functional inside AWF
         if self.config.config().is_some() {
@@ -90,10 +103,21 @@ impl CompilerExtension for PythonExtension {
         }
 
         let agent_prepare_steps = vec![Step::Task(python_install_task_step(&self.config))];
+        // A granted feed is reached through the credential-isolated package
+        // proxy, so its URL carries no credential either.
+        let source_url = match self.config.feed() {
+            Some(handle) => Some(crate::runtimes::selected_feed_url(
+                ctx,
+                "python",
+                handle,
+                crate::compile::types::PackageProtocol::Pypi,
+            )?),
+            None => self.config.feed_url().map(str::to_string),
+        };
         let mut agent_env_vars = Vec::new();
-        if let Some(feed_url) = self.config.feed_url() {
-            agent_env_vars.push(("PIP_INDEX_URL".to_string(), feed_url.to_string()));
-            agent_env_vars.push(("UV_DEFAULT_INDEX".to_string(), feed_url.to_string()));
+        if let Some(source_url) = source_url {
+            agent_env_vars.push(("PIP_INDEX_URL".to_string(), source_url.clone()));
+            agent_env_vars.push(("UV_DEFAULT_INDEX".to_string(), source_url));
         }
         Ok(Declarations {
             agent_prepare_steps,
@@ -149,7 +173,7 @@ mod tests {
     #[test]
     fn test_validate_config_and_feed_url_are_mutually_exclusive() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nruntimes:\n  python:\n    config: 'pip.conf'\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
+            "---\nname: test\ndescription: test\nruntimes:\n  python:\n    config: 'pip.conf'\n    feed-url: 'https://packages.example.test/org/_packaging/feed/pypi/simple/'\n---\n",
         )
         .unwrap();
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
@@ -233,7 +257,7 @@ mod tests {
     #[test]
     fn declarations_feed_url_selects_source_without_authenticate_task() {
         let (fm, _) = parse_markdown(
-            "---\nname: t\ndescription: x\nruntimes:\n  python:\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
+            "---\nname: t\ndescription: x\nruntimes:\n  python:\n    feed-url: 'https://packages.example.test/org/_packaging/feed/pypi/simple/'\n---\n",
         )
         .unwrap();
         let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();

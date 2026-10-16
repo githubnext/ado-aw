@@ -28,12 +28,21 @@
  *
  * ```json
  * {
- *   "schema": "ado-aw/ado-proxy-material/v1",
+ *   "schema": "ado-aw/ado-proxy-material/v2",
  *   "ca_cert": "<base64 PEM>",
  *   "token": "<base64>",
+ *   "package_token": "<base64>",
  *   "leaves": { "dev.azure.com": { "key": "<base64 PEM>", "cert": "<base64 PEM>" } }
  * }
  * ```
+ *
+ * `token` is the REST bearer and `package_token` the Azure Artifacts credential.
+ * Each is optional — a packages-only workflow carries no REST bearer, a
+ * REST-only workflow no package credential — but at least one must be present,
+ * and `index.ts` cross-checks them against the policy so a configured family is
+ * never started without its credential. They are separate fields, rather than
+ * one shared token, so each family's upstream only ever receives its own
+ * credential.
  *
  * Blobs are base64 so the generating shell never has to escape newlines, and so
  * a corrupted blob fails at decode rather than yielding a subtly wrong
@@ -48,10 +57,13 @@
  */
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 
+import { canonicalizeHost } from "./catalog.js";
+import type { ProxyPolicy } from "./config.js";
+
 export class CaError extends Error {}
 
 /** Wire-format version, checked on parse so a mismatch fails closed. */
-export const MATERIAL_SCHEMA = "ado-aw/ado-proxy-material/v1";
+export const MATERIAL_SCHEMA = "ado-aw/ado-proxy-material/v2";
 
 /** A leaf certificate and its key, for one protected host. */
 export interface Leaf {
@@ -66,13 +78,18 @@ export interface CaMaterials {
   /** Leaf key/cert per host, keyed by lowercase hostname. */
   readonly leaves: ReadonlyMap<string, Leaf>;
   /**
-   * The Azure DevOps bearer.
+   * The Azure DevOps REST bearer, when the workflow enables REST capabilities.
    *
    * Carried in the same document as the certificates because it has the same
    * custody requirement: it must reach this process without touching a path
    * the agent can read.
    */
-  readonly token: string;
+  readonly token?: string;
+  /**
+   * The Azure Artifacts credential, when the policy carries a `packages`
+   * section. Same custody as {@link token}; never sent to a REST host.
+   */
+  readonly packageToken?: string;
 }
 
 const PRIVATE_KEY =
@@ -127,8 +144,8 @@ function requirePem(text: string, pattern: RegExp, label: string): string {
  * Parse the material document.
  *
  * Fails closed on anything incomplete or unrecognised: a wrong schema, a
- * missing CA, a host without both a key and a certificate, no hosts at all, or
- * a missing bearer. Each would otherwise surface as an opaque TLS handshake
+ * missing CA, a host without both a key and a certificate, no hosts at all, a
+ * present-but-empty credential, or no credential at all. Each would otherwise surface as an opaque TLS handshake
  * failure or an unauthenticated forward, long after the cause.
  */
 export function parseCaMaterials(raw: string): CaMaterials {
@@ -163,10 +180,17 @@ export function parseCaMaterials(raw: string): CaMaterials {
     "material.ca_cert",
   );
 
-  // Starting without a bearer would mean every allowed request is forwarded
-  // unauthenticated, and Azure DevOps answers those with a sign-in page a
-  // client can mistake for data.
-  const token = decodeBase64(document, "token", "material.token").trim();
+  // Starting without any credential would mean every allowed request is
+  // forwarded unauthenticated, and Azure DevOps answers those with a sign-in
+  // page a client can mistake for data. Which credential each configured family
+  // needs is cross-checked against the policy by the caller.
+  const token = optionalCredential(document, "token");
+  const packageToken = optionalCredential(document, "package_token");
+  if (token === undefined && packageToken === undefined) {
+    throw new CaError(
+      "material carries neither token nor package_token; refusing to start without a credential",
+    );
+  }
 
   const leavesDocument = asRecord(document.leaves, "material.leaves");
   const leaves = new Map<string, Leaf>();
@@ -192,7 +216,29 @@ export function parseCaMaterials(raw: string): CaMaterials {
     throw new CaError("material carried no host leaves");
   }
 
-  return { caCertPem, leaves, token };
+  return {
+    caCertPem,
+    leaves,
+    ...(token === undefined ? {} : { token }),
+    ...(packageToken === undefined ? {} : { packageToken }),
+  };
+}
+
+/**
+ * Decode an optional credential field.
+ *
+ * Absent is fine; *present but empty* is not. An empty value means the host
+ * step meant to supply a credential and failed to, which must surface here
+ * rather than as an unauthenticated forward later.
+ */
+function optionalCredential(
+  document: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  if (document[key] === undefined) return undefined;
+  const value = decodeBase64(document, key, `material.${key}`).trim();
+  if (value === "") throw new CaError(`material.${key} decoded to nothing`);
+  return value;
 }
 
 /**
@@ -232,4 +278,33 @@ export function publishCaCertificate(path: string, caCertPem: string): void {
   // correct it after creation. The MCP mount and the non-root AWF agent both
   // need read access to this certificate.
   chmodSync(path, 0o644);
+}
+
+/**
+ * Cross-check the supplied credentials and leaves against the policy.
+ *
+ * Returns a reason to refuse to start, or `undefined`. Each family the policy
+ * enables must have its own credential: starting without it would turn every
+ * allowed request into a `502`, which reads to the agent as a flaky network
+ * rather than a misconfigured pipeline. A package host also needs a leaf, or
+ * every package request would fail at the TLS handshake with no explanation.
+ */
+export function credentialProblem(policy: ProxyPolicy, ca: CaMaterials): string | undefined {
+  if (policy.capabilities.length > 0 && ca.token === undefined) {
+    return (
+      "the policy enables Azure DevOps REST capabilities but the material carries " +
+      "no REST token"
+    );
+  }
+  if (policy.packages !== undefined) {
+    if (ca.packageToken === undefined) {
+      return "the policy grants package feeds but the material carries no package_token";
+    }
+    for (const host of policy.packages.hosts) {
+      if (!ca.leaves.has(canonicalizeHost(host))) {
+        return `the policy grants package feeds but the material has no leaf for ${host}`;
+      }
+    }
+  }
+  return undefined;
 }

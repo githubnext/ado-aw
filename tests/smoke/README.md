@@ -190,6 +190,33 @@ low-level AWF topology smoke that needs no compiler output. The source YAML is c
 `assertNoTriggers` still applies. Point it at the `infra` lane, which carries no
 GitHub token.
 
+### Running only some cases
+
+The candidate orchestrator has a `smokeCases` runtime parameter: a
+comma-separated list of case ids. When it is blank (the default, and always for
+scheduled and comment-triggered runs), every case in the mode runs. An unknown
+id, or one that does not run in candidate mode, fails the run instead of
+quietly running less.
+
+Use it to iterate on a new case without paying for the whole suite. It also
+lets you queue a branch whose PR does not target `main`, where `/azp run`
+does not apply:
+
+```powershell
+$token = az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv
+$body = @{
+  definition         = @{ id = 2559 }
+  sourceBranch       = 'refs/heads/<branch>'
+  templateParameters = @{ smokeCases = 'package-feeds,package-feeds-wif' }
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -ContentType 'application/json' -Body $body `
+  -Headers @{ Authorization = "Bearer $token" } `
+  'https://dev.azure.com/msazuresphere/AgentPlayground/_apis/build/builds?api-version=7.1'
+```
+
+Run the full suite once before merging; a filtered run proves only the cases
+it names.
+
 ## Why triggers are stripped and re-asserted
 
 Every case in a lane shares one definition *and* one YAML path. A case that

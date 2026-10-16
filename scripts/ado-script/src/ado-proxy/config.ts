@@ -12,8 +12,17 @@
  */
 import { readFileSync } from "node:fs";
 
-import type { Capability } from "../shared/ado-proxy-catalog.types.gen.js";
-import { CATALOG_SCHEMA_VERSION, PROTECTED_HOSTS } from "./catalog.js";
+import type {
+  Capability,
+  PackageProtocolId,
+} from "../shared/ado-proxy-catalog.types.gen.js";
+import {
+  CATALOG_SCHEMA_VERSION,
+  PACKAGE_HOSTS,
+  PACKAGE_PROTOCOLS,
+  PROTECTED_HOSTS,
+  canonicalizeHost,
+} from "./catalog.js";
 import { projectScopeDefaults } from "./scope.js";
 
 /** Resolved, validated proxy configuration. */
@@ -67,6 +76,47 @@ export interface PolicyOrganizationScope {
   readonly projects: readonly PolicyProjectScope[];
 }
 
+/**
+ * One Azure Artifacts feed the agent may read through the package family.
+ *
+ * Names come from the front matter. The `*_id` GUIDs are filled in on the
+ * trusted host by `resolve-feeds` before the proxy starts, so a client that
+ * addresses the feed (or its project or view) by id matches the same grant as
+ * one that uses the name.
+ */
+export interface PackageFeedGrant {
+  readonly organization: string;
+  /**
+   * Project of a project-scoped feed.
+   *
+   * Absent for an organization-scoped feed, in which case only the
+   * organization-scoped URL shape (`/{org}/_packaging/…`) matches.
+   */
+  readonly project?: string;
+  readonly feed: string;
+  /**
+   * View the agent is pinned to (`feed@view`).
+   *
+   * When set, a request without a view, or naming another view, is denied: the
+   * author chose to expose only, say, `@Release`, and the bare feed would
+   * include unpromoted packages.
+   */
+  readonly view?: string;
+  /** Package protocols the agent may use against this feed. */
+  readonly protocols: readonly PackageProtocolId[];
+  readonly project_id?: string;
+  readonly feed_id?: string;
+  readonly view_id?: string;
+}
+
+/** The `packages` policy section: which feeds, on which hosts. */
+export interface PackagePolicy {
+  /** Package hosts to intercept. Always covers the catalog's package hosts. */
+  readonly hosts: readonly string[];
+  /** Feed grants; never empty. */
+  readonly feeds: readonly PackageFeedGrant[];
+}
+
 export interface ProxyPolicy {
   /**
    * Catalog version this document was generated against.
@@ -99,6 +149,13 @@ export interface ProxyPolicy {
   readonly protected_hosts: readonly string[];
   /** Resource-area ids the SPS fallback discovery route may resolve. */
   readonly allowed_resource_areas: readonly string[];
+  /**
+   * Azure Artifacts feed grants.
+   *
+   * Absent means the package family is off: package hosts are byte-tunnelled
+   * to Squid exactly as before, and no package credential is required.
+   */
+  readonly packages?: PackagePolicy;
 }
 
 export class ConfigError extends Error {}
@@ -214,6 +271,7 @@ const KNOWN_POLICY_KEYS: readonly string[] = [
   "protected_hosts",
   "allowed_resource_areas",
   "additional_scopes",
+  "packages",
 ];
 
 /** Keys a single `additional_scopes` entry may carry. */
@@ -287,6 +345,176 @@ function parseAdditionalScopes(document: Record<string, unknown>): PolicyOrganiz
   });
 }
 
+/** Keys the `packages` section may carry. */
+const KNOWN_PACKAGES_KEYS: readonly string[] = ["hosts", "feeds"];
+
+/** Keys a single feed grant may carry. */
+const KNOWN_FEED_KEYS: readonly string[] = [
+  "organization",
+  "project",
+  "feed",
+  "view",
+  "protocols",
+  "project_id",
+  "feed_id",
+  "view_id",
+];
+
+/** Canonical 8-4-4-4-12 GUID, the only id form the resolver ever writes. */
+const GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/** True when `value` is a canonical GUID. */
+export function isCanonicalGuid(value: string): boolean {
+  return GUID.test(value);
+}
+
+function rejectUnknownKeys(
+  source: Record<string, unknown>,
+  known: readonly string[],
+  label: string,
+): void {
+  for (const key of Object.keys(source)) {
+    if (!known.includes(key)) {
+      fail(`${label} has unknown key ${JSON.stringify(key)}`);
+    }
+  }
+}
+
+function labelledString(
+  source: Record<string, unknown>,
+  key: string,
+  label: string,
+  required: boolean,
+): string | undefined {
+  const value = source[key];
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== "string" || value.trim() === "") {
+    fail(`${label}.${key} must be a non-empty string${required ? "" : " when present"}`);
+  }
+  return value;
+}
+
+function labelledGuid(
+  source: Record<string, unknown>,
+  key: string,
+  label: string,
+): string | undefined {
+  const value = labelledString(source, key, label, false);
+  if (value !== undefined && !isCanonicalGuid(value)) {
+    fail(`${label}.${key} must be a canonical GUID (8-4-4-4-12 hex)`);
+  }
+  return value;
+}
+
+/**
+ * Parse the optional `packages` section, failing closed on anything unknown.
+ *
+ * The section turns on interception of the package hosts, so every field is
+ * load-bearing:
+ *
+ *   - `hosts` must cover the catalogued package hosts — a host missing here
+ *     would be byte-tunnelled with no policy at all — and may not add hosts the
+ *     catalog does not know, because the package authorizer has no rules for
+ *     them;
+ *   - `feeds` must name at least one feed, each with at least one known,
+ *     non-duplicated protocol. An empty list would intercept the host only to
+ *     deny everything, which is almost certainly a compiler bug worth surfacing;
+ *   - `*_id` values must be canonical GUIDs, since they are compared as feed,
+ *     project, and view identifiers and anything looser could alias a name.
+ */
+function parsePackages(document: Record<string, unknown>): PackagePolicy | undefined {
+  const raw = document.packages;
+  if (raw === undefined) return undefined;
+  const section = asRecord(raw, "policy.packages");
+  rejectUnknownKeys(section, KNOWN_PACKAGES_KEYS, "policy.packages");
+
+  const hostsRaw = section.hosts;
+  if (!Array.isArray(hostsRaw)) fail("policy.packages.hosts must be an array");
+  const hosts = hostsRaw.map((entry, index) => {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      fail(`policy.packages.hosts[${index}] must be a non-empty string`);
+    }
+    return entry;
+  });
+  const catalogued = PACKAGE_HOSTS.map(canonicalizeHost);
+  for (const host of hosts) {
+    if (!catalogued.includes(canonicalizeHost(host))) {
+      fail(
+        `policy.packages.hosts names ${host}, which is not a catalogued package host; ` +
+          "the proxy has no rules for it",
+      );
+    }
+  }
+  for (const host of PACKAGE_HOSTS) {
+    if (!hosts.some((entry) => canonicalizeHost(entry) === canonicalizeHost(host))) {
+      fail(
+        `policy.packages.hosts omits the catalogued package host ${host}; ` +
+          "it would bypass policy enforcement.",
+      );
+    }
+  }
+
+  const feedsRaw = section.feeds;
+  if (!Array.isArray(feedsRaw) || feedsRaw.length === 0) {
+    fail("policy.packages.feeds must be a non-empty array");
+  }
+  const knownProtocols = PACKAGE_PROTOCOLS.map((route) => route.protocol);
+
+  const feeds = feedsRaw.map((entry, index): PackageFeedGrant => {
+    const label = `policy.packages.feeds[${index}]`;
+    const grant = asRecord(entry, label);
+    rejectUnknownKeys(grant, KNOWN_FEED_KEYS, label);
+
+    const protocolsRaw = grant.protocols;
+    if (!Array.isArray(protocolsRaw) || protocolsRaw.length === 0) {
+      fail(`${label}.protocols must be a non-empty array`);
+    }
+    const protocols: PackageProtocolId[] = [];
+    for (const protocol of protocolsRaw) {
+      if (typeof protocol !== "string" || !knownProtocols.includes(protocol as PackageProtocolId)) {
+        fail(`${label}.protocols contains an unknown protocol: ${String(protocol)}`);
+      }
+      if (protocols.includes(protocol as PackageProtocolId)) {
+        fail(`${label}.protocols lists ${protocol} more than once`);
+      }
+      protocols.push(protocol as PackageProtocolId);
+    }
+
+    const project = labelledString(grant, "project", label, false);
+    const projectId = labelledGuid(grant, "project_id", label);
+    if (projectId !== undefined && project === undefined) {
+      // A project id with no project would silently turn an
+      // organization-scoped grant into a project-scoped one keyed only by id.
+      fail(`${label}.project_id is set but project is not`);
+    }
+    const view = labelledString(grant, "view", label, false);
+    const viewId = labelledGuid(grant, "view_id", label);
+    if (viewId !== undefined && view === undefined) {
+      fail(`${label}.view_id is set but view is not`);
+    }
+
+    return {
+      organization: labelledString(grant, "organization", label, true) as string,
+      feed: labelledString(grant, "feed", label, true) as string,
+      protocols,
+      ...(project === undefined ? {} : { project }),
+      ...(view === undefined ? {} : { view }),
+      ...(projectId === undefined ? {} : { project_id: projectId }),
+      ...optionalField("feed_id", labelledGuid(grant, "feed_id", label)),
+      ...(viewId === undefined ? {} : { view_id: viewId }),
+    };
+  });
+
+  return { hosts, feeds };
+}
+
+function optionalField<K extends string>(
+  key: K,
+  value: string | undefined,
+): Partial<Record<K, string>> {
+  return value === undefined ? {} : ({ [key]: value } as Record<K, string>);
+}
+
 /**
  * Parse and validate the compiler-emitted policy document.
  *
@@ -324,6 +552,8 @@ export function parsePolicy(raw: string): ProxyPolicy {
   }
 
   const capabilities = requireStringArray(document, "capabilities");
+  // An empty list is legitimate: a packages-only workflow enables no REST
+  // capability, and the REST authorizer then denies every operation.
   for (const capability of capabilities) {
     if (!KNOWN_CAPABILITIES.includes(capability as Capability)) {
       fail(`policy.capabilities contains an unknown capability: ${capability}`);
@@ -358,7 +588,14 @@ export function parsePolicy(raw: string): ProxyPolicy {
       ? requireStringArray(document, "allowed_resource_areas")
       : [],
     additional_scopes: parseAdditionalScopes(document),
+    ...optionalPackages(parsePackages(document)),
   };
+}
+
+function optionalPackages(
+  packages: PackagePolicy | undefined,
+): { packages?: PackagePolicy } {
+  return packages === undefined ? {} : { packages };
 }
 
 /** Resolve the full runtime configuration from argv and the environment. */

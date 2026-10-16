@@ -66,17 +66,18 @@ runtimes:                      # optional runtime configuration (language enviro
   # lean:                      # Alternative object format (with toolchain pinning)
   #   toolchain: "leanprover/lean4:v4.29.1"
   # python: true               # Python runtime — auto-installs via UsePythonVersion@0 (see docs/runtimes.md)
-  # python:                    # Alternative object format (pin version, select package index; no feed credential)
+  # python:                    # Alternative object format (pin version, select package index)
   #   version: "3.12"
-  #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/pypi/simple/"
+  #   feed: internal           # permissions.packages feed granting pypi (credential stays in the proxy)
+  #   public-registry: block   # allow (default) | block — remove pypi.org hosts from the allowlist
   # node: true                 # Node.js runtime — auto-installs via UseNode@1 (see docs/runtimes.md)
-  # node:                      # Alternative object format (pin version, select npm registry; no feed credential)
+  # node:                      # Alternative object format (pin version, select npm registry)
   #   version: "22.x"
-  #   feed-url: "https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/"
+  #   feed: internal           # permissions.packages feed granting npm
   # dotnet: true               # .NET runtime — auto-installs via UseDotNet@2 (see docs/runtimes.md)
-  # dotnet:                    # Alternative object format (pin version, select source via nuget.config; no feed credential)
+  # dotnet:                    # Alternative object format (pin version, select NuGet source)
   #   version: "8.0.x"          # use "global.json" to pin from the repo's global.json
-  #   feed-url: "https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json"
+  #   feed: internal           # permissions.packages feed granting nuget (writes nuget.config if absent)
 # env:                         # workflow-level environment variables (accepted by parser, not yet forwarded to compiled pipeline output)
 #   CUSTOM_VAR: "value"
 # inlined-imports: false        # When true, resolve {{#runtime-import ...}} markers at compile time
@@ -275,6 +276,18 @@ permissions:                   # optional ADO access token configuration (see do
   #           project-id: 33333333-3333-3333-3333-333333333333 # optional GUID-form calls
   #           repositories: [shared-api] # empty/omitted => project reads only
   write: my-write-arm-connection # shorthand: AzureCLI@3 connectionType azureRM
+  # packages:                    # credential-isolated package-feed access (see docs/package-feeds.md)
+  #   service-connection: artifacts-reader # optional WIF connection; omit to use the build identity (current org only)
+  #   connection-type: azureRM   # azureRM | azureDevOps; only with service-connection
+  #   identity-role: reader      # reader | collaborator (default); reader rules out upstream saves
+  #   feeds:
+  #     - name: internal         # handle used by runtimes.<x>.feed; defaults to `feed`
+  #       organization: partner-org # optional; other orgs require service-connection
+  #       project: Engineering   # omit for an organization-scoped feed
+  #       feed: internal-packages
+  #       view: Release          # optional; only packages promoted to this view are readable
+  #       protocols: [npm, nuget] # required: npm | pypi | nuget | cargo
+  #       upstream: deny         # deny (default; needs `view` or identity-role: reader) | allow
   # write:                       # expanded form for scoped cross-org repo writes
   #   service-connection: ado-repository-writer
   #   connection-type: azureDevOps
@@ -288,6 +301,7 @@ permissions:                   # optional ADO access token configuration (see do
 #   write: true                  # docs/imports.md#permissions-required. Unioned across all
 #                                 # imports and the consumer; `read: true` must be satisfied by a
 #                                 # concrete `permissions.read` connection above.
+#   packages: true               # must be satisfied by a concrete `permissions.packages` block
 supply-chain:                  # optional internal supply-chain mirror (see docs/supply-chain.md)
   feed:                          # mirror binaries (compiler, AWF, ado-script) from an ADO Artifacts feed
     name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works

@@ -78,6 +78,7 @@ mod tests {
         CodemodContext {
             compiler_version: INTRODUCED_IN,
             source_compiler_version: None,
+            warnings: Default::default(),
         }
     }
 
