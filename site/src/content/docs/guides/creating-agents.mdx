@@ -23,7 +23,8 @@ Create a file such as `my-agent.md`:
 name: "my-agent"
 description: "Describes what this agent does"
 engine: copilot
-pool: AZS-1ES-L-MMS-ubuntu-22.04
+pool:
+  vmImage: ubuntu-22.04
 ---
 
 Your agent prompt goes here in markdown. This is what the AI agent will see
