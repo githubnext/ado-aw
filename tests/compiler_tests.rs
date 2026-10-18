@@ -2296,6 +2296,53 @@ fn permissions_read_enables_proxy_and_wrapped_az_without_mcp() {
     );
 }
 
+/// The ado-proxy container is the trusted process holding the Stage 1 ADO
+/// credential (see `ado_proxy_container_invocation` in
+/// `src/compile/agentic_pipeline.rs`); its `docker run` hardening flags are
+/// the actual sandbox boundary keeping a compromised proxy process from
+/// escalating privileges, escaping capabilities, or exhausting host PIDs.
+/// Prior coverage only asserted the container's mounts/lifecycle and a
+/// single hardening flag (`no-new-privileges`) inside an unrelated MCPG
+/// test; nothing asserted the full hardened `docker run` invocation through
+/// the compiled `ado-proxy-read-only-agent.md` fixture end to end.
+#[test]
+fn ado_proxy_container_run_is_hardened_end_to_end() {
+    let compiled = compile_fixture_text("ado-proxy-read-only-agent.md");
+
+    let docker_run_start = compiled
+        .find("docker run \\\n")
+        .expect("compiled pipeline must start the ado-proxy container with docker run");
+    let docker_run_block = &compiled[docker_run_start..];
+    let docker_run_end = docker_run_block
+        .find(">/dev/null")
+        .map(|index| index + ">/dev/null".len())
+        .expect("ado-proxy docker run invocation must discard stdout");
+    let docker_run = &docker_run_block[..docker_run_end];
+
+    for required in [
+        "-d \\",
+        "--name \"${PROXY_CONTAINER}\" \\",
+        "--network \"${PROXY_NETWORK}\" \\",
+        "--entrypoint 'sh' \\",
+        "-v \"${PROXY_SCRIPT_PATH}:/app/ado-proxy.js:ro\" \\",
+        "-v \"${PROXY_DIR}/policy:/etc/ado-proxy:ro\" \\",
+        "-v \"${AZ_WRAPPER_DIR}:/var/lib/ado-proxy:rw\" \\",
+        "-v '/tmp/gh-aw/ado-proxy-logs:/var/log/ado-proxy:rw' \\",
+    ] {
+        assert!(
+            docker_run.contains(required),
+            "ado-proxy docker run must contain {required:?}, got:\n{docker_run}"
+        );
+    }
+    // Attached (non-`--rm`) is intentional here: Azure Pipelines tears down
+    // task STDIO on task completion, which would remove a `--rm` container
+    // before the pipeline can stop it deliberately.
+    assert!(
+        !docker_run.contains("--rm"),
+        "ado-proxy container must not be `--rm`; lifecycle is managed explicitly"
+    );
+}
+
 #[test]
 fn no_read_permission_exposes_neither_proxy_nor_az() {
     let compiled = compile_fixture_text("no-ado-read-agent.md");
@@ -2689,6 +2736,84 @@ fn test_mcpg_container_azure_auth_emits_refresher_and_rotating_token_mount() {
         !compiled.contains("initialIdToken: \""),
         "generated YAML must not contain a federated assertion"
     );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// The Azure workload-identity refresher mounts `mount-path` read-only into
+/// the credential container (see `azure_wif_refresh_container_invocation` in
+/// `src/compile/agentic_pipeline.rs`), so an unsanitized value could let a
+/// workflow author point the mount at an unintended container path (e.g. via
+/// `..` traversal) or the container root. `mount-path` is typed as
+/// `ContainerAbsolutePath` precisely to close that off at parse time; this
+/// test is the only place that exercises the rejection through the full CLI
+/// `compile` path (prior coverage only asserted the *valid* mount-path case).
+#[test]
+fn test_azure_auth_mount_path_rejects_traversal_and_relative_and_root_values() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "agentic-pipeline-mcpg-azure-auth-mount-path-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+
+    for (case_name, mount_path) in [
+        ("relative", "relative/path"),
+        ("traversal", "/var/run/../secret"),
+        ("root", "/"),
+    ] {
+        let input = format!(
+            "---\nname: \"Azure Auth Mount Path {case_name}\"\ndescription: \"Tests invalid mount-path rejection\"\nmcp-servers:\n  kusto:\n    container: \"node:22-slim\"\n    azure-auth:\n      service-connection: \"my-arm-sc\"\n      mount-path: \"{mount_path}\"\n---\n\n## Test\n"
+        );
+        let input_path = temp_dir.join(format!("azure-auth-mount-path-{case_name}.md"));
+        let output_path = temp_dir.join(format!("azure-auth-mount-path-{case_name}.yml"));
+        fs::write(&input_path, &input).unwrap();
+
+        let output = std::process::Command::new(&binary_path)
+            .args([
+                "compile",
+                input_path.to_str().unwrap(),
+                "-o",
+                output_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run compiler");
+
+        assert!(
+            !output.status.success(),
+            "mount-path {mount_path:?} ({case_name}) must be rejected at compile time"
+        );
+        assert!(
+            !output_path.exists(),
+            "mount-path {mount_path:?} ({case_name}) must not produce compiled output"
+        );
+    }
+
+    // Control case: a valid absolute path must still compile successfully,
+    // proving the rejections above are specific to the invalid values and
+    // not an unrelated regression.
+    let valid_input = "---\nname: \"Azure Auth Mount Path valid\"\ndescription: \"Control case\"\nmcp-servers:\n  kusto:\n    container: \"node:22-slim\"\n    azure-auth:\n      service-connection: \"my-arm-sc\"\n      mount-path: \"/var/run/custom-azure\"\n---\n\n## Test\n";
+    let valid_input_path = temp_dir.join("azure-auth-mount-path-valid.md");
+    let valid_output_path = temp_dir.join("azure-auth-mount-path-valid.yml");
+    fs::write(&valid_input_path, valid_input).unwrap();
+
+    let output = std::process::Command::new(&binary_path)
+        .args([
+            "compile",
+            valid_input_path.to_str().unwrap(),
+            "-o",
+            valid_output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "a valid absolute mount-path must compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(valid_output_path.exists());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
