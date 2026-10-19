@@ -705,17 +705,7 @@ pub async fn resolve_imports_with_repo_root(
         );
     }
 
-    let mut queue = VecDeque::new();
-    for entry in entries {
-        queue.push_back(PendingImport {
-            entry: entry.clone(),
-            context: ResolutionContext::Local {
-                base_dir: base_dir.clone(),
-            },
-            depth: 1,
-            ancestry: Vec::new(),
-        });
-    }
+    let mut queue = seed_queue(entries, &base_dir);
 
     let mut resolved = Vec::new();
     let mut seen: HashMap<ResolvedIdentity, serde_json::Map<String, serde_json::Value>> =
@@ -728,17 +718,7 @@ pub async fn resolve_imports_with_repo_root(
     let mut resolution_attempts = 0usize;
     while let Some(pending) = queue.pop_front() {
         resolution_attempts += 1;
-        anyhow::ensure!(
-            resolution_attempts <= MAX_IMPORT_RESOLUTIONS,
-            "resolving this import graph requires more than {MAX_IMPORT_RESOLUTIONS} lookups; \
-             reduce duplicate or fanned-out `imports:` entries"
-        );
-        if pending.depth > MAX_IMPORT_DEPTH {
-            anyhow::bail!(
-                "import nesting depth exceeds the maximum of {MAX_IMPORT_DEPTH}: {}",
-                display_chain(&pending.ancestry, &pending.entry.uses)
-            );
-        }
+        check_resolution_limits(resolution_attempts, &pending)?;
 
         let spec = parse_entry_in_context(&pending.entry, &pending.context)
             .with_context(|| format!("failed to parse import `{}`", pending.entry.uses))?;
@@ -762,30 +742,7 @@ pub async fn resolve_imports_with_repo_root(
             .entry(node.identity.clone())
             .or_insert_with(|| node.import.provenance.source.clone());
 
-        if pending
-            .ancestry
-            .iter()
-            .any(|ancestor| ancestor.identity == node.identity)
-        {
-            anyhow::bail!(
-                "import cycle detected: {}",
-                display_cycle(&pending.ancestry, &node.import.provenance.source)
-            );
-        }
-        if let Some(parent) = pending.ancestry.last() {
-            if let Some(path) = find_identity_path(&graph, &node.identity, &parent.identity) {
-                let mut cycle = vec![parent.identity.clone()];
-                cycle.extend(path);
-                anyhow::bail!(
-                    "import cycle detected: {}",
-                    display_identity_path(&cycle, &identity_displays)
-                );
-            }
-            let children = graph.entry(parent.identity.clone()).or_default();
-            if !children.contains(&node.identity) {
-                children.push(node.identity.clone());
-            }
-        }
+        record_edge_checking_cycles(&pending.ancestry, &node, &mut graph, &identity_displays)?;
 
         if let Some(previous_with) = seen.get(&node.identity) {
             if previous_with == &pending.entry.with {
@@ -802,23 +759,7 @@ pub async fn resolve_imports_with_repo_root(
         }
         seen.insert(node.identity.clone(), pending.entry.with.clone());
 
-        let (substituted_front_matter, _) = apply_import_inputs(
-            &node.import.front_matter,
-            &node.import.body,
-            &node.import.entry.with,
-        )
-        .with_context(|| {
-            format!(
-                "failed to apply import inputs for `{}`",
-                node.import.provenance.source
-            )
-        })?;
-        let nested = nested_import_entries(&substituted_front_matter).with_context(|| {
-            format!(
-                "failed to parse nested imports from `{}`",
-                node.import.provenance.source
-            )
-        })?;
+        let nested = nested_entries_of(&node.import)?;
 
         let mut ancestry = pending.ancestry;
         ancestry.push(Ancestor {
@@ -837,6 +778,85 @@ pub async fn resolve_imports_with_repo_root(
     }
 
     Ok(resolved)
+}
+
+fn seed_queue(entries: &[ImportEntry], base_dir: &Path) -> VecDeque<PendingImport> {
+    entries
+        .iter()
+        .map(|entry| PendingImport {
+            entry: entry.clone(),
+            context: ResolutionContext::Local {
+                base_dir: base_dir.to_path_buf(),
+            },
+            depth: 1,
+            ancestry: Vec::new(),
+        })
+        .collect()
+}
+
+fn check_resolution_limits(resolution_attempts: usize, pending: &PendingImport) -> Result<()> {
+    anyhow::ensure!(
+        resolution_attempts <= MAX_IMPORT_RESOLUTIONS,
+        "resolving this import graph requires more than {MAX_IMPORT_RESOLUTIONS} lookups; \
+         reduce duplicate or fanned-out `imports:` entries"
+    );
+    if pending.depth > MAX_IMPORT_DEPTH {
+        anyhow::bail!(
+            "import nesting depth exceeds the maximum of {MAX_IMPORT_DEPTH}: {}",
+            display_chain(&pending.ancestry, &pending.entry.uses)
+        );
+    }
+    Ok(())
+}
+
+fn record_edge_checking_cycles(
+    ancestry: &[Ancestor],
+    node: &ResolvedNode,
+    graph: &mut HashMap<ResolvedIdentity, Vec<ResolvedIdentity>>,
+    identity_displays: &HashMap<ResolvedIdentity, String>,
+) -> Result<()> {
+    if ancestry
+        .iter()
+        .any(|ancestor| ancestor.identity == node.identity)
+    {
+        anyhow::bail!(
+            "import cycle detected: {}",
+            display_cycle(ancestry, &node.import.provenance.source)
+        );
+    }
+    if let Some(parent) = ancestry.last() {
+        if let Some(path) = find_identity_path(graph, &node.identity, &parent.identity) {
+            let mut cycle = vec![parent.identity.clone()];
+            cycle.extend(path);
+            anyhow::bail!(
+                "import cycle detected: {}",
+                display_identity_path(&cycle, identity_displays)
+            );
+        }
+        let children = graph.entry(parent.identity.clone()).or_default();
+        if !children.contains(&node.identity) {
+            children.push(node.identity.clone());
+        }
+    }
+    Ok(())
+}
+
+fn nested_entries_of(import: &ResolvedImport) -> Result<Vec<ImportEntry>> {
+    let (substituted_front_matter, _) =
+        apply_import_inputs(&import.front_matter, &import.body, &import.entry.with).with_context(
+            || {
+                format!(
+                    "failed to apply import inputs for `{}`",
+                    import.provenance.source
+                )
+            },
+        )?;
+    nested_import_entries(&substituted_front_matter).with_context(|| {
+        format!(
+            "failed to parse nested imports from `{}`",
+            import.provenance.source
+        )
+    })
 }
 
 async fn resolve_spec(
