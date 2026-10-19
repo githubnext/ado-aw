@@ -381,11 +381,13 @@ fn models() -> Vec<String> {
     // prompts/create-ado-agentic-workflow.md step 2.
     vec![
         "claude-haiku-4.5".to_string(),
-        "claude-opus-4.7".to_string(),
+        "claude-haiku-5.5".to_string(),
         "claude-opus-4.8".to_string(),
         "claude-opus-4.8-fast".to_string(),
         "claude-opus-5".to_string(),
+        "claude-opus-5.5".to_string(),
         "claude-sonnet-5".to_string(),
+        "claude-sonnet-5.5".to_string(),
         "gpt-3.5-turbo".to_string(),
         "gpt-4".to_string(),
         "gpt-4-o-preview".to_string(),
@@ -402,7 +404,14 @@ fn models() -> Vec<String> {
         "gpt-5.6-luna-utility".to_string(),
         "gpt-5.6-sol".to_string(),
         "gpt-5.6-terra".to_string(),
+        "gpt-6-astra".to_string(),
+        "gpt-6-luna".to_string(),
+        "gpt-6-sol".to_string(),
+        "gpt-6.1-sol".to_string(),
         "grok-4.5".to_string(),
+        "grok-4.6".to_string(),
+        "grok-4.7".to_string(),
+        "mai-code-1.1-flash".to_string(),
     ]
 }
 
