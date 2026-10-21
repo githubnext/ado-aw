@@ -244,33 +244,9 @@ impl Executor for CreateGitTagResult {
         debug!("Tag pattern: {:?}", config.tag_pattern);
         debug!("Allowed repositories: {:?}", config.allowed_repositories);
 
-        // Validate tag against configured pattern
-        if let Some(pattern) = &config.tag_pattern {
-            let re = regex_lite::Regex::new(pattern)
-                .context(format!("Invalid tag-pattern regex in config: {}", pattern))?;
-            if !re.is_match(&self.tag_name) {
-                return Ok(ExecutionResult::failure(format!(
-                    "Tag name '{}' does not match required pattern '{}'",
-                    self.tag_name, pattern
-                )));
-            }
-        }
-
-        // Resolve repository
         let repo_alias = self.repository.as_deref().unwrap_or("self");
-
-        // Validate repository against config policy BEFORE resolving the name,
-        // so operators see a policy error rather than a confusing resolution error.
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&repo_alias.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list: [{}]",
-                repo_alias,
-                config.allowed_repositories.join(", ")
-            )));
+        if let Some(failure) = self.check_policy(&config, repo_alias)? {
+            return Ok(failure);
         }
 
         let target =
@@ -313,13 +289,7 @@ impl Executor for CreateGitTagResult {
         };
         debug!("Tagging commit: {}", commit_sha);
 
-        // Build tag message with optional prefix
-        let tag_message = match (&config.message_prefix, &self.message) {
-            (Some(prefix), Some(msg)) => format!("{}{}", prefix, msg),
-            (Some(prefix), None) => format!("{}Tag {}", prefix, self.tag_name),
-            (None, Some(msg)) => msg.clone(),
-            (None, None) => format!("Tag {}", self.tag_name),
-        };
+        let tag_message = self.build_tag_message(&config);
 
         // POST annotated tag
         let url = format!(
@@ -349,40 +319,95 @@ impl Executor for CreateGitTagResult {
         .await
         .context("Failed to send request to Azure DevOps")?;
 
-        if response.status().is_success() {
-            let resp_body: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse response JSON")?;
+        self.handle_response(response, &commit_sha, &repo_name)
+            .await
+    }
+}
 
-            let tag_url = resp_body.get("url").and_then(|v| v.as_str()).unwrap_or("");
+impl CreateGitTagResult {
+    /// Returns a failure result when the tag name or repository violates the configured policy.
+    fn check_policy(
+        &self,
+        config: &CreateGitTagConfig,
+        repo_alias: &str,
+    ) -> anyhow::Result<Option<ExecutionResult>> {
+        if let Some(pattern) = &config.tag_pattern {
+            let re = regex_lite::Regex::new(pattern)
+                .context(format!("Invalid tag-pattern regex in config: {}", pattern))?;
+            if !re.is_match(&self.tag_name) {
+                return Ok(Some(ExecutionResult::failure(format!(
+                    "Tag name '{}' does not match required pattern '{}'",
+                    self.tag_name, pattern
+                ))));
+            }
+        }
 
-            info!("Tag created: {} -> {}", self.tag_name, commit_sha);
+        // Validate repository against config policy BEFORE resolving the name,
+        // so operators see a policy error rather than a confusing resolution error.
+        if !config.allowed_repositories.is_empty()
+            && !config
+                .allowed_repositories
+                .contains(&repo_alias.to_string())
+        {
+            return Ok(Some(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list: [{}]",
+                repo_alias,
+                config.allowed_repositories.join(", ")
+            ))));
+        }
+        Ok(None)
+    }
 
-            Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Created tag '{}' on commit {} in repository '{}'",
-                    self.tag_name, commit_sha, repo_name
-                ),
-                serde_json::json!({
-                    "tag": self.tag_name,
-                    "commit": commit_sha,
-                    "repository": repo_name,
-                    "url": tag_url,
-                }),
-            ))
-        } else {
+    /// Builds the tag message with the optional configured prefix.
+    fn build_tag_message(&self, config: &CreateGitTagConfig) -> String {
+        match (&config.message_prefix, &self.message) {
+            (Some(prefix), Some(msg)) => format!("{}{}", prefix, msg),
+            (Some(prefix), None) => format!("{}Tag {}", prefix, self.tag_name),
+            (None, Some(msg)) => msg.clone(),
+            (None, None) => format!("Tag {}", self.tag_name),
+        }
+    }
+
+    async fn handle_response(
+        &self,
+        response: reqwest::Response,
+        commit_sha: &str,
+        repo_name: &str,
+    ) -> anyhow::Result<ExecutionResult> {
+        if !response.status().is_success() {
             let status = response.status();
             let error_body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
 
-            Ok(ExecutionResult::failure(format!(
+            return Ok(ExecutionResult::failure(format!(
                 "Failed to create tag (HTTP {}): {}",
                 status, error_body
-            )))
+            )));
         }
+
+        let resp_body: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse response JSON")?;
+
+        let tag_url = resp_body.get("url").and_then(|v| v.as_str()).unwrap_or("");
+
+        info!("Tag created: {} -> {}", self.tag_name, commit_sha);
+
+        Ok(ExecutionResult::success_with_data(
+            format!(
+                "Created tag '{}' on commit {} in repository '{}'",
+                self.tag_name, commit_sha, repo_name
+            ),
+            serde_json::json!({
+                "tag": self.tag_name,
+                "commit": commit_sha,
+                "repository": repo_name,
+                "url": tag_url,
+            }),
+        ))
     }
 }
 
