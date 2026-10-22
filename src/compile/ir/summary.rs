@@ -357,136 +357,106 @@ fn summarize_pool(p: &super::job::Pool) -> PoolSummary {
 }
 
 fn summarize_step(step: &Step, graph: &Graph, stage: Option<&str>, job: &str) -> StepSummary {
-    let (id, kind, display_name, task, condition, mut outputs, env_refs, condition_refs) =
-        match step {
-            Step::Bash(b) => {
-                let env_refs = collect_env_refs(b.env.values());
-                let cond_refs = b
-                    .condition
-                    .as_ref()
-                    .map(collect_condition_refs)
-                    .unwrap_or_default();
-                (
-                    b.id.as_ref().map(|i| i.as_str().to_string()),
-                    StepKind::Bash,
-                    Some(b.display_name.clone()),
-                    None,
-                    b.condition
-                        .as_ref()
-                        .and_then(|c| render_condition(c, graph, stage, Some(job))),
-                    b.outputs
-                        .iter()
-                        .map(summarize_output_decl)
-                        .collect::<Vec<_>>(),
-                    env_refs.into_iter().map(summarize_output_ref).collect(),
-                    cond_refs.into_iter().map(summarize_output_ref).collect(),
-                )
-            }
-            Step::Task(t) => {
-                let env_refs = collect_env_refs(t.env.values());
-                let cond_refs = t
-                    .condition
-                    .as_ref()
-                    .map(collect_condition_refs)
-                    .unwrap_or_default();
-                (
-                    t.id.as_ref().map(|i| i.as_str().to_string()),
-                    StepKind::Task,
-                    Some(t.display_name.clone()),
-                    Some(t.task.clone()),
-                    t.condition
-                        .as_ref()
-                        .and_then(|c| render_condition(c, graph, stage, Some(job))),
-                    Vec::new(),
-                    env_refs.into_iter().map(summarize_output_ref).collect(),
-                    cond_refs.into_iter().map(summarize_output_ref).collect(),
-                )
-            }
-            Step::Checkout(_) => (
-                None,
-                StepKind::Checkout,
-                None,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
-            Step::Download(d) => {
-                let cond_refs = d
-                    .condition
-                    .as_ref()
-                    .map(collect_condition_refs)
-                    .unwrap_or_default();
-                (
-                    None,
-                    StepKind::Download,
-                    Some(format!("download: {}", d.artifact)),
-                    None,
-                    d.condition
-                        .as_ref()
-                        .and_then(|c| render_condition(c, graph, stage, Some(job))),
-                    Vec::new(),
-                    Vec::new(),
-                    cond_refs.into_iter().map(summarize_output_ref).collect(),
-                )
-            }
-            Step::Publish(p) => {
-                let cond_refs = p
-                    .condition
-                    .as_ref()
-                    .map(collect_condition_refs)
-                    .unwrap_or_default();
-                (
-                    None,
-                    StepKind::Publish,
-                    Some(format!("publish: {}", p.artifact)),
-                    None,
-                    p.condition
-                        .as_ref()
-                        .and_then(|c| render_condition(c, graph, stage, Some(job))),
-                    Vec::new(),
-                    Vec::new(),
-                    cond_refs.into_iter().map(summarize_output_ref).collect(),
-                )
-            }
-            Step::RawYaml(_) => (
-                None,
-                StepKind::RawYaml,
-                None,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
+    let summarize_condition = |c: &Option<Condition>| -> (Option<String>, Vec<OutputRefSummary>) {
+        let Some(c) = c else {
+            return (None, Vec::new());
         };
-    // Patch auto_is_output from the graph's outputs_needing_is_output
-    // index so it's accurate without requiring the caller to mutate
-    // the Pipeline via apply_auto_is_output.
-    if let Some(step_id) = id.as_deref()
-        && !outputs.is_empty()
-    {
-        let key = super::ids::StepId::new(step_id).ok();
-        if let Some(k) = key
-            && let Some(needs) = graph.outputs_needing_is_output.get(&k)
-        {
-            for o in outputs.iter_mut() {
-                if needs.contains(&o.name) {
-                    o.auto_is_output = true;
-                }
-            }
-        }
-    }
-    StepSummary {
-        id,
+        let refs = collect_condition_refs(c)
+            .into_iter()
+            .map(summarize_output_ref)
+            .collect();
+        (render_condition(c, graph, stage, Some(job)), refs)
+    };
+    let bare = |kind: StepKind, display_name: Option<String>| StepSummary {
+        id: None,
         kind,
         display_name,
-        task,
-        condition,
-        outputs,
-        env_refs,
-        condition_refs,
+        task: None,
+        condition: None,
+        outputs: Vec::new(),
+        env_refs: Vec::new(),
+        condition_refs: Vec::new(),
+    };
+
+    let mut summary = match step {
+        Step::Bash(b) => {
+            let (condition, condition_refs) = summarize_condition(&b.condition);
+            StepSummary {
+                id: b.id.as_ref().map(|i| i.as_str().to_string()),
+                condition,
+                outputs: b.outputs.iter().map(summarize_output_decl).collect(),
+                env_refs: summarize_env_refs(b.env.values()),
+                condition_refs,
+                ..bare(StepKind::Bash, Some(b.display_name.clone()))
+            }
+        }
+        Step::Task(t) => {
+            let (condition, condition_refs) = summarize_condition(&t.condition);
+            StepSummary {
+                id: t.id.as_ref().map(|i| i.as_str().to_string()),
+                task: Some(t.task.clone()),
+                condition,
+                env_refs: summarize_env_refs(t.env.values()),
+                condition_refs,
+                ..bare(StepKind::Task, Some(t.display_name.clone()))
+            }
+        }
+        Step::Checkout(_) => bare(StepKind::Checkout, None),
+        Step::Download(d) => {
+            let (condition, condition_refs) = summarize_condition(&d.condition);
+            StepSummary {
+                condition,
+                condition_refs,
+                ..bare(
+                    StepKind::Download,
+                    Some(format!("download: {}", d.artifact)),
+                )
+            }
+        }
+        Step::Publish(p) => {
+            let (condition, condition_refs) = summarize_condition(&p.condition);
+            StepSummary {
+                condition,
+                condition_refs,
+                ..bare(StepKind::Publish, Some(format!("publish: {}", p.artifact)))
+            }
+        }
+        Step::RawYaml(_) => bare(StepKind::RawYaml, None),
+    };
+    mark_auto_is_output(&mut summary, graph);
+    summary
+}
+
+fn summarize_env_refs<'a, I: IntoIterator<Item = &'a EnvValue>>(
+    values: I,
+) -> Vec<OutputRefSummary> {
+    collect_env_refs(values)
+        .into_iter()
+        .map(summarize_output_ref)
+        .collect()
+}
+
+/// Patch `auto_is_output` from the graph's `outputs_needing_is_output`
+/// index so it's accurate without requiring the caller to mutate
+/// the Pipeline via `apply_auto_is_output`.
+fn mark_auto_is_output(summary: &mut StepSummary, graph: &Graph) {
+    if summary.outputs.is_empty() {
+        return;
+    }
+    let Some(key) = summary
+        .id
+        .as_deref()
+        .and_then(|id| super::ids::StepId::new(id).ok())
+    else {
+        return;
+    };
+    let Some(needs) = graph.outputs_needing_is_output.get(&key) else {
+        return;
+    };
+    for o in summary.outputs.iter_mut() {
+        if needs.contains(&o.name) {
+            o.auto_is_output = true;
+        }
     }
 }
 
