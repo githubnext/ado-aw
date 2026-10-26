@@ -669,99 +669,105 @@ impl GitHubRelease {
         .with_input("action", action_str);
 
         match self.action {
-            GitHubReleaseAction::Create(s) => {
-                push_opt(&mut t, "target", s.target);
-                push_opt(
-                    &mut t,
-                    "tagSource",
-                    s.tag_source.map(|v| v.as_ado_str().to_string()),
-                );
-                push_opt(&mut t, "tagPattern", s.tag_pattern);
-                push_opt(&mut t, "tag", s.tag);
-                push_opt(&mut t, "title", s.title);
-                push_opt(
-                    &mut t,
-                    "releaseNotesSource",
-                    s.release_notes_source.map(|v| v.as_ado_str().to_string()),
-                );
-                push_opt(&mut t, "releaseNotesFilePath", s.release_notes_file_path);
-                push_opt(&mut t, "releaseNotesInline", s.release_notes_inline);
-                push_opt(&mut t, "assets", s.assets);
-                push_bool(&mut t, "isDraft", s.is_draft);
-                push_bool(&mut t, "isPreRelease", s.is_pre_release);
-                push_opt(
-                    &mut t,
-                    "makeLatest",
-                    s.make_latest.map(|v| v.as_ado_str().to_string()),
-                );
-                push_bool(&mut t, "addChangeLog", s.add_change_log);
-                push_opt(
-                    &mut t,
-                    "changeLogCompareToRelease",
-                    s.change_log_compare_to_release
-                        .map(|v| v.as_ado_str().to_string()),
-                );
-                push_opt(
-                    &mut t,
-                    "changeLogCompareToReleaseTag",
-                    s.change_log_compare_to_release_tag,
-                );
-                push_opt(
-                    &mut t,
-                    "changeLogType",
-                    s.change_log_type.map(|v| v.as_ado_str().to_string()),
-                );
-                push_opt(&mut t, "changeLogLabels", s.change_log_labels);
-            }
-            GitHubReleaseAction::Edit(s) => {
-                t = t.with_input("tag", s.tag);
-                push_opt(&mut t, "target", s.target);
-                push_opt(&mut t, "title", s.title);
-                push_opt(
-                    &mut t,
-                    "releaseNotesSource",
-                    s.release_notes_source.map(|v| v.as_ado_str().to_string()),
-                );
-                push_opt(&mut t, "releaseNotesFilePath", s.release_notes_file_path);
-                push_opt(&mut t, "releaseNotesInline", s.release_notes_inline);
-                push_opt(&mut t, "assets", s.assets);
-                push_opt(
-                    &mut t,
-                    "assetUploadMode",
-                    s.asset_upload_mode.map(|v| v.as_ado_str().to_string()),
-                );
-                push_bool(&mut t, "isDraft", s.is_draft);
-                push_bool(&mut t, "isPreRelease", s.is_pre_release);
-                push_opt(
-                    &mut t,
-                    "makeLatest",
-                    s.make_latest.map(|v| v.as_ado_str().to_string()),
-                );
-                push_bool(&mut t, "addChangeLog", s.add_change_log);
-                push_opt(
-                    &mut t,
-                    "changeLogCompareToRelease",
-                    s.change_log_compare_to_release
-                        .map(|v| v.as_ado_str().to_string()),
-                );
-                push_opt(
-                    &mut t,
-                    "changeLogCompareToReleaseTag",
-                    s.change_log_compare_to_release_tag,
-                );
-                push_opt(
-                    &mut t,
-                    "changeLogType",
-                    s.change_log_type.map(|v| v.as_ado_str().to_string()),
-                );
-                push_opt(&mut t, "changeLogLabels", s.change_log_labels);
-            }
+            GitHubReleaseAction::Create(s) => push_create_inputs(&mut t, s),
+            GitHubReleaseAction::Edit(s) => push_edit_inputs(&mut t, s),
             GitHubReleaseAction::Delete(s) => {
                 t = t.with_input("tag", s.tag);
             }
         }
         t
     }
+}
+
+fn push_create_inputs(t: &mut TaskStep, s: GitHubReleaseCreate) {
+    push_opt(t, "target", s.target);
+    push_opt(
+        t,
+        "tagSource",
+        s.tag_source.map(|v| v.as_ado_str().to_string()),
+    );
+    push_opt(t, "tagPattern", s.tag_pattern);
+    push_opt(t, "tag", s.tag);
+    push_opt(t, "title", s.title);
+    push_opt(
+        t,
+        "releaseNotesSource",
+        s.release_notes_source.map(|v| v.as_ado_str().to_string()),
+    );
+    push_opt(t, "releaseNotesFilePath", s.release_notes_file_path);
+    push_opt(t, "releaseNotesInline", s.release_notes_inline);
+    push_opt(t, "assets", s.assets);
+    push_bool(t, "isDraft", s.is_draft);
+    push_bool(t, "isPreRelease", s.is_pre_release);
+    push_release_tail_inputs(
+        t,
+        s.make_latest,
+        s.add_change_log,
+        s.change_log_compare_to_release,
+        s.change_log_compare_to_release_tag,
+        s.change_log_type,
+        s.change_log_labels,
+    );
+}
+
+fn push_edit_inputs(t: &mut TaskStep, s: GitHubReleaseEdit) {
+    t.inputs.insert("tag".to_string(), s.tag);
+    push_opt(t, "target", s.target);
+    push_opt(t, "title", s.title);
+    push_opt(
+        t,
+        "releaseNotesSource",
+        s.release_notes_source.map(|v| v.as_ado_str().to_string()),
+    );
+    push_opt(t, "releaseNotesFilePath", s.release_notes_file_path);
+    push_opt(t, "releaseNotesInline", s.release_notes_inline);
+    push_opt(t, "assets", s.assets);
+    push_opt(
+        t,
+        "assetUploadMode",
+        s.asset_upload_mode.map(|v| v.as_ado_str().to_string()),
+    );
+    push_bool(t, "isDraft", s.is_draft);
+    push_bool(t, "isPreRelease", s.is_pre_release);
+    push_release_tail_inputs(
+        t,
+        s.make_latest,
+        s.add_change_log,
+        s.change_log_compare_to_release,
+        s.change_log_compare_to_release_tag,
+        s.change_log_type,
+        s.change_log_labels,
+    );
+}
+
+/// Inputs shared by the `create` and `edit` actions: latest-marking and changelog.
+fn push_release_tail_inputs(
+    t: &mut TaskStep,
+    make_latest: Option<MakeLatest>,
+    add_change_log: Option<bool>,
+    compare_to_release: Option<ChangeLogCompareToRelease>,
+    compare_to_release_tag: Option<String>,
+    change_log_type: Option<ChangeLogType>,
+    change_log_labels: Option<String>,
+) {
+    push_opt(
+        t,
+        "makeLatest",
+        make_latest.map(|v| v.as_ado_str().to_string()),
+    );
+    push_bool(t, "addChangeLog", add_change_log);
+    push_opt(
+        t,
+        "changeLogCompareToRelease",
+        compare_to_release.map(|v| v.as_ado_str().to_string()),
+    );
+    push_opt(t, "changeLogCompareToReleaseTag", compare_to_release_tag);
+    push_opt(
+        t,
+        "changeLogType",
+        change_log_type.map(|v| v.as_ado_str().to_string()),
+    );
+    push_opt(t, "changeLogLabels", change_log_labels);
 }
 
 #[cfg(test)]
