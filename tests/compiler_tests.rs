@@ -8755,7 +8755,13 @@ fn test_package_feeds_service_connection_wiring() {
     let doc = parse_compiled_yaml(&compiled);
     let agent = serde_yaml::to_string(find_job_mapping(&doc, "Agent").unwrap()).unwrap();
     assert!(agent.contains("AzureCLI@3"));
-    assert!(agent.contains("connectedServiceNameARM: artifacts-reader") || agent.contains("artifacts-reader"));
+    // AzureCLI@3 takes the connection through `azureSubscription`, typed by
+    // `connectionType`. Assert both exact inputs so a mis-wired connection fails.
+    assert!(
+        agent.contains("azureSubscription: artifacts-reader"),
+        "{agent}"
+    );
+    assert!(agent.contains("connectionType: azureRM"), "{agent}");
     assert!(agent.contains("variable=SC_PACKAGES_TOKEN;issecret=true"));
     assert!(agent.contains("ADO_PROXY_PACKAGE_BEARER: $(SC_PACKAGES_TOKEN)"));
     assert!(!agent.contains("System.AccessToken"), "build identity must not be mapped");

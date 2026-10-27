@@ -16,6 +16,7 @@ use std::path::Path;
 
 use regex_lite::Regex;
 
+use super::common::percent_decode_segment as percent_decode;
 use crate::compile::types::FrontMatter;
 
 /// Package-manager config files checked at the repository root. Single-segment
@@ -226,24 +227,6 @@ fn canonical_url_pattern() -> Regex {
     // Same shape as the legacy pattern: scheme optional, path stops at `:`.
     Regex::new(r#"(?i)(?:https?:)?//pkgs\.dev\.azure\.com(/[^\s"'<>:]*)"#)
         .expect("static regex is valid")
-}
-
-/// Decode `%XX` escapes in one path segment. `None` for malformed escapes.
-fn percent_decode(segment: &str) -> Option<String> {
-    let bytes = segment.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let hex = segment.get(index + 1..index + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            index += 3;
-        } else {
-            out.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 /// A feed route parsed from a canonical URL path, mirroring the proxy's
@@ -672,6 +655,14 @@ mod tests {
         for (url, expected) in cases {
             assert_eq!(reasons(&format!("registry={url}\n"), Some(&packages)), vec![expected], "{url}");
         }
+    }
+
+    #[test]
+    fn a_url_with_a_malformed_escape_is_skipped_not_misparsed() {
+        // Never decoded into a bogus feed name and reported as ungranted.
+        let packages = grants(GRANTS);
+        let url = "https://pkgs.dev.azure.com/contoso/Eng/_packaging/w%+eb/npm/registry/";
+        assert!(reasons(&format!("registry={url}\n"), Some(&packages)).is_empty());
     }
 
     #[test]

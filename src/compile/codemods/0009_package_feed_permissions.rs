@@ -16,6 +16,7 @@ use anyhow::{Result, bail};
 use serde_yaml::{Mapping, Sequence, Value};
 
 use super::{Codemod, CodemodContext};
+use crate::compile::common::percent_decode_segment as percent_decode;
 
 const INTRODUCED_IN: &str = "0.54.0";
 
@@ -31,24 +32,6 @@ const RUNTIMES: &[(&str, &str)] = &[("python", "pypi"), ("node", "npm"), ("dotne
 
 fn key(name: &str) -> Value {
     Value::String(name.to_string())
-}
-
-/// Decode `%XX` escapes. Returns `None` for malformed escapes or non-UTF-8.
-fn percent_decode(segment: &str) -> Option<String> {
-    let bytes = segment.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let hex = segment.get(index + 1..index + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            index += 3;
-        } else {
-            out.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 /// A feed parsed from an Azure Artifacts package-source URL.
@@ -461,5 +444,17 @@ mod tests {
         ] {
             assert!(apply_codemod(&mut map(yaml), &ctx()).is_err(), "{yaml}");
         }
+    }
+
+    #[test]
+    fn a_signed_percent_escape_is_invalid_encoding_not_a_decoded_byte() {
+        // `%+a` would decode to `\n` if the decoder trusted from_str_radix.
+        let err = apply_codemod(
+            &mut map("runtimes:\n  node:\n    feed-url: https://pkgs.dev.azure.com/o/_packaging/f%+a/npm/registry/\n"),
+            &ctx(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("invalid encoding"), "{err}");
     }
 }

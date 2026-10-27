@@ -2846,6 +2846,33 @@ pub(crate) fn find_git_root(path: &std::path::Path) -> Option<std::path::PathBuf
     }
 }
 
+/// Decode `%XX` escapes in one URL path segment.
+///
+/// Returns `None` for a malformed escape or a result that is not UTF-8. Both
+/// characters after `%` must be ASCII hex digits: `u8::from_str_radix` alone
+/// also accepts a leading sign, which would decode `%+a` instead of rejecting
+/// it.
+pub(crate) fn percent_decode_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            let hex = std::str::from_utf8(hex).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 // ==================== Permission helpers ====================
 
 /// ADO resource ID for minting ADO-scoped tokens via Azure CLI.
@@ -4485,6 +4512,21 @@ mod tests {
             err.contains("pool.demands requires `pool.name`") && err.contains("default 1ES pool"),
             "err: {err}"
         );
+    }
+
+    #[test]
+    fn percent_decode_segment_requires_two_hex_digits() {
+        assert_eq!(
+            percent_decode_segment("My%20Project").as_deref(),
+            Some("My Project")
+        );
+        assert_eq!(percent_decode_segment("plain").as_deref(), Some("plain"));
+        assert_eq!(percent_decode_segment("%c3%A9").as_deref(), Some("é"));
+        for malformed in ["%+a", "%-1", "%2", "%", "%zz", "a%2"] {
+            assert_eq!(percent_decode_segment(malformed), None, "{malformed}");
+        }
+        // Valid escapes that do not form UTF-8 are rejected too.
+        assert_eq!(percent_decode_segment("%ff"), None);
     }
 
     #[test]

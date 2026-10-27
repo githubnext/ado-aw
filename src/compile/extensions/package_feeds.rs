@@ -335,6 +335,16 @@ mod tests {
         assert!(dotnet.contains("http_proxy=\"$HTTPS_PROXY\""), "{dotnet}");
         assert!(dotnet.contains("HTTP_PROXY=\"$HTTPS_PROXY\""), "{dotnet}");
         assert!(dotnet.contains("SSL_CERT_FILE=\"$CA_BUNDLE_PATH\""), "{dotnet}");
+        // npm trusts an *additional* CA (the engine's alone), and `npm audit`
+        // is a POST the engine refuses, so the wrapper turns it off.
+        let npm = &wrapper[wrapper.find("npm|npx)").unwrap()..];
+        let npm = &npm[..npm.find(";;").unwrap()];
+        assert!(npm.contains("NODE_EXTRA_CA_CERTS=\"$CA_PATH\""), "{npm}");
+        assert!(npm.contains("npm_config_audit=false"), "{npm}");
+        assert!(
+            !npm.contains("CA_BUNDLE_PATH"),
+            "npm must not replace its trust store: {npm}"
+        );
         for forbidden in ["SYSTEM_ACCESSTOKEN", "SC_PACKAGES_TOKEN", "System.AccessToken"] {
             assert!(!wrapper.contains(forbidden), "{forbidden} leaked into wrapper");
         }
