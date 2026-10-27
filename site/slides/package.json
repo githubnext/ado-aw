@@ -10,7 +10,7 @@
     "export": "slidev export --wait 1500 --wait-until networkidle --output dist/ado-aw-intro.pdf"
   },
   "dependencies": {
-    "@slidev/cli": "^52.16.0",
+    "@slidev/cli": "^52.20.1",
     "@slidev/theme-default": "^0.25.0"
   },
   "devDependencies": {
