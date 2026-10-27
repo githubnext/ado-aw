@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.53.0](https://github.com/githubnext/ado-aw/compare/v0.52.1...v0.53.0) (2026-10-06)
+
+
+### Features
+
+* **safe-outputs:** allow model-selected PR reviewers ([#2099](https://github.com/githubnext/ado-aw/issues/2099)) ([1425411](https://github.com/githubnext/ado-aw/commit/1425411bd6a8fa16580e7b98d84da5cb397126a1))
+
+
+### Bug Fixes
+
+* **ado-proxy:** preserve organization in legacy discovery URLs ([#2292](https://github.com/githubnext/ado-aw/issues/2292)) ([a7d6582](https://github.com/githubnext/ado-aw/commit/a7d6582a29bf9e24b4e4427c869c341432e1620f))
+
 ## [0.52.1](https://github.com/githubnext/ado-aw/compare/v0.52.0...v0.52.1) (2026-09-22)
 
 

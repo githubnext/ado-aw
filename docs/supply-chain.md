@@ -66,18 +66,21 @@ differently:
 
 ### Feed (binaries)
 
-The feed mirror uses `NuGetAuthenticate@1` + `DownloadPackage@1`. The effective
-service connection resolves as:
+The feed mirror downloads with `DownloadPackage@1`, which authenticates
+itself with the job's build identity (`$(System.AccessToken)`): grant the
+pipeline's build identity (e.g. `<Project> Build Service`) the **Feed Reader**
+role on the feed.
+
+The Agent and Detection jobs emit **no** `NuGetAuthenticate@1`. That task
+exports `VSS_NUGET_ACCESSTOKEN` as a non-secret job variable, which Azure
+Pipelines maps into every later step's environment and AWF's `--env-all`
+would hand to the agent. Jobs that do not run AWF (SafeOutputs and custom
+safe-output jobs) still emit `NuGetAuthenticate@1` with the effective service
+connection, resolved as:
 
 1. the feed's own `service-connection`, else
 2. the top-level `service-connection`, else
 3. `$(System.AccessToken)` (the build service identity).
-
-For a **same-organization** feed, no service connection is required: grant the
-pipeline's build identity (e.g. `<Project> Build Service`) the **Feed Reader**
-role and `NuGetAuthenticate@1` authenticates automatically via
-`$(System.AccessToken)`. Set a `service-connection` only for cross-org or
-external feeds.
 
 ### Pipeline artifact (binaries)
 
@@ -282,10 +285,10 @@ supply-chain:
 
 ## Network isolation note
 
-The mirror fetches (`NuGetAuthenticate@1`, `DownloadPackage@1`,
-`DownloadPipelineArtifact@2`, `docker pull`, `az acr login`) run as ordinary
-ADO steps on the build agent — **outside** the AWF network-isolation sandbox,
-which wraps only the copilot agent command.
+The mirror fetches (`DownloadPackage@1`, `NuGetAuthenticate@1` in non-AWF
+jobs, `DownloadPipelineArtifact@2`, `docker pull`, `az acr login`) run as
+ordinary ADO steps on the build agent — **outside** the AWF network-isolation
+sandbox, which wraps only the copilot agent command.
 Consequently:
 
 - The feed/registry hosts are **not** added to the agent's AWF

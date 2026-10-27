@@ -21,8 +21,7 @@ use anyhow::{Context, Result};
 
 use super::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
 use crate::compile::agentic_pipeline::{
-    download_candidate_artifact_step, download_package_step, nuget_authenticate_step,
-    stage_candidate_artifact_payload_bash,
+    download_candidate_artifact_step, download_package_step, stage_candidate_artifact_payload_bash,
 };
 use crate::compile::filter_ir::{
     GateContext, Severity, build_gate_step_typed, lower_pipeline_filters, lower_pr_filters,
@@ -621,9 +620,11 @@ pub(crate) fn install_and_download_steps_typed(
     }
 
     if let Some(feed) = supply_chain.and_then(|sc| sc.feed.as_ref()) {
-        let connection = supply_chain.and_then(|sc| sc.feed_connection());
-        let mut auth = nuget_authenticate_step(connection);
-        auth.condition = Some(Condition::Succeeded);
+        // No NuGetAuthenticate@1: this helper also runs in the Agent and
+        // Detection jobs, where the task's non-secret `VSS_NUGET_ACCESSTOKEN`
+        // job variable would reach AWF's `--env-all` passthrough.
+        // DownloadPackage@1 authenticates itself with the job's
+        // SYSTEMVSSCONNECTION token.
         let download_pkg = {
             let mut t = download_package_step(
                 format!("Download ado-aw scripts (v{version})"),
@@ -643,12 +644,7 @@ pub(crate) fn install_and_download_steps_typed(
             .into_step(format!("Stage ado-aw scripts (v{version})"))
             .with_condition(Condition::Succeeded);
         b.timeout = Some(std::time::Duration::from_secs(300));
-        return vec![
-            Step::Task(install),
-            Step::Task(auth),
-            Step::Task(download_pkg),
-            Step::Bash(b),
-        ];
+        return vec![Step::Task(install), Step::Task(download_pkg), Step::Bash(b)];
     }
 
     let download = {

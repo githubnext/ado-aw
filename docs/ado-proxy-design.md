@@ -61,9 +61,11 @@ The protected credential set is:
 
 Those values must never appear in Agent or Detection environment, argv,
 `/proc`, files, mounts, prompts, MCP configuration or payloads, logs, or
-published artifacts. Existing package-feed credentials created by
-`PipAuthenticate`, `npmAuthenticate`, or `NuGetAuthenticate` are a separate,
-explicitly out-of-scope path.
+published artifacts. Package-feed credentials are covered by the same rule:
+the compiler never runs `PipAuthenticate`, `npmAuthenticate`, or
+`NuGetAuthenticate` in a job that starts AWF, because each exports its
+credential as a non-secret job variable or agent-visible file that AWF's
+`--env-all` would forward (see [`docs/runtimes.md`](runtimes.md#package-feed-credentials)).
 
 ## Network contract
 

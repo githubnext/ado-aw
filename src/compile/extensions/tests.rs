@@ -473,9 +473,8 @@ fn test_python_declarations_prepare_steps_with_feed_url() {
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
     let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
-    assert_eq!(steps.len(), 2);
+    assert_eq!(steps.len(), 1, "feed-url must not add an authenticate task");
     assert!(matches!(&steps[0], Step::Task(t) if t.task == "UsePythonVersion@0"));
-    assert!(matches!(&steps[1], Step::Task(t) if t.task == "PipAuthenticate@1"));
 }
 
 #[test]
@@ -624,10 +623,12 @@ fn test_node_declarations_prepare_steps_with_feed_url() {
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
     let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
-    assert_eq!(steps.len(), 3);
+    assert_eq!(
+        steps.len(),
+        1,
+        "feed-url must not add .npmrc or authenticate steps"
+    );
     assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseNode@1"));
-    assert!(matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Ensure .npmrc")));
-    assert!(matches!(&steps[2], Step::Task(t) if t.task == "npmAuthenticate@0"));
 }
 
 #[test]
@@ -813,10 +814,9 @@ fn test_dotnet_declarations_prepare_steps_with_feed_url() {
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
     let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
-    assert_eq!(steps.len(), 3);
+    assert_eq!(steps.len(), 2);
     assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseDotNet@2"));
     assert!(matches!(&steps[1], Step::Bash(b) if b.display_name.contains("Ensure nuget.config")));
-    assert!(matches!(&steps[2], Step::Task(t) if t.task == "NuGetAuthenticate@1"));
 }
 
 #[test]
@@ -829,11 +829,10 @@ fn test_dotnet_declarations_prepare_steps_with_config_only() {
     let fm = minimal_front_matter();
     let ctx = ctx_from(&fm);
     let steps = ext.declarations(&ctx).unwrap().agent_prepare_steps;
-    // config: alone trusts the user-checked-in nuget.config — no shim,
-    // just the auth step.
-    assert_eq!(steps.len(), 2);
+    // config: alone trusts the user-checked-in nuget.config — no shim and no
+    // authenticate task.
+    assert_eq!(steps.len(), 1);
     assert!(matches!(&steps[0], Step::Task(t) if t.task == "UseDotNet@2"));
-    assert!(matches!(&steps[1], Step::Task(t) if t.task == "NuGetAuthenticate@1"));
 }
 
 #[test]

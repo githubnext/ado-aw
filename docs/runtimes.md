@@ -36,7 +36,7 @@ When enabled, the compiler:
 
 ### Python (`python:`)
 
-Python runtime. Auto-installs Python via `UsePythonVersion@0`, emits `PipAuthenticate@1` for internal feed access, adds Python ecosystem domains to the AWF network allowlist, extends the bash command allow-list, and optionally injects feed URL env vars for pip and uv.
+Python runtime. Auto-installs Python via `UsePythonVersion@0`, adds Python ecosystem domains to the AWF network allowlist, extends the bash command allow-list, and optionally injects feed URL env vars for pip and uv.
 
 ```yaml
 # Simple enablement (installs default Python 3.x)
@@ -55,23 +55,20 @@ runtimes:
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Python version to install (e.g., `"3.12"`, `"3.11"`). Passed to `UsePythonVersion@0` `versionSpec`. Defaults to latest 3.x. |
-| `feed-url` | string | Internal PyPI feed URL. Injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment. |
+| `feed-url` | string | PyPI-compatible feed URL. Injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment. Selects the source only — no credential is attached (see [Package-feed credentials](#package-feed-credentials)). |
 | `config` | string | Path to a pip/uv config file. Accepted with a warning — the file will not be available inside the AWF agent environment until proxy-auth support lands. |
 
 When enabled, the compiler:
 - Contributes a `UsePythonVersion@0` task to `Declarations::agent_prepare_steps` (runs before AWF)
-- If `feed-url` is set, also injects `PipAuthenticate@1` to authenticate the ADO build service identity for internal feeds
 - Auto-adds `python`, `python3`, `pip`, `pip3`, `uv` to the bash command allow-list
 - Adds Python ecosystem domains to the network allowlist (pypi.org, pythonhosted.org, etc.)
-- If `feed-url` is set, injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment
+- If `feed-url` is set, injects `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` env vars into the agent environment and warns that the agent holds no feed credential
 - Appends a prompt supplement informing the agent about Python availability
 - No AWF mounts or PATH prepends needed — `UsePythonVersion@0` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
 
-**Note:** `PipAuthenticate@1` is currently emitted with an empty `artifactFeeds` input, which configures credentials for all feeds accessible to the build service identity. If your internal feed requires scoped authentication to a specific Azure Artifacts feed, this may need future refinement.
-
 ### Node.js (`node:`)
 
-Node.js runtime. Auto-installs Node.js via `UseNode@1`, emits `npmAuthenticate@0` for internal feed access, adds Node ecosystem domains to the AWF network allowlist, extends the bash command allow-list, and optionally injects feed URL env vars for npm.
+Node.js runtime. Auto-installs Node.js via `UseNode@1`, adds Node ecosystem domains to the AWF network allowlist, extends the bash command allow-list, and optionally injects feed URL env vars for npm.
 
 ```yaml
 # Simple enablement (installs default Node LTS)
@@ -90,21 +87,20 @@ runtimes:
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Node.js version to install (e.g., `"22.x"`, `"20.x"`). Passed to `UseNode@1` `version`. Defaults to `"22.x"`. |
-| `feed-url` | string | Internal npm registry URL. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. |
+| `feed-url` | string | npm registry URL. Injects `NPM_CONFIG_REGISTRY` env var into the agent environment. Selects the source only — no credential is attached (see [Package-feed credentials](#package-feed-credentials)). |
 | `config` | string | Path to an .npmrc config file. Accepted with a warning — the file will not be available inside the AWF agent environment until proxy-auth support lands. |
 
 When enabled, the compiler:
 - Contributes a `UseNode@1` task to `Declarations::agent_prepare_steps` (runs before AWF)
-- If `feed-url` or `config` is set, also injects `npmAuthenticate@0` (and an ensure-`.npmrc` step) to authenticate the ADO build service identity for internal feeds
 - Auto-adds `node`, `npm`, `npx` to the bash command allow-list
 - Adds Node ecosystem domains to the network allowlist (npmjs.org, nodejs.org, etc.)
-- If `feed-url` is set, injects `NPM_CONFIG_REGISTRY` env var into the agent environment
+- If `feed-url` is set, injects `NPM_CONFIG_REGISTRY` env var into the agent environment and warns that the agent holds no feed credential
 - Appends a prompt supplement informing the agent about Node.js availability
 - No AWF mounts or PATH prepends needed — `UseNode@1` installs to `/opt/hostedtoolcache` (auto-mounted by AWF) and publishes PATH entries that AWF merges via `$GITHUB_PATH`
 - Note: AWF overlays `~/.npmrc` with `/dev/null` for credential security — the `NPM_CONFIG_REGISTRY` env var approach avoids conflicting with this overlay
 
 ### .NET (`dotnet:`)
-.NET runtime. Auto-installs the .NET SDK via `UseDotNet@2`, emits `NuGetAuthenticate@1` for internal feed access, adds .NET ecosystem domains to the AWF network allowlist, and extends the bash command allow-list with `dotnet`.
+.NET runtime. Auto-installs the .NET SDK via `UseDotNet@2`, adds .NET ecosystem domains to the AWF network allowlist, and extends the bash command allow-list with `dotnet`.
 
 ```yaml
 # Simple enablement (installs default .NET SDK, currently 8.0.x)
@@ -134,8 +130,8 @@ runtimes:
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | .NET SDK version to install (e.g., `"8.0.x"`, `"9.0.x"`). Passed to `UseDotNet@2` `version` with `packageType: 'sdk'`. Defaults to `"8.0.x"`. The special value `"global.json"` (case-insensitive) emits `useGlobalJson: true` instead, which discovers and installs every SDK referenced by `global.json` files in the workspace. |
-| `feed-url` | string | Internal NuGet feed URL (typically the v3 `index.json` of an Azure Artifacts feed). When set, the compiler creates a minimal `nuget.config` if none exists and runs `NuGetAuthenticate@1`. |
-| `config` | string | Path to a checked-in `nuget.config` in the repo. When set, the compiler runs `NuGetAuthenticate@1` (which auto-discovers `nuget.config` files in the workspace). Mutually exclusive with `feed-url`. |
+| `feed-url` | string | NuGet feed URL (typically the v3 `index.json` of an Azure Artifacts feed). When set, the compiler creates a minimal `nuget.config` if none exists. Selects the source only — no credential is attached (see [Package-feed credentials](#package-feed-credentials)). |
+| `config` | string | Path to a checked-in `nuget.config` in the repo. Mutually exclusive with `feed-url`. Sources that require authentication still reject the agent's requests. |
 
 **`global.json` precedence.** A `global.json` file in the repo is the canonical
 way to pin the .NET SDK. The compiler enforces a single source of truth:
@@ -153,8 +149,8 @@ way to pin the .NET SDK. The compiler enforces a single source of truth:
 
 When enabled, the compiler:
 - Contributes a `UseDotNet@2` task to `Declarations::agent_prepare_steps` (runs before AWF)
-- If `feed-url` is set, injects an ensure-`nuget.config` step (writes a minimal `nuget.config` referencing the feed only when one doesn't already exist) and `NuGetAuthenticate@1`
-- If `config` is set (and `feed-url` is not), injects `NuGetAuthenticate@1` only — the user-checked-in `nuget.config` is assumed to be present in the workspace
+- If `feed-url` is set, injects an ensure-`nuget.config` step (writes a minimal `nuget.config` referencing the feed only when one doesn't already exist)
+- If `feed-url` or `config` is set, warns that the agent holds no feed credential
 - Auto-adds `dotnet` to the bash command allow-list
 - Adds .NET ecosystem domains to the network allowlist (nuget.org, dotnet.microsoft.com, pkgs.dev.azure.com, etc.)
 - Appends a prompt supplement informing the agent about .NET availability
@@ -162,8 +158,32 @@ When enabled, the compiler:
 
 **Differences from the Python and Node runtimes** (called out for clarity, since this runtime intentionally diverges):
 - **No agent env var is injected for `feed-url`.** Unlike `pip` (`PIP_INDEX_URL`) and `npm` (`NPM_CONFIG_REGISTRY`), NuGet has no first-class environment-variable equivalent for selecting a package source. Feed configuration always goes through a `nuget.config` file.
-- **`config:` is functional, not a deferred warning.** AWF only overlays files in `$HOME` (e.g., `~/.npmrc` → `/dev/null`); workspace files such as `nuget.config` are preserved inside the agent sandbox, so a checked-in `nuget.config` works today.
-- **`NuGetAuthenticate@1` requires no `workingFile:` input.** It auto-discovers `nuget.config` files anywhere in the workspace, unlike `npmAuthenticate@0` which needs an explicit path.
+- **`config:` is visible to the agent.** AWF only overlays files in `$HOME` (e.g., `~/.npmrc` → `/dev/null`); workspace files such as `nuget.config` are preserved inside the agent sandbox, so a checked-in `nuget.config` selects sources today.
+
+### Package-feed credentials
+
+The compiler never emits `PipAuthenticate`, `npmAuthenticate`, or
+`NuGetAuthenticate` in a job that runs the AWF sandbox. These tasks must
+export their credential as a **non-secret** job variable or write it to a
+file so their client tools can read it — `PIP_EXTRA_INDEX_URL` with an
+embedded token, `VSS_NUGET_ACCESSTOKEN`, or `_authToken` lines appended to
+the workspace `.npmrc`. Azure Pipelines maps non-secret variables into every
+later step's environment, and AWF starts the agent with `--env-all`, so any
+of them would hand the job's build-identity token to the agent.
+
+Consequences:
+
+- `feed-url` and `config` select the package source but carry no credential.
+  Anonymous feeds work; feeds that require authentication (including Azure
+  Artifacts) reject the agent's requests, and the compiler warns.
+- `steps:` and `safe-outputs.threat-detection.steps` — operator steps that
+  run before AWF in the same job — may not use `NuGetAuthenticate`,
+  `npmAuthenticate`, `PipAuthenticate`, `TwineAuthenticate`,
+  `CargoAuthenticate`, or `MavenAuthenticate`; compilation fails. `setup:`,
+  `post-steps:`, and `teardown:` are unaffected.
+- Both AWF invocations exclude `VSS_NUGET_ACCESSTOKEN`,
+  `VSS_NUGET_EXTERNAL_FEED_ENDPOINTS`, `PIP_EXTRA_INDEX_URL`, and
+  `CARGO_REGISTRY_TOKEN` from `--env-all` as defense in depth.
 
 ### Combining Runtimes
 

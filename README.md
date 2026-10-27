@@ -485,9 +485,9 @@ runtimes:
 
 | Runtime | Install mechanism | Notes |
 |---------|-------------------|-------|
-| `python` | `UsePythonVersion@0` (+ `PipAuthenticate@1` if `feed-url` is set) | Adds `python`, `pip`, `uv` to the bash allow-list |
-| `node` | `UseNode@1` (+ `npmAuthenticate@0` if `feed-url`/`config` is set) | Adds `node`, `npm`, `npx` to the bash allow-list |
-| `dotnet` | `UseDotNet@2` (+ `NuGetAuthenticate@1` if `feed-url`/`config` is set) | Adds `dotnet`; `version: "global.json"` auto-discovers SDKs from repo `global.json` files |
+| `python` | `UsePythonVersion@0` | Adds `python`, `pip`, `uv` to the bash allow-list; `feed-url` selects the index without a credential |
+| `node` | `UseNode@1` | Adds `node`, `npm`, `npx` to the bash allow-list; `feed-url` selects the registry without a credential |
+| `dotnet` | `UseDotNet@2` | Adds `dotnet`; `version: "global.json"` auto-discovers SDKs from repo `global.json` files; `feed-url` writes a credential-free `nuget.config` |
 | `lean` | elan toolchain install | Adds `lean`, `lake`, `elan`; auto-pins to a repo `lean-toolchain` file if present |
 
 Each runtime can be enabled with a bare `true` for defaults, or an object for

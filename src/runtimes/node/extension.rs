@@ -2,46 +2,19 @@
 
 use super::{NODE_BASH_COMMANDS, NodeRuntimeConfig};
 use crate::compile::extensions::{CompileContext, CompilerExtension, Declarations, ExtensionPhase};
-use crate::compile::ir::step::{BashStep, Step, TaskStep};
-use crate::compile::ir::tasks::npm_authenticate::NpmAuthenticate;
+use crate::compile::ir::step::{Step, TaskStep};
 use crate::compile::ir::tasks::use_node::UseNode;
-use crate::compile::shell::ShellScript;
-use crate::shell_script;
 use crate::validate;
 use anyhow::Result;
-
-shell_script! {
-    /// Ensure a workspace-level `.npmrc` exists before `npmAuthenticate@0`
-    /// runs.
-    ///
-    /// `npmAuthenticate@0` requires its `workingFile:` to point at an
-    /// existing file, so a repo without a checked-in `.npmrc` would fail
-    /// the auth step. This script leaves any existing `.npmrc` untouched
-    /// and creates a minimal one otherwise, pointing at the configured
-    /// registry (or public npmjs when nothing is configured).
-    ENSURE_NPMRC {
-        interpreter: Bash,
-        bindings: [REGISTRY],
-        externals: [],
-        fragments: [],
-        body: r#"
-set -eo pipefail
-if [ ! -f .npmrc ]; then
-  echo "registry=$REGISTRY" > .npmrc
-  echo "Created .npmrc with registry=$REGISTRY"
-else
-  echo '.npmrc already exists, skipping creation'
-fi
-"#,
-    }
-}
 
 /// Node.js runtime extension.
 ///
 /// Injects: ecosystem network hosts (node), bash commands (node, npm, npx),
-/// install steps (UseNode@1), authenticate steps (npmAuthenticate@0),
-/// env vars (NPM_CONFIG_REGISTRY when feed-url is set), and a prompt
-/// supplement.
+/// install steps (UseNode@1), env vars (NPM_CONFIG_REGISTRY when feed-url is
+/// set), and a prompt supplement.
+///
+/// No `npmAuthenticate@0`: it appends the job's token to the workspace
+/// `.npmrc`, which the agent can read.
 pub struct NodeExtension {
     config: NodeRuntimeConfig,
 }
@@ -61,15 +34,9 @@ impl CompilerExtension for NodeExtension {
         ExtensionPhase::Runtime
     }
 
-    /// Typed-IR view. Returns:
-    ///
-    /// * a [`Step::Task`] for `UseNode@1`,
-    /// * (optionally, when `feed-url:` or `config:` is set):
-    ///   a [`Step::Bash`] that creates a minimal `.npmrc` if missing,
-    ///   then a [`Step::Task`] for `npmAuthenticate@0`.
-    ///
-    /// All other declarations (hosts, bash commands, env vars, prompt
-    /// supplement) flow through the typed bundle as well.
+    /// Typed-IR view. Returns a [`Step::Task`] for `UseNode@1`; all other
+    /// declarations (hosts, bash commands, env vars, prompt supplement) flow
+    /// through the typed bundle as well.
     fn declarations(&self, ctx: &CompileContext) -> Result<Declarations> {
         let mut warnings = Vec::new();
 
@@ -116,13 +83,13 @@ impl CompilerExtension for NodeExtension {
         if let Some(version) = self.config.version() {
             validate::reject_pipeline_injection(version, "runtimes.node.version")?;
         }
-
-        let mut agent_prepare_steps: Vec<Step> = Vec::with_capacity(3);
-        agent_prepare_steps.push(Step::Task(node_install_task_step(&self.config)));
-        if self.config.feed_url().is_some() || self.config.config().is_some() {
-            agent_prepare_steps.push(Step::Bash(ensure_npmrc_bash_step(&self.config)));
-            agent_prepare_steps.push(Step::Task(npm_authenticate_task_step()));
+        if self.config.feed_url().is_some() {
+            warnings.push(crate::runtimes::unauthenticated_feed_warning(
+                "runtimes.node.feed-url",
+            ));
         }
+
+        let agent_prepare_steps = vec![Step::Task(node_install_task_step(&self.config))];
         let mut agent_env_vars = Vec::new();
         if let Some(feed_url) = self.config.feed_url() {
             agent_env_vars.push(("NPM_CONFIG_REGISTRY".to_string(), feed_url.to_string()));
@@ -156,24 +123,6 @@ Node.js is installed and available. Use `node` to run scripts, \
 fn node_install_task_step(config: &NodeRuntimeConfig) -> TaskStep {
     let version = config.version().unwrap_or("22.x");
     UseNode::new(version).into_step()
-}
-
-/// Build the typed [`TaskStep`] for npm authentication.
-fn npm_authenticate_task_step() -> TaskStep {
-    NpmAuthenticate::new(".npmrc")
-        .with_display_name("Authenticate npm (build service identity)")
-        .into_step()
-}
-
-/// Build the typed [`BashStep`] that ensures `.npmrc`. The script
-/// preserves the legacy semantics: leave any repo-checked-in `.npmrc`
-/// untouched; otherwise create a minimal one pointing at the
-/// configured feed (or the default npmjs registry).
-fn ensure_npmrc_bash_step(config: &NodeRuntimeConfig) -> BashStep {
-    let registry = config.feed_url().unwrap_or("https://registry.npmjs.org/");
-    ShellScript::new(&ENSURE_NPMRC)
-        .bind_text("REGISTRY", registry)
-        .into_step("Ensure .npmrc exists")
 }
 
 #[cfg(test)]
@@ -271,11 +220,12 @@ mod tests {
         assert!(decl.agent_env_vars.is_empty());
     }
 
-    /// With `feed-url:` set, three steps surface in order:
-    /// `UseNode@1` → `Ensure .npmrc exists` → `npmAuthenticate@0`,
-    /// and `NPM_CONFIG_REGISTRY` flows into agent env vars.
+    /// With `feed-url:` set, only `UseNode@1` is emitted — no workspace
+    /// `.npmrc` and no `npmAuthenticate@0`, whose token-bearing `.npmrc`
+    /// would be readable by the agent. `NPM_CONFIG_REGISTRY` still selects
+    /// the source, and the author is warned that the agent holds no credential.
     #[test]
-    fn declarations_with_feed_url_appends_npmrc_and_auth() {
+    fn declarations_feed_url_selects_registry_without_authenticate_task() {
         let (fm, _) = parse_markdown(
             "---\nname: t\ndescription: x\nruntimes:\n  node:\n    feed-url: 'https://pkgs.dev.azure.com/org/project/_packaging/feed/npm/registry/'\n---\n",
         )
@@ -283,28 +233,13 @@ mod tests {
         let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
         let ext = NodeExtension::new(node.clone());
         let decl = ext.declarations(&ctx_from(&fm)).unwrap();
-        assert_eq!(decl.agent_prepare_steps.len(), 3);
-        match &decl.agent_prepare_steps[1] {
-            Step::Bash(b) => {
-                assert_eq!(b.display_name, "Ensure .npmrc exists");
-                assert!(
-                    b.script.contains("pkgs.dev.azure.com"),
-                    "expected configured feed URL in script: {}",
-                    b.script
-                );
-            }
-            other => panic!("expected Step::Bash for ensure-npmrc, got {other:?}"),
-        }
-        match &decl.agent_prepare_steps[2] {
-            Step::Task(t) => {
-                assert_eq!(t.task, "npmAuthenticate@0");
-                assert_eq!(
-                    t.inputs.get("workingFile").map(String::as_str),
-                    Some(".npmrc")
-                );
-            }
-            other => panic!("expected Step::Task for npmAuthenticate@0, got {other:?}"),
-        }
+        assert_eq!(decl.agent_prepare_steps.len(), 1);
+        assert!(matches!(&decl.agent_prepare_steps[0], Step::Task(t) if t.task == "UseNode@1"));
+        assert!(
+            decl.warnings
+                .iter()
+                .any(|w| w.contains("no feed credential"))
+        );
         let keys: Vec<&str> = decl
             .agent_env_vars
             .iter()
