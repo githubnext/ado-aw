@@ -154,3 +154,5 @@
 {"id":"findings_concrete","question":"Does the agent output describe specific security concerns tied to the pull request diff rather than generic security advice?","answer":"YES","model":"evals","timestamp":"2026-10-16T20:37:13.554Z","runid":"38963047923"}
 {"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"evals","timestamp":"2026-10-16T21:32:53.122Z","runid":"38969528506"}
 {"id":"findings_concrete","question":"Does the agent output describe specific security concerns tied to the pull request diff rather than generic security advice?","answer":"YES","model":"evals","timestamp":"2026-10-16T21:32:53.122Z","runid":"38969528506"}
+{"id":"review_submitted","question":"Did the agent submit a pull request review?","answer":"YES","model":"evals","timestamp":"2026-10-27T18:43:30.607Z","runid":"40561739404"}
+{"id":"findings_concrete","question":"Does the agent output describe specific security concerns tied to the pull request diff rather than generic security advice?","answer":"NO","model":"evals","timestamp":"2026-10-27T18:43:30.607Z","runid":"40561739404"}
