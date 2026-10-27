@@ -52,6 +52,42 @@ impl DecisionKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DecisionFamily {
+    Rest,
+    Packages,
+}
+
+impl DecisionFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rest => "rest",
+            Self::Packages => "packages",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PackageProtocolName {
+    Npm,
+    Pypi,
+    Nuget,
+    Cargo,
+}
+
+impl PackageProtocolName {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Npm => "npm",
+            Self::Pypi => "pypi",
+            Self::Nuget => "nuget",
+            Self::Cargo => "cargo",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecisionRecord {
@@ -68,6 +104,11 @@ struct DecisionRecord {
     response_bytes: Option<u64>,
     #[serde(default)]
     stripped_credentials: Vec<String>,
+    /// Request family. Absent on records from engines that predate the
+    /// package family, which only ever served REST.
+    family: Option<DecisionFamily>,
+    /// Package protocol, for `packages` records.
+    protocol: Option<PackageProtocolName>,
 }
 
 #[derive(Debug, Default)]
@@ -149,6 +190,8 @@ struct DecisionAccumulator {
     latency: LatencyAccumulator,
     response_bytes: u64,
     stripped_credentials: BTreeMap<String, u64>,
+    families: BTreeMap<String, u64>,
+    package_protocols: BTreeMap<String, u64>,
     recent_problem_events: VecDeque<AdoProxyEventSummary>,
 }
 
@@ -159,6 +202,15 @@ impl DecisionAccumulator {
             DecisionKind::Allow => self.allow_count += 1,
             DecisionKind::Deny => self.deny_count += 1,
             DecisionKind::Error => self.error_count += 1,
+        }
+
+        let family = record.family.unwrap_or(DecisionFamily::Rest);
+        *self.families.entry(family.as_str().to_string()).or_default() += 1;
+        if let Some(protocol) = record.protocol {
+            *self
+                .package_protocols
+                .entry(protocol.as_str().to_string())
+                .or_default() += 1;
         }
 
         self.operations
@@ -224,6 +276,8 @@ impl DecisionAccumulator {
         analysis.latency = self.latency.finish();
         analysis.response_bytes = self.response_bytes;
         analysis.stripped_credentials = self.stripped_credentials;
+        analysis.families = self.families;
+        analysis.package_protocols = self.package_protocols;
         analysis.recent_problem_events = self.recent_problem_events.into_iter().collect();
 
         analysis.operations = self
@@ -587,6 +641,41 @@ mod tests {
         );
         assert_eq!(analysis.recent_problem_events.len(), 2);
         assert!(result.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rolls_up_request_families_and_package_protocols() {
+        let temp = TempDir::new().unwrap();
+        let contents = format!(
+            "{}{}{}{}",
+            header(),
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"request_id\":\"1\",\"host\":\"dev.azure.com\",\"method\":\"GET\",\"decision\":\"allow\",\"stripped_credentials\":[]}\n",
+            "{\"ts\":\"2026-01-01T00:00:01Z\",\"request_id\":\"2\",\"host\":\"pkgs.dev.azure.com\",\"method\":\"GET\",\"decision\":\"allow\",\"family\":\"packages\",\"protocol\":\"npm\",\"stripped_credentials\":[]}\n",
+            "{\"ts\":\"2026-01-01T00:00:02Z\",\"request_id\":\"3\",\"host\":\"pkgs.dev.azure.com\",\"method\":\"PUT\",\"decision\":\"deny\",\"reason\":\"method-not-read\",\"family\":\"packages\",\"stripped_credentials\":[]}\n",
+        );
+        write(temp.path(), DECISION_LOG_FILE, &contents).await;
+
+        let result = analyze_ado_proxy_logs(temp.path()).await.unwrap();
+        let analysis = result.analysis.unwrap();
+        assert_eq!(analysis.families["rest"], 1);
+        assert_eq!(analysis.families["packages"], 2);
+        assert_eq!(analysis.package_protocols["npm"], 1);
+        assert_eq!(analysis.malformed_record_count, 0);
+
+        // An unknown family is malformed rather than silently counted.
+        let temp = TempDir::new().unwrap();
+        let contents = format!(
+            "{}{}",
+            header(),
+            "{\"ts\":\"t\",\"request_id\":\"1\",\"host\":\"h\",\"method\":\"GET\",\"decision\":\"allow\",\"family\":\"other\",\"stripped_credentials\":[]}\n",
+        );
+        write(temp.path(), DECISION_LOG_FILE, &contents).await;
+        let analysis = analyze_ado_proxy_logs(temp.path())
+            .await
+            .unwrap()
+            .analysis
+            .unwrap();
+        assert_eq!(analysis.malformed_record_count, 1);
     }
 
     #[tokio::test]

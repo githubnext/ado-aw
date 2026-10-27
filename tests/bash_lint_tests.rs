@@ -86,6 +86,7 @@ const FIXTURES: &[&str] = &[
     "github-app-token-agent.md",
     "custom-safe-output-bash-coverage.md",
     "pipeline-artifact-agent.md",
+    "package-feeds-agent.md",
 ];
 
 /// Step display names that the lint expects to find at least once across all
@@ -105,6 +106,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Install Lean 4 (elan)",         // src/runtimes/lean/mod.rs
     "Append Lean 4 prompt",          // src/runtimes/lean/extension.rs
     "Ensure nuget.config exists",    // src/runtimes/dotnet/mod.rs
+    "Install package-manager wrappers (ado-proxy)", // src/compile/extensions/package_feeds.rs
     "Restore previous agent memory", // src/tools/cache_memory/extension.rs
     "Initialize empty agent memory (clearMemory=true)",
     "Append Python prompt",      // src/runtimes/python/extension.rs

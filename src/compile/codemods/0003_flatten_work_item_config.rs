@@ -121,6 +121,7 @@ mod tests {
         CodemodContext {
             compiler_version: "0.37.0",
             source_compiler_version: None,
+            warnings: Default::default(),
         }
     }
 

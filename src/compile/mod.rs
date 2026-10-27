@@ -26,6 +26,7 @@ mod job_ir;
 pub(crate) mod mcpg;
 mod onees;
 mod onees_ir;
+pub(crate) mod package_config_check;
 mod path_layout_check;
 pub(crate) mod pr_filters;
 pub mod shell;
@@ -237,6 +238,12 @@ async fn compile_pipeline_inner(
         eprintln!("Warning: {warning}");
     }
 
+    // Committed package-manager config that names the legacy Azure Artifacts
+    // host bypasses the package proxy and fails with 401 (warning-only).
+    for warning in package_config_check::collect_warnings(&front_matter, input_path) {
+        eprintln!("Warning: {warning}");
+    }
+
     // Reject engine-specific config on the wrong engine before anything else
     // consumes it (gh-aw pattern: engine-gated config is a hard error, not a
     // silent no-op). Runs before target dispatch / `get_engine`, so the author
@@ -436,6 +443,9 @@ async fn perform_source_rewrite_if_needed(
     eprintln!("warning: applied codemods to {}:", input_path.display());
     for applied in &report.applied {
         eprintln!("  - {}: {}", applied.id, applied.summary);
+    }
+    for note in &report.warnings {
+        eprintln!("warning: {note}");
     }
     eprintln!(
         "note: front-matter comments are not preserved when codemods rewrite the source. \

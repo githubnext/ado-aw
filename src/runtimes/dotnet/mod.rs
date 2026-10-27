@@ -96,6 +96,22 @@ impl DotnetRuntimeConfig {
             DotnetRuntimeConfig::WithOptions(opts) => opts.config.as_deref(),
         }
     }
+
+    /// Handle of the `permissions.packages` feed used as the NuGet source.
+    pub fn feed(&self) -> Option<&str> {
+        match self {
+            DotnetRuntimeConfig::Enabled(_) => None,
+            DotnetRuntimeConfig::WithOptions(opts) => opts.feed.as_deref(),
+        }
+    }
+
+    /// Whether public NuGet hosts stay on the AWF allowlist.
+    pub fn public_registry(&self) -> crate::runtimes::PublicRegistry {
+        match self {
+            DotnetRuntimeConfig::Enabled(_) => crate::runtimes::PublicRegistry::default(),
+            DotnetRuntimeConfig::WithOptions(opts) => opts.public_registry,
+        }
+    }
 }
 
 impl SanitizeConfigTrait for DotnetRuntimeConfig {
@@ -143,6 +159,19 @@ pub struct DotnetOptions {
     /// Mutually exclusive with `feed-url`.
     #[serde(default)]
     pub config: Option<String>,
+
+    /// Handle of a `permissions.packages` feed (granting `nuget`) to use as
+    /// the package source. The agent reaches it through the
+    /// credential-isolated package proxy. Mutually exclusive with `feed-url`
+    /// and `config`.
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub feed: Option<crate::secure::AdoFeedName>,
+
+    /// `block` removes public NuGet hosts from the AWF allowlist.
+    #[serde(default, rename = "public-registry")]
+    #[sanitize_config(skip)]
+    pub public_registry: crate::runtimes::PublicRegistry,
 }
 
 /// Bash commands that the .NET runtime adds to the allow-list.

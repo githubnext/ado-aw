@@ -466,7 +466,7 @@ fn test_python_declarations_prepare_steps() {
 #[test]
 fn test_python_declarations_prepare_steps_with_feed_url() {
     let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    feed-url: 'https://packages.example.test/org/_packaging/feed/pypi/simple/'\n---\n",
     ).unwrap();
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
@@ -488,7 +488,7 @@ fn test_python_agent_env_vars_no_feed() {
 #[test]
 fn test_python_agent_env_vars_with_feed() {
     let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '3.12'\n    feed-url: 'https://pkgs.dev.azure.com/org/_packaging/feed/pypi/simple/'\n---\n",
+        "---\nname: test\ndescription: test\nruntimes:\n  python:\n    version: '3.12'\n    feed-url: 'https://packages.example.test/org/_packaging/feed/pypi/simple/'\n---\n",
     ).unwrap();
     let python = fm.runtimes.as_ref().unwrap().python.as_ref().unwrap();
     let ext = crate::runtimes::python::PythonExtension::new(python.clone());
@@ -616,7 +616,7 @@ fn test_node_declarations_prepare_steps() {
 #[test]
 fn test_node_declarations_prepare_steps_with_feed_url() {
     let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    feed-url: 'https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/'\n---\n",
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    feed-url: 'https://packages.example.test/ORG/PROJECT/_packaging/FEED/npm/registry/'\n---\n",
     ).unwrap();
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
@@ -642,7 +642,7 @@ fn test_node_agent_env_vars_no_feed() {
 #[test]
 fn test_node_agent_env_vars_with_feed() {
     let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n    feed-url: 'https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/'\n---\n",
+        "---\nname: test\ndescription: test\nruntimes:\n  node:\n    version: '22.x'\n    feed-url: 'https://packages.example.test/ORG/PROJECT/_packaging/FEED/npm/registry/'\n---\n",
     ).unwrap();
     let node = fm.runtimes.as_ref().unwrap().node.as_ref().unwrap();
     let ext = crate::runtimes::node::NodeExtension::new(node.clone());
@@ -807,7 +807,7 @@ fn test_dotnet_declarations_prepare_steps() {
 #[test]
 fn test_dotnet_declarations_prepare_steps_with_feed_url() {
     let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    feed-url: 'https://packages.example.test/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
     ).unwrap();
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());
@@ -849,7 +849,7 @@ fn test_dotnet_agent_env_vars_with_feed() {
     // does NOT inject any env var for feed configuration — it relies on
     // nuget.config files. This test pins that contract.
     let (fm, _) = parse_markdown(
-        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '8.0.x'\n    feed-url: 'https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
+        "---\nname: test\ndescription: test\nruntimes:\n  dotnet:\n    version: '8.0.x'\n    feed-url: 'https://packages.example.test/myorg/_packaging/myfeed/nuget/v3/index.json'\n---\n",
     ).unwrap();
     let dotnet = fm.runtimes.as_ref().unwrap().dotnet.as_ref().unwrap();
     let ext = crate::runtimes::dotnet::DotnetExtension::new(dotnet.clone());

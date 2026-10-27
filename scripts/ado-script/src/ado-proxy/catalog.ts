@@ -16,6 +16,7 @@ import type {
   Capability,
   Catalog,
   Operation,
+  PackageProtocolRoute,
 } from "../shared/ado-proxy-catalog.types.gen.js";
 
 /** The committed catalog snapshot. */
@@ -96,6 +97,34 @@ export function isProtectedHost(host: string): boolean {
     (protectedHost) => canonicalizeHost(protectedHost) === normalized,
   );
 }
+
+/**
+ * Hosts of the package-feed family.
+ *
+ * Unlike {@link PROTECTED_HOSTS} these are intercepted **only** when the policy
+ * carries a `packages` section. Without one, package traffic keeps its
+ * historical behaviour — byte-tunnelled to Squid untouched — so a workflow that
+ * never asked for feed access is not suddenly routed through a policy path it
+ * has no grants for.
+ */
+export const PACKAGE_HOSTS: readonly string[] = CATALOG.package_hosts;
+
+/** Per-protocol package request contracts (path prefixes, methods, auth). */
+export const PACKAGE_PROTOCOLS: readonly PackageProtocolRoute[] =
+  CATALOG.package_protocols;
+
+/**
+ * Host suffixes an upstream package redirect may point at.
+ *
+ * Azure Artifacts serves package content from blob storage via a redirect to a
+ * short-lived signed URL. Only these suffixes may appear in a relayed
+ * `Location`; anything else is replaced with a denial.
+ */
+export const PACKAGE_REDIRECT_HOST_SUFFIXES: readonly string[] =
+  CATALOG.package_redirect_host_suffixes;
+
+/** Largest package response body streamed through the proxy, in bytes. */
+export const PACKAGE_RESPONSE_LIMIT: number = CATALOG.package_response_limit;
 
 /** Inclusive `[major, minor]` bounds of the accepted REST API version. */
 export const API_VERSION_MIN: readonly [number, number] = CATALOG.api_version_min;

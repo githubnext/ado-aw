@@ -15,6 +15,11 @@ import {
   isProtectedHost,
   OPERATIONS,
   operationsFor,
+  PACKAGE_HOSTS,
+  PACKAGE_PROTOCOLS,
+  PACKAGE_REDIRECT_HOST_SUFFIXES,
+  PACKAGE_RESPONSE_LIMIT,
+  PROTECTED_HOSTS,
 } from "./catalog.js";
 
 describe("isProtectedHost", () => {
@@ -95,7 +100,7 @@ describe("operationsFor", () => {
 
 describe("catalog surface", () => {
   it("exposes the schema version the policy document pins against", () => {
-    expect(CATALOG_SCHEMA_VERSION).toBe("ado-aw/ado-proxy-catalog/v1");
+    expect(CATALOG_SCHEMA_VERSION).toBe("ado-aw/ado-proxy-catalog/v2");
   });
 
   it("catalogues only read-shaped methods", () => {
@@ -111,5 +116,40 @@ describe("catalog surface", () => {
 
   it("exposes an ordered API-version window", () => {
     expect(API_VERSION_MIN[0]).toBeLessThanOrEqual(API_VERSION_MAX[0]);
+  });
+});
+
+describe("package family surface", () => {
+  it("keeps package hosts out of the always-protected REST set", () => {
+    // Package hosts are intercepted only when the policy asks for it; being in
+    // PROTECTED_HOSTS would intercept them for every workflow.
+    for (const host of PACKAGE_HOSTS) {
+      expect(PROTECTED_HOSTS).not.toContain(host);
+      expect(isProtectedHost(host)).toBe(false);
+    }
+    expect(PACKAGE_HOSTS).toContain("pkgs.dev.azure.com");
+  });
+
+  it("catalogues only read methods for every package protocol", () => {
+    for (const route of PACKAGE_PROTOCOLS) {
+      expect(route.methods.every((method) => method === "GET" || method === "HEAD")).toBe(true);
+      expect(route.path_prefixes.length).toBeGreaterThan(0);
+      for (const prefix of route.path_prefixes) {
+        expect(prefix).toBe(prefix.toLowerCase());
+        expect(prefix.endsWith("/")).toBe(true);
+      }
+    }
+  });
+
+  it("allows an encoded slash only for npm", () => {
+    const allowing = PACKAGE_PROTOCOLS.filter((route) => route.allow_encoded_slash);
+    expect(allowing.map((route) => route.protocol)).toEqual(["npm"]);
+  });
+
+  it("anchors every redirect suffix at a label boundary", () => {
+    for (const suffix of PACKAGE_REDIRECT_HOST_SUFFIXES) {
+      expect(suffix.startsWith(".")).toBe(true);
+    }
+    expect(PACKAGE_RESPONSE_LIMIT).toBe(512 * 1024 * 1024);
   });
 });

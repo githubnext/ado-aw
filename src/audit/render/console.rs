@@ -378,6 +378,30 @@ fn push_ado_proxy_stats_lines(lines: &mut Vec<String>, analysis: &model::AdoProx
                 .join(", ")
         ));
     }
+    // Only worth a line once package traffic is present; a REST-only run
+    // would just restate the total.
+    if analysis.families.contains_key("packages") {
+        lines.push(format!(
+            "- request families: {}",
+            analysis
+                .families
+                .iter()
+                .map(|(family, count)| format!("{family}={}", format_number(*count)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !analysis.package_protocols.is_empty() {
+        lines.push(format!(
+            "- package protocols: {}",
+            analysis
+                .package_protocols
+                .iter()
+                .map(|(protocol, count)| format!("{protocol}={}", format_number(*count)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
 }
 
 /// Pushes the per-operation request/allow/deny/error breakdown, if any operations were seen.

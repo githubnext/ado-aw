@@ -810,6 +810,12 @@ pub struct AdoProxyAnalysis {
     /// Client credential-header names stripped by the proxy.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stripped_credentials: BTreeMap<String, u64>,
+    /// Request counts per family (`rest`, `packages`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub families: BTreeMap<String, u64>,
+    /// Package-family request counts per protocol (`npm`, `pypi`, ...).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub package_protocols: BTreeMap<String, u64>,
     /// Decision records rejected as malformed or schema-incompatible.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub malformed_record_count: u64,

@@ -21,11 +21,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   CaError,
+  credentialProblem,
   MATERIAL_SCHEMA,
   parseCaMaterials,
   publishCaCertificate,
   readCaMaterials,
 } from "./ca.js";
+import { CATALOG_SCHEMA_VERSION } from "./catalog.js";
+import type { ProxyPolicy } from "./config.js";
 
 const KEY = "-----BEGIN PRIVATE KEY-----\nMIIfake\n-----END PRIVATE KEY-----\n";
 const CERT = "-----BEGIN CERTIFICATE-----\nMIIfake\n-----END CERTIFICATE-----\n";
@@ -85,10 +88,46 @@ describe("parseCaMaterials", () => {
     expect(() => parseCaMaterials('"a string"')).toThrow(/must be a JSON object/);
   });
 
-  it("rejects a missing or empty bearer", () => {
-    expect(() => parseCaMaterials(material({ token: undefined }))).toThrow(/token/);
+  it("rejects a document with no credential at all", () => {
+    expect(() => parseCaMaterials(material({ token: undefined }))).toThrow(
+      /neither token nor package_token/,
+    );
+  });
+
+  it("rejects a present-but-empty credential rather than treating it as absent", () => {
+    // An empty value means the host step meant to supply a credential and
+    // failed; that must surface here, not as an unauthenticated forward.
     expect(() => parseCaMaterials(material({ token: "" }))).toThrow(/token/);
     expect(() => parseCaMaterials(material({ token: b64("   ") }))).toThrow(/token/);
+    expect(() => parseCaMaterials(material({ package_token: "" }))).toThrow(/package_token/);
+    expect(() => parseCaMaterials(material({ package_token: b64(" \n") }))).toThrow(
+      /package_token/,
+    );
+    expect(() => parseCaMaterials(material({ package_token: "not!base64!" }))).toThrow(
+      /package_token is not valid base64/,
+    );
+  });
+
+  it("carries the REST and package credentials separately", () => {
+    const both = parseCaMaterials(material({ package_token: b64("package-canary\n") }));
+    expect(both.token).toBe(TOKEN);
+    expect(both.packageToken).toBe("package-canary");
+
+    const packagesOnly = parseCaMaterials(
+      material({ token: undefined, package_token: b64("package-canary") }),
+    );
+    expect(packagesOnly.token).toBeUndefined();
+    expect(packagesOnly.packageToken).toBe("package-canary");
+
+    const restOnly = parseCaMaterials(material());
+    expect(restOnly.packageToken).toBeUndefined();
+  });
+
+  it("rejects the previous material schema", () => {
+    expect(MATERIAL_SCHEMA).toBe("ado-aw/ado-proxy-material/v2");
+    expect(() =>
+      parseCaMaterials(material({ schema: "ado-aw/ado-proxy-material/v1" })),
+    ).toThrow(/does not match/);
   });
 
   it("rejects a document with no leaves", () => {
@@ -210,5 +249,56 @@ describe("readCaMaterials", () => {
 
   it("reports an unreadable descriptor as a CaError", () => {
     expect(() => readCaMaterials(9999)).toThrow(CaError);
+  });
+});
+
+describe("credentialProblem", () => {
+  const POLICY: ProxyPolicy = {
+    catalog_version: CATALOG_SCHEMA_VERSION,
+    organization: "contoso",
+    project: "Widgets",
+    capabilities: ["core"],
+    protected_hosts: ["dev.azure.com", "app.vssps.visualstudio.com"],
+    allowed_resource_areas: [],
+  };
+  const PACKAGES = {
+    hosts: ["pkgs.dev.azure.com"],
+    feeds: [{ organization: "contoso", feed: "internal", protocols: ["npm" as const] }],
+  };
+  const leaves = (...hosts: string[]): Record<string, unknown> =>
+    Object.fromEntries(hosts.map((host) => [host, { key: b64(KEY), cert: b64(CERT) }]));
+
+  it("accepts a REST-only policy with a REST token", () => {
+    expect(credentialProblem(POLICY, parseCaMaterials(material()))).toBeUndefined();
+  });
+
+  it("refuses REST capabilities without a REST token", () => {
+    const ca = parseCaMaterials(material({ token: undefined, package_token: b64("p") }));
+    expect(credentialProblem(POLICY, ca)).toMatch(/no REST token/);
+  });
+
+  it("refuses a packages section without a package credential", () => {
+    const ca = parseCaMaterials(
+      material({ leaves: leaves("dev.azure.com", "pkgs.dev.azure.com") }),
+    );
+    expect(credentialProblem({ ...POLICY, packages: PACKAGES }, ca)).toMatch(/no package_token/);
+  });
+
+  it("refuses a packages section without a leaf for the package host", () => {
+    const ca = parseCaMaterials(material({ package_token: b64("p") }));
+    expect(credentialProblem({ ...POLICY, packages: PACKAGES }, ca)).toMatch(
+      /no leaf for pkgs\.dev\.azure\.com/,
+    );
+  });
+
+  it("accepts a packages-only policy with only a package credential", () => {
+    const ca = parseCaMaterials(
+      material({
+        token: undefined,
+        package_token: b64("p"),
+        leaves: leaves("dev.azure.com", "pkgs.dev.azure.com"),
+      }),
+    );
+    expect(credentialProblem({ ...POLICY, capabilities: [], packages: PACKAGES }, ca)).toBeUndefined();
   });
 });

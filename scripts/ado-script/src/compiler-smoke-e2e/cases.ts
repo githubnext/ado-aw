@@ -345,13 +345,54 @@ function laneDefinitionId(env: NodeJS.ProcessEnv, lane: SmokeLane): number {
   return parsed;
 }
 
+/** Env var naming a comma-separated subset of case ids to run. */
+export const CASE_FILTER_ENV = "SMOKE_CASES";
+
+/**
+ * Select the cases for `mode`, optionally narrowed by a comma-separated
+ * `filter` of case ids (the `smokeCases` queue-time parameter).
+ *
+ * An empty or whitespace-only filter means every case, so scheduled and
+ * comment-triggered runs keep their full coverage. A filter is strict: an id
+ * the manifest does not declare, or one that does not participate in `mode`,
+ * fails the run rather than silently running less than was asked for.
+ */
+export function selectCases(
+  manifest: SmokeManifest,
+  mode: CompilerSource,
+  filter: string | undefined,
+): SmokeCase[] {
+  const inMode = manifest.cases.filter((entry) => entry.modes.includes(mode));
+  const wanted = (filter ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => id !== "");
+  if (wanted.length === 0) {
+    if (inMode.length === 0) {
+      throw new Error(`${CASES_MANIFEST_PATH}: no case participates in mode '${mode}'`);
+    }
+    return inMode;
+  }
+
+  const requested = new Set(wanted);
+  for (const id of requested) {
+    if (!manifest.cases.some((entry) => entry.id === id)) {
+      throw new Error(`${CASE_FILTER_ENV}: unknown case '${id}'`);
+    }
+    if (!inMode.some((entry) => entry.id === id)) {
+      throw new Error(`${CASE_FILTER_ENV}: case '${id}' does not participate in mode '${mode}'`);
+    }
+  }
+  return inMode.filter((entry) => requested.has(entry.id));
+}
+
 /**
  * Load the manifest from the detached candidate worktree and resolve every
  * case participating in `mode` to its lane's ADO definition id.
  *
  * Read from the worktree — an exact checkout of `BUILD_SOURCEVERSION` — rather
  * than `BUILD_SOURCESDIRECTORY`, which may sit at a different commit. Only the
- * lanes actually used by `mode` require their env var to be set.
+ * lanes actually used by the selected cases require their env var to be set.
  */
 export async function loadCases(
   worktreeDir: string,
@@ -361,10 +402,7 @@ export async function loadCases(
   const text = await readFile(join(worktreeDir, CASES_MANIFEST_PATH), "utf8");
   const manifest = parseManifest(text);
 
-  const selected = manifest.cases.filter((entry) => entry.modes.includes(mode));
-  if (selected.length === 0) {
-    throw new Error(`${CASES_MANIFEST_PATH}: no case participates in mode '${mode}'`);
-  }
+  const selected = selectCases(manifest, mode, env[CASE_FILTER_ENV]);
 
   const lanesById = new Map(manifest.lanes.map((lane) => [lane.id, lane]));
   const idByLane = new Map<string, number>();

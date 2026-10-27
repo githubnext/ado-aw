@@ -170,6 +170,7 @@ mod tests {
         CodemodContext {
             compiler_version: INTRODUCED_IN,
             source_compiler_version: source_version.map(str::to_string),
+            warnings: Default::default(),
         }
     }
 
@@ -246,6 +247,7 @@ mod tests {
         let ctx = CodemodContext {
             compiler_version: "0.48.0",
             source_compiler_version: Some("0.48.0".to_string()),
+            warnings: Default::default(),
         };
         assert!(!apply_codemod(&mut m, &ctx).unwrap());
         assert!(!m.contains_key(Value::String("on".into())));
@@ -261,6 +263,7 @@ mod tests {
         let ctx = CodemodContext {
             compiler_version: INTRODUCED_IN,
             source_compiler_version: Some("0.48.0".to_string()),
+            warnings: Default::default(),
         };
         assert!(apply_codemod(&mut m, &ctx).unwrap());
         assert_eq!(push_include(&m), vec!["*".to_string()]);

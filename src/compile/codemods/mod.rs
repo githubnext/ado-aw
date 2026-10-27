@@ -49,6 +49,8 @@ mod m0006_explicit_push_trigger;
 mod m0007_promote_debug_create_github_issue;
 #[path = "0008_explicit_mcp_pipeline_env.rs"]
 mod m0008_explicit_mcp_pipeline_env;
+#[path = "0009_package_feed_permissions.rs"]
+mod m0009_package_feed_permissions;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
@@ -85,9 +87,20 @@ pub struct CodemodContext {
     ///
     /// The caller performs the read; codemods stay pure.
     pub source_compiler_version: Option<String>,
+    /// Migration notes a codemod records for the author, surfaced by the
+    /// caller alongside the "applied codemods" report.
+    ///
+    /// A codemod must stay pure, so it never prints: it records a note with
+    /// [`warn`](Self::warn) and the runner returns it in
+    /// [`CodemodReport::warnings`].
+    pub warnings: std::cell::RefCell<Vec<String>>,
 }
 
 impl CodemodContext {
+    /// Record a migration note for the author. See [`Self::warnings`].
+    pub fn warn(&self, message: impl Into<String>) {
+        self.warnings.borrow_mut().push(message.into());
+    }
     /// Build a context using the compile-time package version, with no
     /// source provenance. Equivalent to [`Self::for_source`] with `None`.
     ///
@@ -105,6 +118,7 @@ impl CodemodContext {
         Self {
             compiler_version: env!("CARGO_PKG_VERSION"),
             source_compiler_version,
+            warnings: Default::default(),
         }
     }
 }
@@ -155,6 +169,7 @@ pub static CODEMODS: &[&Codemod] = &[
     &m0006_explicit_push_trigger::CODEMOD,
     &m0007_promote_debug_create_github_issue::CODEMOD,
     &m0008_explicit_mcp_pipeline_env::CODEMOD,
+    &m0009_package_feed_permissions::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter
@@ -163,6 +178,8 @@ pub static CODEMODS: &[&Codemod] = &[
 pub struct CodemodReport {
     /// Ordered list of codemods that ran (returned `Ok(true)`).
     pub applied: Vec<AppliedCodemod>,
+    /// Migration notes recorded by the codemods that ran, in order.
+    pub warnings: Vec<String>,
 }
 
 /// Record of a single codemod that fired. Carries enough info for
@@ -179,6 +196,7 @@ impl CodemodReport {
     pub fn empty() -> Self {
         Self {
             applied: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -225,7 +243,10 @@ pub(crate) fn apply_codemods_with(
             });
         }
     }
-    Ok(CodemodReport { applied })
+    Ok(CodemodReport {
+        applied,
+        warnings: ctx.warnings.into_inner(),
+    })
 }
 
 #[cfg(test)]
