@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.54.0](https://github.com/githubnext/ado-aw/compare/v0.53.0...v0.54.0) (2026-10-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **compile:** Azure Artifacts runtimes.<x>.feed-url is replaced by permissions.packages plus runtimes.<x>.feed. Codemod 0009 migrates existing sources automatically.
+
+### Features
+
+* **compile:** credential-isolated package feed access via permissions.packages ([#2315](https://github.com/githubnext/ado-aw/issues/2315)) ([036174c](https://github.com/githubnext/ado-aw/commit/036174c4939adfe72062de907b2aa51c22272e38))
+
+
+### Bug Fixes
+
+* **compile:** keep package-feed credentials out of the AWF sandbox ([#2310](https://github.com/githubnext/ado-aw/issues/2310)) ([09915d5](https://github.com/githubnext/ado-aw/commit/09915d542f10c2470d99c2680c995d60857d3861))
+* **engine:** allow every subcommand of Copilot CLI stem commands ([#2325](https://github.com/githubnext/ado-aw/issues/2325)) ([6ceaf9c](https://github.com/githubnext/ado-aw/commit/6ceaf9ccaf69ecf5e3e2ffc84958f38ecf5d738c))
+
 ## [0.53.0](https://github.com/githubnext/ado-aw/compare/v0.52.1...v0.53.0) (2026-10-06)
 
 
