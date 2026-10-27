@@ -136,7 +136,7 @@ export function successFragment(args: {
     lines.push(
       "Use `build_get_build_by_id` + `build_get_log` with the ids in " +
         "`failing.json` to read the failure logs. If you propose a fix, " +
-        "use `update_pr` / `add_pr_comment` to surface it.",
+        "use `add-pull-request-comment` to surface it.",
     );
   } else {
     lines.push("");

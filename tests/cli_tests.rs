@@ -1,5 +1,20 @@
 use std::path::PathBuf;
 
+#[test]
+fn mcp_output_directory_rejects_a_second_process_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("safe_outputs.ndjson"), "").unwrap();
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(directory.path().join(".safeoutputs.lock")).unwrap();
+    lock.try_lock().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ado-aw"))
+        .arg("mcp").arg(directory.path()).arg(directory.path())
+        .stdin(std::process::Stdio::null()).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already has a writer"));
+    assert_eq!(std::fs::read_to_string(directory.path().join("safe_outputs.ndjson")).unwrap(), "");
+}
+
 // The `run` subcommand previously had a description "Run agent locally" when
 // it was an internal developer tool. It now queues ADO builds ("Queue a build
 // for every ADO definition…"). This test guards against that old description

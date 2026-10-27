@@ -1,0 +1,284 @@
+//! Enable Azure DevOps auto-complete, without immediately merging.
+
+use super::pr_common::{
+    PullRequestReference, legacy_policy, validate_reference,
+};
+use super::pr_mutations::{UpdatePrContext, execute_set_auto_complete};
+use super::{ExecutionContext, ExecutionResult, Executor, Validate};
+use crate::sanitize::{SanitizeContent, sanitize_config};
+use crate::tool_result;
+use super::ToolResult;
+use ado_aw_derive::SanitizeConfig;
+use anyhow::{Context, ensure};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetPrAutoCompleteParams {
+    #[serde(default)]
+    pub pull_request_id: Option<PullRequestReference>,
+    #[serde(default)]
+    pub repository: Option<String>,
+}
+impl Validate for SetPrAutoCompleteParams {
+    fn validate(&self) -> anyhow::Result<()> {
+        if let Some(reference) = &self.pull_request_id {
+            validate_reference(reference)?;
+        }
+        if let Some(repository) = &self.repository {
+            crate::validate::reject_pipeline_injection(repository, "repository")?;
+        }
+        Ok(())
+    }
+}
+tool_result! {
+    name = "set-pull-request-auto-complete",
+    write = true,
+    params = SetPrAutoCompleteParams,
+    #[serde(deny_unknown_fields)]
+    pub struct SetPrAutoCompleteResult {
+        #[serde(default)]
+        pull_request_id: Option<PullRequestReference>,
+        #[serde(default)]
+        repository: Option<String>,
+    }
+}
+impl SanitizeContent for SetPrAutoCompleteResult {
+    fn sanitize_content_fields(&mut self) {
+        self.repository = self.repository.as_deref().map(sanitize_config);
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, SanitizeConfig)]
+#[serde(deny_unknown_fields)]
+pub struct SetPrAutoCompleteConfig {
+    #[serde(default)]
+    #[sanitize_config(skip)]
+    pub target: super::update_pull_request::UpdatePullRequestTarget,
+    #[serde(default, rename = "default-repository")]
+    pub target_repo: Option<String>,
+    #[serde(default, rename = "required-labels")]
+    pub required_labels: Vec<String>,
+    #[serde(default, rename = "required-title-prefix")]
+    pub required_title_prefix: Option<String>,
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
+    pub allowed_repositories: Vec<String>,
+    #[serde(flatten)]
+    #[sanitize_config(skip)]
+    pub completion: super::pr_completion::CompletionPreferences,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
+}
+impl Default for SetPrAutoCompleteConfig {
+    fn default() -> Self {
+        Self {
+            target: Default::default(),
+            target_repo: None,
+            required_labels: Vec::new(),
+            required_title_prefix: None,
+            allowed_repositories: super::pr_policy::unrestricted_names(),
+            completion: Default::default(),
+            max: None,
+        }
+    }
+}
+pub(crate) fn validate_set_pr_auto_complete_config(
+    config: &SetPrAutoCompleteConfig,
+) -> anyhow::Result<()> {
+    config.completion.validate()?;
+    for repository in &config.allowed_repositories {
+        ensure!(
+            !repository.trim().is_empty(),
+            "allowed-repositories entries must not be empty"
+        );
+        crate::validate::reject_pipeline_injection(repository, "allowed-repositories")?;
+    }
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl Executor for SetPrAutoCompleteResult {
+    fn dry_run_summary(&self) -> String {
+        format!("enable auto-complete on {}", super::pr_common::describe_pr_reference(self.pull_request_id.as_ref()))
+    }
+    async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        if let Err(error) = (SetPrAutoCompleteParams {
+            pull_request_id: self.pull_request_id.clone(),
+            repository: self.repository.clone(),
+        })
+        .validate()
+        {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
+        ensure!(
+            ctx.tool_configs
+                .contains_key("set-pull-request-auto-complete"),
+            "set-pull-request-auto-complete is not configured"
+        );
+        let config: SetPrAutoCompleteConfig =
+            ctx.get_tool_config("set-pull-request-auto-complete")?;
+        validate_set_pr_auto_complete_config(&config)?;
+        let client = super::pr_http::client()?;
+        let (pr_id, target) = match super::pr_common::resolve_configured_pr_target(
+            Self::NAME, self.pull_request_id.as_ref(), self.repository.as_deref(), ctx, &client,
+        ).await? {
+            Ok(target) => target,
+            Err(failure) => return Ok(failure),
+        };
+        let legacy = legacy_policy(ctx, "set-pull-request-auto-complete", "set-auto-complete")?;
+        if let Some(legacy) = &legacy
+            && let Err(failure) = super::pr_common::validate_pr_repository_policy(
+                &target, &legacy.allowed_repositories, ctx,
+            )
+        {
+            return Ok(failure);
+        }
+        execute_set_auto_complete(
+            &UpdatePrContext {
+                client: &client,
+                target,
+                pr_id,
+                token: ctx
+                    .access_token
+                    .as_deref()
+                    .context("No access token available")?,
+                connection_type: ctx.write_connection_type,
+            },
+            &config.completion,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_completion_params_round_trip_without_the_retired_operation_envelope() {
+        let params: SetPrAutoCompleteParams = serde_json::from_value(
+            serde_json::json!({"pull_request_id":42}),
+        ).unwrap();
+        let result: SetPrAutoCompleteResult = params.try_into().unwrap();
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["name"], "set-pull-request-auto-complete");
+        assert_eq!(value["pull_request_id"], 42);
+        assert!(value.get("operation").is_none());
+        for value in [
+            serde_json::json!({"pull_request_id":0}),
+            serde_json::json!({"pull_request_id":42,"repository":"##vso[task.setvariable variable=x]y"}),
+            serde_json::json!({"pull_request_id":42,"operation":"set-auto-complete"}),
+        ] {
+            let rejected = match serde_json::from_value::<SetPrAutoCompleteParams>(value) {
+                Err(_) => true,
+                Ok(params) => SetPrAutoCompleteResult::try_from(params).is_err(),
+            };
+            assert!(rejected);
+        }
+    }
+
+    #[test]
+    fn typed_config_rejects_unknown_fields_and_invalid_allowlists() {
+        for value in [
+            serde_json::json!({"merge-immediately": true}),
+            serde_json::json!({"delete-source-branch": "true"}),
+            serde_json::json!({"allowed-repositories": "self"}),
+        ] {
+            assert!(serde_json::from_value::<SetPrAutoCompleteConfig>(value).is_err());
+        }
+        for repository in ["", " ", "##vso[task.setvariable variable=x]y"] {
+            let config = SetPrAutoCompleteConfig {
+                allowed_repositories: vec![repository.into()],
+                ..Default::default()
+            };
+            assert!(validate_set_pr_auto_complete_config(&config).is_err());
+        }
+        for strategy in ["squash", "noFastForward", "rebase", "rebaseMerge"] {
+            let config: SetPrAutoCompleteConfig =
+                serde_json::from_value(serde_json::json!({"merge-strategy": strategy, "max": 0}))
+                    .unwrap();
+            assert!(validate_set_pr_auto_complete_config(&config).is_ok());
+            assert_eq!(config.max, Some(0));
+        }
+    }
+
+    #[test]
+    fn completion_defaults_preserve_omitted_preferences() {
+        let config = SetPrAutoCompleteConfig::default();
+        assert!(config.completion.is_empty());
+        assert!(
+            validate_set_pr_auto_complete_config(&SetPrAutoCompleteConfig {
+                completion: super::super::pr_completion::CompletionPreferences {
+                    merge_strategy: Some("merge-immediately".into()),
+                    ..Default::default()
+                },
+                ..config
+            })
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn migrated_completion_uses_target_actor_and_current_explicit_options() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, header, method, path},
+        };
+        let server = MockServer::start().await;
+        let actor = "01234567-89ab-cdef-0123-456789abcdef";
+        let applied = Arc::new(AtomicBool::new(false));
+        let read = applied.clone();
+        Mock::given(method("GET")).and(path(
+            "/Other/_apis/git/repositories/repo-id/pullRequests/4294967296",
+        )).respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(
+            if read.load(Ordering::SeqCst) {
+                serde_json::json!({"status":"active","isDraft":false,
+                    "autoCompleteSetBy":{"id":actor},
+                    "completionOptions":{"deleteSourceBranch":false,"mergeStrategy":"rebase"}})
+            } else { serde_json::json!({"status":"active","isDraft":false}) }
+        )).expect(2).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/_apis/connectiondata"))
+            .and(header("authorization", "Bearer token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"authenticatedUser": {"id": actor}}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(
+                "/Other/_apis/git/repositories/repo-id/pullRequests/4294967296",
+            ))
+            .and(header("authorization", "Bearer token"))
+            .and(body_json(serde_json::json!({
+                "autoCompleteSetBy": {"id": actor},
+                "completionOptions": {"deleteSourceBranch": false, "mergeStrategy": "rebase"}
+            })))
+            .respond_with(move |_: &wiremock::Request| {
+                applied.store(true, Ordering::SeqCst);
+                ResponseTemplate::new(200)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut ctx = super::super::pr_common::tests::registered_context(
+            &server.uri(),
+            "set-pull-request-auto-complete",
+            serde_json::json!({
+                "delete-source-branch": false, "merge-strategy": "rebase",
+                "legacy-update-pr": {"delete-source-branch": true, "merge-strategy": "squash"}
+            }),
+        );
+        ctx.write_connection_type = Some(crate::compile::types::WriteConnectionType::AzureDevOps);
+        let mut result: SetPrAutoCompleteResult = serde_json::from_value(serde_json::json!({
+            "name": "set-pull-request-auto-complete", "pull_request_id": "#aw_pr123"
+        }))
+        .unwrap();
+        assert!(result.execute_sanitized(&ctx).await.unwrap().success);
+    }
+}

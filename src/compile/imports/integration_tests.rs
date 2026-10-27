@@ -13,6 +13,9 @@ use crate::compile::imports::merge::merge_resolved;
 use crate::compile::types::{ImportEntry, ParsedImportSpec};
 use crate::secure::CommitSha;
 
+#[path = "pr_migration_tests.rs"]
+mod pr_migration_tests;
+
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const SHA2: &str = "89abcdef0123456789abcdef0123456789abcdef";
 

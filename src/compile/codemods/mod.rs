@@ -49,6 +49,31 @@ mod m0006_explicit_push_trigger;
 mod m0007_promote_debug_create_github_issue;
 #[path = "0008_explicit_mcp_pipeline_env.rs"]
 mod m0008_explicit_mcp_pipeline_env;
+#[path = "0009_split_update_pr.rs"]
+mod m0009_split_update_pr;
+#[path = "0010_pull_request_tool_names.rs"]
+mod m0010_pull_request_tool_names;
+#[path = "0011_explicit_pr_policy.rs"]
+mod m0011_explicit_pr_policy;
+pub(crate) use m0011_explicit_pr_policy::CODEMOD as PR_POLICY_DEFAULTS;
+#[path = "0012_pr_completion_preferences.rs"]
+mod m0012_pr_completion_preferences;
+pub(crate) use m0012_pr_completion_preferences::CODEMOD as PR_COMPLETION_PREFERENCES;
+#[path = "0013_pr_default_repository.rs"]
+mod m0013_pr_default_repository;
+pub(crate) use m0013_pr_default_repository::CODEMOD as PR_DEFAULT_REPOSITORY;
+#[path = "0014_pr_allowlist_semantics.rs"]
+mod m0014_pr_allowlist_semantics;
+pub(crate) use m0014_pr_allowlist_semantics::{
+    CODEMOD as PR_ALLOWLIST_SEMANTICS, preserve_legacy_grants,
+    validate_legacy_literal_names, validate_legacy_source_names,
+};
+#[path = "0015_pr_created_handoffs.rs"]
+mod m0015_pr_created_handoffs;
+pub(crate) use m0015_pr_created_handoffs::CODEMOD as PR_CREATED_HANDOFFS;
+#[path = "0016_pr_vocabulary.rs"]
+mod m0016_pr_vocabulary;
+pub(crate) use m0016_pr_vocabulary::CODEMOD as PR_VOCABULARY;
 
 #[allow(unused_imports)] // Re-exported for future codemods; only `take_key` is in-tree use.
 pub use helpers::{ConflictPolicy, insert_no_overwrite, rename_key, take_key};
@@ -155,6 +180,14 @@ pub static CODEMODS: &[&Codemod] = &[
     &m0006_explicit_push_trigger::CODEMOD,
     &m0007_promote_debug_create_github_issue::CODEMOD,
     &m0008_explicit_mcp_pipeline_env::CODEMOD,
+    &m0009_split_update_pr::CODEMOD,
+    &m0010_pull_request_tool_names::CODEMOD,
+    &m0011_explicit_pr_policy::CODEMOD,
+    &m0012_pr_completion_preferences::CODEMOD,
+    &m0013_pr_default_repository::CODEMOD,
+    &m0014_pr_allowlist_semantics::CODEMOD,
+    &m0015_pr_created_handoffs::CODEMOD,
+    &m0016_pr_vocabulary::CODEMOD,
 ];
 
 /// Result of running the codemod registry on a single front-matter

@@ -179,8 +179,8 @@ fn atomic_write_blocking(path: &Path, contents: &str) -> Result<()> {
 /// See [`parse_markdown_detailed`].
 #[derive(Debug)]
 pub struct ParsedSource {
-    /// Typed front matter, after codemods have been applied to the
-    /// underlying mapping.
+    /// Typed root front matter. PR migrations are deferred when imports exist;
+    /// callers needing effective policy must use the import preparation path.
     pub front_matter: FrontMatter,
     /// Body for compilation, with leading/trailing whitespace trimmed
     /// (matches the legacy `parse_markdown` second tuple element).
@@ -199,6 +199,8 @@ pub struct ParsedSource {
     pub body_raw: String,
     /// SHA-256 of the original source bytes (lost-update protection).
     pub source_sha256: [u8; 32],
+    /// Root source provenance for post-import codemods, not the age of imported components.
+    source_compiler_version: Option<String>,
 }
 
 /// Raw markdown split result used by both the typed workflow parser and
@@ -268,8 +270,10 @@ pub(crate) fn split_markdown_front_matter(
 /// Use this from callers that may rewrite the source (the `compile`
 /// command). Callers that only want the typed view of the front matter
 /// should use the backward-compatible [`parse_markdown`] wrapper.
+/// Neither parser resolves imports; use `prepare_source_front_matter` for
+/// effective execution policy, including import-aware PR migrations.
 pub fn parse_markdown_detailed(content: &str) -> Result<ParsedSource> {
-    parse_markdown_detailed_with_registry(content, super::codemods::CODEMODS, None)
+    parse_markdown_detailed_for_source(content, None)
 }
 
 /// Variant of [`parse_markdown_detailed`] that supplies the compiler
@@ -326,10 +330,24 @@ pub(crate) fn parse_markdown_detailed_with_registry(
         }
     };
 
-    // Stage 2: run the codemod registry against the untyped mapping.
-    let report =
-        super::codemods::apply_codemods_with(&mut mapping, registry, source_compiler_version)
-            .context("Failed to apply codemods")?;
+    super::codemods::validate_legacy_source_names(&mapping, source_compiler_version)?;
+
+    // PR identity/ownership must survive until import substitution and merging.
+    let has_imports = mapping
+        .get("imports")
+        .and_then(serde_yaml::Value::as_sequence)
+        .is_some_and(|imports| !imports.is_empty());
+    let initial_registry: Vec<_> = registry
+        .iter()
+        .copied()
+        .filter(|codemod| !has_imports || !is_import_deferred_codemod(codemod.id))
+        .collect();
+    let report = super::codemods::apply_codemods_with(
+        &mut mapping,
+        &initial_registry,
+        source_compiler_version,
+    )
+    .context("Failed to apply codemods")?;
 
     // Stage 3: deserialize the (possibly modified) mapping into the
     // typed FrontMatter. Errors here mean either the user wrote an
@@ -357,7 +375,48 @@ pub(crate) fn parse_markdown_detailed_with_registry(
         leading_whitespace: parts.leading_whitespace,
         body_raw: parts.body_raw,
         source_sha256,
+        source_compiler_version: source_compiler_version.map(str::to_owned),
     })
+}
+
+fn is_import_deferred_codemod(id: &str) -> bool {
+    matches!(id, "split_update_pr" | "pull_request_tool_names")
+}
+
+/// Finish root-only source migration and its dependants after import ownership is known.
+pub(crate) fn finish_import_codemods(
+    parsed: &mut ParsedSource,
+    registry: &[&'static super::codemods::Codemod],
+) -> Result<()> {
+    // Later migrations may consume shapes produced by a deferred migration.
+    // Replay the ordered suffix once; idempotent migrations need no fixed-point loop.
+    let deferred_start = registry
+        .iter()
+        .position(|codemod| is_import_deferred_codemod(codemod.id))
+        .unwrap_or(registry.len());
+    let mut mapping = parsed.front_matter_mapping.clone();
+    let mut custom = Vec::new();
+    if let Some(serde_yaml::Value::Mapping(outputs)) = mapping.get_mut("safe-outputs") {
+        for name in parsed.front_matter.custom_safe_output_tool_names() {
+            let key = serde_yaml::Value::String(name);
+            if let Some(value) = outputs.remove(&key) {
+                custom.push((key, value));
+            }
+        }
+    }
+    let report = super::codemods::apply_codemods_with(
+        &mut mapping,
+        &registry[deferred_start..],
+        parsed.source_compiler_version.as_deref(),
+    )?;
+    if report.changed() {
+        if let Some(serde_yaml::Value::Mapping(outputs)) = mapping.get_mut("safe-outputs") {
+            outputs.extend(custom);
+        }
+        parsed.front_matter_mapping = mapping;
+        parsed.codemods.applied.extend(report.applied);
+    }
+    Ok(())
 }
 
 /// Reconstruct full source content from codemod outputs.
@@ -2997,6 +3056,20 @@ pub fn generate_enabled_tools_args(front_matter: &FrontMatter) -> String {
             continue;
         }
         effective_mcp_tool_count += 1;
+        if crate::safe_outputs::pr_policy::is_pr_tool(key)
+            && !crate::safe_outputs::pr_policy::has_usable_action(key, &front_matter.safe_outputs[key])
+        {
+            continue;
+        }
+        if front_matter.safe_outputs.get("budget-groups").and_then(serde_json::Value::as_object)
+            .is_some_and(|groups| groups.values().any(|group| {
+                group.get("max").and_then(serde_json::Value::as_u64) == Some(0)
+                    && group.get("tools").and_then(serde_json::Value::as_array)
+                        .is_some_and(|tools| tools.iter().any(|tool| tool.as_str() == Some(key.as_str())))
+            }))
+        {
+            continue;
+        }
         if seen.insert(key.clone()) {
             tools.push(key.clone());
         }
@@ -3081,40 +3154,124 @@ pub fn validate_update_work_item_target(front_matter: &FrontMatter) -> Result<()
     Ok(())
 }
 
-/// Validate that submit-pr-review has a required `allowed-events` field when configured.
-///
-/// An empty or missing `allowed-events` list would allow agents to cast any review vote,
-/// including auto-approvals. Operators must explicitly opt in to each allowed event.
+/// Validate review grants: omission permits comment only, explicit empty grants
+/// permit no review, and migrated vote grants must retain their explicit authority.
 pub fn validate_submit_pr_review_events(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("submit-pr-review") {
-        if let Some(obj) = config_value.as_object() {
-            let allowed_events = obj.get("allowed-events");
-            let is_empty = match allowed_events {
-                None => true,
-                Some(v) => v.as_array().is_none_or(|a| a.is_empty()),
-            };
-            if is_empty {
-                anyhow::bail!(
-                    "safe-outputs.submit-pr-review requires a non-empty 'allowed-events' list \
-                     to prevent agents from casting unrestricted review votes. Example:\n\n  \
-                     safe-outputs:\n    submit-pr-review:\n      allowed-events:\n        \
-                     - comment\n        - approve-with-suggestions\n\n\
-                     Valid events: approve, approve-with-suggestions, request-changes, comment\n"
-                );
-            }
-        } else {
-            anyhow::bail!(
-                "safe-outputs.submit-pr-review must be a configuration object with an \
-                 'allowed-events' list. Example:\n\n  \
-                 safe-outputs:\n    submit-pr-review:\n      allowed-events:\n        - comment\n"
-            );
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::SubmitPrReviewConfig>(
+        "submit-pull-request-review",
+    )? {
+        crate::safe_outputs::validate_submit_pr_review_config(&config)?;
+        if config.allowed_events.is_empty() && front_matter.safe_outputs["submit-pull-request-review"]
+            .get(super::pr_migration::LEGACY_PR_CONFIG).is_some()
+        {
+            anyhow::bail!("safe-outputs.update-pr enables vote but has no allowed-votes; restrict allowed-operations or configure allowed-votes");
         }
     }
     Ok(())
 }
 
-/// Validate configuration shared by create-pull-request and update-pr.
+/// Validate the PR tool family, including temporary-reference lanes and shared budgets.
 pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Result<()> {
+    super::pr_migration::validate_legacy_metadata(front_matter)?;
+    super::pr_migration::validate_budget_groups(front_matter)?;
+    for tool in crate::safe_outputs::pr_common::PR_MUTATION_TOOLS {
+        if let Some(raw) = front_matter.safe_outputs.get(*tool) {
+            crate::safe_outputs::pr_common::PrMutationPolicy::parse(raw)
+                .map_err(|error| anyhow::anyhow!("safe-outputs.{tool} has invalid PR policy: {error:#}"))?;
+        }
+    }
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::CreatePrConfig>(
+        "create-pull-request",
+    )? {
+        crate::safe_outputs::validate_create_pr_config(&config)?;
+    }
+    front_matter.typed_safe_output_config::<crate::safe_outputs::MarkPullRequestReadyConfig>(
+        "mark-pull-request-as-ready-for-review",
+    )?;
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::PushToPullRequestBranchConfig>(
+        "push-to-pull-request-branch",
+    )? {
+        crate::safe_outputs::validate_push_config(&config)?;
+    }
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::UpdatePullRequestCommentConfig>(
+        "update-pull-request-comment",
+    )? {
+        anyhow::ensure!(config.comment_key.len() <= 100, "comment-key must fit 100 bytes");
+    }
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::AddPrCommentConfig>(
+        "add-pull-request-comment",
+    )? {
+        crate::safe_outputs::validate_add_pr_comment_config(&config)?;
+    }
+    front_matter.typed_safe_output_config::<crate::safe_outputs::ReplyToPrCommentConfig>(
+        "reply-to-pull-request-comment",
+    )?;
+    front_matter.typed_safe_output_config::<crate::safe_outputs::ResolvePrThreadConfig>(
+        "resolve-pull-request-thread",
+    )?;
+    if let Some(config) = front_matter
+        .typed_safe_output_config::<crate::safe_outputs::AddPrLabelsConfig>(
+            "add-pull-request-labels",
+        )?
+    {
+        crate::safe_outputs::validate_add_pr_labels_config(&config)?;
+    }
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::RemovePullRequestLabelsConfig>(
+        "remove-pull-request-labels",
+    )? {
+        crate::safe_outputs::validate_add_pr_labels_config(&config)?;
+    }
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::ReplacePullRequestLabelConfig>(
+        "replace-pull-request-label",
+    )? {
+        crate::safe_outputs::validate_replace_pr_label_config(&config)?;
+    }
+    if let Some(config) = front_matter
+        .typed_safe_output_config::<crate::safe_outputs::SetPrAutoCompleteConfig>(
+            "set-pull-request-auto-complete",
+        )?
+    {
+        crate::safe_outputs::validate_set_pr_auto_complete_config(&config)?;
+    }
+    if let Some(config) = front_matter
+        .typed_safe_output_config::<crate::safe_outputs::SubmitPrReviewConfig>(
+            "submit-pull-request-review",
+        )?
+    {
+        crate::safe_outputs::validate_submit_pr_review_config(&config)?;
+    }
+    if let Some(config) = front_matter.update_pull_request_config()? {
+        crate::safe_outputs::validate_update_pull_request_config(&config)?;
+    }
+    if let Some(config) = front_matter.abandon_pull_request_config()? {
+        crate::safe_outputs::validate_abandon_pull_request_config(&config)?;
+    }
+    for tool in [
+        "add-pull-request-reviewers",
+        "add-pull-request-labels",
+        "remove-pull-request-labels",
+        "replace-pull-request-label",
+        "mark-pull-request-as-ready-for-review",
+        "update-pull-request-comment",
+        "set-pull-request-auto-complete",
+        "update-pull-request",
+        "abandon-pull-request",
+        "submit-pull-request-review",
+        "add-pull-request-comment",
+        "reply-to-pull-request-comment",
+        "resolve-pull-request-thread",
+    ] {
+        if !front_matter.safe_outputs.contains_key(tool) {
+            continue;
+        }
+        if front_matter.safe_outputs.get(tool).and_then(|config| config.get("target"))
+            .and_then(serde_json::Value::as_str) == Some("created") {
+            anyhow::ensure!(front_matter.safe_outputs.contains_key("create-pull-request"),
+                "target: created requires create-pull-request to be configured");
+            require_same_approval_lane(front_matter, "create-pull-request", tool)?;
+            require_same_staged_lane(front_matter, "create-pull-request", tool)?;
+        }
+    }
     if front_matter
         .safe_outputs
         .contains_key("create-pull-request")
@@ -3126,20 +3283,27 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
 
     if let Some(max_reviewers) = front_matter
         .safe_outputs
-        .get("update-pr")
+        .get("add-pull-request-reviewers")
         .and_then(serde_json::Value::as_object)
         .and_then(|object| object.get("max-reviewers"))
     {
         let max_reviewers =
             serde_json::from_value::<usize>(max_reviewers.clone()).map_err(|_| {
                 anyhow::anyhow!(
-                    "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                    "safe-outputs.add-pull-request-reviewers.max-reviewers must be a positive integer that fits in usize"
                 )
             })?;
         anyhow::ensure!(
             max_reviewers > 0,
-            "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+            "safe-outputs.add-pull-request-reviewers.max-reviewers must be a positive integer that fits in usize"
         );
+    }
+    if let Some(config) = front_matter
+        .typed_safe_output_config::<crate::safe_outputs::AddPrReviewersConfig>(
+            "add-pull-request-reviewers",
+        )?
+    {
+        crate::safe_outputs::validate_add_pr_reviewers_config(&config)?;
     }
 
     Ok(())
@@ -3153,7 +3317,21 @@ pub fn validate_pull_request_outputs_config(front_matter: &FrontMatter) -> Resul
 /// runtime error. Catching this at compile time is consistent with how
 /// `validate_submit_pr_review_events` handles the analogous case.
 pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("update-pr")
+    if let Some(config_value) = front_matter
+        .safe_outputs
+        .get("update-pr")
+        .filter(|_| {
+            !front_matter
+                .custom_safe_output_tool_names()
+                .iter()
+                .any(|name| name == "update-pr")
+        })
+        .or_else(|| {
+            front_matter
+                .safe_outputs
+                .get("submit-pull-request-review")
+                .and_then(|config| config.get(super::pr_migration::LEGACY_PR_CONFIG))
+        })
         && let Some(obj) = config_value.as_object()
     {
         // Determine whether the vote operation is reachable:
@@ -3190,36 +3368,18 @@ pub fn validate_update_pr_votes(front_matter: &FrontMatter) -> Result<()> {
     Ok(())
 }
 
-/// Validate that resolve-pr-thread has a required `allowed-statuses` field when configured.
+/// Validate that resolve-pull-request-thread has a required `allowed-statuses` field when configured.
 ///
 /// An empty or missing `allowed-statuses` list would let agents set any thread status,
 /// including "fixed" or "wontFix" on security-critical review threads. Operators must
 /// explicitly opt in to each allowed status transition.
 pub fn validate_resolve_pr_thread_statuses(front_matter: &FrontMatter) -> Result<()> {
-    if let Some(config_value) = front_matter.safe_outputs.get("resolve-pr-thread") {
-        if let Some(obj) = config_value.as_object() {
-            let allowed_statuses = obj.get("allowed-statuses");
-            let is_empty = match allowed_statuses {
-                None => true,
-                Some(v) => v.as_array().is_none_or(|a| a.is_empty()),
-            };
-            if is_empty {
-                anyhow::bail!(
-                    "safe-outputs.resolve-pr-thread requires a non-empty \
-                     'allowed-statuses' list to prevent agents from manipulating thread \
-                     statuses without explicit operator consent. Example:\n\n  \
-                     safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n\
-                     \x20       - fixed\n\n\
-                     Valid statuses: active, fixed, wont-fix, closed, by-design\n"
-                );
-            }
-        } else {
-            anyhow::bail!(
-                "safe-outputs.resolve-pr-thread must be a configuration object \
-                 with an 'allowed-statuses' list. Example:\n\n  \
-                 safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n\
-                 \x20       - fixed\n"
-            );
+    if let Some(config) = front_matter.typed_safe_output_config::<crate::safe_outputs::ResolvePrThreadConfig>(
+        "resolve-pull-request-thread",
+    )? {
+        for status in &config.allowed_statuses {
+            anyhow::ensure!(["active", "fixed", "wont-fix", "closed", "by-design"].contains(&status.as_str()),
+                "unknown allowed-statuses value '{status}'");
         }
     }
     Ok(())
@@ -3760,12 +3920,29 @@ pub fn compile_mcpg(
         registry_base,
     );
     let mut safeoutputs_entrypoint_args = vec!["mcp".to_string()];
+    let patch_limits = [
+        ("--create-pull-request-max-patch-size",
+            front_matter.typed_safe_output_config::<crate::safe_outputs::CreatePrConfig>("create-pull-request")?
+                .map(|config| config.max_patch_size)),
+        ("--push-to-pull-request-branch-max-patch-size",
+            front_matter.typed_safe_output_config::<crate::safe_outputs::PushToPullRequestBranchConfig>("push-to-pull-request-branch")?
+                .map(|config| config.max_patch_size)),
+    ];
+    for (flag, limit) in patch_limits {
+        if let Some(limit) = limit
+            && limit != crate::safe_outputs::pr_patch::PatchSizeKiB::default()
+        {
+            safeoutputs_entrypoint_args.extend([flag.to_string(), limit.to_string()]);
+        }
+    }
     safeoutputs_entrypoint_args.extend(
         generate_enabled_tools_args(front_matter)
             .split_whitespace()
             .map(str::to_string),
     );
-    if !front_matter.custom_safe_output_tool_names().is_empty() {
+    if !front_matter.custom_safe_output_tool_names().is_empty()
+        || front_matter.safe_output_tool_names().any(|tool| crate::safe_outputs::pr_policy::is_pr_tool(tool))
+    {
         safeoutputs_entrypoint_args.extend([
             "--custom-tools".to_string(),
             "/safeoutputs/custom-tools.json".to_string(),
@@ -4658,6 +4835,61 @@ mod tests {
     }
 
     // ─── parse_markdown_detailed ──────────────────────────────────────────────
+
+    #[test]
+    fn post_import_migrations_keep_root_provenance_for_downstream_codemods() {
+        fn downstream(
+            mapping: &mut serde_yaml::Mapping,
+            ctx: &super::super::codemods::CodemodContext,
+        ) -> Result<bool> {
+            let Some(config) = mapping
+                .get_mut("safe-outputs")
+                .and_then(|outputs| outputs.get_mut("add-pull-request-comment"))
+                .and_then(serde_yaml::Value::as_mapping_mut)
+            else {
+                return Ok(false);
+            };
+            let value = serde_yaml::Value::String(
+                ctx.source_compiler_version.as_deref().unwrap_or("new").to_string(),
+            );
+            if config.get("required-title-prefix") == Some(&value) {
+                return Ok(false);
+            }
+            config.insert("required-title-prefix".into(), value);
+            Ok(true)
+        }
+        static DOWNSTREAM: super::super::codemods::Codemod = super::super::codemods::Codemod {
+            id: "post_import_provenance_probe",
+            summary: "exercise source provenance after a deferred rename",
+            introduced_in: "test",
+            apply: downstream,
+        };
+        let rename = super::super::codemods::CODEMODS
+            .iter()
+            .copied()
+            .find(|codemod| codemod.id == "pull_request_tool_names")
+            .unwrap();
+        let registry = [rename, &DOWNSTREAM];
+        let source = "---\nname: provenance\ndescription: test\nimports: [./component.md]\nsafe-outputs:\n  add-pr-comment: {}\n---\nBody\n";
+
+        for version in [None, Some("0.53.0"), Some("unknown-version")] {
+            let mut parsed = parse_markdown_detailed_with_registry(source, &registry, version).unwrap();
+            assert!(!parsed.codemods.changed());
+            finish_import_codemods(&mut parsed, &registry).unwrap();
+            assert_eq!(
+                parsed.front_matter_mapping["safe-outputs"]["add-pull-request-comment"]["required-title-prefix"],
+                version.unwrap_or("new")
+            );
+            assert_eq!(
+                parsed.codemods.applied_ids(),
+                ["pull_request_tool_names", "post_import_provenance_probe"]
+            );
+            let after = parsed.front_matter_mapping.clone();
+            finish_import_codemods(&mut parsed, &registry).unwrap();
+            assert_eq!(parsed.front_matter_mapping, after);
+            assert_eq!(parsed.codemods.applied.len(), 2);
+        }
+    }
 
     fn reconstruct(parsed: &ParsedSource) -> String {
         reconstruct_source(
@@ -5640,31 +5872,31 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_pr_review_events_fails_when_allowed_events_missing() {
+    fn test_submit_pr_review_events_defaults_to_comment_when_omitted() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-repositories:\n      - self\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pull-request-review:\n    allowed-repositories:\n      - self\n---\n"
         ).unwrap();
         let result = validate_submit_pr_review_events(&fm);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("allowed-events"), "message: {msg}");
+        assert!(result.is_ok());
+        assert_eq!(fm.typed_safe_output_config::<crate::safe_outputs::SubmitPrReviewConfig>(
+            "submit-pull-request-review").unwrap().unwrap().allowed_events, ["comment"]);
     }
 
     #[test]
-    fn test_submit_pr_review_events_fails_when_allowed_events_empty() {
+    fn test_submit_pr_review_events_empty_grant_remains_empty() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-events: []\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pull-request-review:\n    allowed-events: []\n---\n"
         ).unwrap();
         let result = validate_submit_pr_review_events(&fm);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("allowed-events"), "message: {msg}");
+        assert!(result.is_ok());
+        assert!(fm.typed_safe_output_config::<crate::safe_outputs::SubmitPrReviewConfig>(
+            "submit-pull-request-review").unwrap().unwrap().allowed_events.is_empty());
     }
 
     #[test]
     fn test_submit_pr_review_events_fails_when_value_is_scalar() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review: true\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pull-request-review: true\n---\n",
         )
         .unwrap();
         let result = validate_submit_pr_review_events(&fm);
@@ -5674,7 +5906,7 @@ mod tests {
     #[test]
     fn test_submit_pr_review_events_passes_when_events_provided() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pr-review:\n    allowed-events:\n      - comment\n      - approve\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  submit-pull-request-review:\n    allowed-events:\n      - comment\n      - approve\n---\n"
         ).unwrap();
         assert!(validate_submit_pr_review_events(&fm).is_ok());
     }
@@ -5757,31 +5989,31 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_pr_thread_fails_when_allowed_statuses_missing() {
+    fn test_resolve_pr_thread_defaults_to_fixed_when_omitted() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-repositories:\n      - self\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pull-request-thread:\n    allowed-repositories:\n      - self\n---\n"
         ).unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("allowed-statuses"), "message: {msg}");
+        assert!(result.is_ok());
+        assert_eq!(fm.typed_safe_output_config::<crate::safe_outputs::ResolvePrThreadConfig>(
+            "resolve-pull-request-thread").unwrap().unwrap().allowed_statuses, ["fixed"]);
     }
 
     #[test]
-    fn test_resolve_pr_thread_fails_when_allowed_statuses_empty() {
+    fn test_resolve_pr_thread_empty_grant_remains_empty() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-statuses: []\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pull-request-thread:\n    allowed-statuses: []\n---\n"
         ).unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("allowed-statuses"), "message: {msg}");
+        assert!(result.is_ok());
+        assert!(fm.typed_safe_output_config::<crate::safe_outputs::ResolvePrThreadConfig>(
+            "resolve-pull-request-thread").unwrap().unwrap().allowed_statuses.is_empty());
     }
 
     #[test]
     fn test_resolve_pr_thread_fails_when_value_is_scalar() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread: true\n---\n",
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pull-request-thread: true\n---\n",
         )
         .unwrap();
         let result = validate_resolve_pr_thread_statuses(&fm);
@@ -5791,7 +6023,7 @@ mod tests {
     #[test]
     fn test_resolve_pr_thread_passes_when_statuses_provided() {
         let (fm, _) = parse_markdown(
-            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pr-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
+            "---\nname: test\ndescription: test\nsafe-outputs:\n  resolve-pull-request-thread:\n    allowed-statuses:\n      - fixed\n      - wont-fix\n---\n"
         ).unwrap();
         assert!(validate_resolve_pr_thread_statuses(&fm).is_ok());
     }
@@ -6150,6 +6382,65 @@ safe-outputs:
     }
 
     #[test]
+    fn pr_config_rejects_unknown_fields_and_preserves_shared_controls() {
+        for (tool, extra) in [
+            ("create-pull-request", serde_json::json!({})),
+            ("add-pull-request-comment", serde_json::json!({})),
+            ("reply-to-pull-request-comment", serde_json::json!({})),
+            ("resolve-pull-request-thread", serde_json::json!({"allowed-statuses": ["fixed"]})),
+            ("submit-pull-request-review", serde_json::json!({"allowed-events": ["comment"]})),
+            ("update-pull-request", serde_json::json!({})),
+            ("abandon-pull-request", serde_json::json!({})),
+            ("add-pull-request-reviewers", serde_json::json!({})),
+            ("add-pull-request-labels", serde_json::json!({})),
+            ("set-pull-request-auto-complete", serde_json::json!({})),
+        ] {
+            for max in [0, 1, 10] {
+                let mut config = extra.clone();
+                config["max"] = serde_json::json!(max);
+                config["staged"] = serde_json::json!(true);
+                config["require-approval"] = serde_json::json!(false);
+                let source = format!(
+                    "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}: {config}\n---\n"
+                );
+                let (fm, _) = parse_markdown(&source).unwrap();
+                validate_pull_request_outputs_config(&fm)
+                    .unwrap_or_else(|error| panic!("{tool}: {error:#}"));
+
+                config["unsupported-policy"] = serde_json::json!(true);
+                let source = format!(
+                    "---\nname: test\ndescription: test\nsafe-outputs:\n  {tool}: {config}\n---\n"
+                );
+                let (fm, _) = parse_markdown(&source).unwrap();
+                let error = validate_pull_request_outputs_config(&fm).unwrap_err();
+                let message = format!("{error:#}");
+                assert!(message.contains(tool), "{message}");
+                assert!(message.contains("unknown field `unsupported-policy`"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_abandon_pull_request_config() {
+        let yaml = r#"---
+name: test
+description: test
+safe-outputs:
+  abandon-pull-request:
+    required-labels: [""]
+---
+"#;
+        let (fm, _) = parse_markdown(yaml).unwrap();
+        let error = validate_pull_request_outputs_config(&fm)
+            .expect_err("invalid abandon-pull-request config must fail compilation")
+            .to_string();
+        assert!(
+            error.contains("required-labels"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn test_validate_safe_outputs_keys_accepts_known_keys() {
         let yaml = r#"---
 name: test
@@ -6449,10 +6740,9 @@ description: test
 safe-outputs:
   create-pull-request:
     require-approval: {create_approval}
-  update-pr:
+  update-pull-request:
+    target: created
     require-approval: {update_approval}
-    allowed-operations:
-      - update-description
 ---
 "#
             );
@@ -6542,10 +6832,9 @@ description: test
 safe-outputs:
   create-pull-request:
     staged: {create_staged}
-  update-pr:
+  update-pull-request:
+    target: created
     staged: {update_staged}
-    allowed-operations:
-      - update-description
 ---
 "#
             );
@@ -6557,7 +6846,7 @@ safe-outputs:
                 error.contains("same effective staged setting")
                     && error.contains("temporary pull-request IDs")
                     && error.contains("staged create-pull-request")
-                    && error.contains("staged update-pr"),
+                    && error.contains("staged update-pull-request"),
                 "create staged={create_staged}, update staged={update_staged}: {error}"
             );
         }
@@ -6571,9 +6860,8 @@ description: test
 safe-outputs:
   staged: true
   create-pull-request: {}
-  update-pr:
-    allowed-operations:
-      - update-description
+  update-pull-request:
+    target: created
 ---
 "#;
         let (fm, _) = parse_markdown(matching_default).unwrap();
@@ -6586,9 +6874,8 @@ safe-outputs:
   staged: true
   create-pull-request:
     staged: false
-  update-pr:
-    allowed-operations:
-      - update-description
+  update-pull-request:
+    target: created
 ---
 "#;
         let (fm, _) = parse_markdown(mismatched_override).unwrap();
@@ -6633,7 +6920,7 @@ safe-outputs:
         ] {
             let (mut fm, _) = parse_markdown(yaml).unwrap();
             fm.safe_outputs
-                .get_mut("update-pr")
+                .get_mut("add-pull-request-reviewers")
                 .unwrap()
                 .as_object_mut()
                 .unwrap()
@@ -6643,7 +6930,7 @@ safe-outputs:
                 .to_string();
             assert!(
                 error.contains(
-                    "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                    "safe-outputs.add-pull-request-reviewers.max-reviewers must be a positive integer that fits in usize"
                 ),
                 "value {value}: {error}"
             );
@@ -8319,6 +8606,30 @@ safe-outputs:
             }),
             "SafeOutputs must load the staged custom tool definitions: {args:?}"
         );
+    }
+
+    #[test]
+    fn patch_size_overrides_reach_mcp_without_becoming_agent_parameters() {
+        let mut fm = minimal_front_matter();
+        fm.safe_outputs.insert("create-pull-request".into(), serde_json::json!({"max-patch-size":1}));
+        fm.safe_outputs.insert("push-to-pull-request-branch".into(), serde_json::json!({
+            "allowed-branches":["agent/*"], "max-patch-size":10240,
+        }));
+        validate_pull_request_outputs_config(&fm).unwrap();
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let args = config.mcp_servers["safeoutputs"].entrypoint_args.as_ref().unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--create-pull-request-max-patch-size", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["--push-to-pull-request-branch-max-patch-size", "10240"]));
+        for tool in ["create-pull-request", "push-to-pull-request-branch"] {
+            for value in [serde_json::json!(0), serde_json::json!(10241), serde_json::json!("4096"), serde_json::json!(true)] {
+                fm.safe_outputs.get_mut(tool).unwrap()["max-patch-size"] = value;
+                assert!(validate_pull_request_outputs_config(&fm).is_err());
+            }
+            fm.safe_outputs.get_mut(tool).unwrap()["max-patch-size"] = serde_json::json!(4096);
+        }
+        let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
+        let args = config.mcp_servers["safeoutputs"].entrypoint_args.as_ref().unwrap();
+        assert!(!args.iter().any(|argument| argument.contains("max-patch-size")));
     }
 
     #[test]

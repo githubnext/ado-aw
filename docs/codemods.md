@@ -52,6 +52,13 @@ recompiled, its own output records the new version and it stops firing.
 2. The runner walks the registered codemod registry in order. Each
    codemod returns `Ok(true)` if it modified the mapping, `Ok(false)`
    if it didn't, or `Err` to abort the whole compile.
+   When imports exist, migrations that need imported custom-tool ownership
+   are deferred. Once ownership is known, the root source receives one
+   ordered pass from the first deferred migration through the end of the
+   registry, including its downstream transformations. This is a bounded
+   second phase, not a repeat-until-stable loop. The pass retains the root's
+   original compiler-version provenance, protects custom-tool policies and
+   never treats that version as the age of an imported component.
 3. The compiler runs all the usual validation and codegen against
    the rewritten, typed `FrontMatter`.
 4. **Only on a fully successful compile** AND **only if at least one
@@ -66,20 +73,19 @@ recompiled, its own output records the new version and it stops firing.
   the closing `---`).
 - **Leading whitespace** before the opening `---` is preserved
   byte-for-byte (BOM-strippers and editor blank lines).
-- **Front-matter key order** is preserved for keys the codemod
-  doesn't touch (`serde_yaml`'s mapping is insertion-ordered).
-  Renamed keys, however, move to the **end** of the front-matter
-  block: `Mapping::insert` appends new keys, so when a codemod
-  removes `old-key` and inserts `new-key`, the new key lands at
-  the bottom regardless of where the old one was. The compile
-  warning calls this out so users aren't surprised.
-- **Front-matter comments** are NOT preserved. `serde_yaml`
-  round-trip drops them. The warning emitted on rewrite calls this
-  out so it isn't a surprise. If you have important context in a
-  front-matter comment, move it into the markdown body before
-  running compile.
-- **Quote and scalar styles** in YAML may be normalized. This is
-  cosmetic.
+- **Commented YAML** is edited with a lossless syntax tree. Unchanged
+  fields, comments and quoting remain intact; known renamed keys retain
+  their associated comments. When `update-pr` splits, its nested comments
+  remain with the retained legacy constraints.
+- The rendered YAML is reparsed with the compiler's normal `serde_yaml`
+  parser and must equal the codemod's intended mapping. Comment tokens are
+  also checked for loss before any file is written. If a complex edit
+  cannot preserve comments safely, compilation fails with manual-migration
+  guidance rather than silently deleting them.
+- **Uncommented YAML** retains the existing serializer path. Quote/scalar
+  styles may normalize, and renamed keys may move to the end of a mapping.
+- Uniform CRLF endings in commented front matter are preserved. The
+  Markdown body remains byte-for-byte unchanged on either rewrite path.
 
 ### Atomicity and lost-update protection
 
@@ -110,6 +116,95 @@ tree). When at least one codemod would fire, it logs a warning and
 continues.
 
 ## Adding a codemod
+
+### PR repository defaults
+
+`pr_default_repository` renames ADO PR `target-repo` (and abandonment's old
+`repository` spelling) to `default-repository`. It never changes
+`allowed-repositories`: a fallback destination is not a permission grant.
+Conflicting spellings fail rather than selecting one. GitHub and other
+safe-output families keep their existing configuration vocabulary.
+
+### PR completion preferences
+
+`pr_completion_preferences` replaces creation's `squash-merge` boolean with
+flat `merge-strategy` and preserves released merge/deletion defaults explicitly.
+Conflicting old/new fields fail before source rewrites. The focused completion
+tool uses the same optional fields; new omissions do not impose preferences.
+
+For proven legacy configurations, an ineffective draft-plus-auto-complete
+combination remains a draft: the codemod sets `auto-complete: false` and explains
+the migration. Newly authored combinations are compile errors, not automatically
+published PRs. Unknown provenance alone cannot authorize that compatibility
+rewrite. Imported legacy shapes migrate in memory without changing component
+files, and recompiled source/lock pairs are stable under `check`.
+
+### PR tool decomposition
+
+The `0.54.0` contract also removes runtime body/reference aliases. Front-matter
+migration does not edit prompts or external MCP clients: callers must switch
+PR descriptions/comments to `body`, use `pull_request_id`, and supply the
+reviewed SHA for substantive votes unless using a confirmed creation snapshot.
+The retired author-side update `operation` default has no alias; use explicit
+`allowed-operations` and, for multiple operations, `default-operation`.
+
+Empty name grants in proven released shapes become explicit `["*"]` grants.
+New canonical tool names do not acquire old defaults solely because the
+containing workflow has an old lock. Recompilation does not widen explicit
+empty grants on an already migrated tool. Finite action lists remain finite.
+Legacy literal-star policies that would acquire wildcard meaning fail with an
+actionable migration error instead of silently widening authority.
+
+The subsequent `pull_request_tool_names` codemod expands abbreviated tool keys
+such as `add-pr-comment` to `add-pull-request-comment`, preserving configuration
+and updating shared-budget members. Old/new key collisions fail atomically.
+Only source configuration is migrated; old tool spellings are not runtime aliases.
+Legacy enabled shorthand such as `add-pr-comment: true` or
+`reply-to-pr-comment: true` is normalized like a bare/null declaration before
+the explicit PR target policy is preserved. This applies at the root and in
+imports; imported component bytes stay unchanged. It does not make boolean
+values valid in canonical runtime policy objects or enable a `false` declaration.
+
+`explicit_pr_policy` pins the target of each PR mutation. Canonical declarations
+use `triggering`, even in an older workflow: those names did not exist in the
+released legacy schema, so the old lock version alone cannot grant wildcard
+authority to a newly added tool. Proven legacy spellings and `update-pr`
+operations retain their explicit-ID scope through their source transformations.
+The source rewrite also pins
+new defaults explicitly, so recompiling a development build cannot reinterpret
+its own source as legacy on the next `check`.
+The normal compiler-version header establishes the cutover; no dedicated PR
+policy marker is emitted or interpreted. The compiler introducing the new
+contract has a distinct version, so removing an explicit target or adding a
+tool after compilation cannot accidentally restore the old wildcard default.
+Intermediate unpublished builds do not have a separate compatibility contract.
+
+Abbreviated old tool keys and migrated `update-pr` operations prove their old
+explicit-ID contract independently and preserve it, including inside imports.
+An old consumer lock does not establish the age of a newly imported canonical
+declaration: absent separate proof or an explicit target, it uses triggering.
+Imported files and pinned cache bytes are never rewritten.
+
+The same codemod removes `update-pull-request.sync-stack`, with a warning:
+it never synchronized Azure DevOps branches. Unsupported `update-branch: true`
+still fails instead of silently doing nothing.
+
+The `split_update_pr` codemod replaces the old operation-based `update-pr`
+declaration with focused PR tools. It preserves the original aggregate `max`
+in a persisted `budget-groups` declaration and retains operator-owned legacy
+policy metadata to avoid broadening title, body, vote, or reviewer capabilities.
+Existing conflicting focused declarations stop migration without rewriting.
+
+Prompt diagnostics run outside the mapping-only codemod. Explicit `update-pr`
+tool references are highlighted with source locations and replacement guidance;
+the markdown body is never automatically rewritten. The warning persists on
+subsequent compile/lint passes until the author updates the instructions.
+
+The original declaration shape is significant: bare/null/true `update-pr`
+declarations migrate without voting, whereas vote-enabled mappings must carry
+explicit legacy `allowed-votes`. The legacy vocabulary is validated before
+translation; review-only values are not silently accepted as old votes.
+Invalid policy and migration conflicts leave the source untouched.
 
 You need a codemod whenever you introduce a breaking change to the
 front-matter grammar:

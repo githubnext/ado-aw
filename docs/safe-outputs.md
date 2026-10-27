@@ -22,7 +22,7 @@ safe-outputs:
     draft: false             # default is true; set false to publish immediately (required for auto-complete)
     auto-complete: true
     delete-source-branch: true
-    squash-merge: true
+    merge-strategy: squash
     reviewers:
       - "user@example.com"
     labels:
@@ -30,9 +30,7 @@ safe-outputs:
       - agent-created
     work-items:
       - 12345
-  update-pr:
-    allowed-operations:
-      - add-reviewers
+  add-pull-request-reviewers:
     allowed-reviewers:
       - "user@example.com"
     max-reviewers: 3
@@ -40,6 +38,12 @@ safe-outputs:
 ```
 
 Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
+
+PR safe-output configuration and proposal fields are checked strictly.
+Unsupported options fail instead of being silently ignored; a gh-aw option is
+not supported merely because the tool has a similar name. Shared `max`,
+`staged` and `require-approval` controls remain valid configuration. Proposal
+`context` is execution metadata, not a way to supply additional tool policy.
 
 ### Threat detection (`threat-detection`)
 
@@ -129,7 +133,7 @@ safe-outputs:
   require-approval: true          # global default: every output below needs review
   create-pull-request:
     target-branch: main
-  add-pr-comment:
+  add-pull-request-comment:
     require-approval: false       # …except low-impact comments, which auto-apply
 ```
 
@@ -194,7 +198,7 @@ apply one note to every tool.
   diagnostic outputs (`noop`, `report-incomplete`, `missing-tool`,
   `missing-data`) until after approval, since they share that one job. If you
   want diagnostics to apply without waiting on a human, leave at least one
-  low-impact tool (e.g. `add-pr-comment`) non-gated so the automatic split job
+  low-impact tool (e.g. `add-pull-request-comment`) non-gated so the automatic split job
   is created.
 
 The Detection job always runs first. When AI threat analysis is enabled, a
@@ -294,7 +298,7 @@ that pins the representation returned by Azure DevOps.
 ### Executor authentication
 
 All write-bearing safe outputs (e.g. `create-pull-request`,
-`create-work-item`, `add-pr-comment`, `upload-build-attachment`) run in the
+`create-work-item`, `add-pull-request-comment`, `upload-build-attachment`) run in the
 Stage 3 `SafeOutputs` job and authenticate to Azure DevOps using
 `SYSTEM_ACCESSTOKEN`. By default this is `$(System.AccessToken)` — the
 pipeline's built-in OAuth token running as the *Project Collection Build
@@ -842,6 +846,71 @@ their complete existing lists, and `milestone` selects an existing milestone
 by positive number. All requested changes are preflighted before the first
 write.
 
+#### Pull request updates (`update-pull-request`)
+
+`update-pull-request` edits Azure DevOps PR content, not reviewers, labels,
+votes, or completion settings. It updates the title or description (`body`);
+both fields are enabled by default. Author-side `allowed-operations` grants
+description operations: `replace` (the sole default), `append`, `prepend`, or
+`replace-island`. One allowed operation is the inferred default; multiple
+operations require `default-operation` to select one of them. An empty grant
+permits no body operation. The agent's `operation` cannot expand this authority.
+For `replace-island`, a section is appended only when both pipeline-scoped
+markers are absent. One valid pair is replaced; incomplete, duplicate or
+reversed markers fail without writing. Text outside the section is preserved.
+The final description, including existing text, markers, and optional stats,
+must fit 4,000 UTF-16 code units; oversized updates fail rather than truncate.
+
+```yaml
+safe-outputs:
+  update-pull-request:
+    title: true               # enable title updates (default: true)
+    body: true                # enable description updates (default: true)
+    include-stats: false      # optional decoration, off by default
+    allowed-operations: [replace-island] # only this body operation is permitted
+    max: 1                    # maximum updates per run (default: 1)
+    target: "*"               # "triggering" (default), "*", or an ADO PR ID
+    default-repository: self   # selection only, not repository authority
+    allowed-repositories: [self]
+    required-labels: [automated]
+    required-title-prefix: "[bot] "
+```
+
+**Agent parameters:**
+
+- `title` *(optional)* - Nonblank replacement PR title; the shared compiler resource cap is 400 Unicode scalar values.
+- `body` *(optional)* - PR description content in Markdown.
+- `operation` *(optional)* - Selects a permitted body operation for this update.
+- `pull_request_id` - Required
+  when `target: "*"` is configured. With `target: "triggering"`, any supplied ID
+  must match the triggering PR.
+- `repository` *(optional)* - Target repository alias, constrained by
+  `allowed-repositories`.
+
+`target: triggering` binds the **collection/organization, repository, and PR
+ID together**. It is not an ID default that can be redirected to another
+repository. Native PR builds and trusted synthetic-PR resolution both provide
+this identity; an incomplete or mismatched identity fails before mutation.
+When omitted, the repository is the trusted triggering repository, which may
+differ from the pipeline's `self` checkout. This does not grant write access:
+repository allowlists and write-scope authorization still apply.
+
+For another PR, use an explicit fixed target or `target: "*"`, subject to the
+same repository permissions. Numeric and quoted numeric fixed targets have the
+same meaning, including in the human-review preview.
+
+`required-labels` reads the dedicated PR labels-list endpoint, not the optional
+labels in general PR metadata. Every configured label must match
+case-insensitively before writing; HTTP errors and malformed list responses
+fail closed.
+
+Numeric IDs, quoted numeric IDs and same-run temporary PR references are
+accepted. Repository destinations resolve their configured organization and
+project; cross-organization writes require the normal explicit write policy.
+Runtime ID aliases and `update_branch` are not accepted. Old source `footer`
+configuration migrates to `include-stats`; it is not a runtime alias. This is an ADO-native API, not a claim of full
+gh-aw schema or behavior compatibility.
+
 #### Fields, milestones, and assignees
 
 `set-github-issue-field` rejects built-in fields and limits repository-defined
@@ -1079,51 +1148,83 @@ runtime integrity check stays enabled. See [`docs/ado-script.md`](ado-script.md)
 > `target-branch`; enable `infer-target-from-checkout-ref` (and/or
 > `target-branches`) to give each repo its own base branch.
 
-**Stage 3 Execution Architecture (Hybrid Git + ADO API):**
+**Stage 3 execution (local Git + ADO REST):**
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Stage 3 Execution                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  1. Security Validation                                         │
-│     ├── Patch file size limit (5 MB)                           │
-│     └── Path validation (no .., .git, absolute paths)          │
-│                                                                 │
-│  2. Git Worktree (local operations only)                       │
-│     ├── Create worktree at target branch                       │
-│     ├── git apply --check (dry run)                            │
-│     ├── git apply (apply patch correctly)                      │
-│     └── git status --porcelain (detect changes)                │
-│                                                                 │
-│  3. ADO REST API (authenticated, no git config needed)         │
-│     ├── Read full file contents from worktree                  │
-│     ├── POST /pushes (create branch + commit)                  │
-│     ├── POST /pullrequests (create PR)                         │
-│     ├── PATCH (set auto-complete if configured)                │
-│     └── PUT (add reviewers)                                    │
-│                                                                 │
-│  4. Cleanup                                                     │
-│     └── WorktreeGuard removes worktree on drop                 │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+1. Verify the patch hash, paths, operation selection and resource limits before
+   applying it. Resolve the exact target ref; a captured base behind that ref
+   must be a verified ancestor, not an unrelated commit.
+2. Apply at the captured base in a detached temporary worktree. Unfiltered
+   mailbox input uses `git am --3way`; filtered patches and the raw-diff fallback
+   apply selected commit batches to the index. Copy/rename endpoints within
+   each commit refer to that commit's pre-change tree.
+3. Read exact Git blobs from the resulting tree/index, then remove the private
+   worktree before remote writes. No temporary local source ref is created.
+4. Use REST to create the branch/commit and PR, with the same validated base as
+   the commit parent, then apply configured follow-ups. Errors after a successful
+   push remain visible; creating the PR is not an atomic transaction with it.
 
-This hybrid approach combines:
-- **Git worktree + apply**: Correct patch application using git's battle-tested diff parser
-- **ADO REST API**: No git config (user.email/name) needed, authentication handled via token
+MCP capture also uses a private index and detached commit objects: it does not
+commit or reset the author's real HEAD, index or working tree.
+
+#### Shared PR patch limits
+
+Creation and guarded source-branch pushes accept native text/binary copy and
+rename records, rename-with-edit, and ordinary additions/edits/deletions.
+After applying the native records, both serialize the resulting tree delta as
+one REST add/edit/delete per path. This avoids ADO's rejection of separate
+rename and edit operations on the same destination in one commit.
+`excluded-files` uses application glob semantics: a basename matches at any
+depth, and `**/name` matches both root and nested paths. If either endpoint of
+a copy/rename is excluded, the **whole operation** is omitted and reported in
+`omitted_operations` (operation, source, destination). A retained operation
+depending on an omitted operation is rejected, not silently reinterpreted.
+Malformed metadata is rejected even in excluded operations.
+
+| Limit | Contract for both PR code-output tools |
+| --- | --- |
+| `max-patch-size` | Integer KiB, default **4096** (4 MiB), range **1–10240**. Bounds the entire captured patch, each result blob and aggregate expanded selected content. |
+| `max-files` | Default **100** unique paths; both endpoints of native moves/copies count. Push configuration additionally caps this at 1,000. |
+| Source processing | Separate **10 MiB** bound on source/referenced/intermediate blob processing, including binary expansion. |
+| Encoded push request | Separate **10 MiB** ceiling including JSON escaping, base64 and the enclosing REST body. |
+
+These checks run before application and again against actual Git output.
+For example, a small native patch copying a 429,575-byte file 99 times is
+rejected before Git application: it expands to over 40 MiB. Raising
+`max-patch-size` cannot bypass the source-processing or encoded-request bounds.
+Blob content comes from Git objects, not checkout files; `core.autocrlf`, EOL
+attributes and filesystem conversions do not change the bytes sent to ADO.
+Git-generated text patches with spaces in filenames are supported, including
+the terminal tab delimiter in old/new path headers. That syntactic delimiter
+does not authorize literal control characters in filenames.
+
+**Executable modes:** a blob hash proves content, not a file's executable bit.
+Both tools reject retained mode changes the content-only REST transport cannot
+represent, before creating or updating a remote branch. This includes in-place
+chmod changes, new executable files, and copies/moves that require an executable
+destination to be added. Existing executable files can be edited without
+changing their mode or deleted. Unrelated executable files do not block a patch.
+Capture retains explicitly staged mode intent, including with
+`core.filemode=false`; it does not silently turn staged chmod into an empty
+patch. No mode-loss override or native Git publication fallback is provided.
+
+**Intentional tightening:** the previous 5 MiB patch default becomes 4 MiB;
+creation also gains expanded-content and encoded-payload bounds. Authors who
+need a larger patch can explicitly configure, for example,
+`create-pull-request: {max-patch-size: 5120}`. Configure push separately.
+There is no top-level inherited size setting, automatic larger-limit migration,
+or agent-proposal override.
 
 **Agent parameters:**
-- `title` - PR title (required, 5-200 characters)
-- `description` - PR description in markdown (required, 10+ characters)
+- `title` - Nonblank PR title, at most 400 Unicode scalar values including `title-prefix` (the same compiler resource cap as updates).
+- `body` - Nonblank PR description in Markdown; there is no arbitrary minimum length.
 - `repository` - Repository to create PR in: "self" for pipeline repo, or alias from `checkout:` list (default: "self")
 - `labels` - Labels to add to the PR (optional; validated against `allowed-labels` when configured)
 
 Note: The source branch name is auto-generated from a sanitized version of the PR title plus a unique suffix (e.g., `agent/fix-bug-in-parser-a1b2c3`). This format is human-readable while preventing injection attacks.
 
 The tool response includes a generated temporary PR ID such as `#aw_a1b2c3`.
-The agent can pass that value as `pull_request_id` to later `update-pr` calls in
-the same SafeOutputs job. The ID is generated by the MCP server and is not an
+The agent can pass that value as `pull_request_id` to configured focused PR
+follow-up tools in the same SafeOutputs job. The ID is generated by the MCP server and is not an
 input to `create-pull-request`.
 
 **Configuration options (front matter):**
@@ -1160,28 +1261,29 @@ input to `create-pull-request`.
       target-branches:
         docs: gh-pages                      # (redundant here; shown as an explicit override)
   ```
-- `draft` - Whether to create the PR as a draft (default: **true**). Set to `false` to publish the PR immediately. **Note:** `auto-complete` is silently skipped on draft PRs — set `draft: false` when using `auto-complete: true`.
-- `auto-complete` - Set auto-complete on the PR (default: false). Requires `draft: false` to take effect.
-- `delete-source-branch` - Delete source branch after merge (default: true)
-- `squash-merge` - Squash commits on merge (default: true)
+- `draft` - Whether to create the PR as a draft (default: **true**). Set to `false` to publish it. New configurations combining a draft with `auto-complete: true` fail compilation.
+- `auto-complete` - Author-configured automatic completion (default: false), enabled only after configured initialization is confirmed. Requires explicit `draft: false`; never automatically publishes a draft. Failed setup retains the created PR and leaves completion off.
+- `delete-source-branch` - Optional initial deletion preference. Omission does not force branch deletion; explicit `false` is preserved.
+- `merge-strategy` - Optional initial merge preference: `squash`, `noFastForward`, `rebase`, or `rebaseMerge`. Omission does not force a strategy. Setting preferences alone does not enable completion.
 - `title-prefix` - Optional string prepended to all PR titles created by this agent (e.g., `"[Bot] "`)
 - `if-no-changes` - Behavior when the agent's patch produces no file changes: `"warn"` (default, succeed with a warning), `"error"` (fail the step), `"ignore"` (succeed silently)
 - `max-files` - Maximum number of files allowed in a single PR (default: 100). PRs exceeding this limit are rejected.
+- `max-patch-size` - Patch and expanded selected content limit in KiB (default: 4096, integer range: 1–10240); see [shared PR patch limits](#shared-pr-patch-limits).
 - `protected-files` - Controls whether manifest/CI files (e.g., `package-lock.json`, `.github/`, `*.lock`) can be modified: `"blocked"` (default, reject changes to these files) or `"allowed"` (permit all files)
 - `excluded-files` - Glob patterns for files to strip from the patch before applying (e.g., `["*.lock", "dist/**"]`)
-- `allowed-labels` - Allowlist of labels the agent is permitted to apply. If empty (default), any labels are accepted.
+- `allowed-labels` - Names the agent may propose. Omission imposes no additional name restriction; `[]` permits none and `["*"]` explicitly permits all names within the existing repository/action authority.
 - `reviewers` - List of reviewer emails or Azure DevOps user IDs to add
 - `labels` - List of labels to apply
 - `work-items` - List of work item IDs to link
 - `fallback-record-branch` - When PR creation fails, record the pushed branch name and target branch in the failure response so operators can manually create the PR (default: true)
 - `max` - Maximum number of create-pull-request outputs allowed per run (default: 1)
-- `include-stats` - Whether to append agent execution stats (AI credits when available, duration, model, tool calls) to the PR description (default: true)
+- `include-stats` - Whether to append agent execution stats (AI credits when available, duration, model, tool calls) to the PR description (default: false; proven released defaults are made explicit by migration).
 
 **Multi-repository support:**
 When `workspace: root` and multiple repositories are checked out, agents can create PRs for any allowed repository:
 ```json
-{"title": "Fix in main repo", "description": "...", "repository": "self"}
-{"title": "Fix in other repo", "description": "...", "repository": "other-repo"}
+{"title": "Fix in main repo", "body": "...", "repository": "self"}
+{"title": "Fix in other repo", "body": "...", "repository": "other-repo"}
 ```
 The `repository` value must be `"self"`, an alias from the `checkout:` list in the front matter, the full Azure DevOps repository name (e.g. `project/repo`), or the bare repository name (case-insensitive, e.g. `sdk-FtdiDeviceControl` for an entry whose ADO name is `4x4/sdk-FtdiDeviceControl`).
 
@@ -1220,142 +1322,627 @@ Reports that a task could not be completed.
 - `reason` - Why the task could not be completed (required, at least 10 characters)
 - `context` - Optional additional context about what was attempted
 
-### add-pr-comment
+### add-pull-request-comment
 Adds a new comment thread to a pull request.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID to comment on (required, must be positive)
-- `content` - Comment text in markdown format (required, at least 10 characters)
-- `repository` - Repository alias (default: "self")
+- `pull_request_id` - Positive PR ID; required with `target: "*"`, otherwise optional and checked against the configured target.
+- `body` - Nonblank comment text in Markdown (required).
+- `repository` - Optional repository alias; defaults to the configured/trusted target.
 - `file_path` *(optional)* - File path for an inline comment anchored to a specific file
 - `line` *(optional)* - Line number for an inline comment. Requires `file_path`.
 - `start_line` *(optional)* - Starting line for a multi-line inline comment range. Requires `file_path` and `line`, and must be strictly less than `line`.
+- `side` *(optional)* - `right` (default) or `left` side of the PR diff.
+- `expected_head_sha` - Exact reviewed 40-character source commit; required for inline comments. A stale head, missing diff path, invalid range or unavailable revision fails before posting.
 - `status` *(optional)* - Initial thread status: `"active"` (default), `"fixed"`, `"wont-fix"`, `"closed"`, or `"by-design"`. Subject to the `allowed-statuses` allowlist.
 
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  add-pr-comment:
+  add-pull-request-comment:
     comment-prefix: "[Agent Review] "  # Optional — prepended to all comments
-    allowed-repositories: []           # Optional — restrict which repos can be commented on
-    allowed-statuses: []               # Optional — restrict which thread statuses the agent can set (empty = any)
+    allowed-repositories: [self]        # Omitted: no extra restriction; [] permits none
+    allowed-statuses: [active]          # Default: active only; [] permits none
     max: 1                             # Maximum per run (default: 1)
-    include-stats: true                # Append agent stats to comment (default: true)
+    include-stats: false               # Optional decoration, off by default
+    comment-key: default               # Trusted report stream within this pipeline
+    supersede-older-comments: false    # Opt in to preserving/closing older owned reports
+    max-superseded-comments: 20        # Per-call cleanup bound (1-100)
 ```
 
-### reply-to-pr-comment
+Standalone comments are independent proposals, not a buffer for a later review.
+Inline positioning uses the exact ADO iteration and source/common commits,
+including renamed/deleted left-side paths; it does not assume the file exists
+in the current checkout. Upgrade existing inline callers to provide the reviewed
+head SHA. Comment content, including any prefix/stats, is bounded to 65,536 bytes.
+
+Owned comments carry executor-generated pipeline identity, report key and content
+hash in thread properties, not merely a marker in their Markdown. Supersession
+creates the replacement first, then preserves old text, marks it superseded and
+closes eligible older active threads. It never deletes comments or changes votes.
+Unmarked history, other pipelines/actors, externally edited comments and **all
+conversations with replies** remain untouched: a shared PAT/build identity alone
+cannot prove that a reply was automated. Discovery is bounded to 2,000 threads.
+
+### update-pull-request-comment
+
+Edits a verified workflow-owned **root comment with no replies**. Parameters are
+`thread_id`, `comment_id`, `body`, and the shared optional PR/repository target.
+Configuration supports the shared target/filter policy, `comment-key` (default
+`default`), and normal budget/approval/staged controls. This edits a comment,
+not the PR description.
+
+Stage 3 checks immutable pipeline ownership properties, server author, content
+hash and a fresh conversation snapshot. Missing ownership or external edits
+fail before writing. ADO does not permit updating thread properties: subsequent
+edits carry content and its hash trailer together in one comment-content write.
+The trailer alone never establishes ownership. Supersession's thread-status
+change is a separate write; partial or uncertain outcomes remain in artifacts.
+ADO supplies no atomic conversation lock, so concurrent changes discovered
+during/after writes are reported rather than silently overwritten or rolled back.
+
+### reply-to-pull-request-comment
 Replies to an existing review comment thread on a pull request.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID containing the thread (required)
+- `pull_request_id` - Positive PR ID containing the thread; required with `target: "*"`.
 - `thread_id` - The thread ID to reply to (required)
-- `content` - Reply text in markdown format (required, at least 10 characters)
-- `repository` - Repository alias (default: "self")
+- `body` - Nonblank reply text in Markdown (required).
+- `repository` - Optional repository alias; defaults to the configured/trusted target.
 
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  reply-to-pr-comment:
+  reply-to-pull-request-comment:
     comment-prefix: "[Agent] "     # Optional — prepended to all replies
-    allowed-repositories: []       # Optional — restrict which repos can be replied on
+    allowed-repositories: [self]    # Omitted: no extra restriction; [] permits none
     max: 1                         # Maximum per run (default: 1)
 ```
 
-### resolve-pr-thread
+### resolve-pull-request-thread
 Resolves or updates the status of a pull request review thread.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID containing the thread (required)
+- `pull_request_id` - Positive PR ID containing the thread; required with `target: "*"`.
 - `thread_id` - The thread ID to resolve (required)
 - `status` - Target status: `fixed`, `wont-fix`, `closed`, `by-design`, or `active` (to reactivate)
-- `repository` - Repository alias (default: "self")
+- `repository` - Optional repository alias; defaults to the configured/trusted target.
 
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  resolve-pr-thread:
-    allowed-repositories: []     # Optional — restrict which repos can be operated on
-    allowed-statuses: []         # REQUIRED — empty list rejects all status transitions
+  resolve-pull-request-thread:
+    allowed-repositories: [self] # Omitted: no extra restriction; [] permits none
+    allowed-statuses: [fixed]    # Default: fixed only; [] permits no transitions
     max: 1                       # Maximum per run (default: 1)
 ```
 
-### submit-pr-review
-Submits a review vote on a pull request.
+### submit-pull-request-review
+Submits review feedback and, for voting events, a review vote on a pull request.
+`comment` is non-voting: it posts feedback without changing an existing vote.
+Use the separately authorized `reset` event to clear the authenticated actor's
+vote. This is an intentional change for recompiled workflows; there is no
+legacy behavior switch and prompt text is not rewritten automatically.
 
 **Agent parameters:**
-- `pull_request_id` - The PR ID to review (required)
+- `pull_request_id` - Positive PR ID to review; required with `target: "*"`.
 - `event` - Review decision: `approve`, `approve-with-suggestions`, `request-changes`, or `comment` (required)
-- `body` *(optional)* - Review rationale in markdown (required for `request-changes`, at least 10 characters)
-- `repository` - Repository alias (default: "self")
+- `body` *(optional)* - Review summary in Markdown (required for `request-changes`; a non-voting `comment` needs this or inline findings).
+- `comments` *(optional)* - Array of `{file_path, side, line, start_line?, body}` findings belonging to this review. `side` defaults to `right`.
+- `expected_head_sha` - Reviewed source commit, required for substantive votes (`approve`, `approve-with-suggestions`, `request-changes`, `wait-for-author`, `reject`) and inline findings. Creation handles use the producer's validated immutable snapshot. `reset` and comment-only reviews without inline findings are exempt, but an explicitly supplied SHA is still checked.
+- `repository` - Optional repository alias; defaults to the configured/trusted target.
 
 **Configuration options (front matter):**
 ```yaml
 safe-outputs:
-  submit-pr-review:
-    allowed-events: []           # REQUIRED — empty list rejects all events
-    allowed-repositories: []     # Optional — restrict which repos can be reviewed
+  submit-pull-request-review:
+    allowed-events: [comment]    # Default: comment only; [] permits no review
+    allowed-repositories: [self] # Omitted: no extra restriction; [] permits none
     max: 1                       # Maximum per run (default: 1)
+    max-comments: 10             # Explicit nested-comment authority; default 0, maximum 100
+    supersede-older-comments: false # Optional same-workflow comment cleanup, never vote dismissal
 ```
 
-### update-pr
-Updates pull request metadata (reviewers, labels, auto-complete, vote, description).
+One call is one complete review proposal: summary, inline findings and an optional
+explicit vote. Standalone comment calls are never collected into it or reposted.
+Every finding is validated and anchored before the first write; comments are
+posted before the vote. Failed/uncertain comments or head drift prevent the vote.
+ADO does not provide an atomic review transaction or a SHA-bound vote lease:
+partial writes are reported, not rolled back or blindly repeated.
 
-**Agent parameters:**
-- `pull_request_id` - A positive numeric PR ID, a quoted positive numeric ID, or a temporary ID (`#aw_...`) returned by an earlier `create-pull-request` call in the same SafeOutputs job (required)
-- `operation` - Update operation: `add-reviewers`, `add-labels`, `set-auto-complete`, `vote`, or `update-description` (required)
-- `reviewers` - Reviewer emails (required for `add-reviewers`)
-- `labels` - Label names (required for `add-labels`)
-- `vote` - Vote value: `approve`, `approve-with-suggestions`, `wait-for-author`, `reject`, or `reset` (required for `vote`)
-- `description` - New PR description in markdown (required for `update-description`, at least 10 characters)
-- `repository` - Repository alias (default: "self")
+`max` counts review proposals; `max-comments` independently bounds their inline
+writes. Omitting it does not grant nested-comment authority. Nested comments
+inherit the review's target, filter, approval and staged policy and cannot select
+another PR or repository. Comment supersession uses the same ownership/hash
+checks as standalone comments and runs only after the replacement review succeeds.
 
-**Configuration options (front matter):**
+Inline preparation fetches each distinct immutable `(commit, path)` once per
+proposal, scans its requested lines together and processes one full file at a
+time. Left/right comments can require separate reads of the same filename.
+The existing 4 MiB file-content bound and 100-finding hard limit remain;
+there is no additional aggregate unique-file content cap. All anchors must
+validate before the first write, and later source-head checks still apply.
+
+### Focused PR tools
+
+Each PR intent has one agent-facing tool:
+
+| Intent | Tool |
+|---|---|
+| Title/description | `update-pull-request` |
+| Add reviewers | `add-pull-request-reviewers` |
+| Add labels | `add-pull-request-labels` |
+| Remove labels | `remove-pull-request-labels` |
+| Replace one label | `replace-pull-request-label` |
+| Publish an existing draft | `mark-pull-request-as-ready-for-review` |
+| Review/vote | `submit-pull-request-review` |
+| Enable auto-complete | `set-pull-request-auto-complete` |
+| Abandon | `abandon-pull-request` |
+
+**Comments versus reviews:** use standalone comment tools for ad hoc feedback or
+conversation replies; use one `submit-pull-request-review` for a complete review.
+Both enqueue proposals, but standalone comments execute independently in Stage 3.
+They are never buffered, absorbed or reposted by a subsequent review. Do not emit
+the same finding through both routes. `update-pull-request` edits the PR's
+description; `update-pull-request-comment` edits a verified owned root comment.
+`resolve-pull-request-thread` changes conversation status, not a vote.
+
+All PR mutation tools support `target`, `default-repository`, `allowed-repositories`,
+`required-labels` and `required-title-prefix`. New configurations default to
+`target: triggering`: the complete trusted triggering identity is required,
+and an optional supplied PR ID must agree. Use a fixed ID or `target: "*"` for
+another PR. With `"*"`, `pull_request_id` is required. Repository routing and
+filters are enforced in Stage 3, including comment/reply/thread operations.
+
+All Azure DevOps PR operations, including creation and shared policy reads, use
+a **30-second per-request HTTP deadline** and an **8 MiB consumed-response
+bound**, including streamed bodies without a content length. These are per
+request, not a deadline for the whole review. Oversized, malformed or incomplete
+policy metadata blocks mutation. A timeout or unreadable response after a write
+may mean ADO already applied it: delivery is uncertain, not proof of rollback,
+and the executor does not blindly replay the mutation.
+
+Reviewer, label, auto-complete and review tools accept `pull_request_id` and
+accept an optional `repository`. Reviewer and label tools additionally require
+`reviewers` and `labels`, respectively. These are additive operations.
+Auto-complete uses the authenticated actor and does not bypass branch policy.
+It requires an active, non-draft PR and may merge promptly once policies permit;
+enabling it is not a holding state. Omitted completion preferences remain
+unchanged. The executor confirms completion writes by reading back the state;
+unconfirmed delivery fails explicitly without retry.
+
 ```yaml
 safe-outputs:
-  update-pr:
-    allowed-operations: []          # Optional — restrict which operations are permitted (empty = all)
-    allowed-repositories: []        # Optional — restrict which repos can be updated
-    allowed-reviewers: []           # Optional — non-empty list restricts reviewers; empty or ["*"] permits any valid reviewer
-    max-reviewers: 3                # Maximum reviewers in one add-reviewers call (default: 3)
-    allowed-votes: []               # REQUIRED for vote operation — empty rejects all votes
-    delete-source-branch: true      # For set-auto-complete (default: true)
-    merge-strategy: "squash"        # For set-auto-complete: squash, noFastForward, rebase, rebaseMerge
-    max: 1                          # Maximum per run (default: 1)
+  add-pull-request-reviewers:
+    target: "*"
+    allowed-repositories: [self]
+    allowed-reviewers: ["owner@example.com"]
+    max-reviewers: 3
+    max: 1
+  add-pull-request-labels:
+    target: "*"
+    allowed-repositories: [self]
+    max: 1
+  set-pull-request-auto-complete:
+    target: "*"
+    allowed-repositories: [self]
+    delete-source-branch: true
+    merge-strategy: squash
+    max: 1
 ```
 
-When `allowed-reviewers` is omitted or empty, any otherwise-valid reviewer is
-permitted, matching gh-aw's reviewer policy. A non-empty list restricts
-reviewers using case-insensitive exact matching; `["*"]` is an explicit
-unrestricted form. Non-GUID reviewer values must also exactly match an Azure
+When `allowed-reviewers` is omitted, no additional reviewer-name restriction is
+imposed. An explicitly empty list permits no reviewers. Specific entries use
+case-insensitive exact matching; `["*"]` explicitly permits any otherwise-valid
+reviewer within the existing outer authority. Mixing `"*"` and specific names
+is rejected. Non-GUID reviewer values must also exactly match an Azure
 DevOps identity email, account name, or display name; fuzzy Identity Picker
-results are not selected. Reviewer identity or API failures return a warning
-with structured `added` and `failed` arrays. Invalid configuration, disallowed
+results are not selected. Known partial reviewer failures return a warning;
+total failures and uncertain writes fail. Structured `added`, `already_present`,
+`failed`, `uncertain` and per-effect evidence preserve what happened. Invalid configuration, disallowed
 reviewers, and unresolved PR references fail before reviewer writes begin.
 
+Immediately before each addition, Stage 3 reads complete reviewer membership.
+An identity already present is a **no-write no-op**: its vote, required status
+and flags are left untouched. Missing identities are added with an ID-only
+collection POST, never an individual reviewer PUT or explicit vote/required
+fields. Successful requests are followed by a membership read-back; failed or
+unconfirmed delivery is reported without automatic retries. `already_present`
+does not count as a newly added reviewer, but proposal budgets are still charged.
+
+**Concurrency limitation:** this is read-before-add, not an atomic conditional
+creation. If another actor adds the same reviewer and marks them required after
+the membership read but before the POST, ADO can clear that required status.
+The ID-only POST preserved votes in the platform probe; it is not a general
+guarantee that concurrent reviewer state is preserved. Read-back confirms
+membership, not absence of this race, and the executor never restores a stale
+vote/flag snapshot. Explicit voting and reset remain separate review operations.
+
+Creation's configured `reviewers` follow-ups use the same membership helper.
+When configured, its result includes a `reviewers` object containing `added`,
+`already_present` and `failed`. A reviewer failure produces a warning while
+retaining the successfully created PR ID and temporary-reference mapping; it
+does not roll back the PR or hide the partial result.
+
 Temporary PR references are resolved in safe-output proposal order, so
-`create-pull-request` must appear before its `update-pr` entries. They are
+`create-pull-request` must appear before its temporary-reference consumers. They are
 in-memory references scoped to one SafeOutputs job: automatic and manually
 reviewed safe outputs execute in separate jobs and cannot share a temporary ID.
-When both tools are configured, the compiler therefore requires them to have
-the same effective `require-approval` setting.
+For `target: created`, the compiler checks the known producer/consumer
+dependency and requires matching effective `require-approval` settings.
 
 The two tools must also have the same effective `staged` setting. A staged
 `create-pull-request` previews creation instead of producing the live PR that
-`update-pr` would modify, while staging only `update-pr` would preview updates
-after live creation. The compiler rejects both split-process configurations.
+the consumer would modify, while staging only the consumer would preview updates
+after live creation. The compiler rejects both split-process configurations
+for created-only consumers. With mixed `target: "*"`, lane checks apply to
+actual handle use at queue admission and again in Stage 3; unrelated numeric-ID
+actions are not rejected just because creation is configured in another lane.
 Section-level `safe-outputs.staged` defaults and per-tool `staged` overrides are
 resolved before this comparison.
-Each follow-up call counts against `update-pr.max`.
+Each follow-up counts against its tool budget and any shared budget group.
+
+Use `target: created` to restrict a consumer to the exact handle returned by
+creation. It never selects a single/latest PR implicitly. `target: "*"` supports
+both numeric IDs and handles within existing authority. There is no separate
+temporary-ID switch. This does not create temporary thread/comment IDs:
+those parameters remain existing server IDs.
 
 Example agent call sequence:
 
 ```json
-{"title":"Update dependencies","description":"Refresh dependencies and related tests."}
-{"pull_request_id":"#aw_a1b2c3","operation":"add-reviewers","reviewers":["user@example.com"]}
+{"title":"Update dependencies","body":"Refresh dependencies and related tests."}
+{"pull_request_id":"#aw_a1b2c3","reviewers":["user@example.com"]}
 ```
 
 The first line represents the `create-pull-request` call; use the actual
-temporary ID returned by that call in the later `update-pr` call.
+temporary ID returned by that call in the later `add-pull-request-reviewers` call.
+
+Head-bound consumers use the creation receipt's exact commit and validated
+tree, not the latest source head at execution time. The executor verifies the
+created commit's tree and parent against the queued patch. Failed/unconfirmed
+creation or missing snapshot proof blocks head-bound actions; a contradictory
+caller SHA is rejected. Later head drift still requires a fresh review.
+
+#### PR policy and queue contract
+
+| Setting | Omitted | Explicit empty |
+| --- | --- | --- |
+| Repository/reviewer/label name allowlist | No extra name restriction within existing outer authority | Permits no names |
+| Review events | `comment` only | Permits no reviews |
+| New thread statuses | `active` only | Permits no initial statuses |
+| Thread resolution statuses | `fixed` only | Permits no transitions |
+| Body operations | `replace` only | Permits no body edits (title edits may remain available) |
+| Blocklist | Blocks nothing | Blocks nothing |
+
+`["*"]` explicitly means unrestricted names within existing authorization.
+Combining `"*"` and specific names is rejected. Finite action grants remain
+enumerated; branch/file patterns retain their separate glob semantics.
+Tools with zero budget or no usable effective action are not advertised as usable.
+
+PR MCP calls return structured `queued` or `not-queued` receipts. A queued
+receipt includes `proposal_id`, target/reference, dependencies, snapshot
+information and remaining tool/group budgets. That ID is retained as the
+proposal/execution `context` for audit correlation. Queue success means neither
+remote application nor approval. Pending remote checks are listed explicitly.
+Invalid pre-queue calls do not consume budget; accepted calls do, including
+later failures and confirmed no-ops. Exhaustion returns a non-retryable
+`not-queued` receipt with reason `budget-exhausted`, without adding a doomed
+proposal. Uncertain persistence is an error, not a clean rejection or an
+invitation to retry. Reservations survive MCP restart, and a second writer
+cannot open the same output directory concurrently.
+
+Stage 3 independently checks authority, dependencies and budgets. Hand-written
+or modified NDJSON cannot gain authority from a receipt. Confirmed application
+and already-satisfied states succeed; known partial effects warn; total failures
+and uncertain delivery fail. Results retain confirmed, failed, unattempted and
+uncertain effects, with no transaction or rollback promise. Pipeline and audit
+statuses preserve this distinction.
+
+#### Shared PR mutation budgets
+
+Authors can declare `safe-outputs.budget-groups` directly; it is not restricted
+to migration-generated configuration. Each named group has exactly two fields:
+`max` (a nonnegative integer shared attempt limit) and `tools` (a nonempty list
+of configured canonical PR mutation tools).
+
+```yaml
+safe-outputs:
+  update-pull-request:
+    target: triggering
+    max: 3
+  add-pull-request-labels:
+    target: triggering
+    allowed-labels: [triaged]
+    max: 3
+  budget-groups:
+    pr-maintenance:
+      max: 2
+      tools: [update-pull-request, add-pull-request-labels]
+```
+
+This permits at most two attempts across the two tools combined, in proposal
+order. Each tool's own `max` still applies independently. Failed attempts and
+executed no-ops consume the shared budget; entries rejected because a budget
+is already exhausted do not execute. A group `max: 0` prevents all member
+attempts. Budgets reset with each SafeOutputs executor invocation.
+
+Group names must be nonempty and cannot contain pipeline commands. Every
+member must be an explicitly configured PR mutation tool, and a tool can occur
+only once across all groups. Creation, diagnostic tools, custom jobs and non-PR
+tools cannot be members. Members must share the same effective approval lane
+(gated or automatic) and staged setting; invalid groups fail compilation and
+are independently checked before execution. Grouping never grants additional
+repository access, allowed events, labels or nested-comment authority.
+
+The `update-pr` group written by legacy migration uses this same schema.
+Preserve its inherited limit unless deliberately changing the workflow's
+authority.
+
+### PR text-size contract
+
+Creation and content updates use the same title validator: **400 Unicode scalar
+values**, including the configured creation prefix. This is an explicit compiler
+resource cap, inherited from the existing assembled-title bound, **not a claim
+about an undocumented Azure DevOps server maximum**. It replaces inconsistent
+200-UTF-8-byte proposal and 256-scalar update limits without rejecting previously
+accepted assembled titles. The title must be nonblank; there is no arbitrary
+minimum length. Prefix overflow is rejected at MCP admission and again before
+Stage 3 performs a remote write.
+
+The shared description validator enforces **4,000 UTF-16 code units** for the
+assembled body, including current text, ownership markers and opted-in stats.
+This retains the existing conservative client-side counting rule. Microsoft's
+Pull Requests Update reference describes a 4,000-character description limit,
+but does not specify the Unicode counting unit or a title maximum; those
+undocumented details are not presented as verified facts here. Azure DevOps
+remains the authority for server-side restrictions, and a rejection is surfaced
+as an execution failure rather than silent truncation or an automatic retry.
+
+Units are intentional: a supplementary Unicode character counts as one scalar
+value in a title and two UTF-16 units in a description. UTF-8 byte lengths are
+used for separate payload/resource bounds, not mislabeled as character counts.
+Empty replacement descriptions remain valid when clearing a description.
+
+### PR label policies and transitions
+
+`add-pull-request-labels` and `remove-pull-request-labels` accept `labels` and the
+shared PR target policy. An omitted `allowed-labels` adds no name restriction;
+an explicit empty list permits no names. `["*"]` explicitly permits all names
+within the existing action/repository authority, and cannot be mixed with
+specific names. `blocked-labels` always wins. Other names match
+case-insensitively and exactly, not as globs. Names are trimmed and deduplicated before the configured count check.
+Labels must be nonempty, contain no control/pipeline-command characters, and
+fit 256 characters. A request has at most 1,000 raw entries.
+
+`max-labels` defaults to **10** per call, including recompiled existing workflows;
+configure a larger deliberate batch explicitly (range 1-1,000). This is separate
+from `max`, which limits proposals. Creation-only `allowed-labels` does not grant
+or restrict an independent label mutation tool.
+
+```yaml
+safe-outputs:
+  add-pull-request-labels:
+    allowed-labels: [triaged, ready]
+    blocked-labels: [approved]
+    max-labels: 10
+  remove-pull-request-labels:
+    allowed-labels: [stale]
+    max-labels: 10
+  replace-pull-request-label:
+    allowed-add: [done]
+    allowed-remove: [in-progress]
+    blocked-labels: [approved]
+    allowed-transitions:
+      - from: in-progress
+        to: done
+```
+
+Removal resolves IDs through the dedicated label-list endpoint and preserves
+unrelated labels. Absent labels are idempotent no-ops.
+
+Replacement takes one `from`/`to` pair. It validates both permissions and any
+`allowed-transitions` restriction before writes, adds/verifies `to`, then removes
+`from` and checks the resulting state. This is **not atomic**: partial/uncertain
+outcomes are recorded, with no blind replay or rollback. Failed or unverified
+addition never authorizes removing `from`. If `from` is already absent and `to`
+is present, the transition is a no-op; if both are absent, it fails.
+
+### mark-pull-request-as-ready-for-review
+
+Publishes an existing **active** draft PR by changing only `isDraft` to false.
+It accepts optional `pull_request_id`/`repository` under the shared target,
+repository and label/title policies. Default `max` is 1. Same-run temporary
+PR references require the creation and publication tools to share approval
+and staged settings.
+
+An already-ready PR is a no-op; completed/abandoned PRs are rejected. Stage 3
+reads the PR back and succeeds only when publication is persisted. Lost
+responses and failed read-back are reported without blind retries.
+Publishing does not vote, merge or enable auto-complete.
+
+### push-to-pull-request-branch
+
+Applies the agent's code delta to an **existing active PR's source branch**.
+The destination ref comes from authoritative PR metadata, never an agent-supplied
+branch name. Forks, the PR target branch and the repository default branch are
+refused. There is no force-push, branch recreation, fallback PR or policy bypass.
+
+```yaml
+safe-outputs:
+  push-to-pull-request-branch:
+    target: triggering
+    allowed-repositories: [self]
+    allowed-branches: ["agent/*"] # REQUIRED, short source-branch patterns; "*" matches any characters
+    protected-files: blocked
+    excluded-files: ["dist/**"]
+    max-files: 100
+    max-patch-size: 4096         # KiB, integer range 1–10240
+    if-no-changes: warn          # warn, error, ignore
+    max: 1
+```
+
+**Agent parameters:** `repository` is the required checkout alias (`self` or a
+configured alias); `expected_head_sha` is the original 40-character PR source
+commit, not an agent-created commit or native PR merge commit.
+`pull_request_id` is required only for `target: "*"`. Temporary PR IDs are not
+accepted.
+
+For triggering/fixed targets, a trusted pre-agent step selects the exact source
+snapshot before user steps and writes public metadata to
+`/tmp/ado-aw/pr-source-snapshot.json`. It uses the configured read token (or build
+token), never injects that token into the agent, and refuses a dirty checkout.
+Wildcard targets require an explicitly prepared checkout of the selected PR:
+no arbitrary branch or implicit `origin/main` fallback is fetched.
+
+The MCP tool captures committed and uncommitted changes through a temporary
+index without changing the original HEAD, index or working tree. Synthetic
+merge history and sparse checkouts are rejected. Stage 3 verifies the patch
+hash, paths, protected/excluded files and limits, applies it in an isolated
+index at the expected source commit without checking out its tree, rechecks the PR, then uses ADO's
+`oldObjectId` concurrency guard. A changed source head fails rather than
+rebasing, replaying or overwriting another contributor's work.
+
+The [shared PR patch limits](#shared-pr-patch-limits) apply, including native
+copy/rename support and whole-operation exclusions. The resulting push
+represents renames as delete/add while preserving exact blob content.
+Symlinks, submodules,
+file-mode changes and LFS/custom-filtered changes are rejected explicitly.
+Authenticated fetches require an exact approved ADO origin and do not persist
+credentials or follow redirects.
+
+Failed/unconfirmed pushes prevent later same-PR publication, review and
+auto-complete proposals from implying a successful repair. These follow-up
+tools must share the push tool's approval/staged lane; diagnostic outputs and
+independent targets remain separate. Lost responses are not blindly replayed,
+and results distinguish an accepted-but-unconfirmed push from a verified head.
+
+#### gh-aw comparison boundary
+
+The comparison is pinned to `github/gh-aw` v0.89.21 and commit
+`856e7fa3ca4f1597f9adbd519eec415ce92320e2` (reviewed September 30, 2026), not
+an assertion about future releases. Native copy/rename acceptance and the
+4096 KiB default / 1–10240 KiB configuration range align with that reference.
+Its default code transport is a Git bundle, with a format-patch/git-am
+alternative; ado-aw retains patch artifacts and full-blob ADO REST pushes.
+ADO-native targeting, `max-files`, exact-head compare-and-swap pushes, and the
+separate source-processing/encoded-request ceilings remain deliberate
+differences. Creation history/base handling and standalone-comment versus
+self-contained review semantics are not a drop-in gh-aw schema or transport.
+
+### Migrating PR tool names
+
+All public Azure DevOps safe-output tool names use `pull-request`, not `pr`.
+Compilation migrates the following keys, preserving their settings and
+explicit-ID scope as `target: "*"`:
+
+| Previous name | Canonical name |
+|---|---|
+| `add-pr-comment` | `add-pull-request-comment` |
+| `reply-to-pr-comment` | `reply-to-pull-request-comment` |
+| `resolve-pr-thread` | `resolve-pull-request-thread` |
+| `submit-pr-review` | `submit-pull-request-review` |
+| `add-pr-reviewers` | `add-pull-request-reviewers` |
+| `add-pr-labels` | `add-pull-request-labels` |
+| `set-pr-auto-complete` | `set-pull-request-auto-complete` |
+
+Shared-budget member names are migrated too. If both spellings are configured,
+compilation reports a conflict rather than merging policies. Prompt references
+to old tool names are highlighted for manual correction; prompt text is not
+rewritten. These are source migrations, not runtime aliases: MCP and Stage 3
+accept only canonical names. Existing compiled pipelines use their pinned
+compiler release.
+
+Legacy tool spellings and `update-pr` migrations preserve their explicit-ID
+scope. The new canonical names are pinned to `target: triggering`, including
+when added to a source with an older compiled lock; an old version is not
+evidence of legacy authority for a new tool name. Ambiguous provenance does not
+grant wildcard authority. Existing explicit targets are never overwritten.
+`sync-stack` is removed with a warning because it never acted in ADO.
+
+### Migrating the update-pr operation-based tool
+
+`compile` automatically migrates `safe-outputs.update-pr` to focused tools.
+The catch-all is no longer exposed by MCP or executable by the new Stage 3
+executor.
+
+Legacy `allowed-votes` accepts exactly `approve`, `approve-with-suggestions`,
+`wait-for-author`, `reject`, and `reset`. Unsupported values, including the
+review-only events `comment` and `request-changes`, stop migration with an
+actionable error rather than being reinterpreted. The same restriction applies
+to retained legacy policy metadata; native review configuration still supports
+its normal review events.
+
+Bare `update-pr:`, `update-pr: null`, and `update-pr: true` migrate to the four
+non-voting operations with their original shared limit. They do not generate
+an empty review configuration or acquire voting permission. An object-form
+configuration that enables voting but omits `allowed-votes` remains invalid.
+
+| Old operation | Replacement |
+|---|---|
+| `update-description` | `update-pull-request` (`body`) |
+| `add-reviewers` | `add-pull-request-reviewers` |
+| `add-labels` | `add-pull-request-labels` |
+| `vote` | `submit-pull-request-review` (`event`) |
+| `set-auto-complete` | `set-pull-request-auto-complete` |
+
+Migration preserves enabled operations, reviewer/vote/repository policy,
+temporary references, approval/staged settings and completion options.
+Description-only migration does not enable title edits, append/prepend,
+or stats. The persisted `legacy-update-pr` policy is operator-owned
+compatibility metadata, not a parameter the agent can supply.
+
+The codemod writes `safe-outputs.budget-groups.update-pr` with the old `max`
+and focused `tools` list. This is one shared limit, not a fresh allowance for
+every extracted tool. Failed attempts consume it; group members must share
+approval and staged settings. The creator's budget remains independent.
+Do not remove migration metadata without reviewing the authority change.
+
+Conflicting old/new tool declarations require manual migration; no config is
+silently merged or overwritten. Prompt bodies are preserved byte-for-byte.
+Explicit references to `update-pr` or abbreviated PR tool names produce located warnings with
+replacement guidance, including on later compile/lint passes until corrected.
+Review these warnings: front-matter migration cannot rewrite agent intent.
+
+Review votes retain their exact ADO meanings: approve=10,
+approve-with-suggestions=5, wait-for-author/request-changes=-5, reject=-10,
+reset=0. `comment` no longer writes a vote. Existing request-changes requires a rationale; migrated
+wait-for-author does not. A discussion-only comment uses `add-pull-request-comment`.
+
+### abandon-pull-request
+Abandons an Azure DevOps pull request without merging it.
+
+**Agent parameters:**
+- `pull_request_id` - The PR ID to abandon (required when `target: "*"`)
+- `body` *(optional)* - Comment posted after abandoning the PR
+- `repository` - Optional repository selector. The trusted triggering identity or exact creation destination takes precedence over `default-repository`.
+
+**Configuration options (front matter):**
+```yaml
+safe-outputs:
+  abandon-pull-request:
+    target: "triggering"              # "triggering" (default), "*", or PR ID
+    required-labels: [automated, stale]
+    required-title-prefix: "[bot]"
+    allowed-repositories: [self]      # Omitted: no extra restriction; [] permits none
+    default-repository: self          # Optional fallback, not a permission grant
+    include-stats: false              # Optional decoration, off by default
+    max: 1                            # Maximum per run (default: 1)
+```
+
+When `target` is `"triggering"`, Stage 3 requires the complete trusted native or
+synthetic PR identity, not just a matching numeric ID. When `target` is a number, that configured
+ADO PR ID is used. The tool fetches the PR first, applies the optional
+title/label filters, patches the PR status to `abandoned`, then optionally
+posts `body` as a PR thread comment.
+
+All required labels must match (case-insensitively), using the dedicated PR
+labels-list endpoint. A missing label, failed lookup or malformed response
+prevents mutation. Completed PRs are rejected;
+already-abandoned PRs are no-ops and do not post another comment. If abandonment
+succeeds but comment posting fails, execution is a warning with structured
+mutation/comment data. A transport error can leave comment delivery uncertain;
+the tool does not blindly retry and risk duplicate comments.
 
 ### link-work-items
 Links two Azure DevOps work items together.

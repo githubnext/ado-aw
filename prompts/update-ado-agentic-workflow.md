@@ -33,6 +33,19 @@ Identify current:
 - Touch only requested keys/sections.
 - Keep front-matter ordering stable when practical.
 - If changing `on.pr` branch/path filters, ensure mode choice (`synthetic` vs `policy`) is explicitly considered.
+- For PR comment/review changes, retain the intent boundary: standalone
+  `add-pull-request-comment` proposals are never buffered into
+  `submit-pull-request-review`. Put a complete review's findings in its `comments`
+  array with explicit `max-comments`; do not duplicate them as standalone calls.
+- `comment` is non-voting; `reset` explicitly clears the authenticated actor's
+  vote. Do not translate informational reviews into reset votes.
+- Keep PR-description updates (`update-pull-request`) distinct from owned
+  comment updates (`update-pull-request-comment`, requiring thread/comment IDs).
+  Inline comments require `expected_head_sha`; existing implicit target scope
+  is preserved only by proven source migration, not by runtime aliases.
+- Review changes to `target`, label limits and approval/staged lanes as authority
+  changes. Never enable arbitrary PR targeting, nested comments or code pushes
+  merely to make an old prompt compile.
 
 ### 3. Validate
 Run a compact checklist:

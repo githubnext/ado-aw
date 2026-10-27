@@ -15,6 +15,7 @@ on:
     strategy: centralized
     name: review
     events: [pull_request_comment, pull_request_review_comment]
+if: github.event.pull_request.number || github.event.issue.pull_request || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request'
 permissions:
   contents: read
   pull-requests: read
@@ -62,27 +63,40 @@ here; you will only duplicate its comments.
 
 ## Step 1 — Load the pre-fetched data and start the sub-agent
 
-In **one parallel turn**, read all three files:
+Record the start time with `date +%s`. Use a **12-minute agent-work budget**,
+reserving the remaining runtime for submitting the review. Check elapsed time
+between investigation batches. At minute 9 stop opening new investigation
+threads; by minute 12 submit the evidence you have, explicitly naming any
+unreviewed areas. A smaller completed review with honest scope is better than
+timing out with no result. Do not increase this budget while running.
 
-- `/tmp/gh-aw/agent/pr-diff.patch` — the diff you are reviewing
+In **one parallel turn**, read metadata and existing comments, and inspect the
+diff's file/hunk index:
+
+- `/tmp/gh-aw/agent/pr-diff.patch` — read selected changed hunks, not the entire
+  large patch in a single tool response
 - `/tmp/gh-aw/agent/pr-meta.json` — PR metadata and the changed-file list
 - `/tmp/gh-aw/agent/pr-review-comments.json` — comments already on this PR
 
 Restrict yourself to the Rust files in that diff: `src/**`, `ado-aw-derive/**`,
 `tests/**`, and `Cargo.toml`. Ignore everything else — another reviewer owns it.
 
-**In the same turn**, start the `rust-critic` sub-agent in the background,
-passing it the Rust portion of the diff.
+Then start the `rust-critic` sub-agent in the background with the on-disk diff
+path, PR metadata path, exact head SHA and at most three high-risk changed Rust
+files. Give it the complete task in its first message, not an empty launch.
+Keep its scope separate from your initial pass; do not pass the whole large
+Rust diff to both reviewers and repeat the same traversal.
 
 Sub-agent contract:
 
-- Start `rust-critic` exactly once, immediately, and let it work while you do
+- Start `rust-critic` exactly once after selecting its bounded scope, and let it work while you do
   your own pass in Step 2.
+- Do not specify a model or model alias when launching the sub-agent. Omit the
+  model parameter so it inherits the parent/runtime model selection.
 - It must return strict JSONL, one finding per line.
-- Collect its output before Step 3, and **wait for it** rather than polling: make
-  a single blocking read that waits for the sub-agent to finish. Only give up
-  once that blocking wait itself times out — a sub-agent that is still running is
-  not a sub-agent that declined to answer.
+- Give the critic a six-minute investigation budget. Collect its output once,
+  by minute 8 of your own run, using a blocking read with at most a 60-second
+  timeout. Never poll repeatedly, relaunch it, or wait past the review deadline.
 - If it still has not answered after the blocking wait, or if its output is
   unparseable, discard it, continue with your own findings, and say so in one
   line of the review body.
@@ -91,6 +105,14 @@ Sub-agent contract:
 ## Step 2 — Your own pass
 
 While `rust-critic` runs, analyse the changed lines yourself:
+
+Prioritize production paths with user input, IO, state mutation and conversion
+boundaries; examine the relevant tests as evidence. Keep a compact ledger of
+files/hunks checked and candidate findings, so you do not repeatedly re-read
+the same functions. Use the pinned pre-fetched diff: do not fetch a moving PR
+head or reconstruct the full diff. Do not build the repository or run full test
+suites during this review; CI owns those checks. A narrowly scoped reproduction
+must have a short explicit timeout and fit the remaining investigation budget.
 
 **Error handling** — this codebase uses `anyhow` throughout.
 
@@ -127,8 +149,8 @@ a lock guard.
 
 ## Step 3 — Adjudicate
 
-Collect `rust-critic`'s JSONL — using the blocking wait described in Step 1, not
-a single non-blocking peek. Parse it, discarding malformed lines and anything
+Collect `rust-critic`'s JSONL within the deadline in Step 1, not through repeated
+non-blocking peeks. Parse it, discarding malformed lines and anything
 outside the changed lines. Then triage every candidate — its findings and your
 own — as:
 
@@ -163,13 +185,14 @@ Use `REQUEST_CHANGES` when any of the following hold:
 - error handling was weakened — a `Result` turned into an `unwrap`, or context
   stripped from an existing error path.
 
-Otherwise use `COMMENT`. Keep the body short: a verdict, one line of summary,
-and the themes in a `<details>` block.
+Otherwise use `COMMENT`. Keep the body short: a verdict, the reviewed head,
+the production areas actually examined, any coverage/critic limitation, and the
+themes in a `<details>` block. Never claim exhaustive review of files you did
+not inspect. Submit exactly once even if the critic was unavailable.
 
 ## agent: `rust-critic`
 ---
 description: Hostile first-pass Rust reviewer that mines merge-blocking defects from changed lines
-model: small
 ---
 You are a hostile senior Rust reviewer performing a first-pass audit.
 
@@ -181,6 +204,9 @@ Rules:
   async code, and cross-platform path bugs.
 - Ignore formatting and style — `cargo fmt` and `cargo clippy` already run in CI.
 - Assume the code is wrong until the diff proves otherwise.
+- Use only the supplied changed-file scope and on-disk diff. Finish within six
+  minutes and return at most six high-confidence findings. Do not fetch another
+  revision, run full suites, or expand into the parent's review scope.
 
 Output format (strict):
 

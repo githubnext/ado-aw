@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { beforeAll, describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
+import { main as renderApprovalSummary } from "../../approval-summary/index.js";
 
 import { runExecute } from "../execute-cli.js";
 import type {
@@ -126,7 +128,7 @@ describe("create-pull-request add-reviewers handoff", () => {
     "configures and submits one $name reviewer",
     async ({ scenario, temporaryId, submittedReviewer }) => {
       expect(scenario.config(ctx, state)).toEqual({
-        "allowed-operations": ["add-reviewers"],
+        target: "*",
         "allowed-repositories": ["agent-definitions"],
         "allowed-reviewers": [submittedReviewer],
         "max-reviewers": 1,
@@ -134,7 +136,6 @@ describe("create-pull-request add-reviewers handoff", () => {
       });
       await expect(scenario.ndjson(ctx, state)).resolves.toEqual({
         pull_request_id: temporaryId,
-        operation: "add-reviewers",
         reviewers: [submittedReviewer],
       });
     },
@@ -163,7 +164,7 @@ describe("create-pull-request add-reviewers handoff", () => {
         },
       };
       const updated: ExecutedRecord = {
-        name: "update_pr",
+        name: "add_pull_request_reviewers",
         status: "succeeded",
         result: {
           pull_request_id: 42,
@@ -266,7 +267,7 @@ describe("create-pull-request add-reviewers handoff", () => {
         result: created,
       },
       {
-        name: "update_pr",
+        name: "add_pull_request_reviewers",
         status: "succeeded",
         result: updated,
       },
@@ -296,7 +297,7 @@ describe("create-pull-request add-reviewers handoff", () => {
       },
     };
     const updated: ExecutedRecord = {
-      name: "update_pr",
+      name: "add_pull_request_reviewers",
       status: "succeeded",
       result: {
         pull_request_id: 42,
@@ -357,6 +358,74 @@ describe("Rust executor payload contract", () => {
     expect(adoAwBin, "Cargo must report the freshly built ado-aw executable").toBeTruthy();
   }, cargoTimeoutMs);
 
+  function previewPolicyEnv(value: unknown): string | undefined {
+    if (Array.isArray(value)) {
+      for (const child of value) {
+        const result = previewPolicyEnv(child);
+        if (result !== undefined) return result;
+      }
+    } else if (value !== null && typeof value === "object") {
+      const object = value as Record<string, unknown>;
+      if (object.env !== null && typeof object.env === "object" && !Array.isArray(object.env)) {
+        const env = object.env as Record<string, unknown>;
+        if (typeof env.AW_PR_POLICIES === "string") return env.AW_PR_POLICIES;
+      }
+      for (const child of Object.values(object)) {
+        const result = previewPolicyEnv(child);
+        if (result !== undefined) return result;
+      }
+    }
+    return undefined;
+  }
+
+  it.each([42, "42", "9007199254740993"])(
+    "renders the Rust compiler's fixed target %s without falling back to trigger 7",
+    async (target) => {
+      const dir = await mkdtemp(join(tmpdir(), "ado-aw-preview-contract-"));
+      try {
+        const source = join(dir, "workflow.md");
+        await writeFile(source, "---\n" + JSON.stringify({
+          name: "preview-contract", description: "Compiler to preview target contract",
+          "safe-outputs": {
+            "update-pull-request": { target, "include-stats": false },
+            "abandon-pull-request": { target, "include-stats": false },
+          },
+        }) + "\n---\nReview fixture.\n");
+        const compiled = spawnSync(adoAwBin, ["compile", source], {
+          cwd: dir, encoding: "utf8", timeout: 30000,
+          env: { ...process.env, ADO_AW_LOG_DIR: join(dir, "logs"),
+            ADO_AW_COMPILE_REMOTE_URL: "https://dev.azure.com/org/P/_git/repo" },
+        });
+        if (compiled.error) throw compiled.error;
+        expect(compiled.status, compiled.stderr).toBe(0);
+        const pipeline: unknown = parseYaml(await readFile(join(dir, "workflow.lock.yml"), "utf8"));
+        const policies = previewPolicyEnv(pipeline);
+        expect(policies, "compiler must emit preview policy").toBeDefined();
+        const proposals = join(dir, "safe_outputs.ndjson");
+        const summary = join(dir, "ado-aw-safe-outputs.md");
+        await writeFile(proposals, [
+          { name: "update-pull-request", body: "Update report." },
+          { name: "abandon-pull-request", body: "Abandonment reason." },
+        ].map((record) => JSON.stringify(record)).join("\n"));
+        expect(renderApprovalSummary({
+          AW_SAFE_OUTPUTS_NDJSON: proposals, AW_APPROVAL_SUMMARY_OUT: summary,
+          AW_PR_POLICIES: policies, SYSTEM_PULLREQUEST_PULLREQUESTID: "7",
+          BUILD_REASON: "PullRequest", BUILD_REPOSITORY_PROVIDER: "TfsGit",
+          BUILD_REPOSITORY_ID: "11111111-2222-3333-4444-555555555555",
+          BUILD_REPOSITORY_URI: "https://dev.azure.com/org/P/_git/repo",
+          SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
+          SYSTEM_TEAMPROJECT: "P",
+        })).toBe(0);
+        const markdown = await readFile(summary, "utf8");
+        expect(markdown.split("| PR | " + String(target) + " |")).toHaveLength(3);
+        expect(markdown).not.toContain("| PR | 7 |");
+        expect(markdown).not.toContain("9007199254740992");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   async function parseScenario(
     scenario: Scenario<unknown>,
     mutate?: (prior: PriorEntry[], entry: Record<string, unknown>) => void,
@@ -408,7 +477,7 @@ describe("Rust executor payload contract", () => {
 
   it.each([
     { target: "producer", tool: "create-pull-request", index: 0 },
-    { target: "consumer", tool: "update-pr", index: 1 },
+    { target: "consumer", tool: "add-pull-request-reviewers", index: 1 },
   ] as const)(
     "rejects an overlong $target temporary ID through Rust deserialization",
     async ({ target, tool, index }) => {
@@ -458,7 +527,7 @@ describe("Rust executor payload contract", () => {
     expect(result.records).toHaveLength(2);
     expect(result.records[0]?.status).toBe("succeeded");
     expect(result.records[1]?.status).toBe("failed");
-    expect(result.records[1]?.error).toContain("Failed to parse update-pr:");
+    expect(result.records[1]?.error).toContain("Failed to parse add-pull-request-reviewers:");
     expect(result.records[1]?.error).toContain("expected a sequence");
   });
 });

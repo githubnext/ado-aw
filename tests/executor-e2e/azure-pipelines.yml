@@ -13,6 +13,16 @@
 # Register it in msazuresphere/AgentPlayground — see tests/executor-e2e/README.md.
 
 trigger: none
+parameters:
+  - name: scenarios
+    type: string
+    default: ""
+  - name: requireSelected
+    type: boolean
+    default: false
+  - name: fileFailureIssue
+    type: boolean
+    default: false
 pr:
   branches:
     include:
@@ -40,6 +50,7 @@ pool:
   name: AZS-1ES-L-Playground-ubuntu-22.04
 
 variables:
+  EFFECTIVE_EXECUTOR_E2E_FILE_FAILURE_ISSUE: $[or(eq(variables['Build.Reason'], 'Schedule'), ${{ parameters.fileFailureIssue }})]
   # Keep YAML defaults under private names so same-named pipeline/definition UI
   # variables (EXECUTOR_E2E_ADO_REPO, E2E_QUEUE_PIPELINE_ID, E2E_WIKI_NAME,
   # E2E_WORK_ITEM_ASSIGNEE, EXECUTOR_E2E_REVIEWER, CRATES_IO_FEED) are not
@@ -152,6 +163,10 @@ steps:
       # explicitly so the harness (and the ado-aw binary it spawns) can write.
       SYSTEM_ACCESSTOKEN: $(SC_WRITE_TOKEN)
       EXECUTOR_E2E_ADO_AW_BIN: $(ADO_AW_BIN)
+      EXECUTOR_E2E_SCENARIOS: ${{ parameters.scenarios }}
+      EXECUTOR_E2E_REQUIRE_SELECTED: ${{ parameters.requireSelected }}
+      EXECUTOR_E2E_FILE_FAILURE_ISSUE: $(EFFECTIVE_EXECUTOR_E2E_FILE_FAILURE_ISSUE)
+      EXECUTOR_E2E_RESULTS_PATH: $(Build.ArtifactStagingDirectory)/executor-e2e/results.json
       # Compiled conclusion.js driven by the conclusion work-item scenarios.
       # When unset those scenarios skip rather than fail.
       EXECUTOR_E2E_CONCLUSION_BUNDLE: $(CONCLUSION_BUNDLE)
@@ -180,3 +195,10 @@ steps:
       EXECUTOR_E2E_CROSS_ORG_REPOSITORY: $(EXECUTOR_E2E_CROSS_ORG_REPOSITORY)
       EXECUTOR_E2E_CROSS_ORG_ENDPOINT: $(EXECUTOR_E2E_CROSS_ORG_ENDPOINT)
       EXECUTOR_E2E_CROSS_ORG_TOKEN: $(EXECUTOR_E2E_CROSS_ORG_TOKEN)
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish executor E2E results
+    condition: always()
+    inputs:
+      targetPath: $(Build.ArtifactStagingDirectory)/executor-e2e
+      artifact: executor-e2e-results

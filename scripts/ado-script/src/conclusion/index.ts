@@ -291,7 +291,7 @@ function extractNamedValue(
   return match?.[1]?.trim();
 }
 
-function buildPipelineFailureReport(config: RuntimeConfig): SignalReport | null {
+function buildPipelineFailureReport(config: RuntimeConfig, entries: readonly ManifestEntry[]): SignalReport | null {
   const failedJobs = config.jobs.filter((job) => job.result === "Failed");
   if (failedJobs.length === 0) return null;
 
@@ -308,6 +308,26 @@ function buildPipelineFailureReport(config: RuntimeConfig): SignalReport | null 
     `- Build URL: ${config.buildUri ?? "unknown"}`,
     `- Build ID: ${config.buildId ?? "unknown"}`,
   ];
+  const states = ["applied", "already-satisfied", "failed", "unattempted", "uncertain"] as const;
+  const effects = entries.flatMap((entry) =>
+    Array.isArray(entry.result?.effects) ? entry.result.effects.filter(isRecord) : [],
+  );
+  if (effects.length > 0) {
+    lines.push("", "## Safe-output effects", "These are individual effects, not an atomic transaction or a rollback.");
+    for (const state of states) {
+      const count = effects.filter((effect) => effect.state === state).length;
+      if (count > 0) lines.push(`- ${state}: ${count}`);
+    }
+    const prs = unique(entries.map((entry) => {
+      const id = entry.result?.pull_request_id;
+      return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? String(id)
+        : typeof id === "string" && /^[1-9]\d*$/.test(id) ? id : undefined;
+    }));
+    if (prs.length > 0) lines.push(`- PR references recorded by the executor: ${prs.join(", ")}`);
+    if (effects.some((effect) => effect.state === "uncertain")) {
+      lines.push("Uncertain delivery requires inspection before any retry; earlier confirmed effects are retained.");
+    }
+  }
 
   return {
     kind: "pipeline_failure",
@@ -515,7 +535,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   );
 
   const signals = [
-    buildPipelineFailureReport(config),
+    buildPipelineFailureReport(config, manifestEntries),
     buildNoopReport(config, noopEntries),
     buildMissingToolReport(config, missingToolEntries),
     buildMissingDataReport(config, missingDataEntries),

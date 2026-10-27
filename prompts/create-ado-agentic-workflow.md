@@ -50,6 +50,27 @@ Use compact sections:
 
 Ensure "No Action" explicitly maps to `noop` when applicable.
 
+For Azure DevOps PR work, choose tools by intent:
+- Ad hoc general/inline feedback: `add-pull-request-comment`; replies use
+  `reply-to-pull-request-comment` with an existing thread ID.
+- A complete review: one `submit-pull-request-review` proposal containing
+  `event`, optional `body` and `comments`. Standalone comments are never buffered
+  into it; do not submit the same finding through both routes.
+- `comment` is non-voting; `reset` explicitly clears the authenticated actor's
+  vote. Resolving a thread does not approve a PR or clear a vote.
+- Inline findings require `expected_head_sha`; nested review findings require
+  explicit `max-comments` (default 0). New mutation tools default to the complete
+  trusted triggering PR; arbitrary PR IDs require `target: "*"`.
+- Edit PR text with `update-pull-request`; edit only a verified owned comment
+  with `update-pull-request-comment` and both thread/comment IDs.
+- Code repairs use `push-to-pull-request-branch`, an explicit source-branch
+  allowlist and the original source-head snapshot, never an arbitrary git push.
+  Draft publication is separate from voting and auto-complete.
+
+All tools enqueue proposals in Stage 1; none publishes immediately. A complete
+review can require several non-atomic Stage 3 writes. Consult `docs/safe-outputs.md`
+for ownership, partial-outcome, approval and same-lane constraints.
+
 ### 4. Validate Draft Quality
 Checklist:
 - field set is minimal and coherent,

@@ -6,6 +6,23 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 The `mcp-servers:` field configures MCP (Model Context Protocol) servers that are made available to the agent via the MCP Gateway (MCPG). MCPs can be **containerized stdio servers** (Docker-based) or **HTTP servers** (remote endpoints). All MCP traffic flows through the MCP Gateway.
 
+## Built-in SafeOutputs admission
+
+The built-in SafeOutputs server queues proposals; it never holds the Stage 3
+write token. The compiler projects non-secret PR constraints into its tool
+configuration. Canonical PR tool inputs use `body` and `pull_request_id`, with
+no runtime aliases. Structured receipts distinguish accepted proposals from
+non-retryable policy/budget rejection and list remote checks still pending.
+
+The queue's proposal `context` is the receipt's `proposal_id`, retained through
+execution and audit. A shared admission lock prevents concurrent tool/group
+oversubscription, and a process-level lock permits only one writer per output
+directory. Durable queued records restore reservations after restart; corrupted
+or missing prior queue state fails instead of resetting the budget. Receipt
+content and the sandbox policy copy are never write authority: Stage 3
+independently enforces trusted configuration, identity, dependencies and budgets.
+See [the PR contract](safe-outputs.md#pr-policy-and-queue-contract).
+
 ## Docker Container MCP Servers (stdio)
 
 Run containerized MCP servers. MCPG spawns these as sibling Docker containers:

@@ -1474,9 +1474,9 @@ fn test_compile_auto_discover_skips_missing_source() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that submit-pr-review fails compilation when allowed-events is missing
+/// An omitted event grant permits comment-only review.
 #[test]
-fn test_submit_pr_review_requires_allowed_events() {
+fn test_submit_pr_review_defaults_to_comment_events() {
     let temp_dir = std::env::temp_dir().join(format!(
         "agentic-pipeline-spr-events-{}",
         std::process::id()
@@ -1490,7 +1490,7 @@ description: "Agent that submits PR reviews but has no allowed-events"
 permissions:
   write: my-write-sc
 safe-outputs:
-  submit-pr-review:
+  submit-pull-request-review:
     allowed-repositories:
       - self
 ---
@@ -1514,22 +1514,22 @@ Submit PR reviews.
         .expect("Failed to run compiler");
 
     assert!(
-        !output.status.success(),
-        "Compiler should fail when submit-pr-review lacks allowed-events"
+        output.status.success(),
+        "Compiler should accept the comment-only default: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let compiled = fs::read_to_string(&output_path).unwrap();
     assert!(
-        stderr.contains("allowed-events"),
-        "Error message should mention allowed-events: {stderr}"
+        compiled_has_enabled_tool(&compiled, "submit-pull-request-review"),
+        "The usable comment-only tool must be exposed"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that submit-pr-review fails compilation when allowed-events is an empty list
+/// An explicit empty event grant is valid but exposes no usable review tool.
 #[test]
-fn test_submit_pr_review_requires_nonempty_allowed_events() {
+fn test_submit_pr_review_empty_events_disable_tool_exposure() {
     let temp_dir =
         std::env::temp_dir().join(format!("agentic-pipeline-spr-empty-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
@@ -1541,7 +1541,7 @@ description: "Agent that submits PR reviews but has empty allowed-events"
 permissions:
   write: my-write-sc
 safe-outputs:
-  submit-pr-review:
+  submit-pull-request-review:
     allowed-events: []
 ---
 
@@ -1564,20 +1564,21 @@ Submit PR reviews.
         .expect("Failed to run compiler");
 
     assert!(
-        !output.status.success(),
-        "Compiler should fail when submit-pr-review has empty allowed-events"
+        output.status.success(),
+        "Compiler should preserve an empty grant: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let compiled = fs::read_to_string(&output_path).unwrap();
     assert!(
-        stderr.contains("allowed-events"),
-        "Error message should mention allowed-events: {stderr}"
+        !compiled_has_enabled_tool(&compiled, "submit-pull-request-review"),
+        "An empty event grant must not advertise a usable tool"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
-/// Test that submit-pr-review compiles successfully with proper config
+/// Test that submit-pull-request-review compiles successfully with proper config
 #[test]
 fn test_submit_pr_review_compiles_with_allowed_events() {
     let temp_dir =
@@ -1591,7 +1592,7 @@ description: "Agent that submits PR reviews with proper config"
 permissions:
   write: my-write-sc
 safe-outputs:
-  submit-pr-review:
+  submit-pull-request-review:
     allowed-events:
       - comment
       - approve-with-suggestions
@@ -1617,16 +1618,16 @@ Submit PR reviews.
 
     assert!(
         output.status.success(),
-        "Compiler should succeed with proper submit-pr-review config: {}",
+        "Compiler should succeed with proper submit-pull-request-review config: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
     let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
 
-    // The submit-pr-review tool must be listed as an enabled tool for the agent
+    // The submit-pull-request-review tool must be listed as an enabled tool for the agent
     assert!(
-        compiled_has_enabled_tool(&compiled, "submit-pr-review"),
-        "Compiled output should contain --enabled-tools submit-pr-review"
+        compiled_has_enabled_tool(&compiled, "submit-pull-request-review"),
+        "Compiled output should contain --enabled-tools submit-pull-request-review"
     );
     // Stage 3 write token must be acquired for the executor
     assert!(
@@ -1706,10 +1707,9 @@ permissions:
 safe-outputs:
   create-pull-request:
     require-approval: true
-  update-pr:
+  update-pull-request:
+    target: created
     require-approval: false
-    allowed-operations:
-      - update-description
 ---
 
 ## PR Lane Agent
@@ -1769,8 +1769,8 @@ fn test_temporary_id_tools_require_matching_staged_settings() {
             "pull-request",
             "create-pull-request",
             "",
-            "update-pr",
-            "    allowed-operations:\n      - update-description\n",
+            "update-pull-request",
+            "    target: created\n",
             "temporary pull-request IDs",
         ),
     ];
@@ -1929,11 +1929,30 @@ Vote on pull requests.
 
         let compiled = fs::read_to_string(&output_path).expect("Should read compiled YAML");
 
-        // update-pr must be listed as an enabled tool for the agent
         assert!(
-            compiled_has_enabled_tool(&compiled, "update-pr"),
-            "Compiled output should contain --enabled-tools update-pr (case: {})",
-            case_desc
+            !compiled_has_enabled_tool(&compiled, "update-pr"),
+            "legacy catch-all must not be advertised"
+        );
+        for tool in [
+            "add-pull-request-reviewers",
+            "set-pull-request-auto-complete",
+        ] {
+            assert!(
+                compiled_has_enabled_tool(&compiled, tool),
+                "{case_desc}: missing {tool}"
+            );
+        }
+        if case_desc.contains("vote reachable") {
+            assert!(compiled_has_enabled_tool(
+                &compiled,
+                "submit-pull-request-review"
+            ));
+            assert!(compiled_has_enabled_tool(&compiled, "update-pull-request"));
+        }
+        let migrated_source = fs::read_to_string(&test_input).unwrap();
+        assert!(
+            migrated_source.contains("budget-groups:"),
+            "legacy aggregate budget must persist"
         );
         // Stage 3 must acquire a write token (permissions.write is set)
         assert!(
@@ -8077,7 +8096,7 @@ safe-outputs:
         assert!(!ok, "{label} max-reviewers should not compile");
         assert!(
             stderr.contains(
-                "safe-outputs.update-pr.max-reviewers must be a positive integer that fits in usize"
+                "safe-outputs.add-pull-request-reviewers.max-reviewers must be a positive integer that fits in usize"
             ),
             "{label}: {stderr}"
         );
@@ -8098,6 +8117,7 @@ safe-outputs:
     let (ok, _, stderr) = compile_inline_source("update-pr-max-reviewers-overflow", overflow);
     assert!(!ok, "overflow max-reviewers should not compile");
     assert!(
+        // YAML overflows fail before the tool-name migration can run.
         stderr.contains("safe-outputs.update-pr.max-reviewers"),
         "overflow: {stderr}"
     );
@@ -9133,7 +9153,7 @@ safe-outputs:
   create-pull-request:
     target-branch: main
     require-approval: true
-  add-pr-comment: {}
+  add-pull-request-comment: {}
 ---
 
 ## Body
@@ -9182,7 +9202,7 @@ safe-outputs:
   create-pull-request:
     target-branch: main
     require-approval: true
-  add-pr-comment: {}
+  add-pull-request-comment: {}
 ---
 
 ## Body
@@ -9212,7 +9232,7 @@ safe-outputs:
   create-pull-request:
     target-branch: main
     require-approval: true
-  add-pr-comment: {}
+  add-pull-request-comment: {}
 teardown:
   - script: echo "cleanup"
     displayName: "Cleanup"
@@ -9259,7 +9279,7 @@ safe-outputs:
   create-pull-request:
     target-branch: main
     require-approval: true
-  add-pr-comment: {}
+  add-pull-request-comment: {}
 ---
 
 ## Body
@@ -9479,7 +9499,7 @@ safe-outputs:
   create-work-item:
     require-approval:
       instructions: "Check the work-item priority and area path."
-  add-pr-comment:
+  add-pull-request-comment:
     require-approval: true
 ---
 
@@ -9489,7 +9509,7 @@ safe-outputs:
     assert!(ok, "multi-tool approval pipeline should compile: {stderr}");
     // Every reviewed tool is enumerated in the gate message.
     assert!(
-        compiled.contains("add-pr-comment, create-pull-request, create-work-item"),
+        compiled.contains("add-pull-request-comment, create-pull-request, create-work-item"),
         "gate message must list every reviewed tool:\n{compiled}"
     );
     // BOTH distinct author notes are present — not just the first.

@@ -129,7 +129,7 @@ export class AdoRest {
   }
 
   /**
-   * Resolve an identity using the same exact-match fields as update-pr's
+   * Resolve an identity using the same exact-match fields as add-pull-request-reviewers'
    * production add-reviewers implementation. Canonical GUIDs are verified
    * through the identityIds query; names and emails use exact field matching.
    */
@@ -319,17 +319,24 @@ export class AdoRest {
     // `filter` is a prefix match (heads/main also matches heads/main-foo), so
     // select the exact ref by name rather than trusting the first result.
     const fullName = `refs/${refFilter}`;
-    return res?.value?.find((r) => r.name === fullName)?.objectId;
+    if (!Array.isArray(res?.value) || res.value.some((ref) =>
+      !ref || typeof ref.name !== "string" || typeof ref.objectId !== "string")) {
+      throw new Error(`Ref discovery for ${fullName} is incomplete`);
+    }
+    const matches = res.value.filter((ref) => ref.name === fullName);
+    if (matches.length > 1) throw new Error(`Ref discovery for ${fullName} is ambiguous`);
+    return matches[0]?.objectId;
   }
 
   /** Delete a ref (branch or tag) by setting its newObjectId to zeros. */
   async deleteRef(repo: string, refName: string): Promise<void> {
     const oldId = await this.getRefObjectId(repo, refName.replace(/^refs\//, ""));
     if (!oldId) return;
+    if (!/^[a-f0-9]{40}$/i.test(oldId)) throw new Error(`Cannot delete ${refName}: invalid observed SHA`);
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/refs?api-version=7.1`,
     );
-    await this.request(path, {
+    const response = await this.request<{ value?: { name?: string; success?: boolean; updateStatus?: string }[] }>(path, {
       method: "POST",
       body: [
         {
@@ -340,6 +347,13 @@ export class AdoRest {
       ],
       allow404: true,
     });
+    const fullName = refName.startsWith("refs/") ? refName : `refs/${refName}`;
+    if (!Array.isArray(response?.value) || response.value.length !== 1 || response.value[0]?.name !== fullName || response.value[0]?.success !== true) {
+      throw new Error(`Ref deletion was not confirmed for ${fullName}: ${response?.value?.[0]?.updateStatus ?? "invalid response"}`);
+    }
+    if (await this.getRefObjectId(repo, fullName.replace(/^refs\//, ""))) {
+      throw new Error(`Ref remains after deletion: ${fullName}`);
+    }
   }
 
   /**
@@ -388,6 +402,22 @@ export class AdoRest {
     const commitId = res?.commits?.[0]?.commitId;
     if (!commitId) throw new Error("pushAddFileBranch returned no commit id");
     return commitId;
+  }
+
+  async pushDeleteFileBranch(repo: string, branch: string, parent: string, filePath: string): Promise<string> {
+    const response = await this.request<{ commits?: { commitId?: string }[] }>(this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pushes?api-version=7.1`,
+    ), {
+      method: "POST",
+      body: {
+        refUpdates: [{ name: `refs/heads/${branch}`, oldObjectId: "0".repeat(40) }],
+        commits: [{ parents: [parent], comment: "Disposable inline-comment deletion fixture",
+          changes: [{ changeType: "delete", item: { path: filePath } }] }],
+      },
+    });
+    const commit = response?.commits?.[0]?.commitId;
+    if (typeof commit !== "string" || !/^[a-f0-9]{40}$/i.test(commit)) throw new Error("Deletion fixture push returned no valid commit");
+    return commit;
   }
 
   /**
@@ -470,7 +500,12 @@ export class AdoRest {
   async getPullRequest(
     repo: string,
     prId: number,
-  ): Promise<{ pullRequestId: number; status: string; title: string; description?: string }> {
+  ): Promise<{
+    pullRequestId: number; status: string; title: string; description?: string; isDraft?: boolean;
+    sourceRefName?: string; targetRefName?: string;
+    createdBy?: { id: string };
+    labels?: { name: string }[]; autoCompleteSetBy?: { id?: string };
+  }> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}?api-version=7.1`,
     );
@@ -479,6 +514,12 @@ export class AdoRest {
       status: string;
       title: string;
       description?: string;
+      isDraft?: boolean;
+      sourceRefName?: string;
+      targetRefName?: string;
+      createdBy?: { id: string };
+      labels?: { name: string }[];
+      autoCompleteSetBy?: { id?: string };
     }>(path);
     if (!res) throw new Error(`getPullRequest(${prId}) returned no body`);
     return res;
@@ -527,28 +568,92 @@ export class AdoRest {
     const res = await this.request<{ value?: { id: number; comments?: { content?: string }[] }[] }>(
       path,
     );
-    return res?.value ?? [];
+    if (!Array.isArray(res?.value)) throw new Error(`listThreads(${prId}) response missing value array`);
+    return res.value;
   }
 
   async listReviewers(
     repo: string,
     prId: number,
-  ): Promise<{ id: string; vote: number; displayName?: string }[]> {
+  ): Promise<{ id: string; vote: number; displayName?: string; isRequired?: boolean; isFlagged?: boolean; hasDeclined?: boolean }[]> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/reviewers?api-version=7.1`,
     );
     const res = await this.request<{
-      value?: { id: string; vote: number; displayName?: string }[];
+      value?: { id: string; vote: number; displayName?: string; isRequired?: boolean; isFlagged?: boolean; hasDeclined?: boolean }[];
     }>(path);
-    return res?.value ?? [];
+    if (!Array.isArray(res?.value) || res.value.some((entry) => !entry || typeof entry.id !== "string" ||
+      typeof entry.vote !== "number")) throw new Error("Reviewer read-back is malformed");
+    return res.value;
   }
 
-  /** Abandon a PR (status=abandoned). Best-effort cleanup. */
-  async abandonPullRequest(repo: string, prId: number): Promise<void> {
+  async seedReviewerState(
+    repo: string, prId: number, reviewer: string,
+    state: { vote: number; isRequired: boolean; isFlagged: boolean; hasDeclined: boolean },
+  ): Promise<void> {
+    const path = this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/reviewers/${AdoRest.seg(reviewer)}?api-version=7.1`,
+    );
+    await this.request(path, { method: "PUT", body: { id: reviewer, vote: state.vote, isRequired: state.isRequired } });
+    await this.request(path, { method: "PATCH", body: { isFlagged: state.isFlagged, hasDeclined: state.hasDeclined } });
+  }
+
+  async listPullRequestLabels(repo: string, prId: number): Promise<{ name: string }[]> {
+    const path = this.projPath(
+      `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}/labels?api-version=7.1`,
+    );
+    const res = await this.request<{ value?: unknown }>(path);
+    if (!Array.isArray(res?.value)) {
+      throw new Error(`listPullRequestLabels(${prId}) response missing value array`);
+    }
+    return res.value.map((label: unknown) => {
+      if (label === null || typeof label !== "object" || !("name" in label)
+        || typeof label.name !== "string") {
+        throw new Error(`listPullRequestLabels(${prId}) returned an invalid label`);
+      }
+      return { name: label.name };
+    });
+  }
+
+  /** Completion is acceptable only for a scenario explicitly testing auto-completion. */
+  async abandonPullRequest(
+    repo: string,
+    prId: number,
+    opts: { allowCompleted?: boolean } = {},
+  ): Promise<void> {
     const path = this.projPath(
       `_apis/git/repositories/${AdoRest.seg(repo)}/pullRequests/${prId}?api-version=7.1`,
     );
-    await this.request(path, { method: "PATCH", body: { status: "abandoned" }, allow404: true });
+    const read = () => this.request<{ status: string }>(path, { allow404: true });
+    const terminal = (pr: { status: string } | undefined) =>
+      !pr || pr.status === "abandoned" || (opts.allowCompleted === true && pr.status === "completed");
+    const pr = await read();
+    if (terminal(pr)) return;
+    if (pr?.status !== "active") {
+      throw new Error(`Cannot clean up PR ${prId}: unexpected status '${pr?.status}'`);
+    }
+    let failure: unknown;
+    try {
+      await this.request(path, { method: "PATCH", body: { status: "abandoned" }, allow404: true });
+    } catch (error) {
+      if (!opts.allowCompleted) throw error;
+      failure = error;
+    }
+    if (opts.allowCompleted) {
+      let confirmed: { status: string } | undefined;
+      try {
+        confirmed = await read();
+      } catch (error) {
+        throw new Error(`Cannot confirm cleanup of auto-complete PR ${prId}: ${String(error)}`, {
+          cause: failure ?? error,
+        });
+      }
+      if (!terminal(confirmed)) {
+        throw new Error(`Cannot confirm cleanup of auto-complete PR ${prId}: status '${confirmed?.status}'`, {
+          cause: failure,
+        });
+      }
+    }
   }
 
   /**

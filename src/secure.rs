@@ -170,6 +170,16 @@ macro_rules! validated_string {
     };
 }
 
+validated_string!(
+    /// A bounded Azure DevOps PR label name, kept out of URL paths.
+    PrLabelName, "PR label", |value: &str, label: &str| {
+        anyhow::ensure!(!value.trim().is_empty(), "{label} must not be empty");
+        anyhow::ensure!(value.chars().count() <= 256, "{label} must be at most 256 characters");
+        anyhow::ensure!(!value.chars().any(char::is_control), "{label} must not contain control characters");
+        validate::reject_pipeline_injection(value, label)
+    }
+);
+
 validated_string! {
     /// A safe relative file path inside the workspace.
     ///

@@ -1,10 +1,38 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   parseExecutedRecords,
   renderNdjsonLine,
   renderSourceMarkdown,
+  runExecute,
 } from "../execute-cli.js";
+
+it("executes a non-executable JavaScript fixture in a path containing spaces", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ado fixture with spaces "));
+  try {
+    const bin = join(dir, "fake executor.js");
+    await writeFile(bin, `
+const fs = require("node:fs");
+const path = require("node:path");
+const out = process.argv[process.argv.indexOf("--safe-output-dir") + 1];
+fs.writeFileSync(path.join(out,"safe-outputs-executed.ndjson"), JSON.stringify({
+  name:"noop",status:"succeeded",result:{marker:process.env.FIXTURE_MARKER}
+})+"\\n");
+`, { mode: 0o600 });
+    const result = await runExecute({
+      adoAwBin: bin, scenarioDir: dir, tool: "noop", config: {}, entry: {},
+      orgUrl: "https://example.test", project: "test", token: "",
+      extraEnv: { FIXTURE_MARKER: "executed" }, log: () => {},
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.record?.result?.marker).toBe("executed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 describe("renderSourceMarkdown", () => {
   it("emits front matter with inline-JSON safe-outputs config", () => {
@@ -23,8 +51,8 @@ describe("renderSourceMarkdown", () => {
 
   it("emits a repos block when adoRepo is provided", () => {
     const md = renderSourceMarkdown({
-      tool: "add-pr-comment",
-      safeOutputs: { "add-pr-comment": { "allowed-repositories": ["agent-definitions"] } },
+      tool: "add-pull-request-comment",
+      safeOutputs: { "add-pull-request-comment": { "allowed-repositories": ["agent-definitions"] } },
       adoRepo: "agent-definitions",
     });
     expect(md).toContain("repos:");

@@ -43,6 +43,10 @@ pub async fn read_ndjson_file(path: &Path) -> Result<Vec<Value>> {
 /// Append a tool result to an NDJSON file
 pub async fn append_to_ndjson_file<T: ToolResult>(path: &Path, value: &T) -> Result<()> {
     debug!("Appending {} to NDJSON: {}", T::NAME, path.display());
+    append_record(path, value).await
+}
+
+pub(crate) async fn append_record<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let line = serde_json::to_string(&value)? + "\n";
     let mut file = OpenOptions::new()
         .create(true)
@@ -57,6 +61,7 @@ pub async fn append_to_ndjson_file<T: ToolResult>(path: &Path, value: &T) -> Res
     file.flush()
         .await
         .with_context(|| format!("Failed to flush NDJSON file: {}", path.display()))?;
+    file.sync_all().await.with_context(|| format!("Failed to persist NDJSON file: {}", path.display()))?;
     debug!("Appended {} bytes to NDJSON", line.len());
     Ok(())
 }

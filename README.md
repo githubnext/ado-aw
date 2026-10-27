@@ -600,11 +600,15 @@ actions, and the executor processes them after threat analysis.
 | `update-work-item` | Updates fields on an existing ADO work item |
 | `create-wiki-page` | Creates a new Azure DevOps wiki page |
 | `update-wiki-page` | Updates the content of an existing wiki page |
-| `add-pr-comment` | Adds a comment thread on a pull request |
-| `reply-to-pr-comment` | Replies to an existing PR review comment thread |
-| `resolve-pr-thread` | Resolves or updates the status of a PR review thread |
-| `submit-pr-review` | Submits a review vote on a pull request |
-| `update-pr` | Updates pull request metadata (reviewers, labels, auto-complete, vote, update-description) |
+| `add-pull-request-comment` | Adds a comment thread on a pull request |
+| `reply-to-pull-request-comment` | Replies to an existing PR review comment thread |
+| `resolve-pull-request-thread` | Resolves or updates the status of a PR review thread |
+| `submit-pull-request-review` | Submits a review vote on a pull request |
+| `update-pull-request` | Updates PR title or description, including managed sections |
+| `add-pull-request-reviewers` | Adds policy-permitted PR reviewers |
+| `add-pull-request-labels` | Adds PR labels without replacing existing labels |
+| `set-pull-request-auto-complete` | Enables PR auto-complete with configured completion options |
+| `abandon-pull-request` | Abandons a PR without merging, optionally with a comment |
 | `link-work-items` | Links two ADO work items together |
 | `queue-build` | Queues a pipeline build by definition ID |
 | `create-git-tag` | Creates a git tag on a repository ref |

@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { GitRunner, GitRunOptions } from "../git.js";
 import {
@@ -7,10 +10,13 @@ import {
   COMMIT_IDENTITY,
   createDetachedWorktree,
   deleteRemoteRef,
+  deleteRemoteRefs,
+  defaultGitRunner,
   disallowedChanges,
   listCandidateRefs,
   mirrorRepoUrl,
   parseCandidateRef,
+  parseBoundaryTargetRef,
   pushCandidate,
   removeWorktree,
   verifyLocalCommit,
@@ -240,6 +246,38 @@ describe("commitAll", () => {
 });
 
 describe("pushCandidate / verifyRemoteRef / deleteRemoteRef", () => {
+  it("preserves a genuinely advanced remote ref and deletes only its observed tip", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ado-smoke-lease-"));
+    try {
+      const work = join(root, "work");
+      const remote = join(root, "remote.git");
+      const runGit = async (args: string[], cwd = root) => {
+        const result = await defaultGitRunner(args, { cwd, timeoutMs: 10_000 });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
+      await runGit(["init", "--bare", remote]);
+      await runGit(["init", work]);
+      const commit = async (message: string) => {
+        await runGit(["-c", "user.name=Smoke Test", "-c", "user.email=smoke@example.test",
+          "commit", "--allow-empty", "-m", message], work);
+        return runGit(["rev-parse", "HEAD"], work);
+      };
+      const original = await commit("original");
+      const ref = "refs/heads/ado-aw-smoke-candidate/42/check";
+      await runGit(["push", remote, `HEAD:${ref}`], work);
+      const advanced = await commit("advanced");
+      await runGit(["push", remote, `HEAD:${ref}`], work);
+      const opts = { cwd: work, mirrorUrl: remote, ref, token: "opaque-test-token", timeoutMs: 10_000 };
+      await expect(deleteRemoteRef({ ...opts, sha: original })).rejects.toThrow("retained");
+      expect(await runGit(["--git-dir", remote, "rev-parse", ref])).toBe(advanced);
+      await deleteRemoteRef({ ...opts, sha: advanced });
+      expect(await runGit(["ls-remote", "--heads", remote, ref], work)).toBe("");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("pushes HEAD to the ref without --force", async () => {
     const { runner, calls } = fakeRunner(() => ({ status: 0 }));
     await pushCandidate(
@@ -336,17 +374,71 @@ describe("pushCandidate / verifyRemoteRef / deleteRemoteRef", () => {
     ).rejects.toThrow();
   });
 
-  it("deleteRemoteRef pushes a --delete for exactly the given ref", async () => {
+  it("deleteRemoteRef deletes exactly the owned ref with its observed SHA lease", async () => {
     const { runner, calls } = fakeRunner(() => ({ status: 0 }));
+    const ref = "refs/heads/ado-aw-smoke-candidate/1/canary";
+    const sha = "a".repeat(40);
     await deleteRemoteRef(
-      { cwd: "/repo", mirrorUrl: "https://example/_git/r", ref: "refs/heads/x/1", token: "t", timeoutMs: 1000 },
+      { cwd: "/repo", mirrorUrl: "https://example/_git/r", ref, sha, token: "t", timeoutMs: 1000 },
       runner,
     );
-    expect(calls[0]?.args).toEqual(["push", "--porcelain", "https://example/_git/r", "--delete", "refs/heads/x/1"]);
+    expect(calls[0]?.args).toEqual([
+      "push", "--porcelain", `--force-with-lease=${ref}:${sha}`, "https://example/_git/r", `:${ref}`,
+    ]);
+  });
+
+  it("does not retry a failed lease and reports partial deletion from read-back", async () => {
+    const source = { ref: "refs/heads/ado-aw-smoke-candidate/1/canary", sha: "a".repeat(40) };
+    const target = { ref: "refs/heads/ado-aw-smoke-boundary-target/1/canary", sha: "b".repeat(40) };
+    const { runner, calls } = fakeRunner((args) => args[0] === "push"
+      ? { status: 1, stderr: "stale info" }
+      : { status: 0, stdout: `${"c".repeat(40)}\t${source.ref}\n` });
+    await expect(deleteRemoteRefs({
+      cwd: "/repo", mirrorUrl: "https://example/_git/r", refs: [source, target], token: "opaque-test-token", timeoutMs: 1000,
+    }, runner)).rejects.toThrow(`retained: ${source.ref}; confirmed absent: ${target.ref}`);
+    expect(calls.filter((call) => call.args[0] === "push")).toHaveLength(1);
+    expect(calls[0]?.args).toContain(`--force-with-lease=${source.ref}:${source.sha}`);
+    expect(calls[0]?.args).toContain(`--force-with-lease=${target.ref}:${target.sha}`);
+  });
+
+  it("accepts confirmed absence after a lost deletion response without replay", async () => {
+    const { runner, calls } = fakeRunner((args) => args[0] === "push"
+      ? { status: 1, stderr: "connection lost" } : { status: 0, stdout: "" });
+    await expect(deleteRemoteRefs({
+      cwd: "/repo", mirrorUrl: "https://example/_git/r", token: "opaque-test-token", timeoutMs: 1000,
+      refs: [{ ref: "refs/heads/ado-aw-smoke-candidate/1/canary", sha: "a".repeat(40) }],
+    }, runner)).resolves.toBeUndefined();
+    expect(calls.filter((call) => call.args[0] === "push")).toHaveLength(1);
+  });
+
+  it("requires an exact owned name and SHA before deletion", async () => {
+    const { runner, calls } = fakeRunner(() => ({ status: 0 }));
+    for (const ref of ["refs/heads/main", "refs/heads/ado-aw-smoke-candidate/0/canary"]) {
+      await expect(deleteRemoteRef({
+        cwd: "/repo", mirrorUrl: "https://example/_git/r", ref, sha: "a".repeat(40), token: "t", timeoutMs: 1000,
+      }, runner)).rejects.toThrow("owned ref");
+    }
+    expect(calls).toEqual([]);
   });
 });
 
 describe("listCandidateRefs", () => {
+  it("discovers the distinct target namespace without confusing -target case names", async () => {
+    const source = "refs/heads/ado-aw-smoke-candidate/1/real-target";
+    const target = "refs/heads/ado-aw-smoke-boundary-target/1/real-target";
+    const { runner, calls } = fakeRunner(() => ({
+      status: 0, stdout: `${"a".repeat(40)}\t${source}\n${"b".repeat(40)}\t${target}\n`,
+    }));
+    const refs = await listCandidateRefs({
+      cwd: "/repo", mirrorUrl: "https://example/_git/r", token: "opaque-test-token", timeoutMs: 1000,
+    }, runner);
+    expect(refs.map((entry) => entry.ref)).toEqual([source, target]);
+    expect(parseCandidateRef(source)).toEqual({ buildId: 1, caseId: "real-target" });
+    expect(parseBoundaryTargetRef(source)).toBeUndefined();
+    expect(parseBoundaryTargetRef(target)).toEqual({ buildId: 1, caseId: "real-target" });
+    expect(parseCandidateRef(target)).toBeUndefined();
+    expect(calls[0]?.args).toContain("refs/heads/ado-aw-smoke-boundary-target/**");
+  });
   it("lists only refs under the exact candidate prefix", async () => {
     const { runner } = fakeRunner(() => ({
       status: 0,

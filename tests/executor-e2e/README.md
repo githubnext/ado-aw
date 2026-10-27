@@ -20,8 +20,9 @@ This suite removes the LLM from the loop. For every ADO-write safe output it:
 4. asserts the effect via the ADO REST API,
 5. cleans up every object it created,
 
-and, on any failure, files a GitHub issue on the configured issue repository
-and fails the build. AgentPlayground currently uses
+and fails the build on any failure. When issue filing is enabled (the scheduled
+run default), it also files a GitHub issue on the configured repository.
+AgentPlayground currently uses
 `jamesadevine/ado-aw-issues` because a canonical-repository credential is not
 available.
 
@@ -42,6 +43,41 @@ gitignored, non-root path) and is **deliberately excluded** from the released
 `src/__tests__/bundle-coverage.test.ts`).
 
 ## Coverage
+
+### Focused diagnostic runs
+
+Queue the existing pipeline with `scenarios` set to comma-separated exact IDs
+(for example `add-pull-request-labels`), `requireSelected: true`, and
+`fileFailureIssue: false`. Unknown selections fail rather than running a
+different suite. Required reviewer/cross-org inputs are checked before scenario
+resources are created; a required scenario that skips is not a pass.
+Mixed local/cross-organization reviewer selections resolve the reviewer
+independently in each selected organization before **any** scenario setup runs.
+An identity found only in the other organization does not satisfy that check.
+
+The harness environment equivalents are `EXECUTOR_E2E_SCENARIOS`,
+`EXECUTOR_E2E_REQUIRE_SELECTED`, and `EXECUTOR_E2E_FILE_FAILURE_ISSUE`.
+`EXECUTOR_E2E_RESULTS_PATH` writes a structured report with the candidate commit,
+selected IDs, outcomes and cleanup failures. The pipeline publishes it as
+`executor-e2e-results` even when scenarios fail. Normal scheduled runs retain
+their existing failure-issue behavior unless explicitly disabled.
+
+Negative scenarios may provide `assertFailure` to verify postconditions after
+the expected status/error matches (for example, that a rejected description
+left the PR unchanged). A matching error alone does not bypass that hook.
+Ordinary `assert` and `postExecute` remain success-only, and cleanup still runs
+after a failed assertion. An unexpected success is a scenario failure.
+When `priorEntries` repeat the primary tool, the harness selects the primary
+record after those occurrences rather than reusing the first matching record.
+
+The PR family includes focused content updates (including the exact
+4,000-character description boundary), abandonment with comment verification,
+and create-then-follow-up reviewer/content scenarios. Reviewer handoffs use
+`add-pull-request-reviewers`; content handoffs use `update-pull-request`. Old
+configuration names are covered by compiler migration tests, not runtime aliases.
+The compiled `pr-tools-preview` smoke exercises focused MCP discovery and
+staged proposal schemas without writing to an existing PR; live executor
+scenarios are responsible for checking actual service mutations.
 
 ### Offline PR payload contract
 
@@ -67,6 +103,95 @@ scenario code or the relevant Rust schemas, validators, or executor change.
 
 ### Live coverage
 
+Owned-comment scenarios seed through the real executor with controlled
+previous-run metadata, then exercise update, non-destructive supersession,
+manual-edit refusal and reply preservation. Same-actor replies are deliberately
+protected too: a PAT identity cannot distinguish a human reply from automation.
+These are real-service lifecycle checks with synthetic prior-run provenance,
+not evidence that build `1` actually created the seed.
+
+Inline cases cover current right-side content, a deleted left-side file on
+disposable source/target branches, and stale-head rejection. Review-batch cases
+verify distinct inline/summary threads, non-voting behavior, and zero comment
+writes when the last finding is invalid or nested-comment authority is absent.
+
+`pr-push-success` checks the exact source-ref head, direct parent, applied file
+and preservation of the PR's pre-existing changes. Stale-head, forbidden-branch,
+protected-file and bad-hash cases require unchanged remote heads; the empty
+case is a configured no-op. Every target is a harness-owned disposable PR/ref.
+
+The create and push matrices add `native-copy`, `native-rename`, `crlf`,
+`binary` and `expansion-denied` cases. Whole-operation exclusion is covered by
+`create-pull-request-excluded-copy` and `pr-push-excluded-native-copy`.
+Read-back compares Git blob IDs and direct commit parents, not normalized
+checkout text. Negative expansion cases use 99 compact native copies of a
+429,575-byte source and require unchanged remote refs, not just an expected
+error message.
+
+Both families also register `space-edit`, `space-rename-edit`, `mode-up-denied`,
+`mode-down-denied`, `mode-new-denied`, `mode-rename-denied`, and `mode-edit`.
+These use actual Git-generated headers and index modes; successful read-back
+checks tree-entry modes as well as blobs. Rejected mode changes must leave
+remote refs unchanged. Existing-executable fixtures are seeded with an ordinary,
+single-ref fast-forward Git push on the unchanged, harness-owned branch; no
+force push is used. This is test setup only, not a production publication
+transport or a fallback for unsupported safe-output mode changes.
+
+Native creation fixtures use separately seeded disposable targets. Cleanup
+requires exact PR source/target/title ownership and confirmed abandonment
+before either ref is deleted. An unconfirmed creation retains and reports both
+refs; a confirmed pre-write rejection may remove its unchanged target.
+Every ref deletion uses the observed SHA, checks the API's per-entry success,
+and verifies absence. HTTP 200 alone is not cleanup proof, and failed or
+uncertain deletions are never blindly replayed. These rules are test-harness
+behavior, not production safe-output cleanup.
+
+The `pr-api-draft-publication`, `pr-api-owned-comments`,
+`pr-api-label-replacement` and `pr-api-push-concurrency` scenarios probe ADO
+platform prerequisites directly on harness-owned disposable PRs. They use a
+`noop` executor record and are **not** evidence that a corresponding safe-output
+executor has been implemented. Their assertions require persisted read-back,
+round-tripped thread ownership/iteration context, and rejection of an exact
+stale source-head push without changing the branch.
+Historical reviewer capability experiments remain in `prReviewerApiExperiments`
+for local contract tests, but are **not registered production-success scenarios**
+or runnable selections. The ID-only collection POST preserved votes but cleared
+required status when membership already existed; individual PUT, with or without
+`If-None-Match: *`, reset both. Those failed hypotheses are not counted as passes.
+
+`pr-reviewer-existing-required-negative`, `pr-reviewer-existing-required-positive`
+and `pr-reviewer-existing-optional` seed the executor actor's real vote/required/
+flag state on non-draft, owned PRs. The production add-reviewers tool must leave
+that state unchanged and report `already_present`, with no newly added identity.
+The actor is also the fixture PR creator, so live setup keeps `hasDeclined=false`:
+ADO rejects a creator declining their own PR. The live assertion still checks
+that flag remains unchanged; preservation of an already-declined reviewer is
+covered by deterministic no-write tests, not claimed as live evidence.
+`create-pull-request-configured-reviewers` covers configured creation followed by
+repeated membership through the focused tool. This proves the ordinary
+read-before-add/no-op contract, **not** atomic preservation of a reviewer added
+and marked required concurrently after the read. That residual race is documented
+in the safe-output reference.
+
+The PR matrix also registers Unicode boundary/composed-body rejection cases
+and optional cross-organization variants of content editing, reviewers, labels,
+review submission, auto-complete and abandonment. These require the existing
+cross-org variables below; selecting them with `requireSelected: true` fails
+preflight rather than counting missing infrastructure as a pass.
+Auto-complete scenarios use only disposable target branches.
+Their cleanup accepts confirmed completion, including completion racing an
+abandonment request. A failed or lost abandonment response gets one bounded
+read-back, not another write; an active/unknown state or failed read-back remains
+a cleanup failure. Other scenarios retain strict abandonment semantics.
+Both disposable branch deletions are attempted independently, and any failure
+is retained in the teardown result.
+
+Label preservation is read through the dedicated PR labels-list API. General
+PR metadata responses can omit labels and are not used as an empty-set oracle.
+`update-pull-request-required-labels` and `abandon-pull-request-required-labels`
+seed and independently verify a required label before exercising the production
+policy check and the final mutation. They do not depend on embedded PR labels.
+
 All deterministically-assertable ADO-write safe outputs plus the flagship
 `create-pull-request`, and the four signal-only tools:
 
@@ -81,8 +206,8 @@ All deterministically-assertable ADO-write safe outputs plus the flagship
   two rendering-fidelity scenarios (see [Rendering
   fidelity](#rendering-fidelity) below)
 - **Wiki:** `create-wiki-page`, `update-wiki-page`
-- **PR:** `add-pr-comment`, `reply-to-pr-comment`, `resolve-pr-thread`,
-  `submit-pr-review`, `update-pr`
+- **PR:** `add-pull-request-comment`, `reply-to-pull-request-comment`, `resolve-pull-request-thread`,
+  `submit-pull-request-review`, `update-pull-request`
 - **Git:** `create-branch`, `create-git-tag`
 - **Cross-org Git (optional infrastructure):** `create-branch-cross-org`,
   `create-git-tag-cross-org`, and `create-pull-request-cross-org`

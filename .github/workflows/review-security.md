@@ -18,6 +18,7 @@ on:
     strategy: centralized
     name: review
     events: [pull_request_comment, pull_request_review_comment]
+if: github.event.pull_request.number || github.event.issue.pull_request || fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request'
 permissions:
   contents: read
   pull-requests: read

@@ -15,7 +15,7 @@
  */
 import { bearerEnv } from "../shared/git.js";
 import { redact, safeSpawn, type SpawnOutcome } from "./process.js";
-import { CANDIDATE_BRANCH_PREFIX } from "./config.js";
+import { BOUNDARY_TARGET_BRANCH_PREFIX, CANDIDATE_BRANCH_PREFIX } from "./config.js";
 
 export interface GitRunOptions {
   cwd: string;
@@ -258,55 +258,51 @@ export async function verifyRemoteRef(
 
 /** Delete the candidate ref on the mirror repo (best-effort; caller decides how to handle failure). */
 export async function deleteRemoteRef(
-  opts: { cwd: string; mirrorUrl: string; ref: string; token: string; timeoutMs: number },
+  opts: { cwd: string; mirrorUrl: string; ref: string; sha: string; token: string; timeoutMs: number },
   runner: GitRunner = defaultGitRunner,
 ): Promise<void> {
-  await deleteRemoteRefs({ ...opts, refs: [opts.ref] }, runner);
+  await deleteRemoteRefs({ ...opts, refs: [{ ref: opts.ref, sha: opts.sha }] }, runner);
 }
 
 /**
  * Delete one or more candidate refs on the mirror repo in a single push.
  *
- * Batched because the lane model creates one ref per case per run, so a
- * five-case run would otherwise pay five round trips. Falls back to
- * individual deletes if the batch fails, so one bad ref cannot strand the
- * rest.
+ * Every deletion has an exact tip lease. A failed batch is reconciled by
+ * reading refs, never retried unconditionally.
  */
 export async function deleteRemoteRefs(
-  opts: { cwd: string; mirrorUrl: string; refs: readonly string[]; token: string; timeoutMs: number },
+  opts: { cwd: string; mirrorUrl: string; refs: readonly RemoteRef[]; token: string; timeoutMs: number },
   runner: GitRunner = defaultGitRunner,
 ): Promise<void> {
   if (opts.refs.length === 0) return;
+  for (const { ref, sha } of opts.refs) {
+    if ((!parseCandidateRef(ref) && !parseBoundaryTargetRef(ref)) || !/^[0-9a-f]{40}$/i.test(sha)) {
+      throw new Error(`Ref deletion requires an owned ref and an exact commit SHA: ${ref}`);
+    }
+  }
   const env = bearerEnv(opts.token);
-  const run1 = (refs: readonly string[]): Promise<string> =>
-    run(
-      ["push", "--porcelain", opts.mirrorUrl, "--delete", ...refs],
+  try {
+    await run(
+      ["push", "--porcelain", ...opts.refs.map(({ ref, sha }) => `--force-with-lease=${ref}:${sha}`),
+        opts.mirrorUrl, ...opts.refs.map(({ ref }) => `:${ref}`)],
       { cwd: opts.cwd, env, timeoutMs: opts.timeoutMs },
       runner,
       [opts.token],
     );
-
-  if (opts.refs.length === 1) {
-    await run1(opts.refs);
-    return;
-  }
-
-  try {
-    await run1(opts.refs);
-  } catch (batchErr) {
-    const failures: string[] = [];
-    for (const ref of opts.refs) {
-      try {
-        await run1([ref]);
-      } catch (err) {
-        failures.push(`${ref}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+  } catch (error) {
+    let observed: RemoteRef[];
+    try {
+      observed = await listCandidateRefs(opts, runner);
+    } catch (readError) {
+      throw new Error(`Conditional ref deletion failed; remaining refs could not be confirmed: ${String(readError)}`, {
+        cause: error,
+      });
     }
-    if (failures.length > 0) {
-      throw new Error(
-        `batched ref delete failed (${batchErr instanceof Error ? batchErr.message : String(batchErr)}); ` +
-          `per-ref fallback also failed for: ${failures.join("; ")}`,
-      );
+    const remaining = opts.refs.filter(({ ref }) => observed.some((entry) => entry.ref === ref));
+    if (remaining.length > 0) {
+      const deleted = opts.refs.filter(({ ref }) => !remaining.some((entry) => entry.ref === ref));
+      throw new Error(`Conditional ref deletion failed; retained: ${remaining.map((entry) => entry.ref).join(", ")}; ` +
+        `confirmed absent: ${deleted.map((entry) => entry.ref).join(", ") || "none"}`, { cause: error });
     }
   }
 }
@@ -316,7 +312,7 @@ export interface RemoteRef {
   sha: string;
 }
 
-/** List every remote ref under the exact `refs/heads/<CANDIDATE_BRANCH_PREFIX>/` prefix. */
+/** List source and boundary-target refs under the two exact owned prefixes. */
 export async function listCandidateRefs(
   opts: { cwd: string; mirrorUrl: string; token: string; timeoutMs: number },
   runner: GitRunner = defaultGitRunner,
@@ -327,13 +323,14 @@ export async function listCandidateRefs(
     // (`<buildId>/<caseId>`), and some git/server implementations do not match
     // `/` with a single `*`. The exact-prefix guard below remains the real
     // filter either way.
-    ["ls-remote", "--heads", opts.mirrorUrl, `refs/heads/${CANDIDATE_BRANCH_PREFIX}/**`],
+    ["ls-remote", "--heads", opts.mirrorUrl, `refs/heads/${CANDIDATE_BRANCH_PREFIX}/**`,
+      `refs/heads/${BOUNDARY_TARGET_BRANCH_PREFIX}/**`],
     { cwd: opts.cwd, env, timeoutMs: opts.timeoutMs },
     runner,
     [opts.token],
   );
   if (!stdout) return [];
-  const prefix = `refs/heads/${CANDIDATE_BRANCH_PREFIX}/`;
+  const prefixes = [CANDIDATE_BRANCH_PREFIX, BOUNDARY_TARGET_BRANCH_PREFIX].map((prefix) => `refs/heads/${prefix}/`);
   const refs: RemoteRef[] = [];
   for (const line of stdout.split("\n")) {
     if (!line.trim()) continue;
@@ -341,7 +338,7 @@ export async function listCandidateRefs(
     // Exact-prefix guard: ls-remote's glob can match unintended refs on some
     // git/server implementations (e.g. a sibling branch containing the
     // pattern as a substring) — never treat those as our candidate refs.
-    if (sha && ref && ref.startsWith(prefix)) {
+    if (sha && ref && prefixes.some((prefix) => ref.startsWith(prefix))) {
       refs.push({ ref, sha });
     }
   }
@@ -364,9 +361,17 @@ export interface ParsedCandidateRef {
  * identity.
  */
 export function parseCandidateRef(ref: string): ParsedCandidateRef | undefined {
-  const prefix = `refs/heads/${CANDIDATE_BRANCH_PREFIX}/`;
+  return parseOwnedRef(ref, CANDIDATE_BRANCH_PREFIX);
+}
+
+export function parseBoundaryTargetRef(ref: string): ParsedCandidateRef | undefined {
+  return parseOwnedRef(ref, BOUNDARY_TARGET_BRANCH_PREFIX);
+}
+
+function parseOwnedRef(ref: string, branchPrefix: string): ParsedCandidateRef | undefined {
+  const prefix = `refs/heads/${branchPrefix}/`;
   if (!ref.startsWith(prefix)) return undefined;
-  const match = /^([0-9]+)\/([a-z0-9][a-z0-9-]{0,48})$/.exec(ref.slice(prefix.length));
+  const match = /^([1-9][0-9]*)\/([a-z0-9][a-z0-9-]{0,48})$/.exec(ref.slice(prefix.length));
   if (!match) return undefined;
   const buildId = Number(match[1]);
   if (!Number.isSafeInteger(buildId) || buildId <= 0) return undefined;

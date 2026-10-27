@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use crate::ndjson::{self, SAFE_OUTPUT_FILENAME};
 use crate::safe_outputs::{
-    AddBuildTagParams, AddBuildTagResult, AddGithubIssueLabelsParams, AddGithubIssueLabelsResult,
-    AddPrCommentParams, AddPrCommentResult, AssignGithubIssueMilestoneParams,
-    AssignGithubIssueMilestoneResult, AssignGithubIssueToUserParams, AssignGithubIssueToUserResult,
-    AssignWorkItemParams, AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
+    AbandonPullRequestParams, AbandonPullRequestResult, AddBuildTagParams, AddBuildTagResult,
+    AddGithubIssueLabelsParams, AddGithubIssueLabelsResult, AddPrCommentParams, AddPrCommentResult,
+    AssignGithubIssueMilestoneParams, AssignGithubIssueMilestoneResult,
+    AssignGithubIssueToUserParams, AssignGithubIssueToUserResult, AssignWorkItemParams,
+    AssignWorkItemResult, CloseGithubIssueParams, CloseGithubIssueResult,
     CommentOnGithubIssueParams, CommentOnGithubIssueResult, CommentOnWorkItemParams,
     CommentOnWorkItemResult, CreateBranchParams, CreateBranchResult, CreateGitTagParams,
     CreateGitTagResult, CreateGithubIssueParams, CreateGithubIssueResult, CreatePrParams,
@@ -29,11 +30,20 @@ use crate::safe_outputs::{
     ResolvePrThreadResult, SetGithubIssueFieldParams, SetGithubIssueFieldResult,
     SetGithubIssueTypeParams, SetGithubIssueTypeResult, SubmitPrReviewParams, SubmitPrReviewResult,
     ToolResult, UnassignGithubIssueFromUserParams, UnassignGithubIssueFromUserResult,
-    UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePrParams, UpdatePrResult,
-    UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams, UpdateWorkItemResult,
-    UploadBuildAttachmentParams, UploadBuildAttachmentResult, UploadPipelineArtifactParams,
-    UploadPipelineArtifactResult, UploadWorkitemAttachmentParams, UploadWorkitemAttachmentResult,
-    Validate, anyhow_to_mcp_error,
+    UpdateGithubIssueParams, UpdateGithubIssueResult, UpdatePullRequestParams,
+    UpdatePullRequestResult, UpdateWikiPageParams, UpdateWikiPageResult, UpdateWorkItemParams,
+    UpdateWorkItemResult, UploadBuildAttachmentParams, UploadBuildAttachmentResult,
+    UploadPipelineArtifactParams, UploadPipelineArtifactResult, UploadWorkitemAttachmentParams,
+    UploadWorkitemAttachmentResult, Validate, anyhow_to_mcp_error,
+};
+use crate::safe_outputs::{
+    AddPrLabelsParams, AddPrLabelsResult, AddPrReviewersParams, AddPrReviewersResult,
+    SetPrAutoCompleteParams, SetPrAutoCompleteResult,
+    RemovePullRequestLabelsParams, RemovePullRequestLabelsResult,
+    ReplacePullRequestLabelParams, ReplacePullRequestLabelResult,
+    MarkPullRequestReadyParams, MarkPullRequestReadyResult,
+    UpdatePullRequestCommentParams, UpdatePullRequestCommentResult,
+    PushToPullRequestBranchParams, PushToPullRequestBranchResult,
 };
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_markdown};
 use crate::secure::{PullRequestTemporaryId, WorkItemTemporaryId};
@@ -205,11 +215,12 @@ async fn try_root_commit_fallback(git_dir: &std::path::Path) -> Option<String> {
 // SafeOutputs MCP Server
 // ============================================================================
 
-/// SafeOutputs is safe to clone for concurrent use: it only contains immutable
-/// `PathBuf` fields and a `ToolRouter`. File I/O (NDJSON append) opens files
-/// fresh on each call, so no shared mutable state exists between clones.
+/// Clones share admission locks and the process-wide output-directory lease.
+/// Accepted proposals are the durable source of budget reservations.
 #[derive(Clone, Debug)]
 pub struct SafeOutputs {
+    create_pr_patch_size: crate::safe_outputs::pr_patch::PatchSizeKiB,
+    push_pr_patch_size: crate::safe_outputs::pr_patch::PatchSizeKiB,
     bounding_directory: PathBuf,
     self_repository_directory: PathBuf,
     output_directory: PathBuf,
@@ -222,6 +233,8 @@ pub struct SafeOutputs {
     create_work_item_proposal_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes create-pull-request temporary-ID allocation and proposal append.
     create_pr_proposal_lock: Arc<tokio::sync::Mutex<()>>,
+    pr_admission_policy: Option<crate::mcp_admission::PrAdmissionPolicy>,
+    _output_lock: Arc<std::fs::File>,
 }
 
 /// Resolve which git directory to use for patch generation.
@@ -255,138 +268,6 @@ fn resolve_git_dir_for_patch(
             .map_err(anyhow_to_mcp_error)
         }
     }
-}
-
-/// Check whether the working tree has uncommitted changes (staged or unstaged).
-async fn check_uncommitted_changes(git_dir: &std::path::Path) -> Result<bool, McpError> {
-    use tokio::process::Command;
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git status: {}", e)))?;
-    if !status_output.status.success() {
-        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&status_output.stderr)
-        )));
-    }
-    Ok(!String::from_utf8_lossy(&status_output.stdout)
-        .trim()
-        .is_empty())
-}
-
-/// Stage all changes and create a temporary "agent changes" commit so that
-/// uncommitted work is captured by `git format-patch`.
-///
-/// On any failure the staging area is reset before the error is returned,
-/// leaving the working tree in the same state as before the call.
-async fn make_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError> {
-    use tokio::process::Command;
-
-    let add_output = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .map_err(|e| anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git add -A: {}", e)))?;
-
-    if !add_output.status.success() {
-        // Reset index to clean state on failure
-        let _ = Command::new("git")
-            .args(["reset", "HEAD", "--quiet"])
-            .current_dir(git_dir)
-            .output()
-            .await;
-        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "git add -A failed: {}",
-            String::from_utf8_lossy(&add_output.stderr)
-        )));
-    }
-
-    // Create a temporary commit with git identity flags to avoid config dependency
-    let commit_output = Command::new("git")
-        .args([
-            "-c",
-            "user.email=agent@ado-aw",
-            "-c",
-            "user.name=ADO Agent",
-            "commit",
-            "-m",
-            "agent changes",
-            "--allow-empty",
-            "--no-verify",
-        ])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to create temporary commit: {}", e))
-        })?;
-
-    if !commit_output.status.success() {
-        // Reset staging on failure
-        let _ = Command::new("git")
-            .args(["reset", "HEAD", "--quiet"])
-            .current_dir(git_dir)
-            .output()
-            .await;
-        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "Failed to create temporary commit: {}",
-            String::from_utf8_lossy(&commit_output.stderr)
-        )));
-    }
-
-    Ok(())
-}
-
-/// Undo the synthetic commit created by [`make_synthetic_commit`], restoring
-/// all changes to the working tree.
-///
-/// `git reset --mixed HEAD~1` resets the index to the parent tree, leaving
-/// modified files as unstaged changes and previously-untracked files as
-/// untracked again.
-async fn undo_synthetic_commit(git_dir: &std::path::Path) -> Result<(), McpError> {
-    use tokio::process::Command;
-
-    // Capture the synthetic commit SHA for diagnostics before resetting
-    let head_sha = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
-
-    let reset_output = Command::new("git")
-        .args(["reset", "HEAD~1", "--mixed", "--quiet"])
-        .current_dir(git_dir)
-        .output()
-        .await
-        .map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!(
-                "Failed to run git reset (synthetic commit {} may remain): {}",
-                head_sha,
-                e
-            ))
-        })?;
-
-    if !reset_output.status.success() {
-        warn!(
-            "WARNING: synthetic commit {} was not cleaned up; \
-             run `git reset HEAD~1` to restore state",
-            head_sha
-        );
-        return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-            "git reset HEAD~1 failed (synthetic commit {} may remain): {}",
-            head_sha,
-            String::from_utf8_lossy(&reset_output.stderr)
-        )));
-    }
-
-    Ok(())
 }
 
 /// Decide whether a single tool should remain in the router after filtering.
@@ -431,6 +312,9 @@ fn apply_tool_filter(tool_router: &mut ToolRouter<SafeOutputs>, enabled_tools: O
     if let Some(enabled) = enabled_tools {
         for name in enabled {
             if !all_tools.iter().any(|t| t == name) {
+                if crate::compile::pr_migration::is_deprecated_pr_tool(name) {
+                    warn!("{}", crate::compile::pr_migration::PR_PROMPT_GUIDANCE);
+                }
                 warn!(
                     "Enabled-tools entry '{}' has no matching route (ignored)",
                     name
@@ -477,13 +361,41 @@ impl SafeOutputs {
         self.custom_proposal_lock.clone()
     }
 
+    pub(crate) fn shared_budget_groups(&self) -> crate::compile::pr_migration::BudgetGroups {
+        self.pr_admission_policy.as_ref().map(|policy| policy.budget_groups.clone()).unwrap_or_default()
+    }
+
     /// Read the current contents of the safe output file as NDJSON
     async fn read_safe_output_file(&self) -> Result<Vec<Value>> {
         ndjson::read_ndjson_file(&self.safe_output_path()).await
     }
 
+    async fn stage_pr_patch(&self, filename: &str, bytes: &[u8]) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let path = self.output_directory.join(filename);
+        let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true)
+            .open(&path).await.map_err(|error| anyhow::anyhow!("Cannot create a new proposal patch: {error}"))?;
+        let written = async {
+            file.write_all(bytes).await?;
+            file.sync_all().await
+        }.await;
+        if let Err(error) = written {
+            drop(file);
+            tokio::fs::remove_file(&path).await.map_err(|cleanup| anyhow::anyhow!(
+                "Proposal patch persistence failed ({error}); partial-file cleanup also failed ({cleanup})"))?;
+            anyhow::bail!("Proposal patch persistence failed: {error}");
+        }
+        Ok(())
+    }
+
     /// Append a value to the safe output file (NDJSON - just append a line)
     async fn write_safe_output_file<T: ToolResult>(&self, value: &T) -> Result<()> {
+        let _guard = self.custom_proposal_lock.lock().await;
+        if let Some(policy) = &self.pr_admission_policy {
+            let entries = self.read_safe_output_file().await?;
+            let remaining = crate::mcp_admission::shared_budget_remaining(&policy.budget_groups, T::NAME, &entries)?;
+            anyhow::ensure!(remaining.values().all(|remaining| *remaining > 0), "Shared safe-output budget exhausted");
+        }
         ndjson::append_to_ndjson_file(&self.safe_output_path(), value).await
     }
 
@@ -492,10 +404,91 @@ impl SafeOutputs {
         T: ToolResult + SanitizeContent,
     {
         value.sanitize_content_fields();
+        if crate::safe_outputs::pr_policy::is_pr_tool(T::NAME) {
+            return self.admit_pr_output(&value).await;
+        }
         self.write_safe_output_file(&value)
             .await
             .map_err(anyhow_to_mcp_error)?;
         Ok(CallToolResult::success(vec![]))
+    }
+
+    async fn admit_pr_output<T: ToolResult>(&self, value: &T) -> Result<CallToolResult, McpError> {
+        use crate::mcp_admission::{rejected, response, shared_budget_remaining};
+        let _guard = self.custom_proposal_lock.lock().await;
+        let entries = self.read_safe_output_file().await.map_err(anyhow_to_mcp_error)?;
+        if entries.iter().any(|entry| entry.get("name").and_then(Value::as_str).is_none()) {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!("Malformed queue state; admission is stopped")));
+        }
+        let mut record = serde_json::to_value(value).map_err(|error| anyhow_to_mcp_error(error.into()))?;
+        if record["name"] != T::NAME {
+            return Err(anyhow_to_mcp_error(anyhow::anyhow!("Proposal tool name does not match its schema")));
+        }
+        if let Err(error) = crate::safe_outputs::pr_policy::validate_proposal(T::NAME, &record) {
+            warn!("PR proposal {} not queued: invalid sanitized input: {error:#}", T::NAME);
+            return Ok(rejected("invalid-input", error.to_string(), Value::Null));
+        }
+        let used = entries.iter().filter(|entry| entry["name"] == T::NAME).count();
+        let config = self.pr_admission_policy.as_ref().and_then(|policy| policy.tools.get(T::NAME));
+        let maximum = usize::try_from(config.and_then(|config| config.get("max"))
+            .and_then(Value::as_u64).unwrap_or(u64::from(T::DEFAULT_MAX)))
+            .map_err(|error| anyhow_to_mcp_error(error.into()))?;
+        let mut groups = match &self.pr_admission_policy {
+            Some(policy) => shared_budget_remaining(&policy.budget_groups, T::NAME, &entries).map_err(anyhow_to_mcp_error)?,
+            None => Default::default(),
+        };
+        let remaining = serde_json::json!({"tool": maximum.saturating_sub(used), "groups":groups});
+        if used >= maximum || groups.values().any(|remaining| *remaining == 0) {
+            warn!("PR proposal {} not queued: budget exhausted", T::NAME);
+            return Ok(rejected("budget-exhausted", "No execution budget remains; do not retry this proposal", remaining));
+        }
+        let dependencies = match &self.pr_admission_policy {
+            Some(policy) => match policy.validate(T::NAME, &record, &entries) {
+                Ok(dependencies) => dependencies,
+                Err(error) => {
+                    warn!("PR proposal {} not queued: {error:#}", T::NAME);
+                    return Ok(rejected("policy-denied", error.to_string(), remaining));
+                }
+            },
+            None => Vec::new(),
+        };
+        if let Some(filename) = record.get("patch_file").and_then(Value::as_str) {
+            let relative = crate::secure::StrictRelativePath::parse(filename).map_err(anyhow_to_mcp_error)?;
+            let file = tokio::fs::OpenOptions::new().read(true).write(true)
+                .open(self.output_directory.join(relative.as_str())).await
+                .map_err(|error| anyhow_to_mcp_error(anyhow::anyhow!("Cannot persist proposal patch: {error}")))?;
+            file.sync_all().await.map_err(|error| anyhow_to_mcp_error(anyhow::anyhow!("Cannot persist proposal patch: {error}")))?;
+        }
+        let id = (0..16).map(|_| format!("proposal_{}", generate_short_id()))
+            .find(|candidate| !entries.iter().any(|entry| entry.get("context").and_then(Value::as_str) == Some(candidate.as_str())))
+            .ok_or_else(|| anyhow_to_mcp_error(anyhow::anyhow!("Could not allocate a unique proposal ID")))?;
+        record.as_object_mut().ok_or_else(|| anyhow_to_mcp_error(anyhow::anyhow!("Proposal must be an object")))?
+            .insert("context".into(), Value::String(id.clone()));
+        ndjson::append_record(&self.safe_output_path(), &record).await.map_err(|error| {
+            error!("PR proposal {id} persistence failed: {error:#}");
+            anyhow_to_mcp_error(anyhow::anyhow!("Proposal {id} admission is uncertain after a persistence failure; inspect the queue before retrying"))
+        })?;
+        for remaining in groups.values_mut() { *remaining = remaining.saturating_sub(1); }
+        let mut receipt = serde_json::json!({
+            "status":"queued","proposal_id":id,"tool":T::NAME,
+            "target":{"pull_request_id":record.get("pull_request_id"),"repository":record.get("repository")},
+            "dependencies":dependencies,
+            "reviewed_snapshot": {
+                "expected_head_sha": record.get("expected_head_sha"),
+                "base_commit": record.get("base_commit"),
+                "patch_sha256": record.get("patch_sha256"),
+                "creation_handle": record.get("pull_request_id").and_then(Value::as_str)
+                    .filter(|reference| reference.starts_with("#aw_")),
+            },
+            "configured_constraints":config,
+            "remaining_budget":{"tool":maximum.saturating_sub(used.saturating_add(1)),"groups":groups},
+            "pending_checks":["detection","human-approval-if-configured","repository-resolution","remote-authorization","ownership","current-state","reviewed-head"],
+            "message":"Queued proposal, not a confirmed remote action"
+        });
+        if let Some(handle) = record.get("temporary_id") {
+            receipt["temporary_id"] = handle.clone();
+        }
+        Ok(response(receipt))
     }
 
     /// Append a value, but only if we haven't reached the maximum entries for this tool
@@ -607,9 +600,22 @@ impl SafeOutputs {
             output_dir
         );
 
+        if output_dir.join(".safeoutputs.lock").try_exists()?
+            && !output_dir.join(SAFE_OUTPUT_FILENAME).try_exists()?
+        {
+            anyhow::bail!("SafeOutputs queue is missing after prior initialization; refusing to forget accepted reservations");
+        }
+        let output_lock = std::fs::OpenOptions::new().read(true).write(true)
+            .create(true).truncate(false).open(output_dir.join(".safeoutputs.lock"))?;
+        output_lock.try_lock().map_err(|error| anyhow::anyhow!(
+            "SafeOutputs output directory already has a writer or cannot be locked: {error}"))?;
+
         // Initialize the safe output file
         debug!("Initializing safe output file");
         ndjson::init_ndjson_file(&output_dir.join(SAFE_OUTPUT_FILENAME)).await?;
+        let queued = ndjson::read_ndjson_file(&output_dir.join(SAFE_OUTPUT_FILENAME)).await?;
+        anyhow::ensure!(queued.iter().all(|entry| entry.get("name").and_then(Value::as_str).is_some()),
+            "Malformed queue state; refusing to reset admission budgets");
 
         let mut tool_router = Self::tool_router();
 
@@ -629,8 +635,27 @@ impl SafeOutputs {
         if let Some(path) = custom_tools {
             crate::mcp_custom_tools::apply_custom_tools(&mut tool_router, path)?;
         }
+        let pr_admission_policy = custom_tools.map(crate::mcp_admission::PrAdmissionPolicy::load)
+            .transpose()?.flatten();
+        if let Some(policy) = &pr_admission_policy {
+            let names: Vec<_> = tool_router.list_all().iter().map(|tool| tool.name.to_string()).collect();
+            for name in names {
+                if crate::safe_outputs::pr_policy::is_pr_tool(&name) && !policy.usable(&name) {
+                    tool_router.remove_route(&name);
+                } else if let Some(config) = policy.tools.get(&name) {
+                    let used = queued.iter().filter(|entry| entry["name"] == name).count();
+                    let max = config.get("max").and_then(Value::as_u64).unwrap_or(1);
+                    let remaining = crate::mcp_admission::shared_budget_remaining(&policy.budget_groups, &name, &queued)?;
+                    if u64::try_from(used)? >= max || remaining.values().any(|remaining| *remaining == 0) {
+                        tool_router.remove_route(&name);
+                    }
+                }
+            }
+        }
 
         Ok(Self {
+            create_pr_patch_size: Default::default(),
+            push_pr_patch_size: Default::default(),
             bounding_directory: bounding_dir,
             self_repository_directory: self_repository_dir,
             output_directory: output_dir,
@@ -638,74 +663,58 @@ impl SafeOutputs {
             custom_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
             create_work_item_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
             create_pr_proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pr_admission_policy,
+            _output_lock: Arc::new(output_lock),
         })
     }
 
     /// Generate a git diff patch from a specific directory
     /// If `repository` is Some, it's treated as a subdirectory of bounding_directory.
     /// If `repository` is None or "self", use the explicit self checkout.
-    async fn generate_patch(&self, repository: Option<&str>) -> Result<(String, String), McpError> {
-        use tokio::process::Command;
-
+    async fn generate_patch(&self, repository: Option<&str>) -> Result<(Vec<u8>, String), McpError> {
+        use crate::safe_outputs::pr_patch::{bounded_output, git, git_without_filters};
         let git_dir = resolve_git_dir_for_patch(
-            &self.bounding_directory,
-            &self.self_repository_directory,
-            repository,
+            &self.bounding_directory, &self.self_repository_directory, repository,
         )?;
-
-        // Generate patch using git format-patch for proper commit metadata,
-        // rename detection, and binary file handling.
-        //
-        // Handles both committed and uncommitted changes:
-        // 1. Find the merge-base with the upstream branch (origin/HEAD or origin/main)
-        // 2. If there are uncommitted changes, stage and create a temporary commit
-        // 3. Generate format-patch from merge-base..HEAD to capture ALL changes
-        // 4. If a temporary commit was created, reset it (preserving working tree)
-
         let merge_base = Self::find_merge_base(&git_dir).await?;
-        debug!("Using merge base: {}", merge_base);
-
-        let has_uncommitted = check_uncommitted_changes(&git_dir).await?;
-        if has_uncommitted {
-            debug!("Uncommitted changes detected, creating synthetic commit");
-            make_synthetic_commit(&git_dir).await?;
-        } else {
-            debug!("No uncommitted changes — capturing committed changes only");
-        }
-
-        // Capture (don't propagate) the format-patch result so the synthetic commit
-        // is always undone first, even when format-patch fails.
-        let format_patch_result = Command::new("git")
-            .args([
-                "format-patch",
-                &format!("{}..HEAD", merge_base),
-                "--stdout",
-                "-M",
-            ])
-            .current_dir(&git_dir)
-            .output()
-            .await;
-
-        // Always undo the temporary commit before propagating errors.
-        // `git reset --mixed HEAD~1` undoes the commit and resets the index
-        // to the parent tree, which leaves modified files as unstaged changes
-        // and previously-untracked files as untracked again.
-        if has_uncommitted {
-            undo_synthetic_commit(&git_dir).await?;
-        }
-
-        let format_patch_output = format_patch_result.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to run git format-patch: {}", e))
-        })?;
-
-        if !format_patch_output.status.success() {
-            return Err(anyhow_to_mcp_error(anyhow::anyhow!(
-                "git format-patch failed: {}",
-                String::from_utf8_lossy(&format_patch_output.stderr)
-            )));
-        }
-
-        let patch = String::from_utf8_lossy(&format_patch_output.stdout).to_string();
+        let scratch = tempfile::tempdir().map_err(|error| anyhow_to_mcp_error(error.into()))?;
+        let index = scratch.path().join("index");
+        let captured: anyhow::Result<Vec<u8>> = async {
+            let original = git(&git_dir, &["rev-parse", "--verify", "HEAD^{commit}"]).await?;
+            anyhow::ensure!(original.status.success(), "Could not resolve capture HEAD");
+            let head = crate::secure::CommitSha::parse(std::str::from_utf8(&original.stdout)?.trim())?;
+            crate::safe_outputs::pr_patch::seed_capture_index(&git_dir, &index, head.as_str()).await?;
+            let output = bounded_output(git_without_filters(&git_dir).await?
+                .args(["-c", "core.splitIndex=false", "add", "-A"])
+                .env("GIT_INDEX_FILE", &index), crate::safe_outputs::pr_patch::MAX_SOURCE_BYTES, None).await?;
+            anyhow::ensure!(output.status.success(), "Could not capture changes in a private Git index");
+            let tree = bounded_output(git_without_filters(&git_dir).await?.arg("write-tree")
+                .env("GIT_INDEX_FILE", &index), 1024, None).await?;
+            anyhow::ensure!(tree.status.success(), "Could not write captured Git tree");
+            let tree = std::str::from_utf8(&tree.stdout)?.trim();
+            anyhow::ensure!(crate::validate::is_valid_commit_sha(tree), "Git returned an invalid tree ID");
+            let original_tree = git(&git_dir, &["rev-parse", &format!("{head}^{{tree}}")]).await?;
+            anyhow::ensure!(original_tree.status.success(), "Could not resolve original Git tree");
+            let tip = if std::str::from_utf8(&original_tree.stdout)?.trim() == tree {
+                head
+            } else {
+                let commit = bounded_output(git_without_filters(&git_dir).await?.args([
+                    "-c", "user.email=agent@ado-aw", "-c", "user.name=ADO Agent", "-c", "commit.gpgSign=false",
+                    "commit-tree", tree, "-p", head.as_str(), "-m", "agent changes",
+                ]), 1024, None).await?;
+                anyhow::ensure!(commit.status.success(), "Could not create detached capture commit");
+                crate::secure::CommitSha::parse(std::str::from_utf8(&commit.stdout)?.trim())?
+            };
+            let output = bounded_output(git_without_filters(&git_dir).await?.args([
+                "format-patch", &format!("{merge_base}..{tip}"), "--stdout", "-M", "--full-index",
+                "--binary", "--no-ext-diff", "--no-textconv",
+            ]), self.create_pr_patch_size.bytes(), None).await?;
+            anyhow::ensure!(output.status.success(), "git format-patch failed: {}",
+                crate::sanitize::neutralize_pipeline_commands(&String::from_utf8_lossy(&output.stderr)));
+            Ok(output.stdout)
+        }.await;
+        let patch = crate::safe_outputs::pr_patch::finish_scratch(scratch, captured)
+            .map_err(anyhow_to_mcp_error)?;
         Ok((patch, merge_base))
     }
 
@@ -718,7 +727,7 @@ impl SafeOutputs {
             .as_millis();
         // Sanitize repository name for filename
         let safe_repo = repository.replace(['/', '\\'], "-");
-        format!("pr-{}-{}.patch", safe_repo, timestamp)
+        format!("pr-{}-{}-{}.patch", safe_repo, timestamp, generate_short_id())
     }
 
     /// Find the merge-base commit to diff against.
@@ -762,7 +771,7 @@ impl SafeOutputs {
         let mut sanitized = params.0;
         sanitized.context = sanitized.context.map(|c| sanitize_text(&c));
         let result: NoopResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file_with_maximum(&result, 1).await;
+        self.write_safe_output_file_with_maximum(&result, 1).await.map_err(anyhow_to_mcp_error)?;
         Ok(CallToolResult::success(vec![]))
     }
 
@@ -780,7 +789,7 @@ impl SafeOutputs {
         sanitized.tool_name = sanitize_text(&sanitized.tool_name);
         sanitized.context = sanitized.context.map(|c| sanitize_text(&c));
         let result: MissingToolResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        self.write_safe_output_file(&result).await.map_err(anyhow_to_mcp_error)?;
         Ok(CallToolResult::success(vec![]))
     }
     #[tool(
@@ -797,7 +806,7 @@ impl SafeOutputs {
         sanitized.reason = sanitize_text(&sanitized.reason);
         sanitized.context = sanitized.context.map(|c| sanitize_text(&c));
         let result: MissingDataResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        self.write_safe_output_file(&result).await.map_err(anyhow_to_mcp_error)?;
         Ok(CallToolResult::success(vec![]))
     }
 
@@ -842,7 +851,7 @@ or a temporary_id from an earlier create-work-item call in the same run."
         let mut sanitized = params.0;
         sanitized.assignee = crate::sanitize::sanitize_config(sanitized.assignee.trim());
         let result: AssignWorkItemResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        self.write_safe_output_file(&result).await.map_err(anyhow_to_mcp_error)?;
         info!("Work-item assignment queued");
         Ok(CallToolResult::success(vec![]))
     }
@@ -948,6 +957,18 @@ issue_number may be a positive number or a temporary_id from create-github-issue
     }
 
     #[tool(
+        name = "abandon-pull-request",
+        description = "Abandon a configured Azure DevOps pull request without merging, optionally with a comment."
+    )]
+    async fn abandon_pull_request(
+        &self,
+        params: Parameters<AbandonPullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AbandonPullRequestResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
         name = "update-github-issue",
         description = "Update operator-enabled fields on a configured GitHub issue or pull request."
     )]
@@ -956,6 +977,18 @@ issue_number may be a positive number or a temporary_id from create-github-issue
         params: Parameters<UpdateGithubIssueParams>,
     ) -> Result<CallToolResult, McpError> {
         let result: UpdateGithubIssueResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "update-pull-request",
+        description = "Update an Azure DevOps pull request title or description. Uses gh-aw-style title/body/operation inputs."
+    )]
+    async fn update_pull_request(
+        &self,
+        params: Parameters<UpdatePullRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: UpdatePullRequestResult = params.0.try_into()?;
         self.queue_sanitized_output(result).await
     }
 
@@ -1081,17 +1114,19 @@ and only the fields you want to update."
         description = "Create a new pull request to propose code changes. This tool captures all \
 changes in the repository (both committed and uncommitted) and creates a PR from them. \
 Use 'self' for the pipeline's own repository, or a repository alias from the checkout list. \
-Returns a generated temporary_id that can be passed as pull_request_id to later update-pr calls."
+Returns a generated temporary_id for configured PR content, reviewer, label, review or auto-complete follow-up tools."
     )]
     async fn create_pr(
         &self,
         params: Parameters<CreatePrParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = self.create_pr_proposal_lock.lock().await;
         info!("Tool called: create-pull-request - '{}'", params.0.title);
         // Sanitize untrusted agent-provided text fields (IS-01)
         let mut sanitized = params.0;
         sanitized.title = sanitize_text(&sanitized.title);
         sanitized.description = sanitize_text(&sanitized.description);
+        sanitized.validate().map_err(anyhow_to_mcp_error)?;
 
         // Determine repository(default to "self" if not provided)
         let repository = sanitized.repository.as_deref().unwrap_or("self");
@@ -1101,7 +1136,7 @@ Returns a generated temporary_id that can be passed as pull_request_id to later 
         debug!("Generating patch for repository: {}", repository);
         let (patch_content, merge_base) = self.generate_patch(Some(repository)).await?;
 
-        if patch_content.trim().is_empty() {
+        if patch_content.iter().all(u8::is_ascii_whitespace) {
             warn!("No changes detected in repository '{}'", repository);
             return Err(anyhow_to_mcp_error(anyhow::anyhow!(
                 "No changes detected in repository '{}'. Make code changes before creating a PR.",
@@ -1109,6 +1144,7 @@ Returns a generated temporary_id that can be passed as pull_request_id to later 
             )));
         }
         debug!("Patch size: {} bytes", patch_content.len());
+        crate::safe_outputs::pr_patch::inspected_paths(&patch_content).map_err(anyhow_to_mcp_error)?;
 
         // Generate a unique filename for the patch (include repo for clarity)
         let patch_filename = self.generate_patch_filename(repository);
@@ -1116,14 +1152,10 @@ Returns a generated temporary_id that can be passed as pull_request_id to later 
         debug!("Patch filename: {}", patch_filename);
 
         // Write the patch file
-        tokio::fs::write(&patch_path, &patch_content)
-            .await
-            .map_err(|e| {
-                anyhow_to_mcp_error(anyhow::anyhow!("Failed to write patch file: {}", e))
-            })?;
+        self.stage_pr_patch(&patch_filename, &patch_content).await.map_err(anyhow_to_mcp_error)?;
 
         // Compute SHA-256 of the patch for cross-stage integrity verification.
-        let patch_sha256 = crate::hash::sha256_hex(patch_content.as_bytes());
+        let patch_sha256 = crate::hash::sha256_hex(&patch_content);
 
         // Generate source branch name from sanitized title + short unique suffix
         let title_slug = slugify_title(&sanitized.title);
@@ -1135,7 +1167,6 @@ Returns a generated temporary_id that can be passed as pull_request_id to later 
         };
 
         const MAX_ID_ATTEMPTS: usize = 16;
-        let _guard = self.create_pr_proposal_lock.lock().await;
         let existing = self
             .read_safe_output_file()
             .await
@@ -1173,18 +1204,40 @@ Returns a generated temporary_id that can be passed as pull_request_id to later 
         };
 
         // Write to safe outputs
-        self.write_safe_output_file(&result)
-            .await
-            .map_err(anyhow_to_mcp_error)?;
+        let response = self.admit_pr_output(&result).await?;
+        if response.structured_content.as_ref().is_some_and(|receipt| receipt["status"] == "not-queued") {
+            tokio::fs::remove_file(&patch_path).await.map_err(|error| anyhow_to_mcp_error(
+                anyhow::anyhow!("Failed to remove rejected proposal patch: {error}")))?;
+        }
+        Ok(response)
+    }
 
-        let canonical = temporary_id.canonical();
-        let mut response = CallToolResult::success(vec![Content::text(format!(
-            "PR request saved for repository '{}'. Patch file: {}. Use temporary ID {} as pull_request_id in later update-pr calls.",
-            repository, result.patch_file, canonical
-        ))]);
-        response.structured_content = Some(serde_json::json!({
-            "temporary_id": canonical,
-        }));
+    #[tool(
+        name = "push-to-pull-request-branch",
+        description = "Propose code changes to an existing ADO PR source branch, never an arbitrary branch. Supply its original expected_head_sha from /tmp/ado-aw/pr-source-snapshot.json or an explicitly prepared matching checkout. Captures committed and uncommitted changes without altering HEAD/index. Refuses merge-checkout history, stale heads, forks, protected files and unauthorized branches. Stage 3 never force-pushes."
+    )]
+    async fn push_pr_branch(&self, params: Parameters<PushToPullRequestBranchParams>) -> Result<CallToolResult, McpError> {
+        params.0.validate().map_err(anyhow_to_mcp_error)?;
+        let _guard = self.create_pr_proposal_lock.lock().await;
+        let dir = resolve_git_dir_for_patch(&self.bounding_directory,&self.self_repository_directory,Some(params.0.repository.as_str()))?;
+        let bytes = crate::safe_outputs::push_to_pull_request_branch::capture_patch(&dir,&params.0.expected_head_sha,self.push_pr_patch_size)
+            .await.map_err(anyhow_to_mcp_error)?;
+        crate::safe_outputs::pr_patch::inspected_paths(&bytes).map_err(anyhow_to_mcp_error)?;
+        let filename = self.generate_patch_filename(params.0.repository.as_str());
+        self.stage_pr_patch(&filename, &bytes).await.map_err(anyhow_to_mcp_error)?;
+        let result = PushToPullRequestBranchResult {
+            name: PushToPullRequestBranchResult::NAME.into(),
+            pull_request_id: params.0.pull_request_id, repository: params.0.repository,
+            expected_head_sha: params.0.expected_head_sha,
+            patch_file: crate::secure::StrictRelativePath::parse(filename).map_err(anyhow_to_mcp_error)?,
+            patch_sha256: crate::hash::sha256_hex(&bytes),
+        };
+        let patch_path = self.output_directory.join(result.patch_file.as_str());
+        let response = self.queue_sanitized_output(result).await?;
+        if response.structured_content.as_ref().is_some_and(|receipt| receipt["status"] == "not-queued") {
+            tokio::fs::remove_file(patch_path).await.map_err(|error| anyhow_to_mcp_error(
+                anyhow::anyhow!("Failed to remove rejected proposal patch: {error}")))?;
+        }
         Ok(response)
     }
 
@@ -1215,7 +1268,7 @@ structured output that should be visible in the project wiki."
         sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
 
         let result: UpdateWikiPageResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        self.write_safe_output_file(&result).await.map_err(anyhow_to_mcp_error)?;
 
         info!("Wiki page edit queued: '{}'", result.path);
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -1252,7 +1305,7 @@ structured output that should be visible in the project wiki."
         sanitized.comment = sanitized.comment.map(|c| sanitize_text(&c));
 
         let result: CreateWikiPageResult = sanitized.try_into()?;
-        let _ = self.write_safe_output_file(&result).await;
+        self.write_safe_output_file(&result).await.map_err(anyhow_to_mcp_error)?;
 
         info!("Wiki page creation queued: '{}'", result.path);
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -1262,31 +1315,24 @@ structured output that should be visible in the project wiki."
     }
 
     #[tool(
-        name = "add-pr-comment",
-        description = "Add a comment thread to an Azure DevOps pull request. Supports both \
-general comments and file-specific inline comments with optional line positioning. \
-The comment will be posted during safe output processing."
+        name = "add-pull-request-comment",
+        description = "Propose an independent ad hoc comment thread on an Azure DevOps PR. \
+Supports general and inline feedback. It is never buffered into a later review; use \
+submit-pull-request-review for a complete review. Writes happen only during safe output processing."
     )]
     async fn add_pr_comment(
         &self,
         params: Parameters<AddPrCommentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: add-pr-comment - PR #{}",
-            params.0.pull_request_id
+            "Tool called: add-pull-request-comment - {}",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref())
         );
         debug!("Content length: {} chars", params.0.content.len());
         let mut sanitized = params.0;
-        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.content = sanitize_markdown(&sanitized.content);
         let result: AddPrCommentResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
-        })?;
-        info!("PR comment queued for PR #{}", result.pull_request_id);
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Comment queued for PR #{}. The comment will be posted during safe output processing.",
-            result.pull_request_id
-        ))]))
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
@@ -1408,29 +1454,66 @@ pull request. The branch will be created during safe output processing."
     }
 
     #[tool(
-        name = "update-pr",
-        description = "Update pull request metadata in Azure DevOps. Supports operations: \
-add-reviewers, add-labels, set-auto-complete, vote, update-description. \
-Changes will be applied during safe output processing."
+        name = "add-pull-request-reviewers",
+        description = "Add missing policy-permitted reviewers to an Azure DevOps PR. Existing reviewers are no-write no-ops; this tool does not intentionally vote or change required status. Accepts a numeric or same-run temporary PR ID. Concurrent reviewer additions are not atomic."
     )]
-    async fn update_pr(
+    async fn add_pr_reviewers(
         &self,
-        params: Parameters<UpdatePrParams>,
+        params: Parameters<AddPrReviewersParams>,
     ) -> Result<CallToolResult, McpError> {
-        info!(
-            "Tool called: update-pr - PR #{} operation '{}'",
-            params.0.pull_request_id, params.0.operation
-        );
-        let mut sanitized = params.0;
-        sanitized.description = sanitized.description.map(|d| sanitize_text(&d));
-        let result: UpdatePrResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
-        })?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "PR #{} '{}' operation queued. Changes will be applied during safe output processing.",
-            result.pull_request_id, result.operation
-        ))]))
+        let result: AddPrReviewersResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "add-pull-request-labels",
+        description = "Add labels to an Azure DevOps PR without replacing existing labels. Accepts a numeric or same-run temporary PR ID."
+    )]
+    async fn add_pr_labels(
+        &self,
+        params: Parameters<AddPrLabelsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: AddPrLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "remove-pull-request-labels",
+        description = "Propose removal of policy-permitted labels from an Azure DevOps PR. Missing labels are no-ops. Does not remove other labels; writes happen in safe output processing."
+    )]
+    async fn remove_pr_labels(&self, params: Parameters<RemovePullRequestLabelsParams>) -> Result<CallToolResult, McpError> {
+        let result: RemovePullRequestLabelsResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "replace-pull-request-label",
+        description = "Propose one permitted PR label transition from one label to another. Adds and verifies the new label before removing the old label. This is not an atomic ADO operation; partial outcomes are reported."
+    )]
+    async fn replace_pr_label(&self, params: Parameters<ReplacePullRequestLabelParams>) -> Result<CallToolResult, McpError> {
+        let result: ReplacePullRequestLabelResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "mark-pull-request-as-ready-for-review",
+        description = "Propose publishing an existing active draft PR for review. Does not approve, merge or enable auto-complete. Already-ready PRs are no-ops; persisted publication is verified in Stage 3."
+    )]
+    async fn mark_pr_ready(&self, params: Parameters<MarkPullRequestReadyParams>) -> Result<CallToolResult, McpError> {
+        let result: MarkPullRequestReadyResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "set-pull-request-auto-complete",
+        description = "Enable Azure DevOps PR auto-complete using explicit completion preferences. Does not bypass branch policies, but may merge promptly when they pass."
+    )]
+    async fn set_pr_auto_complete(
+        &self,
+        params: Parameters<SetPrAutoCompleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result: SetPrAutoCompleteResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
@@ -1726,33 +1809,39 @@ restrictions may apply per the workflow's safe-outputs config."
     }
 
     #[tool(
-        name = "submit-pr-review",
-        description = "Submit a pull request review with a decision (approve, request-changes, \
-or comment-only) and an optional body explaining the rationale. The review will be \
-submitted during safe output processing. Requires 'allowed-events' to be configured."
+        name = "submit-pull-request-review",
+        description = "Propose a complete pull request review. The comment event posts \
+non-voting feedback and preserves any existing vote; reset explicitly clears your vote. \
+Other explicitly allowed events cast their ADO vote and require the reviewed expected_head_sha \
+(or the immutable snapshot of an explicit creation handle). Plain comments and reset without \
+inline findings are exempt. Standalone comments are independent; writes happen only during safe output processing."
     )]
     async fn submit_pr_review(
         &self,
         params: Parameters<SubmitPrReviewParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: submit-pr-review - PR #{} event '{}'",
-            params.0.pull_request_id, params.0.event
+            "Tool called: submit-pull-request-review - {} event '{}'",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.event
         );
         let mut sanitized = params.0;
-        sanitized.body = sanitized.body.map(|b| sanitize_text(&b));
+        sanitized.body = sanitized.body.map(|b| sanitize_markdown(&b));
+        for comment in &mut sanitized.comments { comment.content = sanitize_markdown(&comment.content); }
         let result: SubmitPrReviewResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
-        })?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "PR review '{}' queued for PR #{}. The review will be submitted during safe output processing.",
-            result.event, result.pull_request_id
-        ))]))
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
-        name = "reply-to-pr-comment",
+        name = "update-pull-request-comment",
+        description = "Propose editing a verified root comment owned by this pipeline and actor, with no replies. Requires existing thread_id and comment_id. Refuses conversations, externally edited comments and unowned history. This edits a comment, not the PR description."
+    )]
+    async fn update_pr_comment(&self, params: Parameters<UpdatePullRequestCommentParams>) -> Result<CallToolResult, McpError> {
+        let result: UpdatePullRequestCommentResult = params.0.try_into()?;
+        self.queue_sanitized_output(result).await
+    }
+
+    #[tool(
+        name = "reply-to-pull-request-comment",
         description = "Reply to an existing review comment thread on an Azure DevOps pull request. \
 Provide the PR ID, thread ID, and reply content. The reply will be posted during safe output processing."
     )]
@@ -1761,23 +1850,17 @@ Provide the PR ID, thread ID, and reply content. The reply will be posted during
         params: Parameters<ReplyToPrCommentParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: reply-to-pr-comment - PR #{} thread #{}",
-            params.0.pull_request_id, params.0.thread_id
+            "Tool called: reply-to-pull-request-comment - {} thread #{}",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.thread_id
         );
         let mut sanitized = params.0;
-        sanitized.content = sanitize_text(&sanitized.content);
+        sanitized.content = sanitize_markdown(&sanitized.content);
         let result: ReplyToPrCommentResult = sanitized.try_into()?;
-        self.write_safe_output_file(&result).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
-        })?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Reply queued for thread #{} on PR #{}. The reply will be posted during safe output processing.",
-            result.thread_id, result.pull_request_id
-        ))]))
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
-        name = "resolve-pr-thread",
+        name = "resolve-pull-request-thread",
         description = "Resolve or change the status of a review thread on an Azure DevOps pull request. \
 Valid statuses: fixed, wont-fix, closed, by-design, active. \
 The status change will be applied during safe output processing."
@@ -1787,17 +1870,11 @@ The status change will be applied during safe output processing."
         params: Parameters<ResolvePrThreadParams>,
     ) -> Result<CallToolResult, McpError> {
         info!(
-            "Tool called: resolve-pr-thread - PR #{} thread #{} → '{}'",
-            params.0.pull_request_id, params.0.thread_id, params.0.status
+            "Tool called: resolve-pull-request-thread - {} thread #{} → '{}'",
+            crate::safe_outputs::pr_common::describe_pr_reference(params.0.pull_request_id.as_ref()), params.0.thread_id, params.0.status
         );
         let result: ResolvePrThreadResult = params.0.try_into()?;
-        self.write_safe_output_file(&result).await.map_err(|e| {
-            anyhow_to_mcp_error(anyhow::anyhow!("Failed to write safe output: {}", e))
-        })?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Thread #{} status change to '{}' queued for PR #{}. The change will be applied during safe output processing.",
-            result.thread_id, result.status, result.pull_request_id
-        ))]))
+        self.queue_sanitized_output(result).await
     }
 
     #[tool(
@@ -1826,8 +1903,15 @@ agent attempted work but couldn't finish (e.g., API timeouts, build failures, re
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for SafeOutputs {
     fn get_info(&self) -> ServerInfo {
+        let instructions = match &self.pr_admission_policy {
+            Some(policy) => format!(
+                "Safe-output calls queue proposals, not remote actions. Stage 3 independently enforces author policy. \
+                 Configured non-secret PR admission policy (omissions use documented defaults): {}",
+                serde_json::json!(policy)),
+            None => "Safe-output calls queue proposals, not remote actions. Author policy and remote authorization remain pending Stage 3 checks.".into(),
+        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("A set of tools that generate SafeOutput compatible results.")
+            .with_instructions(instructions)
     }
 }
 
@@ -1837,17 +1921,21 @@ pub async fn run(
     self_repository_directory: Option<&str>,
     enabled_tools: Option<&[String]>,
     custom_tools: Option<&std::path::Path>,
+    create_pr_patch_size: crate::safe_outputs::pr_patch::PatchSizeKiB,
+    push_pr_patch_size: crate::safe_outputs::pr_patch::PatchSizeKiB,
 ) -> Result<()> {
     // Create and run the server with STDIO transport
-    let service = SafeOutputs::new_with_self_repository_directory(
+    let mut service = SafeOutputs::new_with_self_repository_directory(
         bounding_directory,
         output_directory,
         self_repository_directory.map(PathBuf::from),
         enabled_tools,
         custom_tools,
     )
-    .await?
-    .serve(stdio())
+    .await?;
+    service.create_pr_patch_size = create_pr_patch_size;
+    service.push_pr_patch_size = push_pr_patch_size;
+    let service = service.serve(stdio())
     .await
     .inspect_err(|e| {
         error!("Error starting MCP server: {}", e);
@@ -1863,6 +1951,103 @@ pub async fn run(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn pr_admission_is_atomic_durable_and_correlated_with_execution_context() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("policy.json");
+        let policy = serde_json::json!({
+            "customTools":[],
+            "prPolicy":{"schema_version":1,
+                "tools":{"add-pull-request-labels":{
+                    "target":"*","max":10,"allowed-labels":["ok"],
+                    "staged":false,"require-approval":false}},
+                "budget_groups":{"shared":{"max":3,"tools":["add-pull-request-labels"]}}}
+        });
+        std::fs::write(&config_path, policy.to_string()).unwrap();
+        let enabled = vec!["add-pull-request-labels".to_string()];
+        let service = SafeOutputs::new(directory.path(),directory.path(),Some(&enabled),Some(&config_path)).await.unwrap();
+        let rejected = service.add_pr_labels(Parameters(serde_json::from_value(
+            serde_json::json!({"pull_request_id":7,"labels":["denied"]})).unwrap())).await.unwrap();
+        let receipt = rejected.structured_content.unwrap();
+        assert_eq!(receipt["status"], "not-queued");
+        assert_eq!(receipt["reason"], "policy-denied");
+        assert!(receipt.get("proposal_id").is_none());
+        assert!(service.read_safe_output_file().await.unwrap().is_empty());
+
+        let mut calls = Vec::new();
+        for _ in 0..10 {
+            let cloned = service.clone();
+            calls.push(tokio::spawn(async move {
+                cloned.add_pr_labels(Parameters(serde_json::from_value(
+                    serde_json::json!({"pull_request_id":7,"labels":["ok"]})).unwrap())).await.unwrap()
+            }));
+        }
+        let mut ids = std::collections::HashSet::new();
+        let mut refused = 0;
+        for call in calls {
+            let receipt = call.await.unwrap().structured_content.unwrap();
+            if receipt["status"] == "queued" {
+                assert!(ids.insert(receipt["proposal_id"].as_str().unwrap().to_string()));
+            } else {
+                assert_eq!(receipt["reason"], "budget-exhausted");
+                assert_eq!(receipt["retryable"], false);
+                assert_eq!(receipt["remaining_budget"]["groups"]["shared"], 0);
+                refused += 1;
+            }
+        }
+        assert_eq!((ids.len(), refused), (3, 7));
+        let queued = service.read_safe_output_file().await.unwrap();
+        assert_eq!(queued.len(), 3);
+        for entry in queued { assert!(ids.contains(entry["context"].as_str().unwrap())); }
+        assert!(SafeOutputs::new(directory.path(), directory.path(), Some(&enabled), Some(&config_path)).await.is_err());
+        drop(service);
+        let restarted = SafeOutputs::new(directory.path(), directory.path(), Some(&enabled), Some(&config_path)).await.unwrap();
+        assert!(!restarted.tool_router.has_route("add-pull-request-labels"));
+        let result = restarted.add_pr_labels(Parameters(serde_json::from_value(
+            serde_json::json!({"pull_request_id":7,"labels":["ok"]})).unwrap())).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["reason"], "budget-exhausted");
+        assert_eq!(restarted.read_safe_output_file().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn corrupt_or_lost_queue_state_never_becomes_an_empty_budget() {
+        let directory = tempdir().unwrap();
+        let service = SafeOutputs::new(directory.path(),directory.path(),None,None).await.unwrap();
+        std::fs::write(service.safe_output_path(), "{incomplete").unwrap();
+        let params = serde_json::from_value(serde_json::json!({"pull_request_id":7,"labels":["ok"]})).unwrap();
+        assert!(service.add_pr_labels(Parameters(params)).await.is_err());
+        assert_eq!(std::fs::read_to_string(service.safe_output_path()).unwrap(), "{incomplete");
+        drop(service);
+        assert!(SafeOutputs::new(directory.path(),directory.path(),None,None).await.is_err());
+        std::fs::remove_file(directory.path().join(SAFE_OUTPUT_FILENAME)).unwrap();
+        assert!(SafeOutputs::new(directory.path(),directory.path(),None,None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_patch_never_produces_an_accepted_receipt_or_budget_reservation() {
+        let directory = tempdir().unwrap();
+        let service = SafeOutputs::new(directory.path(), directory.path(), None, None).await.unwrap();
+        let proposal = CreatePrResult {
+            name: CreatePrResult::NAME.into(), title:"Change".into(), description:"Body".into(),
+            source_branch:"agent/change".into(), patch_file:"missing.patch".into(), repository:"self".into(),
+            agent_labels:vec![], temporary_id:PullRequestTemporaryId::parse("#aw_missingpatch").unwrap(),
+            base_commit:Some("a".repeat(40)), patch_sha256:"b".repeat(64),
+        };
+        let rejected = service.admit_pr_output(&proposal).await;
+        assert!(rejected.is_err());
+        assert!(service.read_safe_output_file().await.unwrap().is_empty());
+        assert!(matches!(rejected.unwrap_err().code, rmcp::model::ErrorCode::INVALID_PARAMS));
+    }
+
+    #[tokio::test]
+    async fn patch_staging_never_overwrites_an_earlier_proposals_artifact() {
+        let directory = tempdir().unwrap();
+        let service = SafeOutputs::new(directory.path(), directory.path(), None, None).await.unwrap();
+        service.stage_pr_patch("captured.patch", b"first patch").await.unwrap();
+        assert!(service.stage_pr_patch("captured.patch", b"second patch").await.is_err());
+        assert_eq!(std::fs::read(directory.path().join("captured.patch")).unwrap(), b"first patch");
+    }
 
     async fn create_test_safe_outputs() -> (SafeOutputs, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
@@ -2128,6 +2313,92 @@ mod tests {
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0]["name"], "create-pull-request");
         assert_eq!(proposals[0]["temporary_id"], temporary_id);
+    }
+
+    #[tokio::test]
+    async fn creation_capture_preserves_head_index_and_worktree_on_success_and_size_failure() {
+        for limited in [false, true] {
+            let repo = tempdir().unwrap();
+            let output = tempdir().unwrap();
+            initialize_git_repo_with_change(repo.path());
+            let command = |args: &[&str]| {
+                let result = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+                assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+                result.stdout
+            };
+            command(&["add", "file.txt"]);
+            std::fs::write(repo.path().join("file.txt"), "unstaged version\n").unwrap();
+            std::fs::write(repo.path().join("untracked.txt"), "x".repeat(4096)).unwrap();
+            let head = command(&["rev-parse", "HEAD"]);
+            let index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let mut service = SafeOutputs::new(repo.path(), output.path(), None, None).await.unwrap();
+            if limited {
+                service.create_pr_patch_size = crate::safe_outputs::pr_patch::PatchSizeKiB::try_from(1).unwrap();
+            }
+            let result = service.generate_patch(None).await;
+            assert_eq!(result.is_ok(), !limited);
+            assert_eq!(command(&["rev-parse", "HEAD"]), head);
+            assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), index);
+            assert_eq!(std::fs::read(repo.path().join("file.txt")).unwrap(), b"unstaged version\n");
+            assert_eq!(std::fs::read(repo.path().join("untracked.txt")).unwrap().len(), 4096);
+            assert!(service.read_safe_output_file().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn review3_capture_preserves_explicit_staged_mode_intent() {
+        for push in [false, true] {
+            let repo = tempdir().unwrap();
+            let out = tempdir().unwrap();
+            initialize_git_repo_with_change(repo.path());
+            std::fs::write(repo.path().join("file.txt"), "before\n").unwrap();
+            let command = crate::safe_outputs::pr_patch::tests::command;
+            command(repo.path(), &["config", "core.filemode", "false"]);
+            command(repo.path(), &["update-index", "--chmod=+x", "file.txt"]);
+            let index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let head = crate::secure::CommitSha::parse(command(repo.path(), &["rev-parse", "HEAD"])).unwrap();
+            let bytes = if push {
+                crate::safe_outputs::push_to_pull_request_branch::capture_patch(repo.path(), &head, Default::default()).await.unwrap()
+            } else {
+                SafeOutputs::new(repo.path(), out.path(), None, None).await.unwrap().generate_patch(None).await.unwrap().0
+            };
+            assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), index);
+            assert_eq!(command(repo.path(), &["rev-parse", "HEAD"]), head.as_str());
+            let patch = String::from_utf8(bytes).unwrap();
+            assert!(patch.contains("old mode 100644") && patch.contains("new mode 100755"), "push={push}: staged chmod disappeared: {patch}");
+        }
+    }
+
+    #[tokio::test]
+    async fn review3_both_mcp_tools_queue_native_spaced_path_artifacts() {
+        for push in [false, true] {
+            let (repo, head) = crate::safe_outputs::pr_patch::tests::repository(&[
+                ("space dir/user guide.md", b"before\n"),
+            ]);
+            let out = tempdir().unwrap();
+            std::fs::write(repo.path().join("space dir").join("user guide.md"), b"after\n").unwrap();
+            let original_index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let service = SafeOutputs::new(repo.path(), out.path(), None, None).await.unwrap();
+            if push {
+                service.push_pr_branch(Parameters(PushToPullRequestBranchParams {
+                    pull_request_id: Some(crate::safe_outputs::pr_common::PullRequestReference::Number(42)),
+                    repository: crate::secure::RelativeSafePath::parse("self").unwrap(),
+                    expected_head_sha: head,
+                })).await.unwrap();
+            } else {
+                service.create_pr(Parameters(CreatePrParams {
+                    title: "Update spaced path".into(),
+                    description: "Update the guide using the native Git patch format.".into(),
+                    repository: None, labels: vec![],
+                })).await.unwrap();
+            }
+            let proposals = service.read_safe_output_file().await.unwrap();
+            assert_eq!(proposals.len(), 1);
+            let bytes = std::fs::read(out.path().join(proposals[0]["patch_file"].as_str().unwrap())).unwrap();
+            assert_eq!(proposals[0]["patch_sha256"], crate::hash::sha256_hex(&bytes));
+            assert!(crate::safe_outputs::pr_patch::inspected_paths(&bytes).unwrap().contains("space dir/user guide.md"));
+            assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), original_index);
+        }
     }
 
     #[tokio::test]
@@ -2619,7 +2890,7 @@ safe-outputs:
 
     #[tokio::test]
     async fn test_all_configured_only_tools_are_routes() {
-        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 14);
+        assert_eq!(CONFIGURED_ONLY_TOOLS.len(), 29);
         let temp_dir = tempfile::tempdir().unwrap();
         let enabled: Vec<String> = CONFIGURED_ONLY_TOOLS
             .iter()
@@ -2629,6 +2900,10 @@ safe-outputs:
             .await
             .unwrap();
         let tools = so.tool_router.list_all();
+        assert!(
+            !tools.iter().any(|tool| tool.name.as_ref() == "update-pr"),
+            "historical update-pr must never be an advertised MCP route"
+        );
         for configured_tool in CONFIGURED_ONLY_TOOLS {
             let route = tools
                 .iter()
@@ -2639,6 +2914,22 @@ safe-outputs:
                 "{configured_tool} must expose an MCP input schema"
             );
         }
+    }
+
+    #[test]
+    fn public_pull_request_names_have_no_abbreviated_runtime_aliases() {
+        let tools = SafeOutputs::tool_router().list_all();
+        for (old, new) in crate::compile::pr_migration::PR_TOOL_RENAMES {
+            assert!(
+                tools.iter().any(|tool| tool.name.as_ref() == *new),
+                "missing {new}"
+            );
+            assert!(
+                !tools.iter().any(|tool| tool.name.as_ref() == *old),
+                "deprecated route {old}"
+            );
+        }
+        assert!(!tools.iter().any(|tool| tool.name.as_ref() == "update-pr"));
     }
 
     #[tokio::test]

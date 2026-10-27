@@ -1,12 +1,13 @@
 //! Create pull request safe output tool
 
+use super::pr_http::BoundedPrResponse;
 use log::{debug, info, warn};
 use percent_encoding::utf8_percent_encode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, PATH_SEGMENT, Validate};
+use crate::safe_outputs::{ExecutionContext, ExecutionResult, Executor, PATH_SEGMENT, ToolResult, Validate};
 use crate::sanitize::{SanitizeContent, sanitize as sanitize_text, sanitize_config};
 use crate::secure::PullRequestTemporaryId;
 use crate::tool_result;
@@ -14,8 +15,6 @@ use crate::validate::reject_pipeline_injection;
 use ado_aw_derive::SanitizeConfig;
 use anyhow::{Context, ensure};
 
-/// Maximum allowed patch file size (5 MB)
-const MAX_PATCH_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Default maximum files allowed in a single PR
 const DEFAULT_MAX_FILES: usize = 100;
@@ -205,7 +204,7 @@ async fn resolve_reviewer_identity(
         return None;
     }
 
-    match resp.json::<serde_json::Value>().await {
+    match resp.bounded_json::<serde_json::Value>().await {
         Ok(data) => {
             let result = find_identity_in_response(&data, reviewer);
             if result.is_none() {
@@ -234,11 +233,12 @@ fn identity_picker_url(organization: &str) -> String {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePrParams {
-    /// Title for the pull request; should be concise and descriptive
+    /// Nonblank title, at most 400 Unicode scalar values including the configured title-prefix.
     pub title: String,
 
     /// Description of the changes in the pull request. Use markdown formatting.
     /// Explain what changes were made and why.
+    #[serde(rename = "body")]
     pub description: String,
 
     /// Repository to create the PR in. Use "self" for the pipeline's own repository,
@@ -255,18 +255,12 @@ pub struct CreatePrParams {
 
 impl Validate for CreatePrParams {
     fn validate(&self) -> anyhow::Result<()> {
+        super::pr_common::validate_title(&self.title)?;
         ensure!(
-            self.title.len() >= 5,
-            "PR title must be at least 5 characters"
+            !self.description.trim().is_empty(),
+            "PR body must not be blank"
         );
-        ensure!(
-            self.title.len() <= 200,
-            "PR title must be at most 200 characters"
-        );
-        ensure!(
-            self.description.len() >= 10,
-            "PR description must be at least 10 characters"
-        );
+        super::pr_common::validate_description(&self.description)?;
         if let Some(repository) = &self.repository {
             reject_pipeline_injection(repository, "repository")?;
         }
@@ -280,6 +274,7 @@ impl Validate for CreatePrParams {
 #[derive(Deserialize, JsonSchema)]
 struct CreatePrResultFields {
     title: String,
+    #[serde(rename = "body")]
     description: String,
     source_branch: String,
     patch_file: String,
@@ -300,10 +295,12 @@ tool_result! {
     write = true,
     params = CreatePrResultFields,
     /// Result of creating a pull request - stored as safe output
+    #[serde(deny_unknown_fields)]
     pub struct CreatePrResult {
         /// Title for the pull request
         title: String,
         /// Description/body of the pull request (markdown)
+        #[serde(rename = "body")]
         description: String,
         /// Source branch name (generated or provided)
         source_branch: String,
@@ -399,7 +396,15 @@ pub enum ProtectedFiles {
 ///       - "agent-created"
 /// ```
 #[derive(Debug, Clone, SanitizeConfig, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePrConfig {
+    /// Maximum patch and expanded selected content, in KiB (default 4096).
+    #[serde(default, rename = "max-patch-size")]
+    #[sanitize_config(skip)]
+    pub max_patch_size: super::pr_patch::PatchSizeKiB,
+    /// Optional restriction within the compiler-authorized checkout destinations.
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-repositories")]
+    pub allowed_repositories: Vec<String>,
     /// Target branch to merge into (default: "main"). This is the literal
     /// fallback applied to every repo unless overridden by `target_branches`
     /// or `infer_target_from_checkout_ref`. It is always a plain branch name —
@@ -432,13 +437,10 @@ pub struct CreatePrConfig {
     #[serde(default, rename = "auto-complete")]
     pub auto_complete: bool,
 
-    /// Whether to delete source branch after merge (default: true)
-    #[serde(default = "default_true", rename = "delete-source-branch")]
-    pub delete_source_branch: bool,
-
-    /// Whether to squash commits on merge (default: true)
-    #[serde(default = "default_true", rename = "squash-merge")]
-    pub squash_merge: bool,
+    /// Optional initial completion preferences, independent of enabling completion.
+    #[serde(flatten)]
+    #[sanitize_config(skip)]
+    pub completion: super::pr_completion::CompletionPreferences,
 
     /// Prefix to prepend to all PR titles
     #[serde(default, rename = "title-prefix")]
@@ -462,8 +464,8 @@ pub struct CreatePrConfig {
     pub excluded_files: Vec<String>,
 
     /// Allowlist of labels the agent is permitted to use.
-    /// If empty, any labels are accepted.
-    #[serde(default, rename = "allowed-labels")]
+    /// Omission adds no name restriction; an explicit empty list permits no agent labels.
+    #[serde(default = "super::pr_policy::unrestricted_names", rename = "allowed-labels")]
     pub allowed_labels: Vec<String>,
 
     /// Reviewers to add to the PR (email addresses or user IDs)
@@ -484,9 +486,24 @@ pub struct CreatePrConfig {
     #[serde(default = "default_true", rename = "fallback-record-branch")]
     pub fallback_record_branch: bool,
 
-    /// Whether to include agent execution stats in the PR description (default: true).
-    #[serde(default = "default_true", rename = "include-stats")]
+    /// Whether to include optional execution stats in the PR body (default: false).
+    #[serde(default, rename = "include-stats")]
     pub include_stats: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sanitize_config(skip)]
+    pub max: Option<u32>,
+}
+
+pub(crate) fn validate_create_pr_config(config: &CreatePrConfig) -> anyhow::Result<()> {
+    config.completion.validate()?;
+    super::pr_policy::validate_names(&config.allowed_repositories, "allowed-repositories")?;
+    super::pr_policy::validate_names(&config.allowed_labels, "allowed-labels")?;
+    anyhow::ensure!(config.work_items.iter().all(|id| *id > 0), "Creation work-items must contain positive IDs");
+    anyhow::ensure!(
+        !config.draft || !config.auto_complete,
+        "safe-outputs.create-pull-request cannot combine draft: true with auto-complete: true; explicitly set draft: false or disable auto-complete"
+    );
+    Ok(())
 }
 
 fn default_target_branch() -> String {
@@ -567,24 +584,26 @@ fn repository_api_base(target: &crate::safe_outputs::result::AdoRepositoryTarget
 impl Default for CreatePrConfig {
     fn default() -> Self {
         Self {
+            max_patch_size: Default::default(),
+            allowed_repositories: super::pr_policy::unrestricted_names(),
             target_branch: default_target_branch(),
             target_branches: std::collections::HashMap::new(),
             infer_target_from_checkout_ref: false,
             draft: true,
             auto_complete: false,
-            delete_source_branch: true,
-            squash_merge: true,
+            completion: Default::default(),
             title_prefix: None,
             if_no_changes: default_if_no_changes(),
             max_files: default_max_files(),
             protected_files: default_protected_files(),
             excluded_files: Vec::new(),
-            allowed_labels: Vec::new(),
+            allowed_labels: super::pr_policy::unrestricted_names(),
             reviewers: Vec::new(),
             labels: Vec::new(),
             work_items: Vec::new(),
             fallback_record_branch: true,
-            include_stats: true,
+            include_stats: false,
+            max: None,
         }
     }
 }
@@ -593,20 +612,29 @@ impl Default for CreatePrConfig {
 struct WorktreeGuard {
     repo_dir: std::path::PathBuf,
     worktree_path: std::path::PathBuf,
+    removed: bool,
+}
+
+impl WorktreeGuard {
+    fn remove(&mut self) -> anyhow::Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(super::pr_patch::git_path(&self.worktree_path).as_ref())
+            .current_dir(&self.repo_dir)
+            .output().context("Failed to remove private PR worktree")?;
+        anyhow::ensure!(output.status.success(), "Private PR worktree cleanup failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+        self.removed = true;
+        Ok(())
+    }
 }
 
 impl Drop for WorktreeGuard {
     fn drop(&mut self) {
-        // Best effort cleanup - ignore errors
-        let _ = std::process::Command::new("git")
-            .args([
-                "worktree",
-                "remove",
-                "--force",
-                &self.worktree_path.to_string_lossy(),
-            ])
-            .current_dir(&self.repo_dir)
-            .output();
+        if !self.removed
+            && let Err(error) = self.remove() {
+                warn!("Private PR worktree cleanup failed: {error:#}");
+            }
     }
 }
 
@@ -625,6 +653,15 @@ impl Executor for CreatePrResult {
     }
 
     async fn execute_impl(&self, ctx: &ExecutionContext) -> anyhow::Result<ExecutionResult> {
+        if !ctx.tool_configs.contains_key(Self::NAME) {
+            return Ok(ExecutionResult::failure("create-pull-request is not configured for this workflow"));
+        }
+        if let Err(error) = (CreatePrParams {
+            title: self.title.clone(), description: self.description.clone(),
+            repository: Some(self.repository.clone()), labels: self.agent_labels.clone(),
+        }).validate() {
+            return Ok(ExecutionResult::failure(error.to_string()));
+        }
         info!(
             "Creating PR: '{}' in repository '{}'",
             self.title, self.repository
@@ -641,12 +678,9 @@ impl Executor for CreatePrResult {
         debug!("Target branch from config: {}", config.target_branch);
         debug!("Draft: {}", config.draft);
         debug!("Auto-complete: {}", config.auto_complete);
-        debug!("Squash merge: {}", config.squash_merge);
-
-        if config.draft && config.auto_complete {
-            warn!(
-                "auto-complete cannot be set on a draft PR; set draft: false to enable auto-complete"
-            );
+        validate_create_pr_config(&config)?;
+        if config.allowed_repositories.is_empty() {
+            return Ok(ExecutionResult::failure("allowed-repositories permits no PR destination"));
         }
 
         // Apply title prefix if configured
@@ -656,12 +690,9 @@ impl Executor for CreatePrResult {
             self.title.clone()
         };
 
-        // ADO PR titles have a 400-character limit
-        let title_char_count = effective_title.chars().count();
-        if title_char_count > 400 {
+        if let Err(error) = super::pr_common::validate_title(&effective_title) {
             return Ok(ExecutionResult::failure(format!(
-                "PR title too long after applying title-prefix ({} chars, max 400)",
-                title_char_count
+                "PR title after applying title-prefix is invalid: {error}"
             )));
         }
 
@@ -700,6 +731,11 @@ impl Executor for CreatePrResult {
             Err(failure) => return Ok(failure),
         };
         debug!("Resolved repository ID: {}", target.repository_locator());
+        if let Err(failure) = super::pr_common::validate_pr_repository_policy(
+            &target, &config.allowed_repositories, ctx,
+        ) {
+            return Ok(failure);
+        }
         if ctx.has_resolved_pull_request(&self.temporary_id)? {
             return Ok(ExecutionResult::failure(format!(
                 "temporary_id '{}' was already used in this run",
@@ -741,107 +777,14 @@ impl Executor for CreatePrResult {
             )));
         }
 
-        // Security: Enforce patch file size limit
-        let metadata = tokio::fs::metadata(&patch_path)
-            .await
-            .context("Failed to get patch file metadata")?;
-        if metadata.len() > MAX_PATCH_SIZE_BYTES {
-            return Ok(ExecutionResult::failure(format!(
-                "Patch file exceeds maximum size of {} bytes (got {} bytes)",
-                MAX_PATCH_SIZE_BYTES,
-                metadata.len()
-            )));
-        }
-
-        // Read patch content for validation
-        debug!("Reading patch file content");
-        let patch_content = tokio::fs::read_to_string(&patch_path)
-            .await
-            .context("Failed to read patch file")?;
-        debug!("Patch content size: {} bytes", patch_content.len());
-
-        // SHA-256 integrity check: verify the patch file hasn't been tampered
-        // with between Stage 1 and Stage 3.
-        let live_hash = crate::hash::sha256_hex(patch_content.as_bytes());
+        let patch_path = crate::validate::ensure_path_within_base(
+            &patch_path, &ctx.working_directory, "PR patch",
+        )?;
+        let patch_bytes = super::pr_patch::read_patch(&patch_path, config.max_patch_size).await?;
+        let live_hash = crate::hash::sha256_hex(&patch_bytes);
         if live_hash != self.patch_sha256 {
             return Ok(ExecutionResult::failure(format!(
-                "Patch file SHA-256 mismatch: expected {}, got {} — \
-                 the file may have been tampered with between stages",
-                self.patch_sha256, live_hash
-            )));
-        }
-        debug!("Patch file SHA-256 verified: {}", live_hash);
-
-        // Excluded files are handled via --exclude flags on git am / git apply,
-        // which filters them at the git level rather than post-processing patch content.
-        // This is the same approach used by gh-aw (via :(exclude) pathspecs).
-        // Note: Exclusion happens during patch application (before the protection check).
-        // If a protected file matches an excluded-files pattern, it is silently dropped
-        // from the patch rather than triggering a protection error.
-        let exclude_args: Vec<String> = config
-            .excluded_files
-            .iter()
-            .map(|p| format!("--exclude={}", p))
-            .collect();
-        if !exclude_args.is_empty() {
-            debug!(
-                "Will apply {} excluded-files patterns via --exclude flags",
-                exclude_args.len()
-            );
-        }
-
-        // Security: Validate patch paths before applying
-        debug!("Validating patch paths for security");
-        if let Err(e) = validate_patch_paths(&patch_content) {
-            warn!("Patch path validation failed: {}", e);
-            return Ok(ExecutionResult::failure(format!(
-                "Patch validation failed: {}",
-                e
-            )));
-        }
-        debug!("Patch path validation passed");
-
-        // Extract file paths from patch for validation.
-        // Filter out excluded files before the protection check — if a protected file
-        // matches an excluded-files pattern, it will be excluded from the patch by
-        // git am/apply --exclude and should not trigger a protection error.
-        let patch_paths: Vec<String> = extract_paths_from_patch(&patch_content)
-            .into_iter()
-            .filter(|p| {
-                !config
-                    .excluded_files
-                    .iter()
-                    .any(|pat| glob_match_simple(pat, p))
-            })
-            .collect();
-
-        // Security: File protection check
-        if config.protected_files != ProtectedFiles::Allowed {
-            let protected = find_protected_files(&patch_paths);
-            if !protected.is_empty() {
-                warn!(
-                    "Patch modifies {} protected file(s): {:?}",
-                    protected.len(),
-                    protected
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Patch modifies protected files (set protected-files: allowed to override): {}",
-                    protected.join(", ")
-                )));
-            }
-        }
-
-        // Security: Max files per PR check (count diff blocks, not paths, to avoid
-        // double-counting renames which appear in both --- and +++ lines)
-        let file_count = count_patch_files(&patch_content);
-        if file_count > config.max_files {
-            warn!(
-                "Patch contains {} files, exceeding max of {}",
-                file_count, config.max_files
-            );
-            return Ok(ExecutionResult::failure(format!(
-                "Patch contains {} files, exceeding maximum of {} files per PR",
-                file_count, config.max_files
+                "Patch file SHA-256 mismatch: expected {}, got {}", self.patch_sha256, live_hash
             )));
         }
 
@@ -880,233 +823,119 @@ impl Executor for CreatePrResult {
         }
         debug!("Git repository verified");
 
-        // Create a temporary directory for the worktree
+        let client = super::pr_http::client()?;
+        #[derive(Deserialize)]
+        struct RefTip {
+            name: String,
+            #[serde(rename = "objectId")]
+            oid: crate::secure::CommitSha,
+        }
+        #[derive(Deserialize)]
+        struct Refs { value: Vec<RefTip> }
+        let response = crate::safe_outputs::authenticate_ado_request(
+            client.get(format!("{}/refs", repository_api_base(&target))).query(&[
+                ("filter", format!("heads/{target_branch}")), ("api-version", "7.1".into()),
+            ]), token, ctx.write_connection_type,
+        ).send().await.context("Failed to resolve PR target ref")?;
+        anyhow::ensure!(response.status().is_success(), "Failed to resolve PR target ref (HTTP {})", response.status());
+        let refs: Refs = response.bounded_json().await?;
+        let mut matches = refs.value.into_iter().filter(|reference| reference.name == target_ref);
+        let current = matches.next().context("PR target ref is missing")?.oid;
+        anyhow::ensure!(matches.next().is_none(), "PR target ref is ambiguous");
+        let base_sha = self.base_commit.as_deref().map(crate::secure::CommitSha::parse)
+            .transpose().context("Invalid base_commit SHA from Stage 1")?.unwrap_or_else(|| current.clone());
+        if !base_sha.eq_ignore_ascii_case(current.as_str()) {
+            #[derive(Deserialize)]
+            struct Ancestry {
+                #[serde(rename = "baseCommit")]
+                base: crate::secure::CommitSha,
+                #[serde(rename = "targetCommit")]
+                target: crate::secure::CommitSha,
+                #[serde(rename = "commonCommit")]
+                common: crate::secure::CommitSha,
+            }
+            let response = crate::safe_outputs::authenticate_ado_request(
+                client.get(format!("{}/diffs/commits", repository_api_base(&target))).query(&[
+                    ("baseVersion", base_sha.as_str()), ("baseVersionType", "commit"),
+                    ("targetVersion", current.as_str()), ("targetVersionType", "commit"),
+                    ("diffCommonCommit", "true"), ("$top", "1"), ("api-version", "7.1"),
+                ]), token, ctx.write_connection_type,
+            ).send().await.context("Failed to verify captured PR base ancestry")?;
+            anyhow::ensure!(response.status().is_success(), "Failed to verify captured PR base ancestry (HTTP {})", response.status());
+            let ancestry: Ancestry = response.bounded_json().await?;
+            anyhow::ensure!(ancestry.base.eq_ignore_ascii_case(base_sha.as_str())
+                && ancestry.target.eq_ignore_ascii_case(current.as_str())
+                && ancestry.common.eq_ignore_ascii_case(base_sha.as_str()),
+                "Captured PR base is not a verified ancestor of the configured target");
+        }
+        super::pr_patch::ensure_commit(&repo_git_dir, &base_sha, &target, &client, token, ctx.write_connection_type).await?;
+        let prepared = super::pr_patch::prepare(&repo_git_dir, &base_sha, &patch_bytes, &super::pr_patch::PatchPolicy {
+            limit: config.max_patch_size, max_files: config.max_files,
+            excluded_files: &config.excluded_files, protected_files: config.protected_files, exact: false,
+        }).await?;
+        if prepared.is_empty() {
+            let mut result = handle_no_changes(&config, &[]);
+            result.data = Some(serde_json::json!({"omitted_operations":prepared.omitted}));
+            return Ok(result);
+        }
         let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
         let worktree_path = temp_dir.path().join("worktree");
-        debug!("Creating worktree at: {}", worktree_path.display());
-
-        // Create a worktree at the target branch
-        let worktree_output = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                &worktree_path.to_string_lossy(),
-                &format!("origin/{}", target_branch),
-            ])
-            .current_dir(&repo_git_dir)
-            .output()
-            .await
-            .context("Failed to create git worktree")?;
-
-        if !worktree_output.status.success() {
-            debug!(
-                "Worktree creation with origin/ prefix failed, trying without: {}",
-                String::from_utf8_lossy(&worktree_output.stderr)
-            );
-            // Try with just the branch name if origin/ prefix fails
-            let worktree_output = Command::new("git")
-                .args([
-                    "worktree",
-                    "add",
-                    &worktree_path.to_string_lossy(),
-                    target_branch,
-                ])
-                .current_dir(&repo_git_dir)
-                .output()
-                .await
-                .context("Failed to create git worktree")?;
-
-            if !worktree_output.status.success() {
-                warn!(
-                    "Failed to create worktree: {}",
-                    String::from_utf8_lossy(&worktree_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to create worktree: {}",
-                    String::from_utf8_lossy(&worktree_output.stderr)
-                )));
-            }
-        }
-        debug!("Worktree created successfully");
+        let verified_patch = temp_dir.path().join("verified.patch");
+        tokio::fs::write(&verified_patch, &prepared.bytes).await?;
+        let worktree_output = super::pr_patch::bounded_output(
+            super::pr_patch::git_without_filters(&repo_git_dir).await?
+                .args(["worktree", "add", "--detach", &worktree_path.to_string_lossy(), base_sha.as_str()]),
+            super::pr_patch::MAX_SOURCE_BYTES, None,
+        ).await?;
+        anyhow::ensure!(worktree_output.status.success(), "Failed to create PR worktree at its verified base");
 
         // Ensure worktree cleanup on exit
-        let _worktree_guard = WorktreeGuard {
+        let mut worktree_guard = WorktreeGuard {
             repo_dir: repo_git_dir.clone(),
             worktree_path: worktree_path.clone(),
+            removed: false,
         };
 
-        // Create and checkout a local branch in the worktree for patch application.
-        // Note: this local branch name may differ from the final remote branch name
-        // if a collision is detected later — the ADO push is REST-only, so the local
-        // branch name is not used for the remote ref.
-        debug!("Creating source branch: {}", source_branch);
-        let checkout_output = Command::new("git")
-            .args(["checkout", "-b", &source_branch])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to create source branch")?;
+        let application = async {
+            let patch_committed = match apply_patch_to_worktree(
+                &worktree_path, &verified_patch, &prepared.batches, !config.excluded_files.is_empty(),
+            ).await? {
+                Ok(committed) => committed,
+                Err(result) => return Ok(Err(result)),
+            };
+            prepared.collect(&worktree_path, &base_sha, None,
+                if patch_committed { Some("HEAD") } else { None }).await.map(Ok)
+        }.await;
+        let application = match (application, worktree_guard.remove()) {
+            (result, Ok(())) => result,
+            (Ok(_), Err(cleanup)) => Err(cleanup),
+            (Err(error), Err(cleanup)) => Err(error.context(format!("PR worktree cleanup also failed: {cleanup:#}"))),
+        };
+        let applied = match super::pr_patch::finish_scratch(temp_dir, application)? {
+            Ok(applied) => applied,
+            Err(result) => return Ok(result),
+        };
+        let expected_tree = applied.tree;
+        let changes = applied.changes;
+        let skipped_symlinks = applied.skipped_symlinks;
+        let omitted_paths = applied.omitted;
+        if changes.is_empty() {
+            let mut result = handle_no_changes(&config, &skipped_symlinks);
+            result.data = Some(serde_json::json!({"omitted_operations":omitted_paths}));
+            return Ok(result);
+        }
 
-        if !checkout_output.status.success() {
-            warn!(
-                "Failed to create source branch: {}",
-                String::from_utf8_lossy(&checkout_output.stderr)
-            );
+        let description_with_stats =
+            crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
+        let description_final =
+            append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
+        if let Err(error) = super::pr_common::validate_description(&description_final) {
             return Ok(ExecutionResult::failure(format!(
-                "Failed to create source branch: {}",
-                String::from_utf8_lossy(&checkout_output.stderr)
+                "Assembled PR body is invalid before publishing the branch: {error}"
             )));
         }
-        debug!("Source branch created");
 
-        // Record the worktree HEAD before applying the patch so we can diff against
-        // it later. For multi-commit patches, git am creates N commits and diff-tree HEAD
-        // alone only shows the last commit's changes — we need base_sha..HEAD.
-        let base_sha_output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Failed to get worktree HEAD SHA")?;
-        let base_sha = String::from_utf8_lossy(&base_sha_output.stdout)
-            .trim()
-            .to_string();
-        debug!("Worktree base SHA before patch: {}", base_sha);
-
-        // Apply the patch. Strategy depends on whether excluded-files are configured:
-        // - Without exclusions: prefer git am --3way (preserves commit metadata)
-        //   with git apply --3way as fallback
-        // - With exclusions: use git apply --3way directly (git am does not support
-        //   --exclude flags; git apply does)
-        let patch_committed =
-            match apply_patch_to_worktree(&worktree_path, &patch_path, &exclude_args).await? {
-                Ok(committed) => committed,
-                Err(result) => return Ok(result),
-            };
-
-        // Collect changed files. The method depends on how the patch was applied:
-        // - git am: changes are committed → use git diff-tree to compare base_sha..HEAD
-        //   (covers all commits in multi-commit patches, not just the last one)
-        // - git apply: changes are in working tree → use git status --porcelain
-        debug!("Getting list of changed files");
-        let (status_str, use_diff_tree) = if patch_committed {
-            let diff_tree_output = Command::new("git")
-                .args(["diff-tree", "-r", "--name-status", &base_sha, "HEAD"])
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git diff-tree")?;
-
-            if !diff_tree_output.status.success() {
-                warn!(
-                    "Failed to get diff-tree: {}",
-                    String::from_utf8_lossy(&diff_tree_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get diff-tree: {}",
-                    String::from_utf8_lossy(&diff_tree_output.stderr)
-                )));
-            }
-            (
-                String::from_utf8_lossy(&diff_tree_output.stdout).to_string(),
-                true,
-            )
-        } else {
-            let status_output = Command::new("git")
-                .args(["status", "--porcelain"])
-                .current_dir(&worktree_path)
-                .output()
-                .await
-                .context("Failed to run git status")?;
-
-            if !status_output.status.success() {
-                warn!(
-                    "Failed to get git status: {}",
-                    String::from_utf8_lossy(&status_output.stderr)
-                );
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get git status: {}",
-                    String::from_utf8_lossy(&status_output.stderr)
-                )));
-            }
-            (
-                String::from_utf8_lossy(&status_output.stdout).to_string(),
-                false,
-            )
-        };
-
-        debug!("Change detection output:\n{}", status_str);
-        let (changes, skipped_symlinks) = if use_diff_tree {
-            collect_changes_from_diff_tree(&worktree_path, &status_str).await?
-        } else {
-            collect_changes_from_worktree(&worktree_path, &status_str).await?
-        };
-        debug!("Collected {} file changes for push", changes.len());
-        if !skipped_symlinks.is_empty() {
-            warn!(
-                "Skipped {} symlink(s) when collecting PR file changes: {}",
-                skipped_symlinks.len(),
-                skipped_symlinks.join(", ")
-            );
-        }
-
-        if changes.is_empty() {
-            return Ok(handle_no_changes(&config, &skipped_symlinks));
-        }
-
-        // Use ADO REST API to create branch and push changes
-        let client = reqwest::Client::new();
-
-        // Get the target branch ref to find the base commit
-        debug!("Getting target branch ref from ADO");
-        let refs_url = format!("{}/refs", repository_api_base(&target));
-        debug!("Refs URL: {}", refs_url);
-
-        // Resolve the base commit for the push.
-        // Prefer the merge-base SHA recorded at patch generation time (Stage 1) so the
-        // patch is applied against the exact commit it was created from.  Fall back to
-        // querying the ADO refs API when the field is absent (backward compat with old
-        // NDJSON entries).
-        let base_commit: String = if let Some(ref recorded) = self.base_commit {
-            // Validate SHA format before trusting Stage 1 data
-            if recorded.len() != 40 || !recorded.chars().all(|c| c.is_ascii_hexdigit()) {
-                anyhow::bail!(
-                    "Invalid base_commit SHA from Stage 1 NDJSON: {:?}",
-                    recorded
-                );
-            }
-            info!("Using recorded base_commit from Stage 1: {}", recorded);
-            recorded.clone()
-        } else {
-            debug!("No recorded base_commit — resolving from ADO refs API");
-            let refs_response = crate::safe_outputs::authenticate_ado_request(
-                client.get(&refs_url).query(&[
-                    ("filter", format!("heads/{target_branch}")),
-                    ("api-version", "7.1".to_string()),
-                ]),
-                token,
-                ctx.write_connection_type,
-            )
-            .send()
-            .await
-            .context("Failed to get target branch ref")?;
-
-            if !refs_response.status().is_success() {
-                let status = refs_response.status();
-                let body = refs_response.text().await.unwrap_or_default();
-                warn!("Failed to get target branch ref: {} - {}", status, body);
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to get target branch ref: {} - {}",
-                    status, body
-                )));
-            }
-
-            let refs_data: serde_json::Value = refs_response.json().await?;
-            let resolved = refs_data["value"][0]["objectId"]
-                .as_str()
-                .context("Could not find target branch commit")?;
-            resolved.to_string()
-        };
+        let base_commit = base_sha.to_string();
         debug!("Base commit: {}", base_commit);
 
         info!(
@@ -1136,10 +965,18 @@ impl Executor for CreatePrResult {
             .await
             .context("Failed to check source branch existence")?;
 
-            if check_ref_response.status().is_success() {
-                let check_data: serde_json::Value = check_ref_response.json().await?;
-                let refs = check_data["value"].as_array();
-                if refs.is_some_and(|r| !r.is_empty()) {
+            anyhow::ensure!(check_ref_response.status().is_success(),
+                "Failed to check source branch existence (HTTP {})", check_ref_response.status());
+            anyhow::ensure!(check_ref_response.headers().get("x-ms-continuationtoken")
+                .is_none_or(|value| value.as_bytes().is_empty()), "Source branch discovery is incomplete");
+            #[derive(Deserialize)]
+            struct RefEntry { name: String, #[serde(rename = "objectId")] _sha: crate::secure::CommitSha }
+            #[derive(Deserialize)]
+            struct RefList { value: Vec<RefEntry> }
+            let refs: RefList = check_ref_response.bounded_json().await?;
+            let exact = refs.value.iter().filter(|entry| entry.name == source_ref).count();
+            anyhow::ensure!(exact <= 1, "Source branch discovery is ambiguous");
+                if exact == 1 {
                     warn!(
                         "Branch '{}' already exists, generating new suffix (attempt {})",
                         source_branch,
@@ -1150,7 +987,6 @@ impl Executor for CreatePrResult {
                     info!("Renamed source branch to '{}'", source_branch);
                     continue;
                 }
-            }
             break;
         }
 
@@ -1159,7 +995,7 @@ impl Executor for CreatePrResult {
         let push_url = format!("{}/pushes?api-version=7.1", repository_api_base(&target));
         debug!("Push URL: {}", push_url);
 
-        (source_branch, source_ref) = match push_new_branch(PushBranchParams {
+        let pushed = match push_new_branch(PushBranchParams {
             client: &client,
             push_url: &push_url,
             token,
@@ -1172,20 +1008,12 @@ impl Executor for CreatePrResult {
         })
         .await?
         {
-            Ok(pair) => pair,
+            Ok(pushed) => pushed,
             Err(result) => return Ok(result),
         };
+        source_branch = pushed.branch;
+        source_ref = pushed.reference;
         debug!("Changes pushed successfully");
-
-        // If any symlinks were skipped during file collection, surface that in the
-        // PR description so the agent/PR author can see that some intended file
-        // content was dropped for safety (otherwise the warning only appears in
-        // Stage 3 infrastructure logs).
-        let description_with_stats =
-            crate::agent_stats::append_stats_to_body(&self.description, ctx, config.include_stats);
-        let description_with_symlink_notice =
-            append_skipped_symlink_notice(&description_with_stats, &skipped_symlinks);
-        let description_final = description_with_symlink_notice;
 
         // Create the pull request via REST API
         info!("Creating pull request");
@@ -1233,11 +1061,11 @@ impl Executor for CreatePrResult {
         .json(&pr_body)
         .send()
         .await
-        .context("Failed to create pull request")?;
+        .context("Failed to create pull request; delivery is uncertain and must not be replayed blindly")?;
 
         if !pr_response.status().is_success() {
             let status = pr_response.status();
-            let body = pr_response.text().await.unwrap_or_default();
+            let body = pr_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             warn!("Failed to create pull request: {} - {}", status, body);
 
             // Record branch info for manual recovery if enabled
@@ -1286,7 +1114,8 @@ impl Executor for CreatePrResult {
             )));
         }
 
-        let pr_data: serde_json::Value = pr_response.json().await?;
+        let pr_data: serde_json::Value = pr_response.bounded_json().await
+            .context("PR creation response is unavailable or invalid; the branch was pushed and PR delivery is uncertain")?;
         let pr_id = pr_data["pullRequestId"].as_u64().unwrap_or(0);
         let pr_web_url = pr_data["url"].as_str().unwrap_or("");
         info!("Pull request created: #{} - {}", pr_id, pr_web_url);
@@ -1307,31 +1136,66 @@ impl Executor for CreatePrResult {
                 "Azure DevOps create-pull-request response contained no positive pull request ID",
             ));
         }
-        if let Err(error) = ctx.register_resolved_pull_request(
-            &self.temporary_id,
-            crate::safe_outputs::ResolvedPullRequest {
-                id: pr_id,
-                url: pr_web_url.to_string(),
-                target: target.clone(),
-            },
-        ) {
-            return Ok(ExecutionResult::failure_with_data(
-                format!(
-                    "Created pull request #{} but failed to register temporary_id '{}': {}",
-                    pr_id,
-                    self.temporary_id.canonical(),
-                    crate::sanitize::neutralize_pipeline_commands(&error.to_string())
-                ),
-                serde_json::json!({
-                    "pull_request_id": pr_id,
-                    "url": pr_web_url,
-                    "temporary_id": self.temporary_id.canonical(),
-                    "repository": target.display_name(),
-                }),
-            ));
+        use super::result::{ActionEffect, EffectState};
+        let mut effects = vec![ActionEffect::new("create-pull-request", pr_id.to_string(), EffectState::Applied)];
+        let snapshot = match verified_creation_snapshot(
+            &pr_ctx, pushed.commit, expected_tree.as_ref(), self.base_commit.as_deref(),
+            &self.patch_sha256, &source_ref, &pr_data,
+        ).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                effects.push(ActionEffect::new("bind-created-snapshot", pr_id.to_string(), EffectState::Failed)
+                    .detail(format!("Creation snapshot unavailable; head-bound consumers are blocked: {error:#}")));
+                None
+            }
+        };
+        let reviewer_changes = add_reviewers_to_pr(&pr_ctx).await;
+        effects.extend(reviewer_changes.effects());
+        if !all_labels.is_empty() {
+            let labels = super::pr_common::fetch_pr_labels(
+                &client, &repository_api_base(&target), pr_id, token, ctx,
+            ).await;
+            match labels {
+                Ok(Ok(actual)) => {
+                    for label in &all_labels {
+                        let state = if actual.iter().any(|name| name.eq_ignore_ascii_case(label)) {
+                            EffectState::Applied
+                        } else {
+                            EffectState::Failed
+                        };
+                        effects.push(ActionEffect::new("initialize-label", label, state));
+                    }
+                }
+                Ok(Err(failure)) => effects.push(ActionEffect::new("initialize-labels", pr_id.to_string(),
+                    EffectState::Uncertain).detail(failure.message)),
+                Err(error) => effects.push(ActionEffect::new("initialize-labels", pr_id.to_string(),
+                    EffectState::Uncertain).detail(format!("Label initialization could not be confirmed: {error:#}"))),
+            }
         }
-        set_pr_completion_options(&pr_ctx, pr_data["createdBy"]["id"].as_str()).await;
-        add_reviewers_to_pr(&pr_ctx).await;
+        if !config.work_items.is_empty() {
+            match confirm_initial_work_items(&pr_ctx).await {
+                Ok(ids) => {
+                    for id in &config.work_items {
+                        effects.push(ActionEffect::new("initialize-work-item", id.to_string(),
+                            if ids.contains(&id.to_string()) { EffectState::Applied } else { EffectState::Failed }));
+                    }
+                }
+                Err(error) => effects.push(ActionEffect::new("initialize-work-items", pr_id.to_string(),
+                    EffectState::Uncertain).detail(format!("Work-item initialization could not be confirmed: {error:#}"))),
+            }
+        }
+        let initialized = effects.iter().all(|effect| {
+            matches!(effect.state, EffectState::Applied | EffectState::AlreadySatisfied)
+        });
+        if !config.completion.is_empty() || (config.auto_complete && initialized) {
+            effects.push(set_pr_completion_options(
+                &pr_ctx, pr_data["createdBy"]["id"].as_str(), config.auto_complete && initialized,
+            ).await);
+        }
+        if config.auto_complete && !initialized {
+            effects.push(ActionEffect::new("enable-auto-complete", pr_id.to_string(), EffectState::Unattempted)
+                .detail("Auto-complete was not enabled because required PR initialization was not confirmed"));
+        }
 
         info!(
             "PR #{} created successfully: {} -> {}{}",
@@ -1341,17 +1205,45 @@ impl Executor for CreatePrResult {
             if config.draft { " (draft)" } else { "" }
         );
 
-        Ok(ExecutionResult::success_with_data(
-            format!("Created pull request #{}: {}", pr_id, effective_title),
-            serde_json::json!({
-                "pull_request_id": pr_id,
-                "url": pr_web_url,
-                "source_branch": source_branch,
-                "target_branch": target_branch,
-                "draft": config.draft,
-                "temporary_id": self.temporary_id.canonical(),
-            }),
-        ))
+        let mut message = format!("Created pull request #{}: {}", pr_id, effective_title);
+        let mut data = serde_json::json!({
+            "pull_request_id": pr_id,
+            "url": pr_web_url,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "draft": config.draft,
+            "temporary_id": self.temporary_id.canonical(),
+            "omitted_operations": omitted_paths,
+            "creation_snapshot": snapshot,
+        });
+        if !config.reviewers.is_empty() {
+            data["reviewers"] = serde_json::to_value(&reviewer_changes)?;
+        }
+        if !initialized {
+            message.push_str("; initialization was not fully confirmed; auto-complete was not enabled");
+        }
+        for effect in &effects {
+            if let Some(detail) = &effect.detail {
+                message.push_str(&format!("; {}: {detail}", effect.operation));
+            }
+        }
+        let mut result = ExecutionResult::success_with_data(message, data).with_effects(effects);
+        if result.success
+            && let Err(error) = ctx.register_resolved_pull_request(
+                &self.temporary_id,
+                crate::safe_outputs::ResolvedPullRequest {
+                    creation_snapshot: snapshot,
+                    id: pr_id,
+                    url: pr_web_url.to_string(),
+                    target,
+                },
+            ) {
+                return Ok(ExecutionResult::failure_with_data(
+                    format!("Created PR #{pr_id}, but its handle could not be registered: {error:#}"),
+                    result.data.take().context("Creation result lacks its effect data")?,
+                ));
+        }
+        Ok(result)
     }
 }
 
@@ -1363,11 +1255,9 @@ impl Executor for CreatePrResult {
 async fn check_for_conflict_markers(
     worktree_path: &std::path::Path,
 ) -> anyhow::Result<Option<ExecutionResult>> {
-    let conflict_check = Command::new("git")
-        .args(["grep", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"])
-        .current_dir(worktree_path)
-        .output()
-        .await
+    let conflict_check = super::pr_patch::git(
+        worktree_path, &["grep", "--cached", "-l", "-E", r"^(<<<<<<<\s|>>>>>>>\s)"],
+    ).await
         .context("Failed to run git grep for conflict markers")?;
 
     if conflict_check.status.success() {
@@ -1381,28 +1271,21 @@ async fn check_for_conflict_markers(
         warn!("{}", err_msg);
         return Ok(Some(ExecutionResult::failure(err_msg)));
     }
+    anyhow::ensure!(conflict_check.status.code() == Some(1), "Could not inspect patch conflict markers");
     Ok(None)
 }
 
-/// Apply a patch to a git worktree using `git apply --3way` with `--exclude` flags.
-///
-/// Used when `excluded-files` are configured (git am does not support `--exclude`).
-/// Returns `Ok(false)` on success (`false` = changes are staged, not committed).
+/// Apply already-selected operations to the index; never reinterpret policy globs.
 async fn apply_patch_with_exclusions(
     worktree_path: &std::path::Path,
-    patch_path: &std::path::Path,
-    exclude_args: &[String],
+    batches: &[Vec<u8>],
 ) -> anyhow::Result<Result<bool, ExecutionResult>> {
-    debug!("Using git apply --3way (excluded-files configured)");
-    let mut apply_args: Vec<String> = vec!["apply".into(), "--3way".into()];
-    apply_args.extend(exclude_args.iter().cloned());
-    apply_args.push(patch_path.to_string_lossy().into_owned());
-
-    let apply_output = Command::new("git")
-        .args(&apply_args)
-        .current_dir(worktree_path)
-        .output()
-        .await
+    for batch in batches {
+    let apply_output = super::pr_patch::bounded_output(
+        super::pr_patch::git_without_filters(worktree_path).await?
+            .args(["apply", "--cached", "--3way", "--whitespace=nowarn"]),
+        super::pr_patch::MAX_SOURCE_BYTES, Some(batch),
+    ).await
         .context("Failed to run git apply --3way")?;
 
     if !apply_output.status.success() {
@@ -1412,6 +1295,7 @@ async fn apply_patch_with_exclusions(
         );
         warn!("{}", err_msg);
         return Ok(Err(ExecutionResult::failure(err_msg)));
+    }
     }
     debug!("Patch applied with git apply --3way");
 
@@ -1430,14 +1314,16 @@ async fn apply_patch_with_exclusions(
 async fn apply_patch_without_exclusions(
     worktree_path: &std::path::Path,
     patch_path: &std::path::Path,
+    batches: &[Vec<u8>],
 ) -> anyhow::Result<Result<bool, ExecutionResult>> {
     // No exclusions — use git am --3way for proper commit metadata preservation
     debug!("Applying patch with git am --3way");
-    let am_output = Command::new("git")
-        .args(["am", "--3way", &patch_path.to_string_lossy()])
-        .current_dir(worktree_path)
-        .output()
-        .await
+    let am_output = super::pr_patch::bounded_output(
+        super::pr_patch::git_without_filters(worktree_path).await?
+            .args(["am", "--3way", "--keep-cr", "--whitespace=nowarn",
+                super::pr_patch::git_path(patch_path).as_ref()]),
+        super::pr_patch::MAX_SOURCE_BYTES, None,
+    ).await
         .context("Failed to run git am")?;
 
     if am_output.status.success() {
@@ -1449,41 +1335,24 @@ async fn apply_patch_without_exclusions(
     debug!("git am --3way failed: {}", stderr);
 
     // Abort the failed am to leave worktree clean
-    let _ = Command::new("git")
-        .args(["am", "--abort"])
-        .current_dir(worktree_path)
-        .output()
-        .await;
+    let abort = super::pr_patch::git(worktree_path, &["am", "--abort"]).await?;
+    if !abort.status.success() {
+        // A raw diff is not a mailbox and never starts an am session.
+        let state = super::pr_patch::git(worktree_path, &["rev-parse", "--git-path", "rebase-apply"]).await?;
+        anyhow::ensure!(state.status.success(), "Could not inspect failed git am state");
+        let path = worktree_path.join(std::str::from_utf8(&state.stdout)?.trim());
+        anyhow::ensure!(!path.exists(), "Failed to abort partially applied git am session");
+    }
 
     // Fallback: try git apply --3way
     debug!("Falling back to git apply --3way");
-    let apply_output = Command::new("git")
-        .args(["apply", "--3way", &patch_path.to_string_lossy()])
-        .current_dir(worktree_path)
-        .output()
-        .await
-        .context("Failed to run git apply --3way")?;
-
-    if !apply_output.status.success() {
-        let err_msg = format!(
-            "Patch could not be applied (conflicts): {}",
-            String::from_utf8_lossy(&apply_output.stderr)
-        );
-        warn!("{}", err_msg);
-        return Ok(Err(ExecutionResult::failure(err_msg)));
-    }
-    debug!("Patch applied with git apply --3way fallback");
-
-    if let Some(conflict_result) = check_for_conflict_markers(worktree_path).await? {
-        return Ok(Err(conflict_result));
-    }
-    Ok(Ok(false))
+    apply_patch_with_exclusions(worktree_path, batches).await
 }
 
 /// Apply a patch to a git worktree, choosing the right strategy automatically.
 ///
-/// Delegates to [`apply_patch_with_exclusions`] when `exclude_args` is non-empty
-/// (because `git am` doesn't support `--exclude`), otherwise delegates to
+/// Delegates to [`apply_patch_with_exclusions`] for filtered patches,
+/// otherwise delegates to
 /// [`apply_patch_without_exclusions`] which prefers `git am` for commit metadata.
 ///
 /// Returns `Ok(patch_committed)` on success (`true` = changes are committed via
@@ -1492,12 +1361,13 @@ async fn apply_patch_without_exclusions(
 async fn apply_patch_to_worktree(
     worktree_path: &std::path::Path,
     patch_path: &std::path::Path,
-    exclude_args: &[String],
+    batches: &[Vec<u8>],
+    filtered: bool,
 ) -> anyhow::Result<Result<bool, ExecutionResult>> {
-    if !exclude_args.is_empty() {
-        apply_patch_with_exclusions(worktree_path, patch_path, exclude_args).await
+    if filtered {
+        apply_patch_with_exclusions(worktree_path, batches).await
     } else {
-        apply_patch_without_exclusions(worktree_path, patch_path).await
+        apply_patch_without_exclusions(worktree_path, patch_path, batches).await
     }
 }
 
@@ -1556,9 +1426,83 @@ struct PushBranchParams<'a> {
 ///
 /// Returns `Ok((source_branch, source_ref))` with the (possibly-renamed) branch on
 /// success. Returns `Err(ExecutionResult)` on push failure.
+struct PushedBranch {
+    branch: String,
+    reference: String,
+    commit: Result<crate::secure::CommitSha, String>,
+}
+
+async fn capture_pushed_commit(
+    response: reqwest::Response,
+    reference: &str,
+) -> anyhow::Result<crate::secure::CommitSha> {
+    let value: serde_json::Value = response.bounded_json().await?;
+    anyhow::ensure!(value["commits"].as_array().is_some_and(|values| values.len() == 1)
+        && value["refUpdates"].as_array().is_some_and(|values| values.len() == 1),
+        "Push receipt must identify exactly one commit and ref update");
+    let commit = crate::secure::CommitSha::parse(value["commits"][0]["commitId"].as_str().context("Push receipt lacks commitId")?)?;
+    let update = &value["refUpdates"][0];
+    anyhow::ensure!(update["name"].as_str() == Some(reference)
+        && update["oldObjectId"].as_str() == Some("0000000000000000000000000000000000000000")
+        && update["newObjectId"].as_str().is_some_and(|sha| sha.eq_ignore_ascii_case(commit.as_str())),
+        "Push receipt does not bind the exact newly created source ref");
+    Ok(commit)
+}
+
+async fn verified_creation_snapshot(
+    ctx: &PrContext<'_>,
+    commit: Result<crate::secure::CommitSha, String>,
+    tree: Option<&crate::secure::CommitSha>,
+    base: Option<&str>,
+    patch_sha256: &str,
+    source_ref: &str,
+    created: &serde_json::Value,
+) -> anyhow::Result<super::result::CreatedPullRequestSnapshot> {
+    let commit = commit.map_err(anyhow::Error::msg)?;
+    let tree = tree.context("Selected output has no exact Git tree proof")?;
+    let base = base.context("Queued creation did not capture its base commit")?;
+    let base_url = repository_api_base(ctx.target);
+    let response = crate::safe_outputs::authenticate_ado_request(
+        ctx.client.get(format!("{base_url}/commits/{}?api-version=7.1", commit.as_str())),
+        ctx.token, ctx.connection_type,
+    ).send().await.context("Could not read the immutable created commit")?;
+    anyhow::ensure!(response.status().is_success(), "Created commit verification returned HTTP {}", response.status());
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CommitProof {
+        commit_id: crate::secure::CommitSha,
+        tree_id: crate::secure::CommitSha,
+        parents: Vec<crate::secure::CommitSha>,
+    }
+    let proof: CommitProof = response.bounded_json().await?;
+    anyhow::ensure!(proof.commit_id.eq_ignore_ascii_case(commit.as_str())
+        && proof.tree_id.eq_ignore_ascii_case(tree.as_str())
+        && proof.parents.len() == 1 && proof.parents[0].eq_ignore_ascii_case(base),
+        "Created commit does not match the validated queued tree and base");
+    let owned;
+    let pr = if created.pointer("/lastMergeSourceCommit/commitId").is_some() {
+        created
+    } else {
+        let response = crate::safe_outputs::authenticate_ado_request(
+            ctx.client.get(format!("{base_url}/pullRequests/{}?api-version=7.1", ctx.pr_id)),
+            ctx.token, ctx.connection_type,
+        ).send().await.context("Could not verify the created PR source")?;
+        anyhow::ensure!(response.status().is_success(), "Created PR verification returned HTTP {}", response.status());
+        owned = response.bounded_json::<serde_json::Value>().await?;
+        &owned
+    };
+    anyhow::ensure!(pr["sourceRefName"].as_str() == Some(source_ref)
+        && pr.pointer("/lastMergeSourceCommit/commitId").and_then(serde_json::Value::as_str)
+            .is_some_and(|sha| sha.eq_ignore_ascii_case(commit.as_str())),
+        "Created PR source does not match its captured creation commit");
+    Ok(super::result::CreatedPullRequestSnapshot {
+        commit, tree: tree.clone(), patch_sha256: patch_sha256.to_string(),
+    })
+}
+
 async fn push_new_branch(
     p: PushBranchParams<'_>,
-) -> anyhow::Result<Result<(String, String), ExecutionResult>> {
+) -> anyhow::Result<Result<PushedBranch, ExecutionResult>> {
     let PushBranchParams {
         client,
         push_url,
@@ -1581,17 +1525,19 @@ async fn push_new_branch(
         token,
         connection_type,
     )
-    .json(&push_body)
+    .header("Content-Type", "application/json")
+    .body(super::pr_patch::request_bytes(&push_body)?)
     .send()
     .await
     .context("Failed to push changes")?;
 
     if push_response.status().is_success() {
-        return Ok(Ok((source_branch, source_ref)));
+        let commit = capture_pushed_commit(push_response, &source_ref).await.map_err(|error| format!("{error:#}"));
+        return Ok(Ok(PushedBranch { branch: source_branch, reference: source_ref, commit }));
     }
 
     let status = push_response.status();
-    let body = push_response.text().await.unwrap_or_default();
+    let body = push_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
 
     // Handle TOCTOU branch collision: retry once with a new random suffix
     if status.as_u16() == 409 || (status.as_u16() == 400 && body.contains("already exists")) {
@@ -1609,14 +1555,15 @@ async fn push_new_branch(
             token,
             connection_type,
         )
-        .json(&retry_body)
+        .header("Content-Type", "application/json")
+        .body(super::pr_patch::request_bytes(&retry_body)?)
         .send()
         .await
         .context("Failed to push changes (retry)")?;
 
         if !retry_response.status().is_success() {
             let retry_status = retry_response.status();
-            let retry_body_text = retry_response.text().await.unwrap_or_default();
+            let retry_body_text = retry_response.bounded_text().await.unwrap_or_else(|error| format!("Failed to read PR error response: {error}"));
             warn!(
                 "Retry push also failed: {} - {}",
                 retry_status, retry_body_text
@@ -1626,7 +1573,8 @@ async fn push_new_branch(
                 retry_status, retry_body_text
             ))));
         }
-        return Ok(Ok((source_branch, source_ref)));
+        let commit = capture_pushed_commit(retry_response, &source_ref).await.map_err(|error| format!("{error:#}"));
+        return Ok(Ok(PushedBranch { branch: source_branch, reference: source_ref, commit }));
     }
 
     warn!("Failed to push changes: {} - {}", status, body);
@@ -1707,14 +1655,11 @@ fn validate_and_build_labels(
         return Ok(all_labels);
     }
 
-    if !config.allowed_labels.is_empty() {
+    {
         let disallowed: Vec<_> = agent_labels
             .iter()
             .filter(|l| {
-                !config
-                    .allowed_labels
-                    .iter()
-                    .any(|al| al.eq_ignore_ascii_case(l))
+                !super::pr_policy::permits_name(&config.allowed_labels, l)
             })
             .collect();
         if !disallowed.is_empty() {
@@ -1752,69 +1697,55 @@ struct PrContext<'a> {
     reviewers: &'a [String],
 }
 
-/// Set PR completion options (delete-source-branch, squash-merge) and optionally
-/// enable auto-complete. Logs a warning on failure but does not propagate the error
-/// because these are best-effort settings that do not affect the PR's existence.
-async fn set_pr_completion_options(ctx: &PrContext<'_>, pr_created_by_id: Option<&str>) {
-    debug!(
-        "Setting PR completion options: delete_source_branch={}, squash_merge={}, auto_complete={}",
-        ctx.config.delete_source_branch, ctx.config.squash_merge, ctx.config.auto_complete
-    );
-    let pr_update_url = format!(
-        "{}/pullrequests/{}?api-version=7.1",
-        repository_api_base(ctx.target),
-        ctx.pr_id
-    );
-
-    let mut update_body = serde_json::json!({
-        "completionOptions": {
-            "deleteSourceBranch": ctx.config.delete_source_branch,
-            "squashMerge": ctx.config.squash_merge
-        }
-    });
-
-    // Only set autoCompleteSetBy if auto_complete is enabled and PR is not a draft
-    // (ADO silently ignores auto-complete on draft PRs, so skip the API call)
-    if ctx.config.auto_complete && !ctx.config.draft {
-        if let Some(creator_id) = pr_created_by_id {
-            update_body["autoCompleteSetBy"] = serde_json::json!({ "id": creator_id });
-        } else {
-            warn!(
-                "auto_complete requested but creator ID is unavailable; skipping autoCompleteSetBy"
-            );
-        }
+async fn set_pr_completion_options(
+    ctx: &PrContext<'_>,
+    pr_created_by_id: Option<&str>,
+    enable: bool,
+) -> super::result::ActionEffect {
+    if enable && pr_created_by_id.is_none() {
+        return super::result::ActionEffect::new("enable-auto-complete", ctx.pr_id.to_string(),
+            super::result::EffectState::Failed).detail("Created PR response lacks the auto-complete actor identity");
     }
+    super::pr_completion::apply(
+        &super::pr_mutations::UpdatePrContext {
+            client: ctx.client,
+            target: ctx.target.clone(),
+            pr_id: ctx.pr_id,
+            token: ctx.token,
+            connection_type: ctx.connection_type,
+        },
+        &ctx.config.completion,
+        pr_created_by_id.filter(|_| enable),
+    ).await
+}
 
-    match crate::safe_outputs::authenticate_ado_request(
-        ctx.client.patch(&pr_update_url),
-        ctx.token,
-        ctx.connection_type,
-    )
-    .json(&update_body)
-    .send()
-    .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            debug!("PR completion options set successfully");
-        }
-        Ok(resp) => {
-            warn!("Failed to set PR completion options: {}", resp.status());
-        }
-        Err(e) => {
-            warn!("Failed to set PR completion options: {}", e);
-        }
+async fn confirm_initial_work_items(ctx: &PrContext<'_>) -> anyhow::Result<std::collections::HashSet<String>> {
+    let response = crate::safe_outputs::authenticate_ado_request(
+        ctx.client.get(format!("{}/pullRequests/{}/workitems?api-version=7.1",
+            repository_api_base(ctx.target), ctx.pr_id)),
+        ctx.token, ctx.connection_type,
+    ).send().await.context("Failed to read initialized PR work items")?;
+    ensure!(response.status().is_success(), "PR work-item read returned HTTP {}", response.status());
+    #[derive(Deserialize)]
+    struct Reference { id: String }
+    #[derive(Deserialize)]
+    struct References { value: Vec<Reference>, count: Option<usize> }
+    let references: References = response.bounded_json().await?;
+    ensure!(references.count.is_none_or(|count| count == references.value.len()), "Incomplete PR work-item references");
+    let mut ids = std::collections::HashSet::new();
+    for reference in references.value {
+        ensure!(reference.id.parse::<u64>().is_ok_and(|id| id > 0), "Invalid PR work-item reference");
+        ids.insert(reference.id);
     }
+    Ok(ids)
 }
 
 /// Add configured reviewers to a pull request.
 ///
 /// Resolves each reviewer's identity (email/display-name → ADO identity ID) and
-/// issues a `PUT` for each one. Logs a warning if a reviewer cannot be resolved or
-/// if the API call fails; does not abort the overall PR creation.
-async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
-    if ctx.reviewers.is_empty() {
-        return;
-    }
+/// preserves existing membership with the same helper as the focused tool.
+async fn add_reviewers_to_pr(ctx: &PrContext<'_>) -> super::pr_mutations::ReviewerChanges {
+    let mut changes = super::pr_mutations::ReviewerChanges::default();
     debug!("Adding {} reviewers", ctx.reviewers.len());
     for reviewer in ctx.reviewers {
         debug!("Adding reviewer: {}", reviewer);
@@ -1831,327 +1762,17 @@ async fn add_reviewers_to_pr(ctx: &PrContext<'_>) {
         {
             Some(id) => id,
             None => {
-                warn!(
-                    "Could not resolve reviewer '{}' to an identity ID, skipping",
-                    reviewer
-                );
+                changes.record(reviewer, super::pr_mutations::ReviewerAddResult::Failed("identity not found".into()));
                 continue;
             }
         };
 
-        let reviewer_url = format!(
-            "{}/pullrequests/{}/reviewers/{}?api-version=7.1",
-            repository_api_base(ctx.target),
-            ctx.pr_id,
-            reviewer_id
-        );
-        let reviewer_body = serde_json::json!({ "vote": 0, "isRequired": false });
-
-        match crate::safe_outputs::authenticate_ado_request(
-            ctx.client.put(&reviewer_url),
-            ctx.token,
-            ctx.connection_type,
-        )
-        .json(&reviewer_body)
-        .send()
-        .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                debug!(
-                    "Reviewer '{}' (ID: {}) added successfully",
-                    reviewer, reviewer_id
-                );
-            }
-            Ok(resp) => {
-                warn!(
-                    "Failed to add reviewer '{}' (ID: {}): {}",
-                    reviewer,
-                    reviewer_id,
-                    resp.status()
-                );
-            }
-            Err(e) => {
-                warn!("Failed to add reviewer '{}': {}", reviewer, e);
-            }
-        }
+        let result = super::pr_mutations::add_reviewer_to_pr(ctx.client,
+            &repository_api_base(ctx.target), ctx.pr_id, &reviewer_id,
+            reviewer, ctx.token, ctx.connection_type).await;
+        changes.record(reviewer, result);
     }
-}
-
-/// Collect file changes from a worktree based on git status output
-///
-/// Parses git status --porcelain output and reads file contents to build
-/// ADO Push API change objects with full file content.
-async fn collect_changes_from_worktree(
-    worktree_path: &std::path::Path,
-    status_output: &str,
-) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
-    let mut changes = Vec::new();
-    let mut skipped_symlinks: Vec<String> = Vec::new();
-
-    for line in status_output.lines() {
-        if line.len() < 3 {
-            continue;
-        }
-
-        let status_code = &line[0..2];
-        let file_path = line[3..].trim();
-
-        // Skip empty paths
-        if file_path.is_empty() {
-            continue;
-        }
-
-        // Validate path for security
-        validate_single_path(file_path)?;
-
-        let full_path = worktree_path.join(file_path);
-
-        match status_code {
-            // Deleted files
-            " D" | "D " | "DD" => {
-                changes.push(serde_json::json!({
-                    "changeType": "delete",
-                    "item": {
-                        "path": format!("/{}", file_path)
-                    }
-                }));
-            }
-            // New/untracked files
-            "??" | "A " | " A" | "AM" => {
-                push_file_change_skipping_symlinks(
-                    &mut changes,
-                    &mut skipped_symlinks,
-                    "add",
-                    file_path,
-                    &full_path,
-                )
-                .await?;
-            }
-            // Modified files
-            " M" | "M " | "MM" => {
-                push_file_change_skipping_symlinks(
-                    &mut changes,
-                    &mut skipped_symlinks,
-                    "edit",
-                    file_path,
-                    &full_path,
-                )
-                .await?;
-            }
-            // Renamed files - format is "R  old_path -> new_path"
-            // For "RM" (renamed + modified), we emit both a rename and an edit change.
-            // The ADO Pushes API processes changes sequentially within a single push,
-            // so the rename establishes the file at the new path, then the edit updates
-            // its content — this is the correct way to express rename-with-modification.
-            "R " | " R" | "RM" => {
-                if let Some((old_path, new_path)) = file_path.split_once(" -> ") {
-                    validate_single_path(old_path.trim())?;
-                    validate_single_path(new_path.trim())?;
-
-                    changes.push(serde_json::json!({
-                        "changeType": "rename",
-                        "sourceServerItem": format!("/{}", old_path.trim()),
-                        "item": {
-                            "path": format!("/{}", new_path.trim())
-                        }
-                    }));
-
-                    // If status is "RM" (renamed + modified), also emit content
-                    if status_code == "RM" {
-                        let new_path_trimmed = new_path.trim();
-                        let new_full_path = worktree_path.join(new_path_trimmed);
-                        push_file_change_skipping_symlinks(
-                            &mut changes,
-                            &mut skipped_symlinks,
-                            "edit",
-                            new_path_trimmed,
-                            &new_full_path,
-                        )
-                        .await?;
-                    }
-                }
-            }
-            // Other statuses - try to handle as edit if file exists
-            _ => {
-                push_file_change_skipping_symlinks(
-                    &mut changes,
-                    &mut skipped_symlinks,
-                    "edit",
-                    file_path,
-                    &full_path,
-                )
-                .await?;
-            }
-        }
-    }
-
-    Ok((changes, skipped_symlinks))
-}
-
-/// Collect file changes from a git diff-tree --name-status output.
-///
-/// Used when git am has already committed the changes. Parses the output format:
-/// `M\tpath`, `A\tpath`, `D\tpath`, `R100\told_path\tnew_path`
-async fn collect_changes_from_diff_tree(
-    worktree_path: &std::path::Path,
-    diff_tree_output: &str,
-) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
-    let mut changes = Vec::new();
-    let mut skipped_symlinks: Vec<String> = Vec::new();
-
-    for line in diff_tree_output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-
-        let status_code = parts[0];
-        let file_path = parts[1];
-
-        // Validate path for security
-        validate_single_path(file_path)?;
-
-        let full_path = worktree_path.join(file_path);
-
-        if status_code == "D" {
-            // Deleted file
-            changes.push(serde_json::json!({
-                "changeType": "delete",
-                "item": {
-                    "path": format!("/{}", file_path)
-                }
-            }));
-        } else if status_code == "A" {
-            // Added file
-            push_file_change_skipping_symlinks(
-                &mut changes,
-                &mut skipped_symlinks,
-                "add",
-                file_path,
-                &full_path,
-            )
-            .await?;
-        } else if status_code.starts_with('R') && parts.len() >= 3 {
-            // Renamed file: R100\told_path\tnew_path
-            let old_path = file_path;
-            let new_path = parts[2];
-            // old_path (= file_path) is already validated above
-            validate_single_path(new_path)?;
-
-            // Emit the rename
-            changes.push(serde_json::json!({
-                "changeType": "rename",
-                "sourceServerItem": format!("/{}", old_path),
-                "item": {
-                    "path": format!("/{}", new_path)
-                }
-            }));
-
-            // If the file was also modified (similarity < 100), emit an edit with content
-            let new_full_path = worktree_path.join(new_path);
-            if status_code != "R100" {
-                push_file_change_skipping_symlinks(
-                    &mut changes,
-                    &mut skipped_symlinks,
-                    "edit",
-                    new_path,
-                    &new_full_path,
-                )
-                .await?;
-            }
-        } else if status_code.starts_with('C') && parts.len() >= 3 {
-            // Copied file: C100\tsrc_path\tdest_path
-            let dest_path = parts[2];
-            validate_single_path(dest_path)?;
-
-            let dest_full_path = worktree_path.join(dest_path);
-            push_file_change_skipping_symlinks(
-                &mut changes,
-                &mut skipped_symlinks,
-                "add",
-                dest_path,
-                &dest_full_path,
-            )
-            .await?;
-        } else {
-            // Modified or other — read current content
-            push_file_change_skipping_symlinks(
-                &mut changes,
-                &mut skipped_symlinks,
-                "edit",
-                file_path,
-                &full_path,
-            )
-            .await?;
-        }
-    }
-
-    Ok((changes, skipped_symlinks))
-}
-
-/// Push a file change into `changes`, skipping symlinks with a warning.
-///
-/// Centralizes the "regular file → read & push; symlink → warn & skip; other → ignore"
-/// logic used in multiple places when collecting changes from a worktree or diff tree.
-/// Uses `symlink_metadata` so symlinks are detected without being followed — this is
-/// the primary defense against symlink-following exfiltration attacks in Stage 3.
-///
-/// Skipped symlink paths are appended to `skipped_symlinks` so the caller can surface
-/// them in the PR description (the agent that produced the PR would otherwise have no
-/// way to see that some of its intended file content was dropped).
-async fn push_file_change_skipping_symlinks(
-    changes: &mut Vec<serde_json::Value>,
-    skipped_symlinks: &mut Vec<String>,
-    change_type: &str,
-    file_path: &str,
-    full_path: &std::path::Path,
-) -> anyhow::Result<()> {
-    // Note: there is a theoretical TOCTOU window between the symlink_metadata
-    // (lstat) call below and the subsequent tokio::fs::read inside
-    // read_file_change (which follows symlinks). A concurrent rename(2) could
-    // swap a regular file for a symlink between the two syscalls. This is not
-    // exploitable in Stage 3's deployment model: the worktree has no concurrent
-    // writer (the agent's patch has already been applied; only this serial
-    // collector reads from it). Closing the window fully would require platform-
-    // specific O_NOFOLLOW open syscalls, which is overkill given the threat
-    // model. If that ever changes, switch to opening the fd here with
-    // O_NOFOLLOW and reading from the fd inside read_file_change.
-    match tokio::fs::symlink_metadata(full_path).await {
-        Ok(meta) if meta.file_type().is_file() => {
-            changes.push(read_file_change(change_type, file_path, full_path).await?);
-        }
-        Ok(meta) if meta.file_type().is_symlink() => {
-            warn!(
-                "Skipping symlink in worktree: {} (symlink-following attack prevention)",
-                file_path
-            );
-            skipped_symlinks.push(file_path.to_string());
-        }
-        Ok(_) => {
-            // Not a regular file (e.g. directory, fifo, socket) — silently skip.
-        }
-        Err(e) => {
-            // NotFound is a normal transient condition (worktree mid-rebase, file
-            // already pruned by git apply, etc.). Anything else — most notably
-            // PermissionDenied — is unusual and worth flagging at warn for triage.
-            if e.kind() == std::io::ErrorKind::NotFound {
-                debug!("File no longer present for {} — skipping", file_path);
-            } else {
-                warn!(
-                    "Failed to read metadata for {}: {} (kind={:?}) — skipping",
-                    file_path,
-                    e,
-                    e.kind()
-                );
-            }
-        }
-    }
-    Ok(())
+    changes
 }
 
 /// If any symlinks were skipped during PR file collection, append a clearly
@@ -2220,126 +1841,6 @@ fn sanitize_path_for_markdown(path: &str) -> String {
         .collect()
 }
 
-/// Read a file and produce an ADO push change entry.
-/// Handles both text (rawtext) and binary (base64encoded) content.
-async fn read_file_change(
-    change_type: &str,
-    file_path: &str,
-    full_path: &std::path::Path,
-) -> anyhow::Result<serde_json::Value> {
-    let bytes = tokio::fs::read(full_path)
-        .await
-        .with_context(|| format!("Failed to read file: {}", file_path))?;
-
-    // Try UTF-8 first; fall back to base64 for binary files
-    match String::from_utf8(bytes.clone()) {
-        Ok(content) => Ok(serde_json::json!({
-            "changeType": change_type,
-            "item": {
-                "path": format!("/{}", file_path)
-            },
-            "newContent": {
-                "content": content,
-                "contentType": "rawtext"
-            }
-        })),
-        Err(_) => {
-            use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            Ok(serde_json::json!({
-                "changeType": change_type,
-                "item": {
-                    "path": format!("/{}", file_path)
-                },
-                "newContent": {
-                    "content": encoded,
-                    "contentType": "base64encoded"
-                }
-            }))
-        }
-    }
-}
-///
-/// Security checks:
-/// - No path traversal (..)
-/// - No .git directory modifications
-/// - No absolute paths
-/// - No null bytes
-/// - No symlink entries (mode 120000)
-fn validate_patch_paths(patch_content: &str) -> anyhow::Result<()> {
-    let mut in_diff = false;
-    for line in patch_content.lines() {
-        // Only validate paths within diff blocks, not commit message bodies.
-        // format-patch output includes commit messages before each diff section.
-        if line.starts_with("diff --git") {
-            in_diff = true;
-            // Extract paths using strip_prefix for correct handling of spaces
-            if let Some(rest) = line.strip_prefix("diff --git a/") {
-                // The b/ path starts after the last " b/" — but for simple validation,
-                // validate the a/ path (everything before " b/") and the b/ path
-                if let Some((a_path, b_path)) = rest.rsplit_once(" b/") {
-                    validate_single_path(a_path.trim_matches('"'))?;
-                    validate_single_path(b_path.trim_matches('"'))?;
-                }
-            }
-            continue;
-        }
-        // Reset on commit envelope boundaries
-        if line.starts_with("From ") && in_diff {
-            in_diff = false;
-            continue;
-        }
-        if !in_diff {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("--- a/") {
-            let path = rest.trim().trim_matches('"');
-            validate_single_path(path)?;
-        } else if let Some(rest) = line.strip_prefix("+++ b/") {
-            let path = rest.trim().trim_matches('"');
-            validate_single_path(path)?;
-        } else if line.starts_with("--- /dev/null") || line.starts_with("+++ /dev/null") {
-            // New or deleted files — no path to validate
-        } else if line.starts_with("rename from ")
-            || line.starts_with("rename to ")
-            || line.starts_with("copy from ")
-            || line.starts_with("copy to ")
-        {
-            let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
-            validate_single_path(path)?;
-        }
-        // Only consider this a real header line if it has no leading
-        // whitespace — diff context lines are space-prefixed, so a line
-        // body of "new file mode 120000" inside a hunk would look identical
-        // to a real mode header after trim(). Real git header lines never
-        // start with whitespace; we require the same here to avoid false
-        // positives on adversarial-but-benign diff content. Added (+)/
-        // removed (-) lines start with a non-whitespace prefix that
-        // survives trim() and so cannot match the exact mode-line strings.
-        let is_symlink_mode_header = {
-            let starts_with_ws = line.chars().next().is_some_and(|c| c.is_whitespace());
-            let trimmed = line.trim();
-            !starts_with_ws && (trimmed == "new file mode 120000" || trimmed == "new mode 120000")
-        };
-        if is_symlink_mode_header {
-            // Reject patch lines that INTRODUCE a symlink (git mode 120000).
-            // Either of these lines means the resulting tree contains a symlink:
-            //   - "new file mode 120000" — a freshly added symlink
-            //   - "new mode 120000"      — an existing file converted to a symlink
-            // A symlink in the worktree could make Stage 3 follow it to arbitrary
-            // filesystem paths (e.g. /proc/self/environ) when collecting file
-            // changes to upload to ADO.
-            //
-            // We deliberately do NOT reject "old mode 120000" on its own: a patch
-            // with "old mode 120000" + "new mode 100644" converts a symlink into a
-            // regular file, which is a legitimate cleanup operation and produces a
-            // safe worktree.
-            anyhow::bail!("Patch introduces a symlink (mode 120000), which is not allowed");
-        }
-    }
-    Ok(())
-}
-
 /// Truncate an error response body to avoid embedding large or sensitive content.
 fn truncate_error_body(body: &str, max_len: usize) -> &str {
     match body.char_indices().nth(max_len) {
@@ -2356,78 +1857,13 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
 /// Patterns without `/` are treated as basename matches (e.g., `*.lock` matches
 /// `subdir/Cargo.lock`). Patterns with `**/` prefix match at any depth.
 /// Uses the `glob-match` crate for correct glob semantics (`*` does not cross `/`).
-fn glob_match_simple(pattern: &str, path: &str) -> bool {
+pub(crate) fn glob_match_simple(pattern: &str, path: &str) -> bool {
     if !pattern.contains('/') {
         // Basename-only pattern: auto-prefix with **/ for any-depth matching
         let full_pattern = format!("**/{}", pattern);
         return glob_match::glob_match(&full_pattern, path);
     }
     glob_match::glob_match(pattern, path)
-}
-
-/// Validate a single file path for security issues.
-///
-/// Thin wrapper over the canonical [`crate::validate::validate_relative_safe_path`]
-/// primitive so all path-traversal / absolute / `.git` / null-byte / pipeline
-/// command checks live in one place.
-fn validate_single_path(path: &str) -> anyhow::Result<()> {
-    crate::validate::validate_relative_safe_path(path, "path")
-}
-
-/// Extract all file paths from a patch/diff content.
-/// Returns deduplicated list of file paths referenced in the patch (both source and destination).
-/// Uses `--- a/` and `+++ b/` lines for robust parsing (handles quoted paths
-/// with spaces that break `diff --git` header parsing via split_whitespace).
-fn extract_paths_from_patch(patch_content: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let mut in_diff = false;
-    for line in patch_content.lines() {
-        // Only extract paths after the first diff --git header to avoid
-        // false positives from commit messages that quote patch fragments
-        if line.starts_with("diff --git") {
-            in_diff = true;
-            continue;
-        }
-        if !in_diff {
-            continue;
-        }
-        // A new commit envelope resets — skip until next diff --git
-        if line.starts_with("From ") {
-            in_diff = false;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("--- a/") {
-            let path = rest.trim().trim_matches('"');
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("+++ b/") {
-            let path = rest.trim().trim_matches('"');
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        } else if line.starts_with("rename from ")
-            || line.starts_with("rename to ")
-            || line.starts_with("copy from ")
-            || line.starts_with("copy to ")
-        {
-            // "rename from <path>" / "rename to <path>"
-            let path = line.splitn(3, ' ').nth(2).unwrap_or("").trim_matches('"');
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
-/// Count the number of distinct files changed in a patch.
-/// Reuses `extract_paths_from_patch` which correctly handles quoted paths,
-/// renames, copies, and multi-commit deduplication.
-fn count_patch_files(patch_content: &str) -> usize {
-    extract_paths_from_patch(patch_content).len()
 }
 
 /// Check if any file paths in the patch are protected.
@@ -2439,7 +1875,7 @@ fn count_patch_files(patch_content: &str) -> usize {
 /// - Access control files (CODEOWNERS)
 ///
 /// Returns a list of protected file paths found, or empty vec if none.
-fn find_protected_files(paths: &[String]) -> Vec<String> {
+pub(crate) fn find_protected_files(paths: &[String]) -> Vec<String> {
     let mut protected = Vec::new();
     for path in paths {
         let lower_path = path.to_lowercase();
@@ -2482,6 +1918,244 @@ mod tests {
     use super::*;
     use crate::safe_outputs::ToolResult;
 
+    fn pushed_tree(repo: &std::path::Path, request: &serde_json::Value) -> String {
+        use base64::Engine;
+        let scratch = tempfile::tempdir().unwrap();
+        let index = scratch.path().join("index");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").arg("-C").arg(repo)
+                .args(args).env("GIT_INDEX_FILE", &index).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["read-tree", request["commits"][0]["parents"][0].as_str().unwrap()]);
+        for change in request["commits"][0]["changes"].as_array().unwrap() {
+            let path = change["item"]["path"].as_str().unwrap().strip_prefix('/').unwrap();
+            if change["changeType"] == "delete" {
+                git(&["update-index", "--force-remove", "--", path]);
+            } else {
+                let content = change["newContent"]["content"].as_str().unwrap();
+                let bytes = if change["newContent"]["contentType"] == "base64encoded" {
+                    base64::engine::general_purpose::STANDARD.decode(content).unwrap()
+                } else { content.as_bytes().to_vec() };
+                let blob = scratch.path().join("blob");
+                std::fs::write(&blob, bytes).unwrap();
+                let oid = git(&["hash-object", "-w", "--no-filters", blob.to_str().unwrap()]);
+                git(&["update-index", "--add", "--cacheinfo", "100644", &oid, path]);
+            }
+        }
+        git(&["write-tree"])
+    }
+
+    #[tokio::test]
+    async fn creation_uses_shared_patch_selection_blobs_and_verified_parent() {
+        use crate::safe_outputs::pr_patch::tests::{command, movement, repository};
+        use std::sync::{Arc, Mutex};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, query_param}};
+        for case in ["copy", "rename-edit", "crlf", "excluded-copy", "series", "filtered-series", "base-drift", "unrelated-base", "prefix-ref", "space-header", "mode-up", "reviewer-existing", "reviewer-missing", "reviewer-read-failure"] {
+            let (repo, base) = repository(&[("old.txt", b"base\n"), ("nested/secret.txt", b"excluded\n"), ("keep.txt", b"old\n"), ("space dir/user guide.md", b"old\n")]);
+            let mut current = base.clone();
+            let mut text = match case {
+                "copy" => movement("copy", "old.txt", "new.txt"),
+                "rename-edit" => movement("rename", "old.txt", "new.txt")
+                    + "--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-base\n+changed\n",
+                "excluded-copy" => movement("copy", "nested/secret.txt", "public.txt")
+                    + "diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ b/old.txt\n@@ -1 +1 @@\n-base\n+changed\n",
+                _ => "diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ b/old.txt\n@@ -1 +1 @@\n-base\n+changed\n".into(),
+            };
+            if case == "crlf" { command(repo.path(), &["config", "core.autocrlf", "true"]); }
+            if case == "space-header" {
+                std::fs::write(repo.path().join("space dir").join("user guide.md"), "changed\n").unwrap();
+                text = String::from_utf8(super::super::pr_patch::git(repo.path(), &["diff", "--binary", "--full-index"]).await.unwrap().stdout).unwrap();
+            }
+            if case == "mode-up" {
+                command(repo.path(), &["config", "core.filemode", "false"]);
+                command(repo.path(), &["update-index", "--chmod=+x", "old.txt"]);
+                text = String::from_utf8(super::super::pr_patch::git(repo.path(), &["diff", "--cached", "--binary", "--full-index"]).await.unwrap().stdout).unwrap();
+            }
+            if case == "series" || case == "filtered-series" {
+                for content in ["first\n", "changed\n"] {
+                    std::fs::write(repo.path().join("old.txt"), content).unwrap();
+                    command(repo.path(), &["add", "old.txt"]);
+                    command(repo.path(), &["commit", "--quiet", "-m", content.trim()]);
+                }
+                let output = std::process::Command::new("git")
+                    .args(["format-patch", "--full-index", "--stdout", &format!("{base}..HEAD")])
+                    .current_dir(repo.path()).output().unwrap();
+                assert!(output.status.success());
+                text = String::from_utf8(output.stdout).unwrap();
+                command(repo.path(), &["checkout", "--detach", base.as_str()]);
+            }
+            if case == "base-drift" {
+                std::fs::write(repo.path().join("keep.txt"), "target changed\n").unwrap();
+                command(repo.path(), &["add", "keep.txt"]);
+                command(repo.path(), &["commit", "--quiet", "-m", "advance target"]);
+                current = crate::secure::CommitSha::parse(command(repo.path(), &["rev-parse", "HEAD"])).unwrap();
+            }
+            let recorded = if case == "unrelated-base" { "f".repeat(40) } else { base.to_string() };
+            let original_refs = command(repo.path(), &["show-ref"]);
+            let original_index = std::fs::read(repo.path().join(".git").join("index")).unwrap();
+            let original_status = command(repo.path(), &["status", "--porcelain"]);
+            let server = MockServer::start().await;
+            let api = "/P/_apis/git/repositories/repo";
+            Mock::given(method("GET")).and(path(format!("{api}/refs"))).and(query_param("filter", "heads/main"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value":[{"name":"refs/heads/main","objectId":current}]
+                }))).mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("{api}/refs")))
+                .and(query_param("filter", format!("heads/agent/{case}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": if case == "prefix-ref" {
+                        vec![serde_json::json!({"name":"refs/heads/agent/prefix-ref-target", "objectId":base})]
+                    } else { vec![] }
+                })))
+                .mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("{api}/diffs/commits")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "baseCommit":recorded,"targetCommit":current,"commonCommit":base
+                }))).mount(&server).await;
+            let pushes = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+            let observed = pushes.clone();
+            let server_tree = Arc::new(Mutex::new(None::<String>));
+            let captured_tree = server_tree.clone();
+            let repository_path = repo.path().to_path_buf();
+            let new_commit = "a".repeat(40);
+            let captured_commit = new_commit.clone();
+            Mock::given(method("POST")).and(path(format!("{api}/pushes")))
+                .respond_with(move |request: &wiremock::Request| {
+                    let pushed: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    *captured_tree.lock().unwrap() = Some(pushed_tree(&repository_path, &pushed));
+                    observed.lock().unwrap().push(pushed.clone());
+                    ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                        "commits":[{"commitId":captured_commit}],
+                        "refUpdates":[{"name":pushed["refUpdates"][0]["name"],
+                            "oldObjectId":"0000000000000000000000000000000000000000",
+                            "newObjectId":captured_commit}]
+                    }))
+                }).mount(&server).await;
+            let proof_base = base.clone();
+            let proof_commit = new_commit.clone();
+            Mock::given(method("GET")).and(path(format!("{api}/commits/{new_commit}")))
+                .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"commitId":proof_commit,
+                        "treeId":server_tree.lock().unwrap().clone().unwrap(),"parents":[proof_base]})))
+                .expect(if matches!(case,"unrelated-base"|"mode-up") {0} else {1})
+                .mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("{api}/pullrequests")))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "pullRequestId":7,"url":"https://example.test/pr/7",
+                    "createdBy":{"id":"01234567-89ab-cdef-0123-456789abcdef"},
+                    "sourceRefName":format!("refs/heads/agent/{case}"),
+                    "lastMergeSourceCommit":{"commitId":new_commit}
+                }))).mount(&server).await;
+            let reviewer = "01234567-89ab-cdef-0123-456789abcdef";
+            let present = Arc::new(std::sync::atomic::AtomicBool::new(case == "reviewer-existing"));
+            let observed_present = present.clone();
+            Mock::given(method("GET")).and(path(format!("{api}/pullRequests/7/reviewers")))
+                .respond_with(move |_: &wiremock::Request| {
+                    if case == "reviewer-read-failure" { return ResponseTemplate::new(403); }
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"value":
+                        if observed_present.load(std::sync::atomic::Ordering::SeqCst) {
+                            vec![serde_json::json!({"id":reviewer,"vote":-10,"isRequired":true})]
+                        } else { vec![] }
+                    }))
+                }).expect(if case == "reviewer-missing" {2} else if case.starts_with("reviewer-") {1} else {0})
+                .mount(&server).await;
+            Mock::given(method("POST")).and(path(format!("{api}/pullRequests/7/reviewers")))
+                .and(wiremock::matchers::body_json(serde_json::json!([{"id":reviewer}])))
+                .respond_with(move |_: &wiremock::Request| {
+                    present.store(true, std::sync::atomic::Ordering::SeqCst);
+                    ResponseTemplate::new(200)
+                }).expect(usize::from(case == "reviewer-missing") as u64).mount(&server).await;
+            let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed_complete = complete.clone();
+            let enables_completion = matches!(case, "reviewer-existing" | "reviewer-missing");
+            Mock::given(method("GET")).and(path(format!("{api}/pullRequests/7")))
+                .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "status":"active","isDraft":false,
+                        "autoCompleteSetBy": if observed_complete.load(std::sync::atomic::Ordering::SeqCst) {
+                            serde_json::json!({"id":reviewer})
+                        } else { serde_json::Value::Null }
+                    })))
+                .expect(if enables_completion {2} else {0}).mount(&server).await;
+            Mock::given(method("PATCH")).and(path(format!("{api}/pullRequests/7")))
+                .and(wiremock::matchers::body_json(serde_json::json!({"autoCompleteSetBy":{"id":reviewer}})))
+                .respond_with(move |_: &wiremock::Request| {
+                    complete.store(true,std::sync::atomic::Ordering::SeqCst);
+                    ResponseTemplate::new(200)
+                }).expect(u64::from(enables_completion)).mount(&server).await;
+            let output = tempfile::tempdir().unwrap();
+            std::fs::write(output.path().join("changes.patch"), &text).unwrap();
+            let mut ctx = ExecutionContext {
+                ado_org_url: Some(server.uri()), ado_organization: Some("org".into()),
+                ado_project: Some("P".into()), repository_name: Some("repo".into()),
+                repository_provider: Some("TfsGit".into()), access_token: Some("token".into()),
+                source_directory: repo.path().into(), self_repository_directory: repo.path().into(),
+                working_directory: output.path().into(), ..Default::default()
+            };
+            ctx.tool_configs.insert("create-pull-request".into(), serde_json::json!({
+                "include-stats":false, "excluded-files":if case == "excluded-copy" || case == "filtered-series" { vec!["secret.txt"] } else { vec![] }
+            }));
+            if case.starts_with("reviewer-") {
+                ctx.tool_configs.get_mut("create-pull-request").unwrap()["reviewers"] = serde_json::json!([reviewer]);
+                ctx.tool_configs.get_mut("create-pull-request").unwrap()["draft"] = serde_json::json!(false);
+                ctx.tool_configs.get_mut("create-pull-request").unwrap()["auto-complete"] = serde_json::json!(true);
+            }
+            let result = crate::execute::execute_safe_output(&serde_json::json!({
+                "name":"create-pull-request", "title":"Patch fixture", "body":"A validated code change.",
+                "source_branch":format!("agent/{case}"), "repository":"self", "temporary_id":"#aw_fixture",
+                "patch_file":"changes.patch", "patch_sha256":crate::hash::sha256_hex(text.as_bytes()),
+                "base_commit":recorded
+            }), &ctx).await;
+            assert_eq!(command(repo.path(), &["show-ref"]), original_refs, "{case}");
+            assert_eq!(std::fs::read(repo.path().join(".git").join("index")).unwrap(), original_index, "{case}");
+            assert_eq!(command(repo.path(), &["status", "--porcelain"]), original_status, "{case}");
+            if matches!(case, "unrelated-base" | "mode-up") {
+                assert!(result.is_err());
+                if case == "mode-up" {
+                    assert!(result.unwrap_err().to_string().contains("file-mode change"));
+                }
+                assert!(pushes.lock().unwrap().is_empty());
+                assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() == "GET"));
+                continue;
+            }
+            let (_, result) = result.unwrap();
+            assert!(result.success, "{case}: {}", result.message);
+            assert_eq!(result.is_warning(), case == "reviewer-read-failure", "{case}");
+            if case.starts_with("reviewer-") {
+                let data = result.data.as_ref().unwrap();
+                let key = match case {
+                    "reviewer-existing" => "already_present", "reviewer-missing" => "added", _ => "failed",
+                };
+                assert_eq!(data["reviewers"][key].as_array().unwrap().len(), 1);
+                assert!(server.received_requests().await.unwrap().iter().all(|request| request.method.as_str() != "PUT"));
+                let effects = data["effects"].as_array().unwrap();
+                let completion = effects.iter().find(|effect| effect["operation"] == "enable-auto-complete").unwrap();
+                assert_eq!(completion["state"], if enables_completion { "applied" } else { "unattempted" });
+                if enables_completion {
+                    let requests = server.received_requests().await.unwrap();
+                    let setup = requests.iter().rposition(|request| request.url.path().ends_with("/reviewers")).unwrap();
+                    let completion = requests.iter().position(|request| request.method.as_str() == "PATCH").unwrap();
+                    assert!(setup < completion, "configured reviewers must be confirmed before enabling completion");
+                }
+            }
+            let pushes = pushes.lock().unwrap();
+            assert_eq!(pushes.len(), 1, "{case}");
+            assert_eq!(pushes[0]["refUpdates"][0]["name"], format!("refs/heads/agent/{case}"));
+            assert_eq!(pushes[0]["commits"][0]["parents"], serde_json::json!([base]));
+            let changes = pushes[0]["commits"][0]["changes"].as_array().unwrap();
+            let unique = changes.iter().map(|change| change["item"]["path"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(unique.len(), changes.len(), "ADO allows one operation per path: {case}");
+            let content = changes.iter().find(|change| change.get("newContent").is_some()).unwrap();
+            assert_eq!(content["newContent"]["content"], if case == "copy" { "base\n" } else { "changed\n" }, "{case}");
+            if case == "excluded-copy" {
+                assert!(changes.iter().all(|change| change["item"]["path"] == "/old.txt"));
+                assert_eq!(result.data.unwrap()["omitted_operations"][0]["operation"], "copy");
+            }
+        }
+    }
+
     #[test]
     fn test_validate_params_valid() {
         let params = CreatePrParams {
@@ -2495,23 +2169,53 @@ mod tests {
 
     #[test]
     fn test_validate_params_short_title() {
-        let params = CreatePrParams {
+        let mut params = CreatePrParams {
             title: "Fix".to_string(),
             description: "This PR fixes a critical bug in the parser module.".to_string(),
             repository: None,
             labels: vec![],
         };
+        assert!(params.validate().is_ok());
+        params.title = " \t".into();
         assert!(params.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn executor_rejects_oversized_prefixed_titles_before_any_remote_write() {
+        let server = wiremock::MockServer::start().await;
+        let ctx = ExecutionContext {
+            ado_org_url: Some(server.uri()),
+            ado_organization: Some("org".into()),
+            ado_project: Some("P".into()),
+            repository_name: Some("repo".into()),
+            access_token: Some("token".into()),
+            tool_configs: std::collections::HashMap::from([(
+                "create-pull-request".into(),
+                serde_json::json!({"title-prefix":"x".repeat(super::super::pr_common::MAX_TITLE_SCALARS)}),
+            )]),
+            ..Default::default()
+        };
+        let mut proposal: CreatePrResult = serde_json::from_value(serde_json::json!({
+            "name":"create-pull-request", "title":"A", "body":"Body",
+            "source_branch":"agent/title", "repository":"self", "temporary_id":"#aw_title",
+            "patch_file":"unused.patch", "patch_sha256":"a".repeat(64)
+        })).unwrap();
+        let outcome = proposal.execute_sanitized(&ctx).await.unwrap();
+        assert!(!outcome.success);
+        assert!(outcome.message.contains("title-prefix"));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
     fn test_validate_params_short_description() {
-        let params = CreatePrParams {
+        let mut params = CreatePrParams {
             title: "Fix bug in parser".to_string(),
             description: "Fix bug".to_string(),
             repository: None,
             labels: vec![],
         };
+        assert!(params.validate().is_ok());
+        params.description = " \n".into();
         assert!(params.validate().is_err());
     }
 
@@ -2520,7 +2224,7 @@ mod tests {
         assert!(
             serde_json::from_value::<CreatePrParams>(serde_json::json!({
                 "title": "Valid title",
-                "description": "A sufficiently long description.",
+                "body": "A sufficiently long description.",
                 "temporary_id": "#aw_pr123"
             }))
             .is_err()
@@ -2528,7 +2232,7 @@ mod tests {
         assert!(
             serde_json::from_value::<CreatePrParams>(serde_json::json!({
                 "title": "Valid title",
-                "description": "A sufficiently long description.",
+                "body": "A sufficiently long description.",
                 "reviewers": ["owner@example.com"]
             }))
             .is_err()
@@ -2575,13 +2279,13 @@ mod tests {
         assert_eq!(config.target_branch, "main");
         assert!(config.draft);
         assert!(!config.auto_complete);
-        assert!(config.delete_source_branch);
-        assert!(config.squash_merge);
+        assert!(config.completion.delete_source_branch.is_none());
+        assert!(config.completion.merge_strategy.is_none());
         assert_eq!(config.if_no_changes, IfNoChanges::Warn);
         assert_eq!(config.max_files, 100);
         assert_eq!(config.protected_files, ProtectedFiles::Blocked);
         assert!(config.excluded_files.is_empty());
-        assert!(config.allowed_labels.is_empty());
+        assert_eq!(config.allowed_labels, ["*"]);
         assert!(config.fallback_record_branch);
         assert!(config.target_branches.is_empty());
         assert!(!config.infer_target_from_checkout_ref);
@@ -2690,6 +2394,7 @@ mod tests {
             ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
             ado_organization: Some("current-org".to_string()),
             ado_project: Some("Current Project".to_string()),
+            tool_configs: std::collections::HashMap::from([("create-pull-request".into(), serde_json::json!({}))]),
             ..Default::default()
         };
         let scopes = allow.then(|| {
@@ -2833,6 +2538,7 @@ mod tests {
             ado_organization: Some("current-org".to_string()),
             ado_project: Some("Current Project".to_string()),
             dry_run: true,
+            tool_configs: std::collections::HashMap::from([("create-pull-request".into(), serde_json::json!({}))]),
             ..Default::default()
         };
         let allow = vec![crate::compile::types::AdoOrganizationScope {
@@ -2913,7 +2619,7 @@ mod tests {
     #[test]
     fn test_validate_patch_paths_valid() {
         let patch = r#"diff --git a/src/main.rs b/src/main.rs
-index 1234567..abcdefg 100644
+index 1234567..abcdef0 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -1,3 +1,4 @@
@@ -2922,7 +2628,7 @@ index 1234567..abcdefg 100644
      println!("World");
  }
 "#;
-        assert!(validate_patch_paths(patch).is_ok());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_ok());
     }
 
     #[test]
@@ -2936,7 +2642,7 @@ index 0000000..1234567
 +Hello
 +World
 "#;
-        assert!(validate_patch_paths(patch).is_ok());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_ok());
     }
 
     #[test]
@@ -2945,7 +2651,7 @@ index 0000000..1234567
 --- a/../../../etc/passwd
 +++ b/../../../etc/passwd
 "#;
-        assert!(validate_patch_paths(patch).is_err());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err());
     }
 
     #[test]
@@ -2957,7 +2663,7 @@ new file mode 100755
 @@ -0,0 +1 @@
 +#!/bin/bash
 "#;
-        assert!(validate_patch_paths(patch).is_err());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err());
     }
 
     #[test]
@@ -2966,7 +2672,7 @@ new file mode 100755
 --- a//etc/passwd
 +++ b//etc/passwd
 "#;
-        assert!(validate_patch_paths(patch).is_err());
+        assert!(super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err());
     }
 
     #[test]
@@ -2977,7 +2683,7 @@ new file mode 100755
         let patch = "diff --git a/old b/new\n\
                      rename from some dir/../.git/config\n\
                      rename to new name\n";
-        let result = validate_patch_paths(patch);
+        let result = super::super::pr_patch::inspected_paths((patch).as_bytes());
         assert!(
             result.is_err(),
             "rename with spaces and traversal should be rejected"
@@ -2987,7 +2693,7 @@ new file mode 100755
         let patch_copy = "diff --git a/old b/new\n\
                           copy from some dir/../.git/config\n\
                           copy to new name\n";
-        let result_copy = validate_patch_paths(patch_copy);
+        let result_copy = super::super::pr_patch::inspected_paths((patch_copy).as_bytes());
         assert!(
             result_copy.is_err(),
             "copy with spaces and traversal should be rejected"
@@ -3000,7 +2706,7 @@ new file mode 100755
         // This is the primary attack vector for symlink exfiltration of Stage 3 secrets.
         let patch = r#"diff --git a/secrets.txt b/secrets.txt
 new file mode 120000
-index 0000000..abcdefg
+index 0000000..abcdef0
 --- /dev/null
 +++ b/secrets.txt
 @@ -0,0 +1 @@
@@ -3008,7 +2714,7 @@ index 0000000..abcdefg
 \ No newline at end of file
 "#;
         assert!(
-            validate_patch_paths(patch).is_err(),
+            super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err(),
             "patch with symlink mode 120000 should be rejected"
         );
     }
@@ -3020,7 +2726,7 @@ index 0000000..abcdefg
                      old mode 100644\n\
                      new mode 120000\n";
         assert!(
-            validate_patch_paths(patch).is_err(),
+            super::super::pr_patch::inspected_paths((patch).as_bytes()).is_err(),
             "patch that introduces symlink via mode change should be rejected"
         );
     }
@@ -3040,7 +2746,7 @@ index 0000000..abcdefg
                      -/etc/passwd\n\
                      +hello world\n";
         assert!(
-            validate_patch_paths(patch).is_ok(),
+            super::super::pr_patch::inspected_paths((patch).as_bytes()).is_ok(),
             "patch converting symlink → regular file should be allowed"
         );
     }
@@ -3054,7 +2760,7 @@ index 0000000..abcdefg
                      --- a/link\n\
                      +++ /dev/null\n";
         assert!(
-            validate_patch_paths(patch).is_ok(),
+            super::super::pr_patch::inspected_paths((patch).as_bytes()).is_ok(),
             "patch deleting an existing symlink should be allowed"
         );
     }
@@ -3068,7 +2774,7 @@ index 0000000..abcdefg
         // padding.
         let patch_trailing_ws = "diff --git a/x b/x\nnew file mode 120000 \n";
         assert!(
-            validate_patch_paths(patch_trailing_ws).is_err(),
+            super::super::pr_patch::inspected_paths((patch_trailing_ws).as_bytes()).is_err(),
             "trailing whitespace must not let a symlink mode line bypass the check"
         );
 
@@ -3076,7 +2782,7 @@ index 0000000..abcdefg
         // not bypass.
         let patch_crlf = "diff --git a/x b/x\nnew file mode 120000\r\n";
         assert!(
-            validate_patch_paths(patch_crlf).is_err(),
+            super::super::pr_patch::inspected_paths((patch_crlf).as_bytes()).is_err(),
             "trailing \\r must not let a symlink mode line bypass the check"
         );
 
@@ -3098,7 +2804,7 @@ index 0000000..abcdefg
             + " new file mode 120000\n"
             + " keep line\n";
         assert!(
-            validate_patch_paths(&patch_context_line).is_ok(),
+            super::super::pr_patch::inspected_paths(patch_context_line.as_bytes()).is_ok(),
             "diff context line containing the mode string as data must not be rejected"
         );
 
@@ -3113,7 +2819,7 @@ index 0000000..abcdefg
                             -count: 1200000\n\
                             +count: 1200001\n";
         assert!(
-            validate_patch_paths(patch_benign).is_ok(),
+            super::super::pr_patch::inspected_paths((patch_benign).as_bytes()).is_ok(),
             "patch body lines containing '120000' as data must not be rejected"
         );
     }
@@ -3214,36 +2920,36 @@ index 0000000..abcdefg
 
     #[test]
     fn test_validate_single_path_valid() {
-        assert!(validate_single_path("src/main.rs").is_ok());
-        assert!(validate_single_path("deeply/nested/path/file.txt").is_ok());
-        assert!(validate_single_path("file.txt").is_ok());
+        assert!(crate::secure::RelativeSafePath::parse("src/main.rs").is_ok());
+        assert!(crate::secure::RelativeSafePath::parse("deeply/nested/path/file.txt").is_ok());
+        assert!(crate::secure::RelativeSafePath::parse("file.txt").is_ok());
     }
 
     #[test]
     fn test_validate_single_path_traversal() {
-        assert!(validate_single_path("../secret.txt").is_err());
-        assert!(validate_single_path("foo/../bar").is_err());
-        assert!(validate_single_path("foo/bar/../../baz").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("../secret.txt").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("foo/../bar").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("foo/bar/../../baz").is_err());
     }
 
     #[test]
     fn test_validate_single_path_git_dir() {
-        assert!(validate_single_path(".git").is_err());
-        assert!(validate_single_path(".git/config").is_err());
-        assert!(validate_single_path(".git/hooks/pre-commit").is_err());
-        assert!(validate_single_path(".GIT/config").is_err()); // case insensitive
+        assert!(crate::secure::RelativeSafePath::parse(".git").is_err());
+        assert!(crate::secure::RelativeSafePath::parse(".git/config").is_err());
+        assert!(crate::secure::RelativeSafePath::parse(".git/hooks/pre-commit").is_err());
+        assert!(crate::secure::RelativeSafePath::parse(".GIT/config").is_err()); // case insensitive
     }
 
     #[test]
     fn test_validate_single_path_absolute() {
-        assert!(validate_single_path("/etc/passwd").is_err());
-        assert!(validate_single_path("\\Windows\\System32").is_err());
-        assert!(validate_single_path("C:\\Windows").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("/etc/passwd").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("\\Windows\\System32").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("C:\\Windows").is_err());
     }
 
     #[test]
     fn test_validate_single_path_null_byte() {
-        assert!(validate_single_path("file\0.txt").is_err());
+        assert!(crate::secure::RelativeSafePath::parse("file\0.txt").is_err());
     }
 
     // ─── Protected files detection ──────────────────────────────────────────
@@ -3369,27 +3075,27 @@ index 0000000..abcdefg
 
     #[test]
     fn test_extract_paths_from_patch() {
-        let patch = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def\n--- a/src/main.rs\n+++ b/src/main.rs\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n";
-        let paths = extract_paths_from_patch(patch);
-        assert!(paths.contains(&"src/main.rs".to_string()));
-        assert!(paths.contains(&"README.md".to_string()));
+        let patch = "diff --git a/src/main.rs b/src/main.rs\nindex abc1234..def1234\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
+        let paths = super::super::pr_patch::inspected_paths((patch).as_bytes()).unwrap();
+        assert!(paths.contains("src/main.rs"));
+        assert!(paths.contains("README.md"));
     }
 
     #[test]
     fn test_extract_paths_from_patch_with_spaces() {
-        let patch = "diff --git \"a/path with spaces/file.txt\" \"b/path with spaces/file.txt\"\n--- a/path with spaces/file.txt\n+++ b/path with spaces/file.txt\n";
-        let paths = extract_paths_from_patch(patch);
-        assert!(paths.contains(&"path with spaces/file.txt".to_string()));
+        let patch = "diff --git \"a/path with spaces/file.txt\" \"b/path with spaces/file.txt\"\n--- a/path with spaces/file.txt\n+++ b/path with spaces/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let paths = super::super::pr_patch::inspected_paths((patch).as_bytes()).unwrap();
+        assert!(paths.contains("path with spaces/file.txt"));
     }
 
     #[test]
     fn test_extract_paths_new_file() {
         let patch =
             "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n";
-        let paths = extract_paths_from_patch(patch);
-        assert!(paths.contains(&"new.txt".to_string()));
+        let paths = super::super::pr_patch::inspected_paths((patch).as_bytes()).unwrap();
+        assert!(paths.contains("new.txt"));
         // /dev/null from --- should not be included (no a/ prefix)
-        assert!(!paths.contains(&"/dev/null".to_string()));
+        assert!(!paths.contains("/dev/null"));
     }
 
     #[test]
@@ -3442,6 +3148,7 @@ index 0000000..abcdefg
         let server = MockServer::start().await;
         let temporary_id = PullRequestTemporaryId::parse("#aw_duplicate1").unwrap();
         let registered_pull_request = crate::safe_outputs::ResolvedPullRequest {
+            creation_snapshot: None,
             id: 42,
             url: "https://example.test/pr/42".to_string(),
             target: crate::safe_outputs::result::AdoRepositoryTarget {
@@ -3461,6 +3168,7 @@ index 0000000..abcdefg
             access_token: Some("fake-token".to_string()),
             repository_id: Some("repo-id".to_string()),
             repository_name: Some("test-repo".to_string()),
+            tool_configs: std::collections::HashMap::from([("create-pull-request".into(), serde_json::json!({}))]),
             ..Default::default()
         };
         ctx.register_resolved_pull_request(&temporary_id, registered_pull_request.clone())
@@ -3529,13 +3237,14 @@ index 0000000..abcdefg
             ado_organization: Some("test".to_string()),
             ado_project: Some("TestProject".to_string()),
             ado_project_id: None,
+            pipeline_collection_uri: None,
             access_token: Some("fake-token".to_string()),
             github_token: None,
             github_actor_login: None,
             source_directory: dir.path().to_path_buf(),
             self_repository_directory: dir.path().to_path_buf(),
             working_directory: dir.path().to_path_buf(),
-            tool_configs: std::collections::HashMap::new(),
+            tool_configs: std::collections::HashMap::from([("create-pull-request".into(), serde_json::json!({}))]),
             repository_id: Some("repo-id".to_string()),
             repository_name: Some("test-repo".to_string()),
             repository_provider: Some("TfsGit".to_string()),
@@ -3565,6 +3274,8 @@ index 0000000..abcdefg
             resolved_pull_requests: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            budget_groups: Default::default(),
+            triggering_pr: Default::default(),
             triggered_by_build_id: None,
             triggered_by_definition_name: None,
             triggered_by_build_number: None,

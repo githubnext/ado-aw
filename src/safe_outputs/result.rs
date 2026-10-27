@@ -65,6 +65,14 @@ pub struct ResolvedPullRequest {
     pub id: u64,
     pub url: String,
     pub target: AdoRepositoryTarget,
+    pub creation_snapshot: Option<CreatedPullRequestSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CreatedPullRequestSnapshot {
+    pub commit: crate::secure::CommitSha,
+    pub tree: crate::secure::CommitSha,
+    pub patch_sha256: String,
 }
 
 /// Trusted compiler/source metadata for one checked-out repository alias.
@@ -126,6 +134,8 @@ pub struct ExecutionContext {
     pub ado_project: Option<String>,
     /// Azure DevOps project GUID (`SYSTEM_TEAMPROJECTID`)
     pub ado_project_id: Option<String>,
+    /// Original pipeline collection, independent of CLI target overrides.
+    pub pipeline_collection_uri: Option<String>,
     /// Write-capable ADO access token used by Stage 3 executors. Populated
     /// from the `SYSTEM_ACCESSTOKEN` env var, which the compiler maps to
     /// `$(System.AccessToken)` by default or `$(SC_WRITE_TOKEN)`
@@ -259,6 +269,8 @@ pub struct ExecutionContext {
     /// PR ID when `BUILD_REASON=PullRequest` (`SYSTEM_PULLREQUEST_PULLREQUESTID`)
     #[allow(dead_code)]
     pub pull_request_id: Option<String>,
+    /// Trusted trigger identity, independent of compiler-owned self and CLI routing overrides.
+    pub triggering_pr: Option<super::pr_common::TriggeringPullRequest>,
     /// PR source branch (`SYSTEM_PULLREQUEST_SOURCEBRANCH`)
     #[allow(dead_code)]
     pub pull_request_source_branch: Option<String>,
@@ -284,6 +296,7 @@ pub struct ExecutionContext {
     pub resolved_work_items: Arc<Mutex<HashMap<String, ResolvedWorkItem>>>,
     /// Temporary pull-request IDs resolved by successful `create-pull-request` calls.
     pub resolved_pull_requests: Arc<Mutex<HashMap<String, ResolvedPullRequest>>>,
+    pub budget_groups: crate::compile::pr_migration::BudgetGroups,
 }
 
 impl ExecutionContext {
@@ -313,6 +326,7 @@ impl ExecutionContext {
                 if let Some(object) = value.as_object_mut() {
                     object.remove("require-approval");
                     object.remove("staged");
+                    object.remove(crate::compile::pr_migration::LEGACY_PR_CONFIG);
                 }
                 serde_json::from_value(value).map_err(|error| {
                     anyhow::anyhow!("failed to deserialize config for tool '{tool_name}': {error}")
@@ -491,6 +505,7 @@ impl ExecutionContext {
             ado_organization,
             ado_project: env("SYSTEM_TEAMPROJECT"),
             ado_project_id: env("SYSTEM_TEAMPROJECTID"),
+            pipeline_collection_uri: env("SYSTEM_COLLECTIONURI"),
             access_token: env("SYSTEM_ACCESSTOKEN").or_else(|| env("AZURE_DEVOPS_EXT_PAT")),
             github_token: env("ADO_AW_GITHUB_TOKEN"),
             github_actor_login: env("ADO_AW_GITHUB_ACTOR_LOGIN"),
@@ -534,6 +549,7 @@ impl ExecutionContext {
 
             // Pull request variables
             pull_request_id: env("SYSTEM_PULLREQUEST_PULLREQUESTID"),
+            triggering_pr: super::pr_common::TriggeringPullRequest::from_env(&env),
             pull_request_source_branch: env("SYSTEM_PULLREQUEST_SOURCEBRANCH"),
             pull_request_target_branch: env("SYSTEM_PULLREQUEST_TARGETBRANCH"),
 
@@ -542,6 +558,7 @@ impl ExecutionContext {
             resolved_github_issues: Arc::new(Mutex::new(HashMap::new())),
             resolved_work_items: Arc::new(Mutex::new(HashMap::new())),
             resolved_pull_requests: Arc::new(Mutex::new(HashMap::new())),
+            budget_groups: Default::default(),
         }
     }
 }
@@ -552,7 +569,38 @@ impl Default for ExecutionContext {
     }
 }
 
-/// Result of executing a tool action in Stage 3
+/// A confirmed or unresolved portion of an action; never implies rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EffectState {
+    Applied,
+    AlreadySatisfied,
+    Failed,
+    Unattempted,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ActionEffect {
+    pub operation: &'static str,
+    pub target: String,
+    pub state: EffectState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ActionEffect {
+    pub(crate) fn new(operation: &'static str, target: impl Into<String>, state: EffectState) -> Self {
+        Self { operation, target: target.into(), state, detail: None }
+    }
+
+    pub(crate) fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+}
+
+/// Result of executing a tool action in Stage 3.
 #[derive(Debug, Serialize)]
 pub struct ExecutionResult {
     /// Whether the execution succeeded
@@ -576,6 +624,31 @@ pub struct ExecutionResult {
 }
 
 impl ExecutionResult {
+    pub(crate) fn delivery_uncertain(&self) -> bool {
+        self.data.as_ref().is_some_and(|data| data.get("delivery").and_then(serde_json::Value::as_str) == Some("uncertain"))
+    }
+
+    pub(crate) fn with_effects(mut self, effects: Vec<ActionEffect>) -> Self {
+        let confirmed = effects.iter().any(|effect| {
+            matches!(effect.state, EffectState::Applied | EffectState::AlreadySatisfied)
+        });
+        let uncertain = effects.iter().any(|effect| effect.state == EffectState::Uncertain);
+        let incomplete = effects.iter().any(|effect| {
+            matches!(effect.state, EffectState::Failed | EffectState::Unattempted)
+        });
+        self.success = confirmed && !uncertain;
+        self.warning = self.success && incomplete;
+        self.budget_exhausted = false;
+        let mut data = match self.data.take() {
+            Some(serde_json::Value::Object(data)) => data,
+            Some(value) => serde_json::Map::from_iter([("details".into(), value)]),
+            None => serde_json::Map::new(),
+        };
+        data.insert("effects".into(), serde_json::json!(effects));
+        self.data = Some(serde_json::Value::Object(data));
+        self
+    }
+
     /// Whether this is a warning (succeeded with issues)
     pub fn is_warning(&self) -> bool {
         self.warning
@@ -674,6 +747,79 @@ impl ExecutionResult {
             data: None,
         }
     }
+}
+
+pub(crate) async fn execute_pr_sanitized<T: Executor + ToolResult>(
+    output: &mut T,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<ExecutionResult> {
+    output.sanitize_content_fields();
+    if ctx.dry_run {
+        return Ok(ExecutionResult::success_with_data(
+            format!("DRY RUN: {}", output.dry_run_summary()),
+            serde_json::json!({"preview":true,"applied":false}),
+        ));
+    }
+    let result = output.execute_impl(ctx).await?;
+    Ok(normalize_pr_outcome(T::NAME, &serde_json::to_value(output)?, result))
+}
+
+fn normalize_pr_outcome(tool: &str, proposal: &serde_json::Value, result: ExecutionResult) -> ExecutionResult {
+    let Some(data) = result.data.as_ref() else { return result };
+    if data.get("effects").is_some() { return result; }
+    let target = data.get("pull_request_id").map(ToString::to_string).unwrap_or_else(|| "configured PR".into());
+    let state = |value: &serde_json::Value| match value.as_str() {
+        Some("posted" | "applied" | "confirmed") => EffectState::Applied,
+        Some("already-present" | "already-absent") => EffectState::AlreadySatisfied,
+        Some("failed") => EffectState::Failed,
+        Some("not-attempted" | "not-requested") => EffectState::Unattempted,
+        _ => EffectState::Uncertain,
+    };
+    let mut effects = Vec::new();
+    match tool {
+        "submit-pull-request-review" if data.get("vote_status").is_some() => {
+            if proposal.get("event").and_then(serde_json::Value::as_str) != Some("comment") {
+                effects.push(ActionEffect::new("review-vote", &target, state(&data["vote_status"])));
+            }
+            if proposal.get("body").is_some_and(|value| !value.is_null()) {
+                effects.push(ActionEffect::new("review-summary", &target, state(&data["comment_status"])));
+            }
+            if let Some(comments) = proposal.get("comments").and_then(serde_json::Value::as_array) {
+                for index in 0..comments.len() {
+                    let status = data["inline_comments"].as_array().and_then(|entries| entries.iter()
+                        .find(|entry| entry["index"].as_u64() == u64::try_from(index).ok()));
+                    effects.push(ActionEffect::new("review-inline-comment", format!("{target}:{index}"),
+                        status.map_or(EffectState::Unattempted, |entry| state(&entry["status"]))));
+                }
+            }
+            if result.is_warning() {
+                effects.push(ActionEffect::new("review-post-processing", &target, EffectState::Unattempted)
+                    .detail(&result.message));
+            }
+            if data["supersession"]["uncertain"].as_u64().is_some_and(|count| count > 0) {
+                effects.push(ActionEffect::new("review-post-processing", &target, EffectState::Uncertain)
+                    .detail(&result.message));
+            }
+        }
+        "abandon-pull-request" if data["abandoned"] == true => {
+            let already = data["already_abandoned"] == true;
+            effects.push(ActionEffect::new("abandon-pull-request", &target,
+                if already { EffectState::AlreadySatisfied } else { EffectState::Applied }));
+            if !already && proposal.get("body").is_some_and(|value| !value.is_null()) {
+                effects.push(ActionEffect::new("abandonment-comment", &target, state(&data["comment_status"])));
+            }
+        }
+        "replace-pull-request-label" if data.get("addition_status").is_some() => {
+            if data["already_replaced"] == true {
+                effects.push(ActionEffect::new("replace-label", &target, EffectState::AlreadySatisfied));
+            } else {
+                effects.push(ActionEffect::new("add-replacement-label", &target, state(&data["addition_status"])));
+                effects.push(ActionEffect::new("remove-replaced-label", &target, state(&data["removal_status"])));
+            }
+        }
+        _ => return result,
+    }
+    result.with_effects(effects)
 }
 
 /// Trait for executing tool results in Stage 3 of the pipeline.
@@ -782,8 +928,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -825,8 +971,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -867,8 +1013,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -908,8 +1054,8 @@ macro_rules! tool_result {
             ),* $(,)?
         }
     ) => {
-        $(#[$meta])*
         #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        $(#[$meta])*
         $vis struct $name {
             /// Tool identifier
             pub name: String,
@@ -980,6 +1126,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn action_effects_determine_status_without_losing_confirmed_resource_data() {
+        use EffectState::*;
+        for (states, success, warning) in [
+            (vec![Applied], true, false),
+            (vec![AlreadySatisfied], true, false),
+            (vec![Applied, Failed, Unattempted], true, true),
+            (vec![AlreadySatisfied, Failed], true, true),
+            (vec![Applied, Uncertain], false, false),
+            (vec![Failed], false, false),
+            (vec![Unattempted], false, false),
+            (vec![], false, false),
+        ] {
+            let effects = states.iter().map(|state| ActionEffect::new("test", "42", *state)).collect();
+            let result = ExecutionResult::success_with_data("result", serde_json::json!({"pull_request_id":42}))
+                .with_effects(effects);
+            assert_eq!((result.success, result.is_warning()), (success, warning), "{states:?}");
+            let data = result.data.unwrap();
+            assert_eq!(data["pull_request_id"], 42);
+            assert_eq!(data["effects"].as_array().unwrap().len(), states.len());
+        }
+    }
+
+    #[test]
     fn test_execution_result_success() {
         let r = ExecutionResult::success("all good");
         assert!(r.success);
@@ -1048,6 +1217,7 @@ mod tests {
         let ctx = ExecutionContext::default();
         let temporary_id = PullRequestTemporaryId::parse("aw_pr123").unwrap();
         let resolved = ResolvedPullRequest {
+            creation_snapshot: None,
             id: 42,
             url: "https://example.test/pr/42".to_string(),
             target: AdoRepositoryTarget {
