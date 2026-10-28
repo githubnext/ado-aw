@@ -184,6 +184,176 @@ fn apply_title_prefix(path: &str, prefix: &str) -> String {
     }
 }
 
+/// Normalize and validate the requested path against the configured
+/// path/title prefixes. Returns a failure message on rejection.
+fn resolve_effective_path(raw_path: &str, config: &CreateWikiPageConfig) -> Result<String, String> {
+    let mut effective_path = normalize_wiki_path(raw_path);
+
+    // Belt-and-suspenders: reject path traversal even after sanitize_fields()
+    if effective_path.contains("..") {
+        return Err("Wiki page path contains path traversal characters (..)".to_string());
+    }
+
+    // Enforce the configured path prefix restriction.
+    if let Some(prefix) = &config.path_prefix {
+        let normalized_prefix = normalize_wiki_path(prefix);
+        // Path must be exactly the prefix or start with "<prefix>/"
+        let under_prefix = effective_path == normalized_prefix
+            || effective_path.starts_with(&format!("{normalized_prefix}/"));
+        if !under_prefix {
+            return Err(format!(
+                "Wiki page path '{}' is not under the configured path-prefix '{}'",
+                effective_path, normalized_prefix
+            ));
+        }
+    }
+
+    // Apply the title prefix (modifies only the last segment).
+    if let Some(title_prefix) = &config.title_prefix {
+        effective_path = apply_title_prefix(&effective_path, title_prefix);
+    }
+    Ok(effective_path)
+}
+
+fn push_version_descriptor<'a>(query: &mut Vec<(&'a str, &'a str)>, branch: Option<&'a str>) {
+    if let Some(branch) = branch {
+        query.push(("versionDescriptor.version", branch));
+        query.push(("versionDescriptor.versionType", "branch"));
+    }
+}
+
+fn created_page_result(
+    body: &serde_json::Value,
+    effective_path: &str,
+    wiki_name: &str,
+    project: &str,
+) -> ExecutionResult {
+    let page_id = body
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let remote_url = body.get("remoteUrl").and_then(|v| v.as_str()).unwrap_or("");
+
+    info!("Created wiki page: {effective_path} (id={page_id})");
+
+    ExecutionResult::success_with_data(
+        format!("Created wiki page: {effective_path}"),
+        serde_json::json!({
+            "id": page_id,
+            "path": effective_path,
+            "url": remote_url,
+            "wiki": wiki_name,
+            "project": project,
+            "action": "created",
+        }),
+    )
+}
+
+/// GET the page; returns a failure result when the check fails or the page already exists.
+async fn check_page_absent(
+    client: &reqwest::Client,
+    base_url: &str,
+    effective_path: &str,
+    branch: Option<&str>,
+    token: &str,
+) -> anyhow::Result<Option<ExecutionResult>> {
+    let mut get_query: Vec<(&str, &str)> = vec![("path", effective_path), ("api-version", "7.0")];
+    push_version_descriptor(&mut get_query, branch);
+    let get_resp = client
+        .get(base_url)
+        .query(&get_query)
+        .basic_auth("", Some(token))
+        .send()
+        .await
+        .context("Failed to check existing wiki page")?;
+
+    let get_status = get_resp.status();
+
+    if !get_status.is_success() && get_status.as_u16() != 404 {
+        let error_body = get_resp.text().await.unwrap_or_default();
+        return Ok(Some(ExecutionResult::failure(format!(
+            "Failed to check wiki page (HTTP {get_status}): {error_body}"
+        ))));
+    }
+
+    if get_status.is_success() {
+        return Ok(Some(ExecutionResult::failure(format!(
+            "Wiki page '{effective_path}' already exists. \
+             Use the update-wiki-page safe output to update existing pages."
+        ))));
+    }
+    Ok(None)
+}
+
+/// PUT the new page with `If-Match: ""` and map the response to a result.
+#[allow(clippy::too_many_arguments)]
+async fn put_new_page(
+    client: &reqwest::Client,
+    base_url: &str,
+    effective_path: &str,
+    comment: &str,
+    branch: Option<&str>,
+    token: &str,
+    content: &str,
+    (wiki_name, project): (&str, &str),
+) -> anyhow::Result<ExecutionResult> {
+    debug!("Creating new wiki page: {effective_path}");
+
+    // ── PUT: create the new page using If-Match: "" for atomic create-only ──
+    //
+    // The ADO Wiki Pages API treats a PUT without If-Match as an upsert.
+    // Sending `If-Match: ""` (empty ETag) tells the API "create only — fail
+    // with 412 if this resource already exists", closing the TOCTOU race
+    // between our GET (404) and the PUT where a concurrent request could
+    // create the page first.
+    let mut put_query: Vec<(&str, &str)> = vec![
+        ("path", effective_path),
+        ("comment", comment),
+        ("api-version", "7.0"),
+    ];
+    push_version_descriptor(&mut put_query, branch);
+    let put_resp = client
+        .put(base_url)
+        .query(&put_query)
+        .header("Content-Type", "application/json")
+        .header("If-Match", "")
+        .basic_auth("", Some(token))
+        .json(&serde_json::json!({
+            "content": content
+        }))
+        .send()
+        .await
+        .context("Failed to create wiki page")?;
+
+    let put_status = put_resp.status();
+
+    // 412 Precondition Failed means the page was created between our GET
+    // and our PUT (TOCTOU). Surface this as a clean, actionable message.
+    if put_status.as_u16() == 412 {
+        return Ok(ExecutionResult::failure(format!(
+            "Wiki page '{effective_path}' already exists (conflict detected during creation). \
+             Use the update-wiki-page safe output to update existing pages."
+        )));
+    }
+
+    if put_status.is_success() {
+        let body: serde_json::Value = put_resp.json().await.unwrap_or_default();
+        Ok(created_page_result(
+            &body,
+            effective_path,
+            wiki_name,
+            project,
+        ))
+    } else {
+        let error_body = put_resp.text().await.unwrap_or_default();
+        Ok(ExecutionResult::failure(format!(
+            "Failed to create wiki page '{}' (HTTP {}): {}",
+            effective_path, put_status, error_body
+        )))
+    }
+}
+
 // ============================================================================
 // Stage-2 executor
 // ============================================================================
@@ -226,34 +396,10 @@ impl Executor for CreateWikiPageResult {
         // Use the wiki-project override if present, otherwise use the pipeline project.
         let project = config.wiki_project.as_deref().unwrap_or(pipeline_project);
 
-        // ── Path validation ───────────────────────────────────────────────────
-        let mut effective_path = normalize_wiki_path(&self.path);
-
-        // Belt-and-suspenders: reject path traversal even after sanitize_fields()
-        if effective_path.contains("..") {
-            return Ok(ExecutionResult::failure(
-                "Wiki page path contains path traversal characters (..)",
-            ));
-        }
-
-        // Enforce the configured path prefix restriction.
-        if let Some(prefix) = &config.path_prefix {
-            let normalized_prefix = normalize_wiki_path(prefix);
-            // Path must be exactly the prefix or start with "<prefix>/"
-            let under_prefix = effective_path == normalized_prefix
-                || effective_path.starts_with(&format!("{normalized_prefix}/"));
-            if !under_prefix {
-                return Ok(ExecutionResult::failure(format!(
-                    "Wiki page path '{}' is not under the configured path-prefix '{}'",
-                    effective_path, normalized_prefix
-                )));
-            }
-        }
-
-        // Apply the title prefix (modifies only the last segment).
-        if let Some(title_prefix) = &config.title_prefix {
-            effective_path = apply_title_prefix(&effective_path, title_prefix);
-        }
+        let effective_path = match resolve_effective_path(&self.path, &config) {
+            Ok(p) => p,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
+        };
 
         debug!("Effective wiki page path: {effective_path}");
 
@@ -282,37 +428,16 @@ impl Executor for CreateWikiPageResult {
             Err(msg) => return Ok(ExecutionResult::failure(msg)),
         };
 
-        // ── GET: check whether the page already exists ────────────────────────
-        let mut get_query: Vec<(&str, &str)> =
-            vec![("path", effective_path.as_str()), ("api-version", "7.0")];
-        if let Some(branch) = &resolved_branch {
-            get_query.push(("versionDescriptor.version", branch.as_str()));
-            get_query.push(("versionDescriptor.versionType", "branch"));
-        }
-        let get_resp = client
-            .get(&base_url)
-            .query(&get_query)
-            .basic_auth("", Some(token))
-            .send()
-            .await
-            .context("Failed to check existing wiki page")?;
-
-        let get_status = get_resp.status();
-
-        if !get_status.is_success() && get_status.as_u16() != 404 {
-            let error_body = get_resp.text().await.unwrap_or_default();
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to check wiki page (HTTP {get_status}): {error_body}"
-            )));
-        }
-
-        let page_exists = get_status.is_success();
-
-        if page_exists {
-            return Ok(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' already exists. \
-                 Use the update-wiki-page safe output to update existing pages."
-            )));
+        if let Some(failure) = check_page_absent(
+            &client,
+            &base_url,
+            &effective_path,
+            resolved_branch.as_deref(),
+            token,
+        )
+        .await?
+        {
+            return Ok(failure);
         }
 
         let comment = self
@@ -321,81 +446,19 @@ impl Executor for CreateWikiPageResult {
             .or(config.comment.as_deref())
             .unwrap_or("Created by agent");
 
-        debug!("Creating new wiki page: {effective_path}");
-
-        // ── PUT: create the new page using If-Match: "" for atomic create-only ──
-        //
-        // The ADO Wiki Pages API treats a PUT without If-Match as an upsert.
-        // Sending `If-Match: ""` (empty ETag) tells the API "create only — fail
-        // with 412 if this resource already exists", closing the TOCTOU race
-        // between our GET (404) and the PUT where a concurrent request could
-        // create the page first.
-        let mut put_query: Vec<(&str, &str)> = vec![
-            ("path", effective_path.as_str()),
-            ("comment", comment),
-            ("api-version", "7.0"),
-        ];
-        if let Some(branch) = &resolved_branch {
-            put_query.push(("versionDescriptor.version", branch.as_str()));
-            put_query.push(("versionDescriptor.versionType", "branch"));
-        }
-        let put_resp = client
-            .put(&base_url)
-            .query(&put_query)
-            .header("Content-Type", "application/json")
-            .header("If-Match", "")
-            .basic_auth("", Some(token))
-            .json(&serde_json::json!({
-                "content": crate::agent_stats::append_stats_to_body(
-                    &self.content,
-                    ctx,
-                    config.include_stats,
-                )
-            }))
-            .send()
-            .await
-            .context("Failed to create wiki page")?;
-
-        let put_status = put_resp.status();
-
-        // 412 Precondition Failed means the page was created between our GET
-        // and our PUT (TOCTOU). Surface this as a clean, actionable message.
-        if put_status.as_u16() == 412 {
-            return Ok(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' already exists (conflict detected during creation). \
-                 Use the update-wiki-page safe output to update existing pages."
-            )));
-        }
-
-        if put_status.is_success() {
-            let body: serde_json::Value = put_resp.json().await.unwrap_or_default();
-            let page_id = body
-                .get("id")
-                .and_then(|v| v.as_i64())
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let remote_url = body.get("remoteUrl").and_then(|v| v.as_str()).unwrap_or("");
-
-            info!("Created wiki page: {effective_path} (id={page_id})");
-
-            Ok(ExecutionResult::success_with_data(
-                format!("Created wiki page: {effective_path}"),
-                serde_json::json!({
-                    "id": page_id,
-                    "path": effective_path,
-                    "url": remote_url,
-                    "wiki": wiki_name,
-                    "project": project,
-                    "action": "created",
-                }),
-            ))
-        } else {
-            let error_body = put_resp.text().await.unwrap_or_default();
-            Ok(ExecutionResult::failure(format!(
-                "Failed to create wiki page '{}' (HTTP {}): {}",
-                effective_path, put_status, error_body
-            )))
-        }
+        let content =
+            crate::agent_stats::append_stats_to_body(&self.content, ctx, config.include_stats);
+        put_new_page(
+            &client,
+            &base_url,
+            &effective_path,
+            comment,
+            resolved_branch.as_deref(),
+            token,
+            &content,
+            (wiki_name, project),
+        )
+        .await
     }
 }
 
