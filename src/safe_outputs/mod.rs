@@ -430,6 +430,77 @@ fn split_repository_target_name(
     }
 }
 
+fn lookup_repository_target_config(
+    alias: &str,
+    selector: &str,
+    current_organization: &str,
+    ctx: &ExecutionContext,
+) -> Result<crate::safe_outputs::result::AdoRepositoryTargetConfig, ExecutionResult> {
+    let config = ctx.repository_targets.get(alias).cloned().or_else(|| {
+        ctx.allowed_repositories.get(alias).map(|name| {
+            crate::safe_outputs::result::AdoRepositoryTargetConfig {
+                name: name.clone(),
+                organization: None,
+                endpoint: None,
+            }
+        })
+    });
+    let Some(config) = config else {
+        return Err(ExecutionResult::failure(format!(
+            "Repository alias '{alias}' has no configured target metadata"
+        )));
+    };
+    if config.organization.is_none()
+        && (config.endpoint.is_some() || ctx.cross_organization_repositories.contains(alias))
+    {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{selector}' (checkout alias '{alias}') uses an endpoint-backed \
+             Azure Repos checkout but has no `repos.organization`; the target organization \
+             cannot be resolved safely."
+        )));
+    }
+    if config.endpoint.is_some()
+        && config
+            .organization
+            .as_deref()
+            .is_some_and(|organization| organization.eq_ignore_ascii_case(current_organization))
+    {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{selector}' (checkout alias '{alias}') uses an endpoint-backed \
+             Azure Repos checkout but declares the pipeline's current organization \
+             '{current_organization}'. Remove the unnecessary endpoint for a same-organization \
+             repository or set `repos.organization` to the actual target organization."
+        )));
+    }
+    Ok(config)
+}
+
+fn enforce_cross_organization_write_policy(
+    selector: &str,
+    organization: &str,
+    project: &str,
+    repository_name: &str,
+    ctx: &ExecutionContext,
+) -> Result<(), ExecutionResult> {
+    if ctx.write_connection_type != Some(crate::compile::types::WriteConnectionType::AzureDevOps) {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{selector}' resolves to cross-organization target \
+             '{organization}/{project}/{repository_name}', but permissions.write must use \
+             `connection-type: azureDevOps`."
+        )));
+    }
+    let scope = repository_write_scope_key(organization, project, repository_name);
+    if !ctx.write_allowed_repositories.contains(&scope) {
+        return Err(ExecutionResult::failure(format!(
+            "Repository '{selector}' resolves to cross-organization target \
+             '{organization}/{project}/{repository_name}', which is not listed in \
+             permissions.write.allow."
+        )));
+    }
+
+    Ok(())
+}
+
 /// Resolve a repository selector to an exact organization/project/repository
 /// destination and enforce the additional cross-organization write policy.
 pub(crate) fn resolve_repository_write_target(
@@ -472,43 +543,7 @@ pub(crate) fn resolve_repository_write_target(
         });
     }
 
-    let config = ctx.repository_targets.get(&alias).cloned().or_else(|| {
-        ctx.allowed_repositories.get(&alias).map(|name| {
-            crate::safe_outputs::result::AdoRepositoryTargetConfig {
-                name: name.clone(),
-                organization: None,
-                endpoint: None,
-            }
-        })
-    });
-    let Some(config) = config else {
-        return Err(ExecutionResult::failure(format!(
-            "Repository alias '{alias}' has no configured target metadata"
-        )));
-    };
-    if config.organization.is_none()
-        && (config.endpoint.is_some() || ctx.cross_organization_repositories.contains(&alias))
-    {
-        return Err(ExecutionResult::failure(format!(
-            "Repository '{selector}' (checkout alias '{alias}') uses an endpoint-backed \
-             Azure Repos checkout but has no `repos.organization`; the target organization \
-             cannot be resolved safely."
-        )));
-    }
-    if config.endpoint.is_some()
-        && config
-            .organization
-            .as_deref()
-            .is_some_and(|organization| organization.eq_ignore_ascii_case(current_organization))
-    {
-        return Err(ExecutionResult::failure(format!(
-            "Repository '{selector}' (checkout alias '{alias}') uses an endpoint-backed \
-             Azure Repos checkout but declares the pipeline's current organization \
-             '{current_organization}'. Remove the unnecessary endpoint for a same-organization \
-             repository or set `repos.organization` to the actual target organization."
-        )));
-    }
-
+    let config = lookup_repository_target_config(&alias, selector, current_organization, ctx)?;
     let (project, repository_name) = split_repository_target_name(&config.name, current_project)?;
     let organization = config
         .organization
@@ -516,23 +551,13 @@ pub(crate) fn resolve_repository_write_target(
         .unwrap_or(current_organization);
     let cross_organization = !organization.eq_ignore_ascii_case(current_organization);
     if cross_organization {
-        if ctx.write_connection_type
-            != Some(crate::compile::types::WriteConnectionType::AzureDevOps)
-        {
-            return Err(ExecutionResult::failure(format!(
-                "Repository '{selector}' resolves to cross-organization target \
-                 '{organization}/{project}/{repository_name}', but permissions.write must use \
-                 `connection-type: azureDevOps`."
-            )));
-        }
-        let scope = repository_write_scope_key(organization, &project, &repository_name);
-        if !ctx.write_allowed_repositories.contains(&scope) {
-            return Err(ExecutionResult::failure(format!(
-                "Repository '{selector}' resolves to cross-organization target \
-                 '{organization}/{project}/{repository_name}', which is not listed in \
-                 permissions.write.allow."
-            )));
-        }
+        enforce_cross_organization_write_policy(
+            selector,
+            organization,
+            &project,
+            &repository_name,
+            ctx,
+        )?;
     }
 
     Ok(AdoRepositoryTarget {
