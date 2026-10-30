@@ -131,39 +131,9 @@ impl Executor for ReplyToPrCommentResult {
         let config: ReplyToPrCommentConfig = ctx.get_tool_config("reply-to-pr-comment")?;
         debug!("Config: {:?}", config);
 
-        let repository = self.repository.as_deref().unwrap_or("self");
-
-        // Validate repository against allowed-repositories config
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&repository.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                repository
-            )));
-        }
-
-        // Determine the repository name for the API call
-        let repo_name = if repository == "self" || repository.is_empty() {
-            ctx.repository_name
-                .as_ref()
-                .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
-                .clone()
-        } else {
-            match crate::safe_outputs::lookup_allowed_repository(
-                repository,
-                &ctx.allowed_repositories,
-            ) {
-                Some(name) => name.clone(),
-                None => {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Repository alias '{}' not found in allowed repositories",
-                        repository
-                    )));
-                }
-            }
+        let repo_name = match self.resolve_repo_name(&config, ctx)? {
+            Ok(name) => name,
+            Err(failure) => return Ok(failure),
         };
 
         // Build comment content with optional prefix
@@ -172,15 +142,7 @@ impl Executor for ReplyToPrCommentResult {
             None => self.content.clone(),
         };
 
-        // Build the API URL for adding a comment to an existing thread
-        let url = format!(
-            "{}/{}/_apis/git/repositories/{}/pullRequests/{}/threads/{}/comments?api-version=7.1",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            utf8_percent_encode(&repo_name, PATH_SEGMENT),
-            self.pull_request_id,
-            self.thread_id,
-        );
+        let url = self.thread_comments_url(org_url, project, &repo_name);
         debug!("API URL: {}", url);
 
         // parentCommentId=1 targets the root comment in the thread. In ADO,
@@ -206,6 +168,68 @@ impl Executor for ReplyToPrCommentResult {
             .await
             .context("Failed to send request to Azure DevOps")?;
 
+        self.build_result(response, &repo_name, project).await
+    }
+}
+
+impl ReplyToPrCommentResult {
+    /// Validates the repository against config and resolves its API name.
+    /// The inner `Err` carries a user-facing failure result.
+    fn resolve_repo_name(
+        &self,
+        config: &ReplyToPrCommentConfig,
+        ctx: &ExecutionContext,
+    ) -> anyhow::Result<Result<String, ExecutionResult>> {
+        let repository = self.repository.as_deref().unwrap_or("self");
+
+        if !config.allowed_repositories.is_empty()
+            && !config
+                .allowed_repositories
+                .contains(&repository.to_string())
+        {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list",
+                repository
+            ))));
+        }
+
+        if repository == "self" || repository.is_empty() {
+            let name = ctx
+                .repository_name
+                .as_ref()
+                .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
+                .clone();
+            return Ok(Ok(name));
+        }
+
+        match crate::safe_outputs::lookup_allowed_repository(repository, &ctx.allowed_repositories)
+        {
+            Some(name) => Ok(Ok(name.clone())),
+            None => Ok(Err(ExecutionResult::failure(format!(
+                "Repository alias '{}' not found in allowed repositories",
+                repository
+            )))),
+        }
+    }
+
+    /// API URL for adding a comment to an existing thread.
+    fn thread_comments_url(&self, org_url: &str, project: &str, repo_name: &str) -> String {
+        format!(
+            "{}/{}/_apis/git/repositories/{}/pullRequests/{}/threads/{}/comments?api-version=7.1",
+            org_url.trim_end_matches('/'),
+            utf8_percent_encode(project, PATH_SEGMENT),
+            utf8_percent_encode(repo_name, PATH_SEGMENT),
+            self.pull_request_id,
+            self.thread_id,
+        )
+    }
+
+    async fn build_result(
+        &self,
+        response: reqwest::Response,
+        repo_name: &str,
+        project: &str,
+    ) -> anyhow::Result<ExecutionResult> {
         if response.status().is_success() {
             let body: serde_json::Value = response
                 .json()
