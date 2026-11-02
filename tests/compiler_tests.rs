@@ -11759,3 +11759,56 @@ fn test_compile_warns_on_volume_arg_smuggling_sensitive_mount() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+fn compile_source_expecting_failure(label: &str, source: &str) -> String {
+    let temp_dir = std::env::temp_dir().join(format!("ado-aw-{label}-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+    let input = temp_dir.join("agent.md");
+    fs::write(&input, source).expect("Failed to write test input");
+    let output_path = temp_dir.join("agent.yml");
+    let output = std::process::Command::new(PathBuf::from(env!("CARGO_BIN_EXE_ado-aw")))
+        .args([
+            "compile",
+            input.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run compiler");
+    let _ = fs::remove_dir_all(&temp_dir);
+    assert!(!output.status.success(), "Compiler should have failed");
+    String::from_utf8_lossy(&output.stderr).to_string()
+}
+
+#[test]
+fn test_compile_rejects_markdown_without_front_matter() {
+    let stderr = compile_source_expecting_failure("no-fm", "## Just a heading\n\nNo front matter.\n");
+    assert!(
+        stderr.contains("must start with YAML front matter"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_assign_work_item_rejects_non_positive_target_id() {
+    let stderr = compile_source_expecting_failure(
+        "awi-zero",
+        "---\nname: \"A\"\ndescription: \"d\"\npermissions:\n  write: my-write-sc\nsafe-outputs:\n  assign-work-item:\n    target: 0\n---\n\n## A\n\nDo it.\n",
+    );
+    assert!(
+        stderr.contains("assign-work-item.target must be positive"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_assign_work_item_rejects_unknown_target_pattern() {
+    let stderr = compile_source_expecting_failure(
+        "awi-pattern",
+        "---\nname: \"A\"\ndescription: \"d\"\npermissions:\n  write: my-write-sc\nsafe-outputs:\n  assign-work-item:\n    target: \"abc\"\n---\n\n## A\n\nDo it.\n",
+    );
+    assert!(
+        stderr.contains("assign-work-item.target must be"),
+        "unexpected stderr: {stderr}"
+    );
+}
