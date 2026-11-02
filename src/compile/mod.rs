@@ -592,20 +592,11 @@ pub async fn compile_all_pipelines(skip_integrity: bool, debug_pipeline: bool) -
     Ok(())
 }
 
-/// Check that a compiled pipeline YAML matches its source markdown.
-///
-/// Reads the `@ado-aw` header from `pipeline_path` to discover the source
-/// markdown file, compiles it fresh, and compares the canonicalized output
-/// against the existing pipeline file. When they differ, a unified diff is
-/// printed to stderr showing exactly which lines changed.
-pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
-    let pipeline_path = Path::new(pipeline_path);
-
-    // Read existing pipeline and extract header to discover source path
-    let existing = tokio::fs::read_to_string(pipeline_path)
-        .await
-        .with_context(|| format!("Failed to read pipeline file: {}", pipeline_path.display()))?;
-
+/// Extract the `@ado-aw` header from an existing pipeline, warning on version skew.
+fn read_pipeline_header(
+    existing: &str,
+    pipeline_path: &Path,
+) -> Result<crate::detect::HeaderMetadata> {
     let header_meta = existing
         .lines()
         .take(5)
@@ -626,10 +617,16 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             header_meta.version, current_version
         );
     }
+    Ok(header_meta)
+}
 
-    // The header stores the source path relative to the repository root.
-    // Walk up from the pipeline file to find the .git directory, then resolve
-    // the source path relative to that root.
+/// The header stores the source path relative to the repository root.
+/// Walk up from the pipeline file to find the .git directory, then resolve
+/// the source path relative to that root.
+fn resolve_header_source_path(
+    header_meta: &crate::detect::HeaderMetadata,
+    pipeline_path: &Path,
+) -> Result<PathBuf> {
     let pipeline_abs = if pipeline_path.is_absolute() {
         pipeline_path.to_path_buf()
     } else {
@@ -643,7 +640,24 @@ pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
             pipeline_path.display()
         )
     })?;
-    let source_path = repo_root.join(&header_meta.source);
+    Ok(repo_root.join(&header_meta.source))
+}
+
+/// Check that a compiled pipeline YAML matches its source markdown.
+///
+/// Reads the `@ado-aw` header from `pipeline_path` to discover the source
+/// markdown file, compiles it fresh, and compares the canonicalized output
+/// against the existing pipeline file. When they differ, a unified diff is
+/// printed to stderr showing exactly which lines changed.
+pub async fn check_pipeline(pipeline_path: &str) -> Result<()> {
+    let pipeline_path = Path::new(pipeline_path);
+
+    let existing = tokio::fs::read_to_string(pipeline_path)
+        .await
+        .with_context(|| format!("Failed to read pipeline file: {}", pipeline_path.display()))?;
+
+    let header_meta = read_pipeline_header(&existing, pipeline_path)?;
+    let source_path = resolve_header_source_path(&header_meta, pipeline_path)?;
 
     info!(
         "Checking pipeline integrity: {} -> {} (source from header)",
