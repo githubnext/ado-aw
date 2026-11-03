@@ -151,6 +151,59 @@ fn resolve_reference(
     }
 }
 
+/// Check numeric IDs against the configured `target` scope, returning the
+/// failure message when a link is not permitted.
+fn check_target_scope(
+    config: &LinkWorkItemsConfig,
+    (source_id, source_needs_target): (i64, bool),
+    (target_id, target_needs_target): (i64, bool),
+) -> Option<String> {
+    if !(source_needs_target || target_needs_target) {
+        return None;
+    }
+    let Some(target) = &config.target else {
+        return Some(
+            "link-work-items requires a 'target' field in safe-outputs configuration \
+             to scope which work items can be linked. Example:\n  safe-outputs:\n    \
+             link-work-items:\n      target: \"*\""
+                .to_string(),
+        );
+    };
+    if source_needs_target && target.allows_id(source_id) == Some(false) {
+        return Some(format!(
+            "Source work item #{source_id} is not allowed by the configured target scope"
+        ));
+    }
+    if target_needs_target && target.allows_id(target_id) == Some(false) {
+        return Some(format!(
+            "Target work item #{target_id} is not allowed by the configured target scope"
+        ));
+    }
+    // Area path validation is deferred — would need API calls for both IDs.
+    // For now, ID-based and wildcard scoping is enforced.
+    None
+}
+
+/// Build the JSON Patch document adding a relation to the target work item.
+fn build_patch_doc(
+    relation_type: &str,
+    target_url: &str,
+    comment: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let mut relation_value = serde_json::json!({
+        "rel": relation_type,
+        "url": target_url,
+    });
+    if let Some(comment) = comment {
+        relation_value["attributes"] = serde_json::json!({ "comment": comment });
+    }
+    vec![serde_json::json!({
+        "op": "add",
+        "path": "/relations/-",
+        "value": relation_value,
+    })]
+}
+
 #[async_trait::async_trait]
 impl Executor for LinkWorkItemsResult {
     fn dry_run_summary(&self) -> String {
@@ -204,30 +257,12 @@ impl Executor for LinkWorkItemsResult {
             ));
         }
 
-        // Validate numeric work item IDs against target scope
-        if source_needs_target || target_needs_target {
-            let Some(target) = &config.target else {
-                return Ok(ExecutionResult::failure(
-                    "link-work-items requires a 'target' field in safe-outputs configuration \
-                     to scope which work items can be linked. Example:\n  safe-outputs:\n    \
-                     link-work-items:\n      target: \"*\""
-                        .to_string(),
-                ));
-            };
-            // Check source_id
-            if source_needs_target && target.allows_id(source_id) == Some(false) {
-                return Ok(ExecutionResult::failure(format!(
-                    "Source work item #{source_id} is not allowed by the configured target scope"
-                )));
-            }
-            // Check target_id
-            if target_needs_target && target.allows_id(target_id) == Some(false) {
-                return Ok(ExecutionResult::failure(format!(
-                    "Target work item #{target_id} is not allowed by the configured target scope"
-                )));
-            }
-            // Area path validation is deferred — would need API calls for both IDs.
-            // For now, ID-based and wildcard scoping is enforced.
+        if let Some(message) = check_target_scope(
+            &config,
+            (source_id, source_needs_target),
+            (target_id, target_needs_target),
+        ) {
+            return Ok(ExecutionResult::failure(message));
         }
 
         // Validate link type against configured allow-list
@@ -260,23 +295,7 @@ impl Executor for LinkWorkItemsResult {
             target_id,
         );
 
-        // Build the JSON Patch body
-        let mut relation_value = serde_json::json!({
-            "rel": relation_type,
-            "url": target_url,
-        });
-
-        if let Some(ref comment) = self.comment {
-            relation_value["attributes"] = serde_json::json!({
-                "comment": comment,
-            });
-        }
-
-        let patch_doc = vec![serde_json::json!({
-            "op": "add",
-            "path": "/relations/-",
-            "value": relation_value,
-        })];
+        let patch_doc = build_patch_doc(relation_type, &target_url, self.comment.as_deref());
 
         // PATCH https://dev.azure.com/{org}/{project}/_apis/wit/workitems/{id}?api-version=7.1
         let url = format!(
