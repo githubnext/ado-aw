@@ -1601,6 +1601,93 @@ fn detection_job_needs_ado_script_bundle(engine_config: &EngineConfig) -> bool {
     engine_config.github_app_token().is_some()
 }
 
+fn push_threat_analysis_steps(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+) -> Result<()> {
+    // Detection gets its own effective engine install/config path.
+    push_raw_yaml_if_nonempty(steps, &cfg.detection_engine_install_steps_yaml)?;
+    // No NuGetAuthenticate@1: this job also runs AWF with `--env-all`
+    // (see the Agent job's download step).
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
+    steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
+    steps.extend(download_awf_step(front_matter.supply_chain()));
+    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
+
+    // include_str! may carry CRLF line endings on Windows; normalise to LF
+    // before marker substitution and appending operator instructions.
+    let threat_prompt_raw = include_str!("../data/threat-analysis.md");
+    let mut threat_prompt = threat_prompt_raw
+        .replace("\r\n", "\n")
+        .replace("{{ source_path }}", &cfg.source_path)
+        .replace("{{ agent_name }}", &cfg.agent_display_name)
+        .replace("{{ agent_description }}", &front_matter.description)
+        .replace("{{ working_directory }}", &cfg.working_directory);
+    if let Some(custom_prompt) = cfg
+        .threat_detection
+        .prompt
+        .as_deref()
+        .filter(|prompt| !prompt.is_empty())
+    {
+        threat_prompt.push_str("\n\n## Additional Instructions\n\n");
+        threat_prompt.push_str(&custom_prompt.replace("\r\n", "\n"));
+    }
+    steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
+        &threat_prompt,
+    )?));
+    steps.push(Step::Bash(setup_compiler_step()));
+
+    // Stage auth support before custom pre-steps, but mint credentials only
+    // after them so trusted setup code receives the least privilege needed.
+    if detection_job_needs_ado_script_bundle(&cfg.detection_engine_config) {
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
+    }
+    for user_step in &cfg.threat_detection.steps {
+        steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
+    }
+
+    if let Some(app_token) = cfg.detection_engine_config.github_app_token() {
+        steps.push(super::extensions::ado_script::github_app_token_step_typed(
+            app_token,
+        )?);
+    }
+    if let Some(token) = cfg
+        .detection_engine_config
+        .provider()
+        .and_then(|provider| provider.token.as_ref())
+    {
+        steps.push(Step::Task(provider_token_mint_step(token)));
+    }
+    steps.push(Step::Bash(run_threat_analysis_step(
+        &cfg.detection_allowed_domains,
+        &cfg.working_directory,
+        &cfg.engine_run_detection,
+        &cfg.detection_byom_exclude_keys,
+        &cfg.detection_engine_env,
+        crate::engine::github_token_source_var(&cfg.detection_engine_config),
+        front_matter.supply_chain(),
+    )?));
+    if let Some(app_token) = cfg.detection_engine_config.github_app_token()
+        && !app_token.skip_token_revocation
+    {
+        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?);
+    }
+    for user_step in &cfg.threat_detection.post_steps {
+        steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
+    }
+    steps.push(Step::Bash(prepare_analyzed_outputs_step()));
+    steps.push(Step::Bash(evaluate_threat_analysis_step()));
+    Ok(())
+}
+
 fn build_detection_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -1620,87 +1707,7 @@ fn build_detection_job(
         &cfg.working_directory,
     )));
     if cfg.threat_detection.is_enabled() {
-        // Detection gets its own effective engine install/config path.
-        push_raw_yaml_if_nonempty(&mut steps, &cfg.detection_engine_install_steps_yaml)?;
-        // No NuGetAuthenticate@1: this job also runs AWF with `--env-all`
-        // (see the Agent job's download step).
-        steps.extend(download_compiler_step(
-            &cfg.compiler_version,
-            front_matter.supply_chain(),
-        ));
-        steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
-        steps.extend(download_awf_step(front_matter.supply_chain()));
-        steps.extend(prepull_images_step(false, front_matter.supply_chain()));
-
-        // include_str! may carry CRLF line endings on Windows; normalise to LF
-        // before marker substitution and appending operator instructions.
-        let threat_prompt_raw = include_str!("../data/threat-analysis.md");
-        let mut threat_prompt = threat_prompt_raw
-            .replace("\r\n", "\n")
-            .replace("{{ source_path }}", &cfg.source_path)
-            .replace("{{ agent_name }}", &cfg.agent_display_name)
-            .replace("{{ agent_description }}", &front_matter.description)
-            .replace("{{ working_directory }}", &cfg.working_directory);
-        if let Some(custom_prompt) = cfg
-            .threat_detection
-            .prompt
-            .as_deref()
-            .filter(|prompt| !prompt.is_empty())
-        {
-            threat_prompt.push_str("\n\n## Additional Instructions\n\n");
-            threat_prompt.push_str(&custom_prompt.replace("\r\n", "\n"));
-        }
-        steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
-            &threat_prompt,
-        )?));
-        steps.push(Step::Bash(setup_compiler_step()));
-
-        // Stage auth support before custom pre-steps, but mint credentials only
-        // after them so trusted setup code receives the least privilege needed.
-        if detection_job_needs_ado_script_bundle(&cfg.detection_engine_config) {
-            steps.extend(
-                super::extensions::ado_script::install_and_download_steps_typed(
-                    front_matter.supply_chain(),
-                ),
-            );
-        }
-        for user_step in &cfg.threat_detection.steps {
-            steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
-        }
-
-        if let Some(app_token) = cfg.detection_engine_config.github_app_token() {
-            steps.push(super::extensions::ado_script::github_app_token_step_typed(
-                app_token,
-            )?);
-        }
-        if let Some(token) = cfg
-            .detection_engine_config
-            .provider()
-            .and_then(|provider| provider.token.as_ref())
-        {
-            steps.push(Step::Task(provider_token_mint_step(token)));
-        }
-        steps.push(Step::Bash(run_threat_analysis_step(
-            &cfg.detection_allowed_domains,
-            &cfg.working_directory,
-            &cfg.engine_run_detection,
-            &cfg.detection_byom_exclude_keys,
-            &cfg.detection_engine_env,
-            crate::engine::github_token_source_var(&cfg.detection_engine_config),
-            front_matter.supply_chain(),
-        )?));
-        if let Some(app_token) = cfg.detection_engine_config.github_app_token()
-            && !app_token.skip_token_revocation
-        {
-            steps.push(
-                super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?,
-            );
-        }
-        for user_step in &cfg.threat_detection.post_steps {
-            steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
-        }
-        steps.push(Step::Bash(prepare_analyzed_outputs_step()));
-        steps.push(Step::Bash(evaluate_threat_analysis_step()));
+        push_threat_analysis_steps(&mut steps, front_matter, cfg)?;
     } else {
         steps.push(Step::Bash(prepare_analyzed_outputs_passthrough_step()));
         steps.push(Step::Bash(threat_analysis_disabled_step()));
