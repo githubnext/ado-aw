@@ -69,37 +69,11 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
     let repositories = take_key(fm, "repositories").expect("checked above");
     let checkout = take_key(fm, "checkout");
 
-    let repositories_seq = match repositories {
-        Value::Sequence(s) => s,
-        Value::Null => Vec::new(),
-        other => bail!(
-            "front matter `repositories:` must be a sequence, got {}",
-            describe(&other)
-        ),
-    };
+    let repositories_seq = parse_repositories(repositories)?;
 
     // Collect the checkout alias allow-list. Order doesn't matter for
     // membership; we preserve `repositories:` order in the output.
-    let checkout_aliases: Vec<String> = match checkout {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Sequence(s)) => {
-            let mut out = Vec::with_capacity(s.len());
-            for v in s {
-                match v {
-                    Value::String(name) => out.push(name),
-                    other => bail!(
-                        "front matter `checkout:` entries must be strings, got {}",
-                        describe(&other)
-                    ),
-                }
-            }
-            out
-        }
-        Some(other) => bail!(
-            "front matter `checkout:` must be a sequence of strings, got {}",
-            describe(&other)
-        ),
-    };
+    let checkout_aliases = parse_checkout_aliases(checkout)?;
 
     // Trivially-empty sources: an empty `repositories:` (and either no
     // `checkout:` or an empty one) carries no semantic content. We
@@ -118,83 +92,11 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
 
     let mut repos_seq: Vec<Value> = Vec::with_capacity(repositories_seq.len());
     for repo in repositories_seq {
-        let mut repo_map = match repo {
-            Value::Mapping(m) => m,
-            other => bail!(
-                "front matter `repositories:` entries must be mappings, got {}",
-                describe(&other)
-            ),
-        };
-
-        // The legacy `repository:` key becomes the new `alias:` key.
-        let alias_value = repo_map.remove(Value::String("repository".to_string()));
-        let alias_str = match alias_value.as_ref() {
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(other) => bail!(
-                "front matter `repositories:` entry has non-string `repository:` field ({}); \
-                 manual migration required",
-                describe(other)
-            ),
-            None => None,
-        };
-
-        // Build the new entry. Preserve insertion order:
-        // alias, type, name, ref, checkout.
-        let mut new_entry = Mapping::new();
-        if let Some(alias) = alias_str.as_deref() {
-            new_entry.insert(
-                Value::String("alias".to_string()),
-                Value::String(alias.to_string()),
-            );
+        let (entry, matched_alias) = convert_repository(repo, has_checkout, &checkout_aliases)?;
+        if let Some(alias) = matched_alias {
+            matched.insert(alias);
         }
-        if let Some(v) = repo_map.remove(Value::String("type".to_string())) {
-            new_entry.insert(Value::String("type".to_string()), v);
-        }
-        if let Some(v) = repo_map.remove(Value::String("name".to_string())) {
-            new_entry.insert(Value::String("name".to_string()), v);
-        } else {
-            bail!(
-                "front matter `repositories:` entry is missing the required `name:` field; \
-                 manual migration required"
-            );
-        }
-        if let Some(v) = repo_map.remove(Value::String("ref".to_string())) {
-            new_entry.insert(Value::String("ref".to_string()), v);
-        }
-        // Carry over any unknown keys verbatim so the codemod is
-        // forward-compatible with future ADO `resources.repositories`
-        // fields we don't yet model.
-        for (k, v) in repo_map {
-            new_entry.insert(k, v);
-        }
-
-        // Determine checkout flag. If `checkout:` was absent entirely,
-        // legacy semantics treat all repositories as resource-only
-        // (the agent job didn't clone any). If `checkout:` was
-        // present, only listed aliases get cloned.
-        let do_checkout = if !has_checkout {
-            // Legacy: no `checkout:` block at all means nothing was
-            // cloned by the agent.
-            false
-        } else if let Some(alias) = alias_str.as_deref() {
-            let listed = checkout_aliases.iter().any(|a| a == alias);
-            if listed {
-                matched.insert(alias.to_string());
-            }
-            listed
-        } else {
-            // Anonymous entry (no `repository:` alias) cannot be
-            // referenced from `checkout:` — treat as resource-only.
-            false
-        };
-
-        // Only emit the `checkout` field when it deviates from the
-        // default of `true`. Keeps rewritten output compact.
-        if !do_checkout {
-            new_entry.insert(Value::String("checkout".to_string()), Value::Bool(false));
-        }
-
-        repos_seq.push(Value::Mapping(new_entry));
+        repos_seq.push(Value::Mapping(entry));
     }
 
     // Surface dangling checkout aliases (listed but no matching repo).
@@ -218,6 +120,108 @@ fn apply_codemod(fm: &mut Mapping, _ctx: &CodemodContext) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+fn parse_repositories(repositories: Value) -> Result<Vec<Value>> {
+    match repositories {
+        Value::Sequence(s) => Ok(s),
+        Value::Null => Ok(Vec::new()),
+        other => bail!(
+            "front matter `repositories:` must be a sequence, got {}",
+            describe(&other)
+        ),
+    }
+}
+
+fn parse_checkout_aliases(checkout: Option<Value>) -> Result<Vec<String>> {
+    match checkout {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Sequence(s)) => s
+            .into_iter()
+            .map(|v| match v {
+                Value::String(name) => Ok(name),
+                other => bail!(
+                    "front matter `checkout:` entries must be strings, got {}",
+                    describe(&other)
+                ),
+            })
+            .collect(),
+        Some(other) => bail!(
+            "front matter `checkout:` must be a sequence of strings, got {}",
+            describe(&other)
+        ),
+    }
+}
+
+/// Converts one legacy `repositories:` entry into a `repos:` entry.
+/// Returns the new entry and the alias if it matched the `checkout:` list.
+fn convert_repository(
+    repo: Value,
+    has_checkout: bool,
+    checkout_aliases: &[String],
+) -> Result<(Mapping, Option<String>)> {
+    let mut repo_map = match repo {
+        Value::Mapping(m) => m,
+        other => bail!(
+            "front matter `repositories:` entries must be mappings, got {}",
+            describe(&other)
+        ),
+    };
+
+    // The legacy `repository:` key becomes the new `alias:` key.
+    let alias_str = match repo_map.remove(Value::String("repository".to_string())) {
+        Some(Value::String(s)) => Some(s),
+        Some(other) => bail!(
+            "front matter `repositories:` entry has non-string `repository:` field ({}); \
+             manual migration required",
+            describe(&other)
+        ),
+        None => None,
+    };
+
+    // Build the new entry. Preserve insertion order:
+    // alias, type, name, ref, checkout.
+    let mut new_entry = Mapping::new();
+    if let Some(alias) = alias_str.as_deref() {
+        new_entry.insert(
+            Value::String("alias".to_string()),
+            Value::String(alias.to_string()),
+        );
+    }
+    if let Some(v) = repo_map.remove(Value::String("type".to_string())) {
+        new_entry.insert(Value::String("type".to_string()), v);
+    }
+    if let Some(v) = repo_map.remove(Value::String("name".to_string())) {
+        new_entry.insert(Value::String("name".to_string()), v);
+    } else {
+        bail!(
+            "front matter `repositories:` entry is missing the required `name:` field; \
+             manual migration required"
+        );
+    }
+    if let Some(v) = repo_map.remove(Value::String("ref".to_string())) {
+        new_entry.insert(Value::String("ref".to_string()), v);
+    }
+    // Carry over any unknown keys verbatim so the codemod is
+    // forward-compatible with future ADO `resources.repositories`
+    // fields we don't yet model.
+    for (k, v) in repo_map {
+        new_entry.insert(k, v);
+    }
+
+    // Legacy semantics: without a `checkout:` block nothing was cloned;
+    // with one, only listed aliases were. Anonymous entries cannot be
+    // referenced from `checkout:`, so they are resource-only.
+    let matched_alias =
+        alias_str.filter(|alias| has_checkout && checkout_aliases.iter().any(|a| a == alias));
+
+    // Only emit the `checkout` field when it deviates from the
+    // default of `true`. Keeps rewritten output compact.
+    if matched_alias.is_none() {
+        new_entry.insert(Value::String("checkout".to_string()), Value::Bool(false));
+    }
+
+    Ok((new_entry, matched_alias))
 }
 
 fn describe(v: &Value) -> &'static str {
@@ -402,8 +406,14 @@ mod tests {
         // warning.
         let mut m: Mapping = serde_yaml::from_str("name: x\nrepositories: []\n").unwrap();
         let changed = apply_codemod(&mut m, &CodemodContext::current()).expect("apply");
-        assert!(!changed, "empty repositories must not trigger a migration warning");
-        assert!(!m.contains_key(Value::String("repos".into())), "no repos key should be emitted");
+        assert!(
+            !changed,
+            "empty repositories must not trigger a migration warning"
+        );
+        assert!(
+            !m.contains_key(Value::String("repos".into())),
+            "no repos key should be emitted"
+        );
         assert!(
             !m.contains_key(Value::String("repositories".into())),
             "empty repositories stub should be cleaned up"
