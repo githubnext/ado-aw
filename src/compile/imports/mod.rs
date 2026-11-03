@@ -848,155 +848,180 @@ async fn resolve_spec(
     ref_cache: &mut HashMap<String, CommitSha>,
     ref_metadata: &mut RefMetadata,
 ) -> Result<Option<ResolvedNode>> {
-    match &spec {
-        ParsedImportSpec::Local {
-            path,
-            section,
-            optional,
-        } => {
-            let ResolutionContext::Local { base_dir } = context else {
-                anyhow::bail!("internal error: unresolved local import has a remote origin");
-            };
-            let local_path = resolve_local_path(base_dir, repo_root, path)?;
-            let canonical = match fs::canonicalize(&local_path) {
-                Ok(path) => path,
-                Err(error) if *optional && error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(None);
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to resolve local import {}", local_path.display())
-                    });
-                }
-            };
-            ensure_path_within_repo(&canonical, repo_root)?;
-            let bytes = match fs::read(&canonical) {
-                Ok(bytes) => bytes,
-                Err(error) if *optional && error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(None);
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to read local import {}", canonical.display())
-                    });
-                }
-            };
-            enforce_manifest_size(bytes.len(), &canonical.display().to_string())?;
-            let digest = sha256_hex(&bytes);
-            let (front_matter, body) = parse_manifest_bytes(&bytes, section.as_deref())?;
-            let identity_path = local_identity_path(&canonical);
-            Ok(Some(ResolvedNode {
-                import: ResolvedImport {
-                    entry: entry.clone(),
-                    spec: spec.clone(),
-                    front_matter,
-                    body,
-                    provenance: ImportProvenance {
-                        source: canonical.display().to_string(),
-                        requested_ref: None,
-                        sha: None,
-                        manifest_digest: digest,
-                    },
-                },
-                identity: ResolvedIdentity::Local {
-                    path: identity_path,
-                    section: section.clone(),
-                },
-                child_context: ResolutionContext::Local {
-                    base_dir: canonical
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .to_path_buf(),
-                },
-            }))
-        }
-        ParsedImportSpec::Remote {
-            source,
-            project,
-            repository,
-            path,
-            requested_ref,
-            section,
-            optional,
-        } => {
-            let remote_identity = fetcher.remote_identity(&spec).await?;
-            if *optional {
-                match fetcher.ensure_repository_accessible(&spec).await {
-                    Ok(()) => {}
-                    Err(error) if is_import_not_found(&error) => return Ok(None),
-                    Err(error) => return Err(error),
-                }
-            }
-            let ref_key = ref_metadata_key(&remote_identity, repository, requested_ref);
-            let resolved_sha = match resolve_remote_sha(
-                &spec,
-                &remote_identity,
-                &ref_key,
-                repo_root,
-                fetcher,
-                ref_cache,
-                ref_metadata,
-            )
-            .await
-            {
-                Ok(sha) => sha,
-                Err(error) if *optional && is_import_not_found(&error) => return Ok(None),
-                Err(error) => return Err(error),
-            };
-            // Persist the ref movement before fetching the path. If the new
-            // commit no longer contains an optional manifest, retaining the
-            // previous SHA here would let a later offline compile incorrectly
-            // resurrect stale cached content.
-            ref_metadata.record(&remote_identity, repository, requested_ref, &resolved_sha);
-            write_ref_metadata(repo_root, ref_metadata)?;
-            let bytes = match read_remote_manifest(
-                repo_root,
-                &spec,
-                &remote_identity,
-                &resolved_sha,
-                fetcher,
-            )
-            .await
-            {
-                Ok(bytes) => bytes,
-                Err(error) if *optional && is_import_not_found(&error) => return Ok(None),
-                Err(error) => return Err(error),
-            };
-
-            let digest = sha256_hex(&bytes);
-            let (front_matter, body) = parse_manifest_bytes(&bytes, section.as_deref())?;
-            let display = resolved_remote_display(&remote_identity, repository, path);
-            Ok(Some(ResolvedNode {
-                import: ResolvedImport {
-                    entry: entry.clone(),
-                    spec: spec.clone(),
-                    front_matter,
-                    body,
-                    provenance: ImportProvenance {
-                        source: display,
-                        requested_ref: Some(requested_ref.clone()),
-                        sha: Some(resolved_sha.as_str().to_string()),
-                        manifest_digest: digest,
-                    },
-                },
-                identity: ResolvedIdentity::Remote {
-                    source: remote_identity.source,
-                    project: remote_identity.project,
-                    repository: repository.clone(),
-                    sha: resolved_sha.as_str().to_string(),
-                    path: path.clone(),
-                    section: section.clone(),
-                },
-                child_context: ResolutionContext::Remote {
-                    source: source.clone(),
-                    project: project.clone(),
-                    repository: repository.clone(),
-                    manifest_path: path.clone(),
-                    resolved_sha,
-                },
-            }))
+    match spec {
+        ParsedImportSpec::Local { .. } => resolve_local_spec(entry, spec, context, repo_root),
+        ParsedImportSpec::Remote { .. } => {
+            resolve_remote_spec(entry, spec, repo_root, fetcher, ref_cache, ref_metadata).await
         }
     }
+}
+
+fn resolve_local_spec(
+    entry: &ImportEntry,
+    spec: ParsedImportSpec,
+    context: &ResolutionContext,
+    repo_root: &Path,
+) -> Result<Option<ResolvedNode>> {
+    let ParsedImportSpec::Local {
+        path,
+        section,
+        optional,
+    } = &spec
+    else {
+        anyhow::bail!("internal error: expected a local import spec");
+    };
+    let ResolutionContext::Local { base_dir } = context else {
+        anyhow::bail!("internal error: unresolved local import has a remote origin");
+    };
+    let local_path = resolve_local_path(base_dir, repo_root, path)?;
+    let canonical = match fs::canonicalize(&local_path) {
+        Ok(path) => path,
+        Err(error) if *optional && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to resolve local import {}", local_path.display())
+            });
+        }
+    };
+    ensure_path_within_repo(&canonical, repo_root)?;
+    let bytes = match fs::read(&canonical) {
+        Ok(bytes) => bytes,
+        Err(error) if *optional && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read local import {}", canonical.display()));
+        }
+    };
+    enforce_manifest_size(bytes.len(), &canonical.display().to_string())?;
+    let digest = sha256_hex(&bytes);
+    let (front_matter, body) = parse_manifest_bytes(&bytes, section.as_deref())?;
+    let identity_path = local_identity_path(&canonical);
+    Ok(Some(ResolvedNode {
+        import: ResolvedImport {
+            entry: entry.clone(),
+            spec: spec.clone(),
+            front_matter,
+            body,
+            provenance: ImportProvenance {
+                source: canonical.display().to_string(),
+                requested_ref: None,
+                sha: None,
+                manifest_digest: digest,
+            },
+        },
+        identity: ResolvedIdentity::Local {
+            path: identity_path,
+            section: section.clone(),
+        },
+        child_context: ResolutionContext::Local {
+            base_dir: canonical
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+        },
+    }))
+}
+
+async fn resolve_remote_spec(
+    entry: &ImportEntry,
+    spec: ParsedImportSpec,
+    repo_root: &Path,
+    fetcher: &dyn ManifestFetcher,
+    ref_cache: &mut HashMap<String, CommitSha>,
+    ref_metadata: &mut RefMetadata,
+) -> Result<Option<ResolvedNode>> {
+    let ParsedImportSpec::Remote {
+        source,
+        project,
+        repository,
+        path,
+        requested_ref,
+        section,
+        optional,
+    } = &spec
+    else {
+        anyhow::bail!("internal error: expected a remote import spec");
+    };
+    let remote_identity = fetcher.remote_identity(&spec).await?;
+    if *optional {
+        match fetcher.ensure_repository_accessible(&spec).await {
+            Ok(()) => {}
+            Err(error) if is_import_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    let ref_key = ref_metadata_key(&remote_identity, repository, requested_ref);
+    let resolved_sha = match resolve_remote_sha(
+        &spec,
+        &remote_identity,
+        &ref_key,
+        repo_root,
+        fetcher,
+        ref_cache,
+        ref_metadata,
+    )
+    .await
+    {
+        Ok(sha) => sha,
+        Err(error) if *optional && is_import_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    // Persist the ref movement before fetching the path. If the new
+    // commit no longer contains an optional manifest, retaining the
+    // previous SHA here would let a later offline compile incorrectly
+    // resurrect stale cached content.
+    ref_metadata.record(&remote_identity, repository, requested_ref, &resolved_sha);
+    write_ref_metadata(repo_root, ref_metadata)?;
+    let bytes = match read_remote_manifest(
+        repo_root,
+        &spec,
+        &remote_identity,
+        &resolved_sha,
+        fetcher,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) if *optional && is_import_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let digest = sha256_hex(&bytes);
+    let (front_matter, body) = parse_manifest_bytes(&bytes, section.as_deref())?;
+    let display = resolved_remote_display(&remote_identity, repository, path);
+    Ok(Some(ResolvedNode {
+        import: ResolvedImport {
+            entry: entry.clone(),
+            spec: spec.clone(),
+            front_matter,
+            body,
+            provenance: ImportProvenance {
+                source: display,
+                requested_ref: Some(requested_ref.clone()),
+                sha: Some(resolved_sha.as_str().to_string()),
+                manifest_digest: digest,
+            },
+        },
+        identity: ResolvedIdentity::Remote {
+            source: remote_identity.source,
+            project: remote_identity.project,
+            repository: repository.clone(),
+            sha: resolved_sha.as_str().to_string(),
+            path: path.clone(),
+            section: section.clone(),
+        },
+        child_context: ResolutionContext::Remote {
+            source: source.clone(),
+            project: project.clone(),
+            repository: repository.clone(),
+            manifest_path: path.clone(),
+            resolved_sha,
+        },
+    }))
 }
 
 fn parse_entry_in_context(
