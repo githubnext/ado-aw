@@ -468,6 +468,72 @@ fn lint_reports_invalid_task_input_as_warning_finding() {
     );
 }
 
+/// `ado-aw lint` surfaces invalid inputs on **command-dispatch** task steps
+/// (e.g. `DotNetCoreCLI@2`, `NuGetCommand@2`) as `task-input-invalid` warnings,
+/// exercising `dotnet_core_cli::validate_inputs` and
+/// `nuget_command::validate_inputs` — the two command-dispatch validators that
+/// previously had no test coverage anywhere in the repository (unlike
+/// `Docker@2`, the canonical command-dispatch template, which is covered both
+/// in-module and via `invalid-task-input-agent.md`).
+#[test]
+fn lint_reports_invalid_command_dispatch_task_inputs_as_warning_findings() {
+    let workspace = tempfile::tempdir().expect("create temp dir");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("invalid-command-dispatch-task-input-agent.md");
+    let dst = workspace
+        .path()
+        .join("invalid-command-dispatch-task-input-agent.md");
+    std::fs::copy(&src, &dst).expect("copy fixture into temp dir");
+
+    let out = Command::new(binary_path())
+        .arg("lint")
+        .arg(&dst)
+        .arg("--json")
+        .output()
+        .expect("run ado-aw lint --json");
+
+    // Warning-level findings must not fail the command.
+    assert!(
+        out.status.success(),
+        "lint must exit 0 for warning-only findings. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // `DotNetCoreCLI@2`: `packagesToPush` is invalid for `command: test`.
+    assert!(
+        stdout.contains("DotNetCoreCLI@2"),
+        "expected a DotNetCoreCLI@2 finding, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("packagesToPush"),
+        "expected the finding to name the offending input, got:\n{stdout}"
+    );
+
+    // `NuGetCommand@2`: `teleport` is not a recognized command.
+    assert!(
+        stdout.contains("NuGetCommand@2"),
+        "expected a NuGetCommand@2 finding, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("teleport"),
+        "expected the finding to name the unknown command, got:\n{stdout}"
+    );
+
+    // Both findings must be warnings, and there must be exactly two of them.
+    let warning_count = stdout.matches("\"severity\": \"warning\"").count();
+    assert_eq!(
+        warning_count, 2,
+        "expected exactly two task-input-invalid warnings, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"severity\": \"error\""),
+        "command-dispatch task input findings must be warnings, got:\n{stdout}"
+    );
+}
+
 /// `ado-aw whatif --fail <job>` classifies downstream jobs as
 /// `skipped` or `runs_anyway` based on their rendered ADO conditions.
 /// The canary fixture's `Conclusion` job carries an
