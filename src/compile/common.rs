@@ -1195,85 +1195,18 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
             continue;
         }
 
-        let (name, alias, repo_type, repo_ref, endpoint, organization, do_checkout, fetch_opts) =
-            match item {
-                ReposItem::Shorthand(s) => {
-                    let (alias, name) = parse_shorthand(s)?;
-                    (
-                        name,
-                        alias,
-                        "git".to_string(),
-                        "refs/heads/main".to_string(),
-                        None,
-                        None,
-                        true,
-                        CheckoutFetchOpts::default(),
-                    )
-                }
-                ReposItem::Full(entry) => {
-                    let alias = match &entry.alias {
-                        Some(a) => a.clone(),
-                        None => derive_alias(&entry.name)?,
-                    };
-                    (
-                        entry.name.clone(),
-                        alias,
-                        entry.repo_type.clone(),
-                        entry.repo_ref.clone(),
-                        entry.endpoint.clone(),
-                        entry.organization.clone(),
-                        entry.checkout,
-                        CheckoutFetchOpts {
-                            fetch_depth: entry.fetch_depth,
-                            fetch_tags: entry.fetch_tags,
-                        },
-                    )
-                }
-            };
+        let ResolvedRepoItem {
+            name,
+            alias,
+            repo_type,
+            repo_ref,
+            endpoint,
+            organization,
+            do_checkout,
+            fetch_opts,
+        } = resolve_repo_item(item)?;
 
-        // Reject aliases that aren't safe as a single path segment. The alias
-        // is used unquoted as an ADO `checkout:` value / repository resource
-        // name AND (issue #1413) appended to `$(Build.SourcesDirectory)` inside
-        // a double-quoted bash argument in the prepare-pr-base step. An explicit
-        // `alias=org/repo` (or a repo name whose trailing segment carries odd
-        // characters) could otherwise embed `"`, `$`, `` ` ``, `\`, or a newline
-        // and break the generated shell. `is_safe_path_segment` is the same
-        // allowlist the runtime MCP server applies to a repository alias.
-        if !crate::validate::is_safe_path_segment(&alias) {
-            anyhow::bail!(
-                "Repository alias '{}' contains characters that are not allowed. \
-                Aliases must be a single path segment matching [A-Za-z0-9._-] (no \
-                path separators, leading dot, or shell metacharacters). Set an \
-                explicit `alias:` (or `alias=org/repo` shorthand) with a safe name.",
-                alias
-            );
-        }
-
-        // Reject duplicate aliases case-insensitively. Checkout paths are
-        // filesystem paths, so aliases that differ only by case collide on
-        // Windows agents.
-        if !seen_aliases.insert(alias.to_ascii_lowercase()) {
-            anyhow::bail!(
-                "Duplicate repository alias '{}' in repos (aliases are compared \
-                case-insensitively). \
-                Use the `alias` field (or `alias=org/repo` shorthand) to disambiguate.",
-                alias
-            );
-        }
-
-        // Reject reserved names case-insensitively. In particular, no casing
-        // of `self` may collide with the compiler-owned `s/self` checkout.
-        if RESERVED_WORKSPACE_NAMES
-            .iter()
-            .any(|reserved| reserved.eq_ignore_ascii_case(&alias))
-        {
-            anyhow::bail!(
-                "Repository alias '{}' is reserved by the 'workspace:' resolver ({:?}). \
-                Reserved names are case-insensitive; rename the alias to avoid ambiguity.",
-                alias,
-                RESERVED_WORKSPACE_NAMES
-            );
-        }
+        validate_repo_alias(&alias, &mut seen_aliases)?;
 
         // Fetch tuning on a repo that is not checked out is a no-op — the
         // checkout step is never emitted, so the opts are never read. Warn so
@@ -1306,6 +1239,106 @@ pub fn lower_repos(items: &[ReposItem]) -> Result<LoweredRepos> {
     }
 
     Ok((repositories, checkout, fetch))
+}
+
+/// A [`ReposItem`] normalised to the fields `lower_repos` needs.
+struct ResolvedRepoItem {
+    name: String,
+    alias: String,
+    repo_type: String,
+    repo_ref: String,
+    endpoint: Option<String>,
+    organization: Option<crate::secure::AdoOrganization>,
+    do_checkout: bool,
+    fetch_opts: CheckoutFetchOpts,
+}
+
+/// Expand a shorthand or full `repos:` entry into a [`ResolvedRepoItem`],
+/// applying the default type/ref and deriving the alias when absent.
+fn resolve_repo_item(item: &ReposItem) -> Result<ResolvedRepoItem> {
+    Ok(match item {
+        ReposItem::Shorthand(s) => {
+            let (alias, name) = parse_shorthand(s)?;
+            ResolvedRepoItem {
+                name,
+                alias,
+                repo_type: "git".to_string(),
+                repo_ref: "refs/heads/main".to_string(),
+                endpoint: None,
+                organization: None,
+                do_checkout: true,
+                fetch_opts: CheckoutFetchOpts::default(),
+            }
+        }
+        ReposItem::Full(entry) => {
+            let alias = match &entry.alias {
+                Some(a) => a.clone(),
+                None => derive_alias(&entry.name)?,
+            };
+            ResolvedRepoItem {
+                name: entry.name.clone(),
+                alias,
+                repo_type: entry.repo_type.clone(),
+                repo_ref: entry.repo_ref.clone(),
+                endpoint: entry.endpoint.clone(),
+                organization: entry.organization.clone(),
+                do_checkout: entry.checkout,
+                fetch_opts: CheckoutFetchOpts {
+                    fetch_depth: entry.fetch_depth,
+                    fetch_tags: entry.fetch_tags,
+                },
+            }
+        }
+    })
+}
+
+/// Validate a repository alias (safe path segment, case-insensitively unique,
+/// not a reserved workspace name) and record it in `seen_aliases`.
+fn validate_repo_alias(alias: &str, seen_aliases: &mut HashSet<String>) -> Result<()> {
+    // Reject aliases that aren't safe as a single path segment. The alias
+    // is used unquoted as an ADO `checkout:` value / repository resource
+    // name AND (issue #1413) appended to `$(Build.SourcesDirectory)` inside
+    // a double-quoted bash argument in the prepare-pr-base step. An explicit
+    // `alias=org/repo` (or a repo name whose trailing segment carries odd
+    // characters) could otherwise embed `"`, `$`, `` ` ``, `\`, or a newline
+    // and break the generated shell. `is_safe_path_segment` is the same
+    // allowlist the runtime MCP server applies to a repository alias.
+    if !crate::validate::is_safe_path_segment(alias) {
+        anyhow::bail!(
+            "Repository alias '{}' contains characters that are not allowed. \
+            Aliases must be a single path segment matching [A-Za-z0-9._-] (no \
+            path separators, leading dot, or shell metacharacters). Set an \
+            explicit `alias:` (or `alias=org/repo` shorthand) with a safe name.",
+            alias
+        );
+    }
+
+    // Reject duplicate aliases case-insensitively. Checkout paths are
+    // filesystem paths, so aliases that differ only by case collide on
+    // Windows agents.
+    if !seen_aliases.insert(alias.to_ascii_lowercase()) {
+        anyhow::bail!(
+            "Duplicate repository alias '{}' in repos (aliases are compared \
+            case-insensitively). \
+            Use the `alias` field (or `alias=org/repo` shorthand) to disambiguate.",
+            alias
+        );
+    }
+
+    // Reject reserved names case-insensitively. In particular, no casing
+    // of `self` may collide with the compiler-owned `s/self` checkout.
+    if RESERVED_WORKSPACE_NAMES
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(alias))
+    {
+        anyhow::bail!(
+            "Repository alias '{}' is reserved by the 'workspace:' resolver ({:?}). \
+            Reserved names are case-insensitive; rename the alias to avoid ambiguity.",
+            alias,
+            RESERVED_WORKSPACE_NAMES
+        );
+    }
+    Ok(())
 }
 
 /// If `item` is a reserved `self` entry (its resolved *name* is exactly
