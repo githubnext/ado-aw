@@ -605,6 +605,125 @@ impl UpdateGithubIssueResult {
             ))))
         }
     }
+
+    /// Fetches the current target and runs every preflight validation
+    /// (capability, mutation filters, labels/assignees/milestone existence)
+    /// before any write is attempted.
+    async fn resolve_and_validate_target(
+        &self,
+        client: &GithubClient,
+        target: &crate::safe_outputs::ResolvedGithubIssueTarget,
+        config: &UpdateGithubIssueConfig,
+        filters: GithubMutationFilters<'_>,
+    ) -> anyhow::Result<Result<RawUpdateTarget, ExecutionResult>> {
+        let current = match self
+            .fetch_target(client, &target.repository, target.number)
+            .await?
+        {
+            Ok(target) => target,
+            Err(result) => return Ok(Err(result)),
+        };
+        let metadata = current.metadata();
+        if let Err(result) = validate_github_target_capability(
+            &metadata,
+            GithubTargetCapabilities {
+                issues: config.issues,
+                pull_requests: config.pull_requests,
+            },
+        ) {
+            return Ok(Err(result));
+        }
+        if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
+            return Ok(Err(result));
+        }
+        if let Err(result) = self.preflight_labels(client, &target.repository).await? {
+            return Ok(Err(result));
+        }
+        if let Err(result) = self
+            .preflight_assignees(client, &target.repository)
+            .await?
+        {
+            return Ok(Err(result));
+        }
+        if let Err(result) = self
+            .preflight_milestone(client, &target.repository)
+            .await?
+        {
+            return Ok(Err(result));
+        }
+        Ok(Ok(current))
+    }
+
+    /// Builds the PATCH payload from the requested fields, resolving the
+    /// body-update operation against the current body when a body change
+    /// was requested.
+    fn build_update_payload(
+        &self,
+        current: &RawUpdateTarget,
+        config: &UpdateGithubIssueConfig,
+        ctx: &ExecutionContext,
+    ) -> Result<Map<String, Value>, ExecutionResult> {
+        let mut payload = Map::new();
+        if let Some(status) = self.status {
+            payload.insert(
+                "state".to_string(),
+                Value::String(status.as_str().to_string()),
+            );
+        }
+        if let Some(title) = self.title.as_ref() {
+            payload.insert("title".to_string(), Value::String(title.clone()));
+        }
+        if let Some(body) = self.body.as_deref() {
+            let updated = build_updated_body(
+                current.body.as_deref().unwrap_or_default(),
+                body,
+                self.operation.unwrap_or(GithubBodyOperation::Append),
+                config.footer,
+                ctx,
+            )?;
+            payload.insert("body".to_string(), Value::String(updated));
+        }
+        if let Some(labels) = self.labels.as_ref() {
+            payload.insert("labels".to_string(), serde_json::json!(labels));
+        }
+        if let Some(assignees) = self.assignees.as_ref() {
+            payload.insert("assignees".to_string(), serde_json::json!(assignees));
+        }
+        if let Some(milestone) = self.milestone {
+            payload.insert("milestone".to_string(), serde_json::json!(milestone));
+        }
+        Ok(payload)
+    }
+
+    /// Assembles the `previous` state summary included in the success payload.
+    fn previous_state_summary(
+        &self,
+        target: &crate::safe_outputs::ResolvedGithubIssueTarget,
+        metadata: &GithubTargetMetadata,
+        current: RawUpdateTarget,
+    ) -> Value {
+        serde_json::json!({
+            "number": target.number,
+            "target_repo": target.repository,
+            "target_kind": match metadata.kind {
+                GithubTargetKind::Issue => "issue",
+                GithubTargetKind::PullRequest => "pull_request",
+            },
+            "fields": self.requested_fields(),
+            "previous": {
+                "title": current.title,
+                "state": current.state,
+                "labels": current.labels.into_iter().map(|label| label.name).collect::<Vec<_>>(),
+                "assignees": current.assignees.into_iter().map(|user| user.login).collect::<Vec<_>>(),
+                "milestone": current.milestone.map(|milestone| {
+                    serde_json::json!({
+                        "number": milestone.number,
+                        "title": milestone.title,
+                    })
+                }),
+            },
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -655,75 +774,19 @@ impl Executor for UpdateGithubIssueResult {
         };
         let client = GithubClient::new(&ctx.github_api_url, token)?;
 
-        // Fetch and validate every dependency before the single PATCH write.
         let current = match self
-            .fetch_target(&client, &target.repository, target.number)
+            .resolve_and_validate_target(&client, &target, &config, filters)
             .await?
         {
-            Ok(target) => target,
+            Ok(current) => current,
             Err(result) => return Ok(result),
         };
         let metadata = current.metadata();
-        if let Err(result) = validate_github_target_capability(
-            &metadata,
-            GithubTargetCapabilities {
-                issues: config.issues,
-                pull_requests: config.pull_requests,
-            },
-        ) {
-            return Ok(result);
-        }
-        if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
-            return Ok(result);
-        }
-        if let Err(result) = self.preflight_labels(&client, &target.repository).await? {
-            return Ok(result);
-        }
-        if let Err(result) = self
-            .preflight_assignees(&client, &target.repository)
-            .await?
-        {
-            return Ok(result);
-        }
-        if let Err(result) = self
-            .preflight_milestone(&client, &target.repository)
-            .await?
-        {
-            return Ok(result);
-        }
 
-        let mut payload = Map::new();
-        if let Some(status) = self.status {
-            payload.insert(
-                "state".to_string(),
-                Value::String(status.as_str().to_string()),
-            );
-        }
-        if let Some(title) = self.title.as_ref() {
-            payload.insert("title".to_string(), Value::String(title.clone()));
-        }
-        if let Some(body) = self.body.as_deref() {
-            let updated = match build_updated_body(
-                current.body.as_deref().unwrap_or_default(),
-                body,
-                self.operation.unwrap_or(GithubBodyOperation::Append),
-                config.footer,
-                ctx,
-            ) {
-                Ok(body) => body,
-                Err(result) => return Ok(result),
-            };
-            payload.insert("body".to_string(), Value::String(updated));
-        }
-        if let Some(labels) = self.labels.as_ref() {
-            payload.insert("labels".to_string(), serde_json::json!(labels));
-        }
-        if let Some(assignees) = self.assignees.as_ref() {
-            payload.insert("assignees".to_string(), serde_json::json!(assignees));
-        }
-        if let Some(milestone) = self.milestone {
-            payload.insert("milestone".to_string(), serde_json::json!(milestone));
-        }
+        let payload = match self.build_update_payload(&current, &config, ctx) {
+            Ok(payload) => payload,
+            Err(result) => return Ok(result),
+        };
 
         debug!(
             "Updating GitHub target {}#{} fields: {}",
@@ -756,27 +819,7 @@ impl Executor for UpdateGithubIssueResult {
                 target.number,
                 self.requested_fields().join(", ")
             ),
-            serde_json::json!({
-                "number": target.number,
-                "target_repo": target.repository,
-                "target_kind": match metadata.kind {
-                    GithubTargetKind::Issue => "issue",
-                    GithubTargetKind::PullRequest => "pull_request",
-                },
-                "fields": self.requested_fields(),
-                "previous": {
-                    "title": current.title,
-                    "state": current.state,
-                    "labels": current.labels.into_iter().map(|label| label.name).collect::<Vec<_>>(),
-                    "assignees": current.assignees.into_iter().map(|user| user.login).collect::<Vec<_>>(),
-                    "milestone": current.milestone.map(|milestone| {
-                        serde_json::json!({
-                            "number": milestone.number,
-                            "title": milestone.title,
-                        })
-                    }),
-                },
-            }),
+            self.previous_state_summary(&target, &metadata, current),
         ))
     }
 }
