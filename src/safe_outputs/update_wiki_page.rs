@@ -182,6 +182,65 @@ fn apply_title_prefix(path: &str, prefix: &str) -> String {
     }
 }
 
+/// Validate the requested path against traversal and the configured
+/// `path-prefix`, then apply the configured `title-prefix`.
+fn resolve_effective_path(raw_path: &str, config: &UpdateWikiPageConfig) -> Result<String, String> {
+    let effective_path = normalize_wiki_path(raw_path);
+
+    // Belt-and-suspenders: reject path traversal even after sanitize_fields()
+    if effective_path.contains("..") {
+        return Err("Wiki page path contains path traversal characters (..)".to_string());
+    }
+
+    if let Some(prefix) = &config.path_prefix {
+        let normalized_prefix = normalize_wiki_path(prefix);
+        // Path must be exactly the prefix or start with "<prefix>/"
+        let under_prefix = effective_path == normalized_prefix
+            || effective_path.starts_with(&format!("{normalized_prefix}/"));
+        if !under_prefix {
+            return Err(format!(
+                "Wiki page path '{}' is not under the configured path-prefix '{}'",
+                effective_path, normalized_prefix
+            ));
+        }
+    }
+
+    // Apply the title prefix (modifies only the last segment).
+    Ok(match &config.title_prefix {
+        Some(title_prefix) => apply_title_prefix(&effective_path, title_prefix),
+        None => effective_path,
+    })
+}
+
+/// Build the success result from the wiki PUT response body.
+fn update_success_result(
+    body: &serde_json::Value,
+    effective_path: &str,
+    wiki_name: &str,
+    project: &str,
+) -> ExecutionResult {
+    let page_id = body
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let remote_url = body.get("remoteUrl").and_then(|v| v.as_str()).unwrap_or("");
+
+    info!("Updated wiki page: {effective_path} (id={page_id})");
+
+    ExecutionResult::success_with_data(
+        format!("Updated wiki page: {effective_path}"),
+        serde_json::json!({
+            "id": page_id,
+            "path": effective_path,
+            "url": remote_url,
+            "wiki": wiki_name,
+            "project": project,
+            "action": "updated",
+        }),
+    )
+}
+
 // ============================================================================
 // Stage-2 executor
 // ============================================================================
@@ -224,34 +283,10 @@ impl Executor for UpdateWikiPageResult {
         // Use the wiki-project override if present, otherwise use the pipeline project.
         let project = config.wiki_project.as_deref().unwrap_or(pipeline_project);
 
-        // ── Path validation ───────────────────────────────────────────────────
-        let mut effective_path = normalize_wiki_path(&self.path);
-
-        // Belt-and-suspenders: reject path traversal even after sanitize_fields()
-        if effective_path.contains("..") {
-            return Ok(ExecutionResult::failure(
-                "Wiki page path contains path traversal characters (..)",
-            ));
-        }
-
-        // Enforce the configured path prefix restriction.
-        if let Some(prefix) = &config.path_prefix {
-            let normalized_prefix = normalize_wiki_path(prefix);
-            // Path must be exactly the prefix or start with "<prefix>/"
-            let under_prefix = effective_path == normalized_prefix
-                || effective_path.starts_with(&format!("{normalized_prefix}/"));
-            if !under_prefix {
-                return Ok(ExecutionResult::failure(format!(
-                    "Wiki page path '{}' is not under the configured path-prefix '{}'",
-                    effective_path, normalized_prefix
-                )));
-            }
-        }
-
-        // Apply the title prefix (modifies only the last segment).
-        if let Some(title_prefix) = &config.title_prefix {
-            effective_path = apply_title_prefix(&effective_path, title_prefix);
-        }
+        let effective_path = match resolve_effective_path(&self.path, &config) {
+            Ok(p) => p,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
+        };
 
         debug!("Effective wiki page path: {effective_path}");
 
@@ -359,25 +394,11 @@ impl Executor for UpdateWikiPageResult {
 
         if put_resp.status().is_success() {
             let body: serde_json::Value = put_resp.json().await.unwrap_or_default();
-            let page_id = body
-                .get("id")
-                .and_then(|v| v.as_i64())
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let remote_url = body.get("remoteUrl").and_then(|v| v.as_str()).unwrap_or("");
-
-            info!("Updated wiki page: {effective_path} (id={page_id})");
-
-            Ok(ExecutionResult::success_with_data(
-                format!("Updated wiki page: {effective_path}"),
-                serde_json::json!({
-                    "id": page_id,
-                    "path": effective_path,
-                    "url": remote_url,
-                    "wiki": wiki_name,
-                    "project": project,
-                    "action": "updated",
-                }),
+            Ok(update_success_result(
+                &body,
+                &effective_path,
+                wiki_name,
+                project,
             ))
         } else {
             let put_status = put_resp.status();
