@@ -53,7 +53,7 @@ Extensions are sorted by `ExtensionPhase` before the compiler merges declaration
 
 - `System` — compiler-internal infrastructure that later phases depend on (for example `AdoScriptExtension`).
 - `Runtime` — language/toolchain installation (`LeanExtension`, `PythonExtension`, `NodeExtension`, `DotnetExtension`).
-- `Tool` — first-party tools (`AzureDevOpsExtension`, `CacheMemoryExtension`, `AzureCliExtension`).
+- `Tool` — first-party tools (`AzureDevOpsExtension`, `CacheMemoryExtension`, `AzureCliExtension`, `PackageFeedsExtension`).
 
 System extensions run first, runtimes run before tools, and definition order is preserved within each phase.
 
@@ -73,6 +73,11 @@ is configured (`ado_proxy_enabled()`). The pinned AWF agent image ships no
 built-in `az`, so omitting `permissions.read` makes the command unavailable
 rather than exposing an unproxied fallback — see
 [`docs/network.md`](network.md#proxy-gated-azure-cli-az).
+
+`PackageFeedsExtension` (per-tool npm/pip/uv/dotnet/cargo wrappers that route
+restores through `ado-proxy`, plus the granted-feeds prompt) is **conditionally**
+pushed when `permissions.packages` is configured. It is independent of
+`permissions.read` — see [`docs/package-feeds.md`](package-feeds.md).
 
 User-configured runtimes and tools are appended after those always-on extensions, then sorted by phase.
 
