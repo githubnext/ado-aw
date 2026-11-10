@@ -131,39 +131,9 @@ impl Executor for ReplyToPrCommentResult {
         let config: ReplyToPrCommentConfig = ctx.get_tool_config("reply-to-pr-comment")?;
         debug!("Config: {:?}", config);
 
-        let repository = self.repository.as_deref().unwrap_or("self");
-
-        // Validate repository against allowed-repositories config
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&repository.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                repository
-            )));
-        }
-
-        // Determine the repository name for the API call
-        let repo_name = if repository == "self" || repository.is_empty() {
-            ctx.repository_name
-                .as_ref()
-                .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
-                .clone()
-        } else {
-            match crate::safe_outputs::lookup_allowed_repository(
-                repository,
-                &ctx.allowed_repositories,
-            ) {
-                Some(name) => name.clone(),
-                None => {
-                    return Ok(ExecutionResult::failure(format!(
-                        "Repository alias '{}' not found in allowed repositories",
-                        repository
-                    )));
-                }
-            }
+        let repo_name = match self.resolve_repo_name(ctx, &config)? {
+            Ok(name) => name,
+            Err(failure) => return Ok(failure),
         };
 
         // Build comment content with optional prefix
@@ -206,44 +176,96 @@ impl Executor for ReplyToPrCommentResult {
             .await
             .context("Failed to send request to Azure DevOps")?;
 
-        if response.status().is_success() {
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse response JSON")?;
+        self.handle_response(response, &repo_name, project).await
+    }
+}
 
-            let comment_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+impl ReplyToPrCommentResult {
+    /// Validates the target repository and resolves its ADO name.
+    /// The inner `Err` is a user-facing failure result, not an error.
+    fn resolve_repo_name(
+        &self,
+        ctx: &ExecutionContext,
+        config: &ReplyToPrCommentConfig,
+    ) -> anyhow::Result<Result<String, ExecutionResult>> {
+        let repository = self.repository.as_deref().unwrap_or("self");
 
-            info!(
-                "Reply added to PR #{} thread #{}: comment #{}",
-                self.pull_request_id, self.thread_id, comment_id
-            );
+        if !config.allowed_repositories.is_empty()
+            && !config
+                .allowed_repositories
+                .contains(&repository.to_string())
+        {
+            return Ok(Err(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list",
+                repository
+            ))));
+        }
 
-            Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Added reply #{} to PR #{} thread #{}",
-                    comment_id, self.pull_request_id, self.thread_id
-                ),
-                serde_json::json!({
-                    "comment_id": comment_id,
-                    "pull_request_id": self.pull_request_id,
-                    "thread_id": self.thread_id,
-                    "repository": repo_name,
-                    "project": project,
+        if repository == "self" || repository.is_empty() {
+            let name = ctx
+                .repository_name
+                .as_ref()
+                .context("BUILD_REPOSITORY_NAME not set and repository is 'self'")?
+                .clone();
+            return Ok(Ok(name));
+        }
+
+        Ok(
+            crate::safe_outputs::lookup_allowed_repository(repository, &ctx.allowed_repositories)
+                .cloned()
+                .ok_or_else(|| {
+                    ExecutionResult::failure(format!(
+                        "Repository alias '{}' not found in allowed repositories",
+                        repository
+                    ))
                 }),
-            ))
-        } else {
+        )
+    }
+
+    async fn handle_response(
+        &self,
+        response: reqwest::Response,
+        repo_name: &str,
+        project: &str,
+    ) -> anyhow::Result<ExecutionResult> {
+        if !response.status().is_success() {
             let status = response.status();
             let error_body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
 
-            Ok(ExecutionResult::failure(format!(
+            return Ok(ExecutionResult::failure(format!(
                 "Failed to reply to PR #{} thread #{} (HTTP {}): {}",
                 self.pull_request_id, self.thread_id, status, error_body
-            )))
+            )));
         }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse response JSON")?;
+
+        let comment_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        info!(
+            "Reply added to PR #{} thread #{}: comment #{}",
+            self.pull_request_id, self.thread_id, comment_id
+        );
+
+        Ok(ExecutionResult::success_with_data(
+            format!(
+                "Added reply #{} to PR #{} thread #{}",
+                comment_id, self.pull_request_id, self.thread_id
+            ),
+            serde_json::json!({
+                "comment_id": comment_id,
+                "pull_request_id": self.pull_request_id,
+                "thread_id": self.thread_id,
+                "repository": repo_name,
+                "project": project,
+            }),
+        ))
     }
 }
 
