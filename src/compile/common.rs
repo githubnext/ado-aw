@@ -3802,49 +3802,9 @@ fn try_add_user_mcp(
     }
 
     if let Some(container) = &opts.container {
-        validate_stdio_mcp(name, container, opts)?;
-        let server = build_stdio_mcpg_server(name, container, opts, launch_env)
-            .with_context(|| format!("invalid runtime configuration for MCP `{name}`"))?;
-        for (destination, value) in &opts.env {
-            if let Some(source) = value.pipeline_variable() {
-                launch_env.bind_pipeline_variable(
-                    destination,
-                    source,
-                    format!("mcp-servers.{name}.env.{destination}"),
-                )?;
-            }
-        }
-        servers.insert(name.to_string(), server);
+        add_stdio_user_mcp(name, container, opts, servers, launch_env)
     } else if let Some(url) = &opts.url {
-        if opts.azure_auth.is_some() {
-            anyhow::bail!(
-                "mcp-servers.{name}.azure-auth is only supported for containerized stdio MCP servers"
-            );
-        }
-        // HTTP-based MCP (remote server)
-        for w in validate::validate_mcp_url(url, name) {
-            eprintln!("{}", w);
-        }
-        for w in validate::warn_potential_secrets(name, &HashMap::new(), &opts.headers) {
-            eprintln!("{}", w);
-        }
-        if !opts.env.is_empty() {
-            if opts
-                .env
-                .values()
-                .any(|value| value.pipeline_variable().is_some())
-            {
-                anyhow::bail!(
-                    "mcp-servers.{name}.env uses pipeline-variable, but HTTP MCP servers cannot receive process environment variables; use headers instead"
-                );
-            }
-            eprintln!(
-                "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
-                Use headers for authentication instead.",
-                name
-            );
-        }
-        servers.insert(name.to_string(), build_http_mcpg_server(url, opts));
+        add_http_user_mcp(name, url, opts, servers)
     } else {
         if opts.azure_auth.is_some() {
             anyhow::bail!(
@@ -3852,8 +3812,69 @@ fn try_add_user_mcp(
             );
         }
         log::warn!("MCP '{}' has no container or url — skipping", name);
+        Ok(())
     }
+}
 
+/// Validate and register a containerized stdio user-defined MCP server.
+fn add_stdio_user_mcp(
+    name: &str,
+    container: &str,
+    opts: &crate::compile::types::McpOptions,
+    servers: &mut std::collections::BTreeMap<String, McpgServerConfig>,
+    launch_env: &mut super::mcpg::McpgLaunchEnvironment,
+) -> Result<()> {
+    validate_stdio_mcp(name, container, opts)?;
+    let server = build_stdio_mcpg_server(name, container, opts, launch_env)
+        .with_context(|| format!("invalid runtime configuration for MCP `{name}`"))?;
+    for (destination, value) in &opts.env {
+        if let Some(source) = value.pipeline_variable() {
+            launch_env.bind_pipeline_variable(
+                destination,
+                source,
+                format!("mcp-servers.{name}.env.{destination}"),
+            )?;
+        }
+    }
+    servers.insert(name.to_string(), server);
+    Ok(())
+}
+
+/// Validate and register an HTTP (remote) user-defined MCP server.
+fn add_http_user_mcp(
+    name: &str,
+    url: &str,
+    opts: &crate::compile::types::McpOptions,
+    servers: &mut std::collections::BTreeMap<String, McpgServerConfig>,
+) -> Result<()> {
+    if opts.azure_auth.is_some() {
+        anyhow::bail!(
+            "mcp-servers.{name}.azure-auth is only supported for containerized stdio MCP servers"
+        );
+    }
+    for w in validate::validate_mcp_url(url, name) {
+        eprintln!("{}", w);
+    }
+    for w in validate::warn_potential_secrets(name, &HashMap::new(), &opts.headers) {
+        eprintln!("{}", w);
+    }
+    if !opts.env.is_empty() {
+        if opts
+            .env
+            .values()
+            .any(|value| value.pipeline_variable().is_some())
+        {
+            anyhow::bail!(
+                "mcp-servers.{name}.env uses pipeline-variable, but HTTP MCP servers cannot receive process environment variables; use headers instead"
+            );
+        }
+        eprintln!(
+            "Warning: MCP '{}': env vars are not supported for HTTP MCPs — they will be ignored. \
+            Use headers for authentication instead.",
+            name
+        );
+    }
+    servers.insert(name.to_string(), build_http_mcpg_server(url, opts));
     Ok(())
 }
 
