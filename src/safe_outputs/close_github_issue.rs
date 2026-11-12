@@ -555,6 +555,24 @@ async fn mark_as_duplicate(
     Ok(Ok(()))
 }
 
+fn already_closed_result(
+    target: &crate::safe_outputs::ResolvedGithubIssueTarget,
+    state_reason: GithubIssueStateReason,
+) -> ExecutionResult {
+    ExecutionResult::success_with_data(
+        format!(
+            "GitHub issue {}#{} is already closed",
+            target.repository, target.number
+        ),
+        serde_json::json!({
+            "number": target.number,
+            "target_repo": target.repository,
+            "already_closed": true,
+            "state_reason": state_reason.as_str(),
+        }),
+    )
+}
+
 #[async_trait::async_trait]
 impl Executor for CloseGithubIssueResult {
     fn dry_run_summary(&self) -> String {
@@ -630,18 +648,7 @@ impl Executor for CloseGithubIssueResult {
 
         let already_closed = metadata.state.eq_ignore_ascii_case("closed");
         if already_closed && canonical.is_none() {
-            return Ok(ExecutionResult::success_with_data(
-                format!(
-                    "GitHub issue {}#{} is already closed",
-                    target.repository, target.number
-                ),
-                serde_json::json!({
-                    "number": target.number,
-                    "target_repo": target.repository,
-                    "already_closed": true,
-                    "state_reason": state_reason.as_str(),
-                }),
-            ));
+            return Ok(already_closed_result(&target, state_reason));
         }
 
         if let Err(result) = post_closing_comment(
