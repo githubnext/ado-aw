@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::safe_outputs::{
     ExecutionContext, ExecutionResult, Executor, GithubClient, GithubIssueNumber,
-    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities, Validate,
-    merge_github_values, resolve_github_issue_target, validate_blocked_first_globs,
-    validate_github_mutation_filter_config, validate_github_mutation_filters,
-    validate_github_repository, validate_github_target_capability,
+    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities,
+    ResolvedGithubIssueTarget, Validate, merge_github_values, resolve_github_issue_target,
+    validate_blocked_first_globs, validate_github_mutation_filter_config,
+    validate_github_mutation_filters, validate_github_repository,
+    validate_github_target_capability,
 };
 use crate::sanitize::{SanitizeContent, sanitize_config};
 use crate::tool_result;
@@ -118,6 +119,58 @@ fn target_display(issue_number: &GithubIssueNumber, repository: Option<&str>) ->
     }
 }
 
+/// Resolve all requested labels against the live target before the first
+/// DELETE. This makes absent labels idempotent and prevents a denied later
+/// value from leaving a partial mutation.
+fn partition_labels(requested: &[String], existing: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut present = Vec::new();
+    let mut absent = Vec::new();
+    for label in requested {
+        match existing.iter().find(|e| e.eq_ignore_ascii_case(label)) {
+            Some(existing) => present.push(existing.clone()),
+            None => absent.push(label.clone()),
+        }
+    }
+    (present, absent)
+}
+
+/// DELETE each label; returns the removed labels, or a failure result on the
+/// first non-success response. Labels that vanish concurrently go to `absent`.
+async fn delete_labels(
+    client: &GithubClient,
+    target: &ResolvedGithubIssueTarget,
+    present: Vec<String>,
+    absent: &mut Vec<String>,
+) -> anyhow::Result<Result<Vec<String>, ExecutionResult>> {
+    let mut removed = Vec::new();
+    for label in present {
+        let mut url = client.issue_url(&target.repository, target.number)?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("GitHub issue URL cannot be a base URL"))?
+            .push("labels")
+            .push(&label);
+        debug!(
+            "DELETEing label '{}' from GitHub issue {}#{}",
+            label, target.repository, target.number
+        );
+        let response = client.send(Method::DELETE, url, None).await?;
+        if response.status == StatusCode::NOT_FOUND {
+            // A concurrent actor may remove the label after our preflight.
+            // The requested end state is already satisfied.
+            absent.push(label);
+            continue;
+        }
+        if !response.is_success() {
+            let error = response
+                .require_success("Failed to remove GitHub issue label")
+                .expect_err("non-success response must produce an API error");
+            return Ok(Err(ExecutionResult::failure(error.to_string())));
+        }
+        removed.push(label);
+    }
+    Ok(Ok(removed))
+}
+
 #[async_trait::async_trait]
 impl Executor for RemoveGithubIssueLabelsResult {
     fn dry_run_summary(&self) -> String {
@@ -182,48 +235,11 @@ impl Executor for RemoveGithubIssueLabelsResult {
             return Ok(result);
         }
 
-        // Resolve all requested labels against the live target before the first
-        // DELETE. This makes absent labels idempotent and prevents a denied
-        // later value from leaving a partial mutation.
-        let mut present = Vec::new();
-        let mut absent = Vec::new();
-        for requested in &labels {
-            match metadata
-                .labels
-                .iter()
-                .find(|existing| existing.eq_ignore_ascii_case(requested))
-            {
-                Some(existing) => present.push(existing.clone()),
-                None => absent.push(requested.clone()),
-            }
-        }
-
-        let mut removed = Vec::new();
-        for label in present {
-            let mut url = client.issue_url(&target.repository, target.number)?;
-            url.path_segments_mut()
-                .map_err(|_| anyhow::anyhow!("GitHub issue URL cannot be a base URL"))?
-                .push("labels")
-                .push(&label);
-            debug!(
-                "DELETEing label '{}' from GitHub issue {}#{}",
-                label, target.repository, target.number
-            );
-            let response = client.send(Method::DELETE, url, None).await?;
-            if response.status == StatusCode::NOT_FOUND {
-                // A concurrent actor may remove the label after our preflight.
-                // The requested end state is already satisfied.
-                absent.push(label);
-                continue;
-            }
-            if !response.is_success() {
-                let error = response
-                    .require_success("Failed to remove GitHub issue label")
-                    .expect_err("non-success response must produce an API error");
-                return Ok(ExecutionResult::failure(error.to_string()));
-            }
-            removed.push(label);
-        }
+        let (present, mut absent) = partition_labels(&labels, &metadata.labels);
+        let removed = match delete_labels(&client, &target, present, &mut absent).await? {
+            Ok(removed) => removed,
+            Err(result) => return Ok(result),
+        };
 
         info!(
             "Removed {} label(s) from GitHub issue {}#{}; {} already absent",
