@@ -393,6 +393,133 @@ fn build_engine_setup(
     })
 }
 
+/// Identity of the `self` repository, resolved at compile time.
+///
+/// `self` is the repository this workflow is compiled in, and (because the
+/// executor's `--source` resolves beneath the `self` checkout) also the
+/// repository whose pipeline runs it — for template targets that is the
+/// parent pipeline's repository. The compiler therefore already knows the
+/// name, and the `ado-aw-marker` extension already bakes it into the lock,
+/// so `ado-aw check` fails loudly if the baked value ever drifts from the
+/// repository the pipeline actually runs in.
+///
+/// The `$(Build.Repository.Name)` fallback is deliberately last: it names
+/// the *triggering* repository, which differs from `self` on
+/// repository-resource-triggered runs (issue #1731). Warn rather than fail,
+/// because compiling outside an ADO clone is a supported developer path.
+fn resolve_self_repository_name(ctx: &CompileContext<'_>, agent_name: &str) -> Result<EnvValue> {
+    let name = match ctx.ado_context.as_ref() {
+        Some(ado) => EnvValue::literal(ado.repo_name.clone()),
+        None => {
+            eprintln!(
+                "Warning: could not resolve the Azure DevOps repository for agent '{}' \
+                (no ADO git remote and no ADO_AW_COMPILE_REMOTE_URL). Falling back to \
+                $(Build.Repository.Name) for the 'self' repository identity, which names \
+                the TRIGGERING repository — safe-outputs targeting `repository: self` may \
+                resolve to the wrong repository on repository-resource-triggered runs. \
+                Compile from an Azure DevOps clone, or set ADO_AW_COMPILE_REMOTE_URL.",
+                agent_name
+            );
+            EnvValue::ado_macro("Build.Repository.Name")?
+        }
+    };
+    Ok(name)
+}
+
+/// Resolve the workflow source path (for integrity check + metadata).
+/// Returns `(source_path, source_relative_path)`.
+fn resolve_source_paths(
+    input_path: &Path,
+    trigger_repo_directory: &str,
+) -> Result<(String, String)> {
+    // `source_path` embeds `{{ trigger_repo_directory }}` which the
+    // legacy template fold substitutes — do the same eagerly so step
+    // bodies receive a fully-resolved scalar.
+    // Validate the exact user-controlled suffix produced by the canonical path
+    // generator before the final path is embedded into compiler-authored bash.
+    // The trigger-repository prefix itself is compiler-owned.
+    let source_path_raw = common::generate_source_path(input_path);
+    let source_path_suffix = source_path_raw
+        .strip_prefix("{{ trigger_repo_directory }}/")
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "compiler-generated workflow source path is missing the trigger-repository prefix"
+            )
+        })?;
+    crate::validate::reject_pipeline_injection(source_path_suffix, "workflow source path")?;
+    let source_relative_path = source_path_suffix.to_string();
+    let source_path =
+        source_path_raw.replace("{{ trigger_repo_directory }}", trigger_repo_directory);
+    Ok((source_path, source_relative_path))
+}
+
+/// Build the (read, write) ADO token acquisition steps from `permissions:`.
+fn build_token_steps(front_matter: &FrontMatter) -> (Option<Step>, Option<Step>) {
+    let acquire_read_token = common::acquire_ado_token_step(
+        front_matter
+            .permissions
+            .as_ref()
+            .and_then(|p| p.read.as_ref())
+            .map(crate::compile::types::ReadPermissionConfig::service_connection),
+        crate::compile::types::WriteConnectionType::AzureRm,
+        common::AdoTokenVariable::Read,
+    );
+    let write_permission = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_ref());
+    let acquire_write_token = common::acquire_ado_token_step(
+        write_permission.map(crate::compile::types::WritePermissionConfig::service_connection),
+        write_permission
+            .map(crate::compile::types::WritePermissionConfig::connection_type)
+            .unwrap_or_default(),
+        common::AdoTokenVariable::Write,
+    );
+    (acquire_read_token, acquire_write_token)
+}
+
+/// Generate the optional custom-tools JSON and the resolved execution config JSON.
+fn build_custom_tools_json(front_matter: &FrontMatter) -> Result<(Option<String>, String)> {
+    let custom_tool_schemas = super::custom_tools::generate_custom_tool_schemas(front_matter)?;
+    let custom_tools_json = if custom_tool_schemas.is_empty() {
+        None
+    } else {
+        Some(super::custom_tools::custom_tools_json(
+            &custom_tool_schemas,
+        )?)
+    };
+    let resolved_execution_config_json =
+        super::custom_tools::resolved_execution_config_json(front_matter, &custom_tool_schemas)?;
+    Ok((custom_tools_json, resolved_execution_config_json))
+}
+
+/// Compute the Agent and Detection network allowlists.
+fn build_allowed_domains(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    extension_declarations: &[crate::compile::extensions::Declarations],
+    threat_detection: &crate::compile::types::ThreatDetectionConfig,
+    detection_engine_config: &crate::compile::types::EngineConfig,
+) -> Result<(String, String)> {
+    let allowed_domains =
+        common::generate_allowed_domains(front_matter, extensions, extension_declarations)?;
+    // With no engine overlay, Detection uses the same effective engine and
+    // network inputs as Agent, so the already-computed allowlist is identical.
+    // Any future detection-only network contributor must extend this branch
+    // rather than relying on the clone.
+    let detection_allowed_domains = if threat_detection.engine.is_some() {
+        common::generate_allowed_domains_for_engine(
+            front_matter,
+            extensions,
+            extension_declarations,
+            detection_engine_config,
+        )?
+    } else {
+        allowed_domains.clone()
+    };
+    Ok((allowed_domains, detection_allowed_domains))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pipeline_context(
     front_matter: &FrontMatter,
@@ -427,35 +554,7 @@ pub(crate) fn build_pipeline_context(
     )?;
     let working_directory = common::generate_working_directory(&effective_workspace);
     let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
-    // Identity of the `self` repository, resolved at compile time.
-    //
-    // `self` is the repository this workflow is compiled in, and (because the
-    // executor's `--source` resolves beneath the `self` checkout) also the
-    // repository whose pipeline runs it — for template targets that is the
-    // parent pipeline's repository. The compiler therefore already knows the
-    // name, and the `ado-aw-marker` extension already bakes it into the lock,
-    // so `ado-aw check` fails loudly if the baked value ever drifts from the
-    // repository the pipeline actually runs in.
-    //
-    // The `$(Build.Repository.Name)` fallback is deliberately last: it names
-    // the *triggering* repository, which differs from `self` on
-    // repository-resource-triggered runs (issue #1731). Warn rather than fail,
-    // because compiling outside an ADO clone is a supported developer path.
-    let self_repository_name = match ctx.ado_context.as_ref() {
-        Some(ado) => EnvValue::literal(ado.repo_name.clone()),
-        None => {
-            eprintln!(
-                "Warning: could not resolve the Azure DevOps repository for agent '{}' \
-                (no ADO git remote and no ADO_AW_COMPILE_REMOTE_URL). Falling back to \
-                $(Build.Repository.Name) for the 'self' repository identity, which names \
-                the TRIGGERING repository — safe-outputs targeting `repository: self` may \
-                resolve to the wrong repository on repository-resource-triggered runs. \
-                Compile from an Azure DevOps clone, or set ADO_AW_COMPILE_REMOTE_URL.",
-                front_matter.name
-            );
-            EnvValue::ado_macro("Build.Repository.Name")?
-        }
-    };
+    let self_repository_name = resolve_self_repository_name(ctx, &front_matter.name)?;
     let pools = common::resolve_pool_overrides_typed(
         front_matter.target.clone(),
         front_matter.pool.as_ref(),
@@ -470,106 +569,38 @@ pub(crate) fn build_pipeline_context(
         &threat_detection,
         &detection_engine_config,
     )?;
-    let EngineSetup {
-        compiler_version,
-        engine_run,
-        engine_run_detection,
-        engine_install_steps_yaml,
-        detection_engine_install_steps_yaml,
-        engine_log_dir,
-        engine_env,
-        awf_paths,
-        byom_exclude_keys,
-        detection_byom_exclude_keys,
-        detection_engine_env,
-    } = engine_setup;
 
     // AWF mounts + allowlist
-    let allowed_domains =
-        common::generate_allowed_domains(front_matter, extensions, &extension_declarations)?;
-    // With no engine overlay, Detection uses the same effective engine and
-    // network inputs as Agent, so the already-computed allowlist is identical.
-    // Any future detection-only network contributor must extend this branch
-    // rather than relying on the clone.
-    let detection_allowed_domains = if threat_detection.engine.is_some() {
-        common::generate_allowed_domains_for_engine(
-            front_matter,
-            extensions,
-            &extension_declarations,
-            &detection_engine_config,
-        )?
-    } else {
-        allowed_domains.clone()
-    };
+    let (allowed_domains, detection_allowed_domains) = build_allowed_domains(
+        front_matter,
+        extensions,
+        &extension_declarations,
+        &threat_detection,
+        &detection_engine_config,
+    )?;
     let awf_mounts = common::generate_awf_mounts(extensions, &extension_declarations);
-    let awf_path_step_yaml = common::generate_awf_path_step(&awf_paths);
+    let awf_path_step_yaml = common::generate_awf_path_step(&engine_setup.awf_paths);
 
     // MCPG config + compiler-generated dynamic SafeOutputs tool definitions.
-    let custom_tool_schemas = super::custom_tools::generate_custom_tool_schemas(front_matter)?;
-    let custom_tools_json = if custom_tool_schemas.is_empty() {
-        None
-    } else {
-        Some(super::custom_tools::custom_tools_json(
-            &custom_tool_schemas,
-        )?)
-    };
-    let resolved_execution_config_json =
-        super::custom_tools::resolved_execution_config_json(front_matter, &custom_tool_schemas)?;
+    let (custom_tools_json, resolved_execution_config_json) =
+        build_custom_tools_json(front_matter)?;
     let mcpg_compilation =
         common::compile_mcpg(front_matter, &extension_declarations, debug_pipeline)?;
     let mcpg_config_json = serde_json::to_string_pretty(&mcpg_compilation.config)
         .map_err(|e| anyhow::anyhow!("Failed to serialize MCPG config: {e}"))?;
 
-    // Source / pipeline paths (for integrity check + metadata).
-    // `source_path` embeds `{{ trigger_repo_directory }}` which the
-    // legacy template fold substitutes — do the same eagerly so step
-    // bodies receive a fully-resolved scalar.
-    // Validate the exact user-controlled suffix produced by the canonical path
-    // generator before the final path is embedded into compiler-authored bash.
-    // The trigger-repository prefix itself is compiler-owned.
-    let source_path_raw = common::generate_source_path(input_path);
-    let source_path_suffix = source_path_raw
-        .strip_prefix("{{ trigger_repo_directory }}/")
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "compiler-generated workflow source path is missing the trigger-repository prefix"
-            )
-        })?;
-    crate::validate::reject_pipeline_injection(source_path_suffix, "workflow source path")?;
-    let source_relative_path = source_path_suffix.to_string();
-    let source_path =
-        source_path_raw.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
+    let (source_path, source_relative_path) =
+        resolve_source_paths(input_path, &trigger_repo_directory)?;
     let pipeline_path = common::generate_pipeline_path(output_path);
 
-    // Read / write tokens
-    let acquire_read_token = common::acquire_ado_token_step(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.read.as_ref())
-            .map(crate::compile::types::ReadPermissionConfig::service_connection),
-        crate::compile::types::WriteConnectionType::AzureRm,
-        common::AdoTokenVariable::Read,
+    let (acquire_read_token, acquire_write_token) = build_token_steps(front_matter);
+    let integrity_check_yaml = common::generate_integrity_check(
+        skip_integrity
+            || front_matter
+                .ado_aw_debug
+                .as_ref()
+                .is_some_and(|d| d.skip_integrity),
     );
-    let write_permission = front_matter
-        .permissions
-        .as_ref()
-        .and_then(|p| p.write.as_ref());
-    let acquire_write_token = common::acquire_ado_token_step(
-        write_permission.map(crate::compile::types::WritePermissionConfig::service_connection),
-        write_permission
-            .map(crate::compile::types::WritePermissionConfig::connection_type)
-            .unwrap_or_default(),
-        common::AdoTokenVariable::Write,
-    );
-    // Skip integrity check resolution
-    let skip_integrity = skip_integrity
-        || front_matter
-            .ado_aw_debug
-            .as_ref()
-            .map(|d| d.skip_integrity)
-            .unwrap_or(false);
-    let integrity_check_yaml = common::generate_integrity_check(skip_integrity);
 
     // Agent prompt content
     let agent_content_value = build_agent_content(
@@ -602,20 +633,20 @@ pub(crate) fn build_pipeline_context(
         working_directory: working_directory.clone(),
         trigger_repo_directory: trigger_repo_directory.clone(),
         self_repository_name,
-        compiler_version: compiler_version.clone(),
-        engine_install_steps_yaml,
-        detection_engine_install_steps_yaml,
-        engine_run,
-        engine_run_detection,
+        compiler_version: engine_setup.compiler_version,
+        engine_install_steps_yaml: engine_setup.engine_install_steps_yaml,
+        detection_engine_install_steps_yaml: engine_setup.detection_engine_install_steps_yaml,
+        engine_run: engine_setup.engine_run,
+        engine_run_detection: engine_setup.engine_run_detection,
         detection_engine_config,
         threat_detection,
-        engine_env,
-        engine_log_dir,
+        engine_env: engine_setup.engine_env,
+        engine_log_dir: engine_setup.engine_log_dir,
         allowed_domains,
         detection_allowed_domains,
         awf_mounts,
         awf_path_step_yaml,
-        awf_path_prepends: awf_paths,
+        awf_path_prepends: engine_setup.awf_paths,
         mcpg_config_json,
         custom_tools_json,
         resolved_execution_config_json,
@@ -628,9 +659,9 @@ pub(crate) fn build_pipeline_context(
         integrity_check_yaml,
         agent_content_value,
         debug_pipeline,
-        byom_exclude_keys,
-        detection_byom_exclude_keys,
-        detection_engine_env,
+        byom_exclude_keys: engine_setup.byom_exclude_keys,
+        detection_byom_exclude_keys: engine_setup.detection_byom_exclude_keys,
+        detection_engine_env: engine_setup.detection_engine_env,
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
