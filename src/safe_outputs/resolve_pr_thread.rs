@@ -123,6 +123,47 @@ pub struct ResolvePrThreadConfig {
     pub allowed_statuses: Vec<String>,
 }
 
+impl ResolvePrThreadResult {
+    /// Returns a failure result when the config rejects this status or repository.
+    fn check_policy(&self, config: &ResolvePrThreadConfig) -> Option<ExecutionResult> {
+        // Validate status against allowed-statuses — REQUIRED.
+        // An empty allowed-statuses list means the operator hasn't opted in, so reject.
+        // This prevents agents from resolving review threads (e.g. marking security
+        // concerns as "fixed") without explicit operator consent.
+        if config.allowed_statuses.is_empty() {
+            return Some(ExecutionResult::failure(
+                "resolve-pr-thread requires 'allowed-statuses' to be configured in \
+                 safe-outputs.resolve-pr-thread. This prevents agents from \
+                 manipulating thread statuses without explicit operator consent. Example:\n  \
+                 safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n        \
+                 - fixed\n\nValid statuses: active, fixed, wont-fix, closed, by-design"
+                    .to_string(),
+            ));
+        }
+        if !config.allowed_statuses.contains(&self.status) {
+            return Some(ExecutionResult::failure(format!(
+                "Status '{}' is not in the allowed-statuses list",
+                self.status
+            )));
+        }
+
+        let effective_repo = self.repository.as_deref().unwrap_or("self");
+
+        // Validate repository against allowed-repositories config
+        if !config.allowed_repositories.is_empty()
+            && !config
+                .allowed_repositories
+                .contains(&effective_repo.to_string())
+        {
+            return Some(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list",
+                effective_repo
+            )));
+        }
+        None
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for ResolvePrThreadResult {
     fn dry_run_summary(&self) -> String {
@@ -159,39 +200,8 @@ impl Executor for ResolvePrThreadResult {
         let config: ResolvePrThreadConfig = ctx.get_tool_config("resolve-pr-thread")?;
         debug!("Config: {:?}", config);
 
-        // Validate status against allowed-statuses — REQUIRED.
-        // An empty allowed-statuses list means the operator hasn't opted in, so reject.
-        // This prevents agents from resolving review threads (e.g. marking security
-        // concerns as "fixed") without explicit operator consent.
-        if config.allowed_statuses.is_empty() {
-            return Ok(ExecutionResult::failure(
-                "resolve-pr-thread requires 'allowed-statuses' to be configured in \
-                 safe-outputs.resolve-pr-thread. This prevents agents from \
-                 manipulating thread statuses without explicit operator consent. Example:\n  \
-                 safe-outputs:\n    resolve-pr-thread:\n      allowed-statuses:\n        \
-                 - fixed\n\nValid statuses: active, fixed, wont-fix, closed, by-design"
-                    .to_string(),
-            ));
-        }
-        if !config.allowed_statuses.contains(&self.status) {
-            return Ok(ExecutionResult::failure(format!(
-                "Status '{}' is not in the allowed-statuses list",
-                self.status
-            )));
-        }
-
-        let effective_repo = self.repository.as_deref().unwrap_or("self");
-
-        // Validate repository against allowed-repositories config
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&effective_repo.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list",
-                effective_repo
-            )));
+        if let Some(rejection) = self.check_policy(&config) {
+            return Ok(rejection);
         }
 
         // Map status string to ADO integer
