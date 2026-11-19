@@ -3,7 +3,7 @@ name: "ado-aw candidate smoke: credential-isolated package feeds (WIF)"
 description: "Proves npm, pip, and dotnet restore from an Azure Artifacts feed through ado-proxy with a workload-identity token that never reaches the sandbox"
 target: standalone
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 engine:
   id: copilot
   timeout-minutes: 20
@@ -27,12 +27,12 @@ permissions:
     # Workload-identity federation: AzureCLI@3 mints an Entra token for this
     # connection's service principal, which holds Feed and Upstream Reader
     # (Collaborator) on the feed. The token goes only to ado-proxy.
-    service-connection: agent-playground-read
+    service-connection: ado-aw-ci-read
     feeds:
       - name: smoke
-        organization: msazuresphere
-        project: AgentPlayground
-        feed: AgentPlaygroundTestFeed
+        organization: outlookweb
+        project: Test
+        feed: ado-aw-ci-test-feed
         protocols: [npm, pypi, nuget]
         upstream: allow
 safe-outputs:

@@ -3,7 +3,7 @@ name: "Candidate compiler smoke: custom safe outputs"
 description: "Exercises an imported jobs-style custom safe output"
 target: standalone
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 engine:
   id: copilot
   timeout-minutes: 15

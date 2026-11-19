@@ -13,4 +13,4 @@ variables:
   EFFECTIVE_SMOKE_MIRROR_REPO: $[ coalesce(variables['SMOKE_MIRROR_REPO'], 'ado-aw-mirror') ]
   EFFECTIVE_SMOKE_LANE_AGENTIC_DEFINITION_ID: $[ coalesce(variables['SMOKE_LANE_AGENTIC_DEFINITION_ID'], '') ]
   EFFECTIVE_SMOKE_LANE_INFRA_DEFINITION_ID: $[ coalesce(variables['SMOKE_LANE_INFRA_DEFINITION_ID'], '') ]
-  EFFECTIVE_CRATES_IO_FEED: $[ coalesce(variables['CRATES_IO_FEED'], 'sparse+https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/cargo/Cargo/index/') ]
+  EFFECTIVE_CRATES_IO_FEED: $[ coalesce(variables['CRATES_IO_FEED'], 'sparse+https://pkgs.dev.azure.com/outlookweb/Test/_packaging/ado-aw-ci-rust/Cargo/index/') ]

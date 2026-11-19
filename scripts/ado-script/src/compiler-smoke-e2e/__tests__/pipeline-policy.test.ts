@@ -139,7 +139,7 @@ describe("candidate orchestrator trigger policy", () => {
     );
 
     const audit = steps.find(
-      (step) => step.displayName === "Audit AgentPlayground trigger policy",
+      (step) => step.displayName === "Audit CI trigger policy",
     );
     expect(audit?.script).toContain("for attempt in 1 2 3");
     expect(audit?.script).toContain("--fail-with-body");
@@ -185,7 +185,7 @@ describe("candidate orchestrator trigger policy", () => {
     // required to carry a pullRequest trigger it must never have, and failed
     // its own audit. Caught by the first live released run (build 629514).
     const audit = steps.find(
-      (step) => step.displayName === "Audit AgentPlayground trigger policy",
+      (step) => step.displayName === "Audit CI trigger policy",
     );
     expect(audit?.script).toContain(
       "SELF_IS_PR_DEFINITION=${{ eq(parameters.compilerSource, 'candidate') }}",

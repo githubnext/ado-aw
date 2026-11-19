@@ -28,7 +28,7 @@ supply-chain:
     service-connection: feed-conn  # optional (see Authentication)
   # Alternative to feed (the two are mutually exclusive):
   # pipeline-artifact:
-  #   project: AgentPlayground
+  #   project: Test
   #   definition-id: 2560
   #   run-id: 630001
   #   artifact: ado-aw-candidate
@@ -254,7 +254,7 @@ All binaries from one exact candidate pipeline run:
 ```yaml
 supply-chain:
   pipeline-artifact:
-    project: AgentPlayground
+    project: Test
     definition-id: 2560
     run-id: 630001
     artifact: ado-aw-candidate
@@ -265,7 +265,7 @@ Candidate binaries plus mirrored images:
 ```yaml
 supply-chain:
   pipeline-artifact:
-    project: AgentPlayground
+    project: Test
     definition-id: 2560
     run-id: 630001
     artifact: ado-aw-candidate

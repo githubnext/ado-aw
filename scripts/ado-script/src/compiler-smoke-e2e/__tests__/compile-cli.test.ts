@@ -39,7 +39,7 @@ describe("compileAndCheck", () => {
       adoAwBin: "C:\\bin\\ado-aw.exe",
       worktreeDir: "/wt",
       metadataRemoteUrl:
-        "https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror",
+        "https://dev.azure.com/outlookweb/Test/_git/ado-aw-mirror",
       relMd: "tests/safe-outputs/canary.md",
       relLock: "tests/safe-outputs/canary.lock.yml",
       timeoutMs: 1000,
@@ -58,7 +58,7 @@ describe("compileAndCheck", () => {
     for (const call of spawnCalls) {
       expect(call.env).toEqual({
         ADO_AW_COMPILE_REMOTE_URL:
-          "https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror",
+          "https://dev.azure.com/outlookweb/Test/_git/ado-aw-mirror",
       });
     }
   });
