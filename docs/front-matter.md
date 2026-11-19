@@ -307,7 +307,7 @@ supply-chain:                  # optional internal supply-chain mirror (see docs
     name: my-project/my-feed     # feed name or project/feed; scalar `feed: my-feed` shorthand also works
     service-connection: feed-conn  # optional; omit for same-org feeds (uses $(System.AccessToken))
   # pipeline-artifact:           # alternative binary source; mutually exclusive with feed
-  #   project: AgentPlayground   # validated ADO project name or GUID
+  #   project: Test   # validated ADO project name or GUID
   #   definition-id: 2560        # positive producer pipeline definition ID
   #   run-id: 630001             # positive, exact producer build ID
   #   artifact: ado-aw-candidate # complete payload/checksum/provenance artifact

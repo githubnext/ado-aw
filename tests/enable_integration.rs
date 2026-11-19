@@ -139,7 +139,7 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex(r"/AgentPlayground/_apis/build/definitions"))
+        .and(path_regex(r"/Test/_apis/build/definitions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "count": 0,
             "value": []
@@ -159,9 +159,9 @@ async fn enable_dry_run_against_subdirectory_uses_repo_root_relative_yaml_path()
             "--repository-name",
             "githubnext/ado-aw",
             "--project",
-            "AgentPlayground",
+            "Test",
             "--org",
-            "msazuresphere",
+            "outlookweb",
             "--pat",
             "dummy-pat-for-dry-run",
             "--dry-run",

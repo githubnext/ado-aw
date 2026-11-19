@@ -3,7 +3,7 @@ name: "Pipeline Artifact Agent"
 description: "Exercises the pinned candidate pipeline-artifact supply-chain source"
 supply-chain:
   pipeline-artifact:
-    project: AgentPlayground
+    project: Test
     definition-id: 2560
     run-id: 630001
     artifact: ado-aw-candidate

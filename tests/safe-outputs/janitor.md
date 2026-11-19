@@ -1,17 +1,17 @@
 ---
 name: "ado-aw smoke janitor"
-description: "Weekly cleanup of ado-aw-smoke-* artifacts in AgentPlayground"
+description: "Weekly cleanup of ado-aw-smoke-* artifacts in the CI project"
 on:
   schedule: weekly on monday around 02:00
 target: standalone
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 engine:
   id: copilot
   timeout-minutes: 30
 permissions:
-  read: agent-playground-read
-  write: agent-playground-write
+  read: ado-aw-ci-read
+  write: ado-aw-ci-write
 safe-outputs:
   noop: {}
 setup:
@@ -22,7 +22,7 @@ setup:
       #   * delete work items whose title matches `ado-aw-smoke-*`
       #     and whose System.CreatedDate is older than 30 days,
       #   * delete refs/heads/ado-aw-smoke-* and refs/tags/ado-aw-smoke-*
-      #     older than 30 days from the AgentPlayground repo,
+      #     older than 30 days from the CI project's repos,
       #   * delete wiki pages whose path starts with /ado-aw-smoke-
       #     older than 30 days,
       #   * abandon any draft PRs whose title starts with

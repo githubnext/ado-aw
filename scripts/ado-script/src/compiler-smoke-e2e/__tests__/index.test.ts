@@ -20,7 +20,7 @@ const WORKTREE = "C:\\tmp\\ado-aw-smoke-xyz";
 
 const baseEnv = {
   SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
-  SYSTEM_TEAMPROJECT: "AgentPlayground",
+  SYSTEM_TEAMPROJECT: "Test",
   SYSTEM_ACCESSTOKEN: "secret-token",
   BUILD_BUILDID: "630001",
   BUILD_SOURCEBRANCH: "refs/heads/main",
@@ -84,7 +84,7 @@ jobs:
         inputs:
           targetPath: in
           source: specific
-          project: AgentPlayground
+          project: Test
           pipeline: '2560'
           runVersion: specific
           runId: '630001'

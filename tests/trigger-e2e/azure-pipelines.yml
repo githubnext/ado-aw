@@ -1,7 +1,7 @@
 # Deterministic trigger-condition (gate / synth-PR) E2E ORCHESTRATOR pipeline.
 #
 # Builds the trigger-e2e harness from this checkout and runs it against
-# AgentPlayground. The harness creates real PRs and queues the registered
+# the outlookweb/Test CI project. The harness creates real PRs and queues the registered
 # VICTIM pipeline (tests/trigger-e2e/victim-pipeline.yml) under a battery of
 # trigger conditions, asserting the gate decision via build tags + result. On
 # any failure it files a GitHub issue on the configured issue repository and
@@ -12,7 +12,7 @@
 # the victim runs, so the harness only needs Node.
 #
 # This is a hand-authored ADO pipeline (NOT compiled from an agent markdown).
-# Register it in msazuresphere/AgentPlayground — see tests/trigger-e2e/README.md.
+# Register it in outlookweb/Test — see tests/trigger-e2e/README.md.
 
 trigger: none
 pr: none
@@ -26,7 +26,7 @@ schedules:
     always: true
 
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 
 variables:
   # Keep YAML defaults under private names so same-named pipeline/definition UI
@@ -63,7 +63,7 @@ steps:
   - task: AzureCLI@2
     displayName: Acquire ADO token (SC_WRITE_TOKEN)
     inputs:
-      azureSubscription: agent-playground-write
+      azureSubscription: ado-aw-ci-write
       scriptType: bash
       scriptLocation: inlineScript
       addSpnToEnvironment: true

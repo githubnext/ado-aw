@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { prepareCaseSource, splitFrontMatter } from "../source.js";
 
 const VALUES = {
-  project: "AgentPlayground",
+  project: "Test",
   definitionId: 2560,
   runId: 630001,
   artifact: "ado-aw-candidate",
@@ -36,7 +36,7 @@ describe("prepareCaseSource", () => {
     const { yamlText, body } = splitFrontMatter(out);
     expect(yamlText).toContain("supply-chain:");
     expect(yamlText).toContain("pipeline-artifact:");
-    expect(yamlText).toContain("project: AgentPlayground");
+    expect(yamlText).toContain("project: Test");
     expect(yamlText).toContain("definition-id: 2560");
     expect(yamlText).toContain("run-id: 630001");
     expect(yamlText).toContain("artifact: ado-aw-candidate");

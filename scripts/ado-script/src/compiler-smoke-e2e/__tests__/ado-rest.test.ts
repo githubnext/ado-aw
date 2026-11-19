@@ -19,7 +19,7 @@ function makeRest(
 ) {
   return new AdoRest({
     orgUrl: "https://dev.azure.com/org/",
-    project: "AgentPlayground",
+    project: "Test",
     token: "secret-token",
     fetchImpl,
     sleepImpl: async () => {},
@@ -69,7 +69,7 @@ describe("AdoRest.getArtifact", () => {
 
   it("scopes the request to the exact same project as the producer build", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      expect(String(input)).toContain("/AgentPlayground/");
+      expect(String(input)).toContain("/Test/");
       return jsonResponse(200, { name: "a" });
     });
     const rest = makeRest(fetchImpl as unknown as typeof fetch);
@@ -230,7 +230,7 @@ describe("AdoRest.buildUrl", () => {
     const rest = makeRest((async () =>
       emptyResponse(200)) as unknown as typeof fetch);
     expect(rest.buildUrl(123)).toBe(
-      "https://dev.azure.com/org/AgentPlayground/_build/results?buildId=123",
+      "https://dev.azure.com/org/Test/_build/results?buildId=123",
     );
   });
 });

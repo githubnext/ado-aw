@@ -27,7 +27,7 @@ This suite exercises them with **no LLM and no agent** in the loop:
 5. cleans up every object it created,
 
 and, on any failure, files a GitHub issue on the configured issue repository
-and fails the build. AgentPlayground currently uses
+and fails the build. The CI project currently uses
 `jamesadevine/ado-aw-issues` because a canonical-repository credential is not
 available.
 
@@ -36,7 +36,7 @@ available.
 | File | Purpose |
 | --- | --- |
 | `victim-pipeline.yml` | Hand-authored, **parameterized** victim. Runs only `exec-context-pr-synth.js` then `gate.js` from a checkout build, emits observable build tags. Registered separately. |
-| `azure-pipelines.yml` | Hand-authored **orchestrator** (daily + manual). Builds the harness and runs it against AgentPlayground. |
+| `azure-pipelines.yml` | Hand-authored **orchestrator** (daily + manual). Builds the harness and runs it against the `outlookweb/Test` CI project. |
 | `README.md` | This file. |
 
 The harness itself lives in
@@ -101,7 +101,7 @@ the smoke-suite janitor (which prunes `ado-aw-*` artifacts) is the backstop.
 The victim's `self` repository must be Azure Repos, while the orchestrator is
 registered against GitHub. Before running scenarios, the orchestrator pushes
 its checked-out `main` commit to `ado-aw-mirror` and verifies the remote SHA.
-The push is authenticated with the `agent-playground-write` AAD token through
+The push is authenticated with the `ado-aw-ci-write` AAD token through
 an environment-only git bearer header.
 
 Synchronization is fast-forward-only and fail-closed: a divergent mirror stops
@@ -128,8 +128,8 @@ You need a write-capable ADO token (PAT) and a registered victim pipeline id:
 ```bash
 cd scripts/ado-script && npm ci && npm run build:trigger-e2e && cd ../..
 
-export SYSTEM_COLLECTIONURI="https://dev.azure.com/msazuresphere/"
-export SYSTEM_TEAMPROJECT="AgentPlayground"
+export SYSTEM_COLLECTIONURI="https://dev.azure.com/outlookweb/"
+export SYSTEM_TEAMPROJECT="Test"
 export SYSTEM_ACCESSTOKEN="<write-capable-PAT>"
 export TRIGGER_E2E_VICTIM_DEFINITION_ID="<registered victim pipeline id>"
 export TRIGGER_E2E_VICTIM_REPO="<ADO Git repo backing the victim's self>"
@@ -150,11 +150,12 @@ fails.
 
 ## Manual-handoff checklist (one-time ADO setup)
 
-In `https://dev.azure.com/msazuresphere/AgentPlayground`:
+In `https://dev.azure.com/outlookweb/Test`:
 
-> Current registration: orchestrator definition `2551`, victim definition
-> `2552`, and Azure Repo `ado-aw-mirror`. The orchestrator uses concurrency
-> `4` and a 30-minute queue-inclusive victim wait budget.
+> Current registration: victim definition `2876` and Azure Repo
+> `ado-aw-mirror`; the orchestrator ID is in
+> [`tests/smoke/REGISTERED.md`](../smoke/REGISTERED.md). The orchestrator uses
+> concurrency `4` and a 30-minute queue-inclusive victim wait budget.
 
 1. **Create and seed `ado-aw-mirror`.** Import or push the merged
    `githubnext/ado-aw` `main` commit into a dedicated Azure Repo. Do not reuse
@@ -165,10 +166,10 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    It **must** be an ADO Git repo (not GitHub) so `exec-context-pr-synth` can
    discover open PRs in the pipeline's own `self` repo. Note its **definition
    id** for the next step.
-   - **Pool name.** Both `victim-pipeline.yml` and `azure-pipelines.yml`
-     hardcode `pool: { name: AZS-1ES-L-Playground-ubuntu-22.04 }`. If your ADO
-     project uses a different agent pool, edit both files to point at a
-     Linux pool with Node.js 20 available before registering.
+   - **Pool.** Both `victim-pipeline.yml` and `azure-pipelines.yml` use the
+     Microsoft-hosted `pool: { vmImage: ubuntu-22.04 }`. If your ADO project
+     uses a different agent pool, edit both files to point at a Linux pool
+     with Node.js 20 available before registering.
 3. **Register the ORCHESTRATOR pipeline.** New pipeline → GitHub through
    `githubnext` → existing YAML →
    `tests/trigger-e2e/azure-pipelines.yml`. Place both definitions in a
@@ -179,12 +180,12 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
    - `TRIGGER_E2E_VICTIM_REPO=ado-aw-mirror`
 5. **Grant the VICTIM build identity** Code Read on `ado-aw-mirror` for
    checkout and synth PR lookups.
-6. **Grant the principal behind `agent-playground-write`** Contribute, Create
+6. **Grant the principal behind `ado-aw-ci-write`** Contribute, Create
    branch, delete refs, and Contribute to PRs on `ado-aw-mirror`, plus Queue
    builds on the victim definition. Grant it project-level **Stop builds**:
    current-build cancellation is checked against a build-instance token and
    does not inherit a definition-scoped Stop permission. Authorize the
-   `agent-playground-write` service connection for both the orchestrator and
+   `ado-aw-ci-write` service connection for both the orchestrator and
    victim definitions. This same identity performs mirror sync, creates the
    transient PR context, and supplies the gate's short-lived bearer.
    See [`docs/safe-output-permissions.md`](../../docs/safe-output-permissions.md)
@@ -192,7 +193,7 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
 7. **Set the GitHub PAT secret** on the orchestrator only:
    ```powershell
    ado-aw secrets set TRIGGER_E2E_GITHUB_TOKEN `
-     --org msazuresphere --project AgentPlayground `
+     --org outlookweb --project Test `
      --definition-ids <orchestrator-pipeline-id> `
      --value <fine-grained-pat-Issues-rw-on-jamesadevine/ado-aw-issues>
    ```

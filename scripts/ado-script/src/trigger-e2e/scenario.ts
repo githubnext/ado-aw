@@ -27,9 +27,9 @@ import type { AdoRest } from "../executor-e2e/ado-rest.js";
 
 /** Shared, read-only context handed to every scenario phase. */
 export interface TriggerContext {
-  /** ADO collection URI, e.g. https://dev.azure.com/msazuresphere/ */
+  /** ADO collection URI, e.g. https://dev.azure.com/outlookweb/ */
   readonly orgUrl: string;
-  /** ADO project name, e.g. AgentPlayground. */
+  /** ADO project name, e.g. Test. */
   readonly project: string;
   /** ADO Git repo used to create real PRs (initialised `main`). */
   readonly adoRepo: string;

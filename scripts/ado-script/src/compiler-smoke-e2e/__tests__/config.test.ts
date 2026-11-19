@@ -5,7 +5,7 @@ import { candidateRef, loadConfig } from "../config.js";
 function baseEnv(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
     SYSTEM_COLLECTIONURI: "https://dev.azure.com/org/",
-    SYSTEM_TEAMPROJECT: "AgentPlayground",
+    SYSTEM_TEAMPROJECT: "Test",
     SYSTEM_ACCESSTOKEN: "tok",
     BUILD_BUILDID: "42",
     BUILD_SOURCEBRANCH: "refs/heads/main",
@@ -24,7 +24,7 @@ describe("loadConfig", () => {
   it("parses a fully valid environment", () => {
     const config = loadConfig(baseEnv());
     expect(config.orgUrl).toBe("https://dev.azure.com/org/");
-    expect(config.project).toBe("AgentPlayground");
+    expect(config.project).toBe("Test");
     expect(config.buildId).toBe(42);
     expect(config.definitionId).toBe(99);
     expect(config.compilerSource).toBe("candidate");
@@ -146,8 +146,8 @@ describe("loadConfig", () => {
   });
 
   it("trims surrounding whitespace from string env vars", () => {
-    const config = loadConfig(baseEnv({ SYSTEM_TEAMPROJECT: "  AgentPlayground  " }));
-    expect(config.project).toBe("AgentPlayground");
+    const config = loadConfig(baseEnv({ SYSTEM_TEAMPROJECT: "  Test  " }));
+    expect(config.project).toBe("Test");
   });
 
   it("treats an empty string the same as unset", () => {
