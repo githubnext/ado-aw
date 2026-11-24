@@ -265,7 +265,10 @@ async fn submit_vote(
             vote_str, operation_ctx.pr_id
         );
         Ok(ExecutionResult::success_with_data(
-            format!("Vote '{}' submitted on PR #{}", vote_str, operation_ctx.pr_id),
+            format!(
+                "Vote '{}' submitted on PR #{}",
+                vote_str, operation_ctx.pr_id
+            ),
             serde_json::json!({
                 "pull_request_id": operation_ctx.pr_id,
                 "operation": "vote",

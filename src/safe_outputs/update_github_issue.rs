@@ -639,16 +639,10 @@ impl UpdateGithubIssueResult {
         if let Err(result) = self.preflight_labels(client, &target.repository).await? {
             return Ok(Err(result));
         }
-        if let Err(result) = self
-            .preflight_assignees(client, &target.repository)
-            .await?
-        {
+        if let Err(result) = self.preflight_assignees(client, &target.repository).await? {
             return Ok(Err(result));
         }
-        if let Err(result) = self
-            .preflight_milestone(client, &target.repository)
-            .await?
-        {
+        if let Err(result) = self.preflight_milestone(client, &target.repository).await? {
             return Ok(Err(result));
         }
         Ok(Ok(current))
