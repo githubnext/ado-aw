@@ -245,6 +245,94 @@ fn update_success_result(
 // Stage-2 executor
 // ============================================================================
 
+/// The page-scoped inputs shared by the existence probe and the update PUT.
+struct WikiPageRequest<'a> {
+    client: &'a reqwest::Client,
+    base_url: &'a str,
+    effective_path: &'a str,
+    resolved_branch: Option<&'a str>,
+    token: &'a str,
+}
+
+impl WikiPageRequest<'_> {
+    /// GET the page to confirm it exists and obtain its ETag. Returns the
+    /// failure message when the probe fails or the page does not exist.
+    async fn fetch_existing_etag(&self) -> anyhow::Result<Result<Option<String>, String>> {
+        let mut get_query: Vec<(&str, &str)> =
+            vec![("path", self.effective_path), ("api-version", "7.0")];
+        if let Some(branch) = self.resolved_branch {
+            get_query.push(("versionDescriptor.version", branch));
+            get_query.push(("versionDescriptor.versionType", "branch"));
+        }
+        let get_resp = self
+            .client
+            .get(self.base_url)
+            .query(&get_query)
+            .basic_auth("", Some(self.token))
+            .send()
+            .await
+            .context("Failed to check existing wiki page")?;
+
+        let get_status = get_resp.status();
+
+        if !get_status.is_success() && get_status.as_u16() != 404 {
+            let error_body = get_resp.text().await.unwrap_or_default();
+            return Ok(Err(format!(
+                "Failed to check wiki page (HTTP {get_status}): {error_body}"
+            )));
+        }
+
+        let page_exists = get_status.is_success();
+
+        if !page_exists {
+            return Ok(Err(format!(
+                "Wiki page '{}' does not exist. \
+                 Use a separate safe output to create new pages.",
+                self.effective_path
+            )));
+        }
+
+        Ok(Ok(get_resp
+            .headers()
+            .get("ETag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())))
+    }
+
+    /// PUT the updated page content, providing the ETag (when known) for
+    /// optimistic concurrency.
+    async fn put_content(
+        &self,
+        comment: &str,
+        content: String,
+        etag: Option<&str>,
+    ) -> anyhow::Result<reqwest::Response> {
+        let mut put_query: Vec<(&str, &str)> = vec![
+            ("path", self.effective_path),
+            ("comment", comment),
+            ("api-version", "7.0"),
+        ];
+        if let Some(branch) = self.resolved_branch {
+            put_query.push(("versionDescriptor.version", branch));
+            put_query.push(("versionDescriptor.versionType", "branch"));
+        }
+        let mut put_req = self
+            .client
+            .put(self.base_url)
+            .query(&put_query)
+            .header("Content-Type", "application/json")
+            .basic_auth("", Some(self.token))
+            .json(&serde_json::json!({ "content": content }));
+
+        // Provide the ETag for optimistic concurrency when updating an existing page.
+        if let Some(etag) = etag {
+            put_req = put_req.header("If-Match", etag);
+        }
+
+        put_req.send().await.context("Failed to write wiki page")
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for UpdateWikiPageResult {
     fn dry_run_summary(&self) -> String {
@@ -316,43 +404,17 @@ impl Executor for UpdateWikiPageResult {
         };
 
         // ── GET: check whether the page exists and obtain its ETag ────────────
-        let mut get_query: Vec<(&str, &str)> =
-            vec![("path", effective_path.as_str()), ("api-version", "7.0")];
-        if let Some(branch) = &resolved_branch {
-            get_query.push(("versionDescriptor.version", branch.as_str()));
-            get_query.push(("versionDescriptor.versionType", "branch"));
-        }
-        let get_resp = client
-            .get(&base_url)
-            .query(&get_query)
-            .basic_auth("", Some(token))
-            .send()
-            .await
-            .context("Failed to check existing wiki page")?;
-
-        let get_status = get_resp.status();
-
-        if !get_status.is_success() && get_status.as_u16() != 404 {
-            let error_body = get_resp.text().await.unwrap_or_default();
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to check wiki page (HTTP {get_status}): {error_body}"
-            )));
-        }
-
-        let page_exists = get_status.is_success();
-
-        if !page_exists {
-            return Ok(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' does not exist. \
-                 Use a separate safe output to create new pages."
-            )));
-        }
-
-        let etag: Option<String> = get_resp
-            .headers()
-            .get("ETag")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        let request = WikiPageRequest {
+            client: &client,
+            base_url: &base_url,
+            effective_path: &effective_path,
+            resolved_branch: resolved_branch.as_deref(),
+            token,
+        };
+        let etag = match request.fetch_existing_etag().await? {
+            Ok(etag) => etag,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
+        };
 
         let comment = self
             .comment
@@ -363,34 +425,11 @@ impl Executor for UpdateWikiPageResult {
         debug!("Updating existing wiki page: {effective_path}");
 
         // ── PUT: create or update the page ────────────────────────────────────
-        let mut put_query: Vec<(&str, &str)> = vec![
-            ("path", effective_path.as_str()),
-            ("comment", comment),
-            ("api-version", "7.0"),
-        ];
-        if let Some(branch) = &resolved_branch {
-            put_query.push(("versionDescriptor.version", branch.as_str()));
-            put_query.push(("versionDescriptor.versionType", "branch"));
-        }
-        let mut put_req = client
-            .put(&base_url)
-            .query(&put_query)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&serde_json::json!({
-                "content": crate::agent_stats::append_stats_to_body(
-                    &self.content,
-                    ctx,
-                    config.include_stats,
-                )
-            }));
-
-        // Provide the ETag for optimistic concurrency when updating an existing page.
-        if let Some(etag) = &etag {
-            put_req = put_req.header("If-Match", etag);
-        }
-
-        let put_resp = put_req.send().await.context("Failed to write wiki page")?;
+        let content =
+            crate::agent_stats::append_stats_to_body(&self.content, ctx, config.include_stats);
+        let put_resp = request
+            .put_content(comment, content, etag.as_deref())
+            .await?;
 
         if put_resp.status().is_success() {
             let body: serde_json::Value = put_resp.json().await.unwrap_or_default();
