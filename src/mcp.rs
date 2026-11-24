@@ -1904,6 +1904,7 @@ mod tests {
                 "A detailed work-item description for proposal {suffix} that is long enough."
             ),
             tags: Vec::new(),
+            priority: None,
         }
     }
 
@@ -2137,6 +2138,7 @@ mod tests {
             title: "Create work item with body".to_string(),
             description: "<h2>Hi</h2><p>x &lt;string&gt; y</p>".to_string(),
             tags: Vec::new(),
+            priority: None,
         };
 
         safe_outputs
