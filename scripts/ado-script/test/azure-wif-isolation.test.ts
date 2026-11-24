@@ -198,8 +198,6 @@ ${setup.replaceAll("$(Agent.TempDirectory)", "/state")}
 describe.skipIf(!awfEnabled)("Azure WIF real AWF boundary", () => {
   it("hides the host assertion and internal IDs from normal and chroot paths", async () => {
     expect(process.platform, "the real AWF regression requires Linux").toBe("linux");
-    if (!process.getuid || !process.getgid) throw new Error("Linux process identity is unavailable");
-    const owner = `${process.getuid()}:${process.getgid()}`;
     expect(docker("info", "--format", "{{.OSType}}")).toBe("linux");
     // /tmp is intentionally agent-readable in AWF; keep private material in
     // a sibling of the workspace, outside both /tmp and mounted home subdirs.
@@ -289,11 +287,12 @@ echo wif-isolation-passed
       ], { ...env, GITHUB_WORKSPACE: workspace });
       expect(output).toContain("wif-isolation-passed");
     } finally {
-      // AWF's container setup creates root-owned files in its synthetic home.
-      // Restore only this disposable tree, without following symlinks.
+      // AWF's containers leave root-owned, and sometimes owner-unwritable,
+      // entries in this disposable tree. Delete its contents as root inside a
+      // container; `find -delete` never follows symlinks.
       docker("run", "--rm", "--network", "none",
         "--mount", `type=bind,source=${directory},target=/fixture`,
-        image, "chown", "-Rh", owner, "/fixture");
+        image, "find", "/fixture", "-mindepth", "1", "-delete");
       rmSync(directory, { recursive: true, force: true });
     }
   }, 240_000);
