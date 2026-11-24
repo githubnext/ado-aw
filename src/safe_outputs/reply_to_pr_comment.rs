@@ -131,7 +131,7 @@ impl Executor for ReplyToPrCommentResult {
         let config: ReplyToPrCommentConfig = ctx.get_tool_config("reply-to-pr-comment")?;
         debug!("Config: {:?}", config);
 
-        let repo_name = match self.resolve_repo_name(&config, ctx)? {
+        let repo_name = match self.check_and_resolve_repo(&config, ctx)? {
             Ok(name) => name,
             Err(failure) => return Ok(failure),
         };
@@ -175,7 +175,7 @@ impl Executor for ReplyToPrCommentResult {
 impl ReplyToPrCommentResult {
     /// Validates the repository against config and resolves its API name.
     /// The inner `Err` carries a user-facing failure result.
-    fn resolve_repo_name(
+    fn check_and_resolve_repo(
         &self,
         config: &ReplyToPrCommentConfig,
         ctx: &ExecutionContext,
