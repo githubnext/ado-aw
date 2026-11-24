@@ -22,7 +22,7 @@ pub struct AgentStats {
     pub output_tokens: u64,
     /// Aggregated AI credits consumed by the run (`github.copilot.cost`).
     /// Present only when the Copilot CLI emits this attribute (modern versions).
-    pub ai_credits: Option<u64>,
+    pub ai_credits: Option<f64>,
     /// Wall-clock duration in seconds.
     pub duration_seconds: f64,
     /// Number of tool invocations.
@@ -96,8 +96,8 @@ impl AgentStats {
             // AI credits (present on modern Copilot CLI builds)
             let credits = attrs
                 .get("github.copilot.cost")
-                .and_then(|v| v.as_u64());
-            stats.ai_credits = credits.filter(|&c| c > 0);
+                .and_then(|v| v.as_f64());
+            stats.ai_credits = credits.filter(|&c| c > 0.0);
 
             // Turns
             stats.turns = attrs
@@ -276,7 +276,44 @@ mod tests {
         // Duration should be ~8 seconds (from the last invoke_agent span)
         assert!(stats.duration_seconds > 7.0 && stats.duration_seconds < 10.0);
         // AI credits from github.copilot.cost on the last invoke_agent span
-        assert_eq!(stats.ai_credits, Some(2));
+        assert_eq!(stats.ai_credits, Some(2.0));
+    }
+
+    #[test]
+    fn test_ai_credits_in_footer() {
+        for (cost, expected) in [
+            (serde_json::json!(5), Some("5 AI credits")),
+            (serde_json::json!(5.12), Some("5.12 AI credits")),
+            (serde_json::json!(0.12), Some("0.12 AI credits")),
+            (serde_json::json!(0), None),
+            (serde_json::json!(0.0), None),
+            (serde_json::json!(-0.12), None),
+            (serde_json::json!("5.12"), None),
+            (serde_json::Value::Null, None),
+        ] {
+            let entries = vec![serde_json::json!({
+                "type": "span",
+                "name": "invoke_agent",
+                "attributes": {"github.copilot.cost": cost}
+            })];
+            let stats = AgentStats::from_otel_entries(&entries, "test-agent").unwrap();
+            let footer = stats.to_markdown();
+            if let Some(expected) = expected {
+                assert!(footer.contains(expected), "{footer}");
+            } else {
+                assert!(stats.ai_credits.is_none());
+                assert!(!footer.contains("AI credits"), "{footer}");
+            }
+        }
+
+        let entries = vec![serde_json::json!({
+            "type": "span",
+            "name": "invoke_agent",
+            "attributes": {}
+        })];
+        let stats = AgentStats::from_otel_entries(&entries, "test-agent").unwrap();
+        assert!(stats.ai_credits.is_none());
+        assert!(!stats.to_markdown().contains("AI credits"));
     }
 
     #[test]
@@ -286,7 +323,7 @@ mod tests {
             model: Some("claude-opus-4.5".to_string()),
             input_tokens: 45230,
             output_tokens: 12450,
-            ai_credits: Some(5),
+            ai_credits: Some(5.0),
             duration_seconds: 272.0,
             tool_calls: 23,
             turns: 8,
