@@ -218,7 +218,7 @@ Available ecosystem identifiers include:
 | `ruby` | RubyGems, Bundler |
 | `swift` | Swift.org, CocoaPods |
 | `terraform` | HashiCorp releases, Terraform registry |
-| `threat-detection` | Copilot API and telemetry domains used by the Detection stage |
+| `threat-detection` | Copilot API and GitHub domains used by the Detection stage |
 | `copilot-vendor` | Copilot vendor API/telemetry domains (`api.business.githubcopilot.com`, `api.enterprise.githubcopilot.com`, `api.individual.githubcopilot.com`, `telemetry.enterprise.githubcopilot.com`) |
 
 **Compound identifier** (expands to a union of component identifiers):
