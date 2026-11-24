@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ResolvedCase } from "../cases.js";
 import type { FixtureBuildResult } from "../runner.js";
-import { verifyCandidateAudit, verifyCaseSignals } from "../signals.js";
+import {
+  EXECUTED_SAFE_OUTPUTS_FILE,
+  SAFE_OUTPUTS_ARTIFACT,
+  verifyCandidateAudit,
+  verifyCaseSignals,
+} from "../signals.js";
 
 const safeSpawnMock = vi.hoisted(() => vi.fn());
 
@@ -38,6 +43,44 @@ const CASES: ResolvedCase[] = [
   },
 ];
 
+/** Fails loudly if a tag-only case unexpectedly downloads an artifact. */
+const NO_ARTIFACTS = {
+  downloadArtifactFile: async (): Promise<string | undefined> => {
+    throw new Error("unexpected artifact download");
+  },
+};
+
+const NOOP_CASE: ResolvedCase = {
+  id: "noop-target",
+  lane: "agentic",
+  kind: "compiled",
+  modes: ["candidate"],
+  source: "tests/safe-outputs/noop-target.md",
+  assertions: {
+    requiredSafeOutputs: [{ name: "noop", contextIncludes: "build {buildId}" }],
+  },
+  definitionId: 3006,
+};
+
+function record(name: string, status: string, context = ""): string {
+  return JSON.stringify({ name, status, context, timestamp: "2026-01-01T00:00:00Z" });
+}
+
+/** A client whose `safe_outputs` artifact holds `log` (undefined = file absent). */
+function artifactClient(log: string | undefined) {
+  const calls: [number, string, string][] = [];
+  return {
+    calls,
+    getBuildTags: async (): Promise<string[]> => {
+      throw new Error("unexpected tag lookup");
+    },
+    downloadArtifactFile: async (buildId: number, artifact: string, file: string) => {
+      calls.push([buildId, artifact, file]);
+      return log;
+    },
+  };
+}
+
 function result(overrides: Partial<FixtureBuildResult> = {}): FixtureBuildResult {
   return {
     caseId: "custom-safe-output",
@@ -60,7 +103,7 @@ beforeEach(() => {
 describe("verifyCaseSignals", () => {
   it("expands {buildId} and passes when the custom job tag exists", async () => {
     const outcome = await verifyCaseSignals(
-      { getBuildTags: async () => ["unrelated", "ado-aw-custom-job-42"] },
+      { ...NO_ARTIFACTS, getBuildTags: async () => ["unrelated", "ado-aw-custom-job-42"] },
       CASES,
       [result()],
     );
@@ -70,7 +113,7 @@ describe("verifyCaseSignals", () => {
 
   it("fails a successful child when the declared tag is missing", async () => {
     const outcome = await verifyCaseSignals(
-      { getBuildTags: async () => ["unrelated"] },
+      { ...NO_ARTIFACTS, getBuildTags: async () => ["unrelated"] },
       CASES,
       [result()],
     );
@@ -86,6 +129,7 @@ describe("verifyCaseSignals", () => {
   it("reports tag API failures without losing terminal proof", async () => {
     const outcome = await verifyCaseSignals(
       {
+        ...NO_ARTIFACTS,
         getBuildTags: async () => {
           throw new Error("tag API unavailable");
         },
@@ -102,6 +146,7 @@ describe("verifyCaseSignals", () => {
     let calls = 0;
     const outcome = await verifyCaseSignals(
       {
+        ...NO_ARTIFACTS,
         getBuildTags: async () => {
           calls++;
           return [];
@@ -119,6 +164,7 @@ describe("verifyCaseSignals", () => {
     const canary = result({ caseId: "canary" });
     const outcome = await verifyCaseSignals(
       {
+        ...NO_ARTIFACTS,
         getBuildTags: async () => {
           calls++;
           return [];
@@ -136,6 +182,7 @@ describe("verifyCaseSignals", () => {
     const orphan = result({ caseId: "not-declared" });
     const outcome = await verifyCaseSignals(
       {
+        ...NO_ARTIFACTS,
         getBuildTags: async () => {
           calls++;
           return [];
@@ -146,6 +193,84 @@ describe("verifyCaseSignals", () => {
     );
     expect(calls).toBe(0);
     expect(outcome.ok).toBe(true);
+  });
+});
+
+describe("verifyCaseSignals requiredSafeOutputs", () => {
+  const noopResult = () => result({ caseId: "noop-target" });
+
+  it("passes when Stage 3 executed the required output with the expanded context", async () => {
+    const client = artifactClient(
+      [record("noop", "warning", "queued by build 42"), "not json", ""].join("\n"),
+    );
+    const outcome = await verifyCaseSignals(client, [NOOP_CASE], [noopResult()]);
+    expect(outcome.ok).toBe(true);
+    expect(client.calls).toEqual([[42, SAFE_OUTPUTS_ARTIFACT, EXECUTED_SAFE_OUTPUTS_FILE]]);
+  });
+
+  it("matches hyphenated names against Stage 3's underscored records", async () => {
+    const workItemCase: ResolvedCase = {
+      ...NOOP_CASE,
+      assertions: { requiredSafeOutputs: [{ name: "create-work-item" }] },
+    };
+    const outcome = await verifyCaseSignals(
+      artifactClient(record("create_work_item", "succeeded")),
+      [workItemCase],
+      [noopResult()],
+    );
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("fails a green build whose Stage 3 executed nothing", async () => {
+    const outcome = await verifyCaseSignals(artifactClient(undefined), [NOOP_CASE], [noopResult()]);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.results[0]).toMatchObject({ status: "failed", terminalProven: true });
+    expect(outcome.results[0]?.message).toMatch(/executed no safe outputs/);
+  });
+
+  it("fails when the output ran with a different context or did not succeed", async () => {
+    const outcome = await verifyCaseSignals(
+      artifactClient(
+        [record("noop", "succeeded", "build 41"), record("noop", "failed", "build 42")].join("\n"),
+      ),
+      [NOOP_CASE],
+      [noopResult()],
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.results[0]?.message).toMatch(
+      /did not execute required safe output\(s\): noop \(context containing 'build 42'\); executed: noop:succeeded, noop:failed/,
+    );
+  });
+
+  it("reports artifact download failures", async () => {
+    const outcome = await verifyCaseSignals(
+      {
+        ...artifactClient(undefined),
+        downloadArtifactFile: async () => {
+          throw new Error("artifact 'safe_outputs' not visible");
+        },
+      },
+      [NOOP_CASE],
+      [noopResult()],
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.results[0]?.message).toMatch(/safe-output verification failed: artifact/);
+  });
+
+  it("reports tag and safe-output failures together", async () => {
+    const both: ResolvedCase = {
+      ...NOOP_CASE,
+      assertions: {
+        requiredBuildTags: ["tag-{buildId}"],
+        requiredSafeOutputs: [{ name: "noop" }],
+      },
+    };
+    const outcome = await verifyCaseSignals(
+      { ...artifactClient(""), getBuildTags: async () => [] },
+      [both],
+      [noopResult()],
+    );
+    expect(outcome.results[0]?.message).toMatch(/missing required tag\(s\): tag-42; .*did not execute/);
   });
 });
 

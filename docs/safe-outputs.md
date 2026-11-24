@@ -41,6 +41,19 @@ safe-outputs:
 
 Safe output configurations are passed to Stage 3 execution and used when processing safe outputs.
 
+### SafeOutputs availability check
+
+Every compiled pipeline verifies, before the agent starts, that the
+`safeoutputs` MCP backend is reachable through MCPG and lists its tools
+(including the always-on `noop`, `missing-data`, `missing-tool`, and
+`report-incomplete`). This `Verify SafeOutputs MCP backend` step is always
+on, is not configurable, and retries for up to 60 seconds. If the backend
+never becomes ready — for example because MCPG refused to launch the
+SafeOutputs container — **the Agent job fails** with the MCPG container logs
+attached. Previously such a run went green with zero safe outputs because the
+agent simply had no safe-output tools. See
+[`docs/mcpg.md`](mcpg.md#pipeline-integration).
+
 ### Threat detection (`threat-detection`)
 
 Threat Detection runs between the Agent and SafeOutputs jobs. Configuration

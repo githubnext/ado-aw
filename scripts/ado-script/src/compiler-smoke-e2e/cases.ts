@@ -47,12 +47,26 @@ const LANE_ID_RE = /^[a-z0-9][a-z0-9-]{0,48}$/;
 /** Env var names must look like env var names before we read them. */
 const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,64}$/;
 
-/** The only placeholder supported inside `assertions.requiredBuildTags`. */
+/**
+ * The only placeholder supported inside `assertions.requiredBuildTags` and
+ * `assertions.requiredSafeOutputs[].contextIncludes`.
+ */
 const BUILD_ID_PLACEHOLDER = "{buildId}";
+
+/** Safe-output tool names as they appear in `cases.json` (`noop`, `create-work-item`, …). */
+const SAFE_OUTPUT_NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 
 export interface AgentCommandAssertion {
   readonly required: readonly string[];
   readonly forbidden: readonly string[];
+}
+
+/** One safe output the child's Stage 3 execution log must record as executed. */
+export interface RequiredSafeOutput {
+  /** Tool name; `-` and `_` are equivalent (Stage 3 records `create_work_item`). */
+  readonly name: string;
+  /** Substring the record's `context` must contain, with `{buildId}` expanded. */
+  readonly contextIncludes?: string;
 }
 
 export interface CaseAssertions {
@@ -62,6 +76,12 @@ export interface CaseAssertions {
   readonly pipelineText?: AgentCommandAssertion;
   /** Build tags the child run must carry, with `{buildId}` expanded to the child build id. */
   readonly requiredBuildTags?: readonly string[];
+  /**
+   * Safe outputs the child's `safe_outputs` artifact must show as executed. A
+   * green build alone does not prove the agent ever reached its safe-output
+   * tools.
+   */
+  readonly requiredSafeOutputs?: readonly RequiredSafeOutput[];
 }
 
 export interface SmokeLane {
@@ -206,30 +226,61 @@ function parseAssertions(raw: unknown, caseId: string): CaseAssertions | undefin
       `case '${caseId}' assertions.requiredBuildTags`,
     );
     for (const tag of requiredBuildTags) {
-      // Catch typo'd placeholders (e.g. `{buildid}`) rather than silently
-      // asserting a tag that can never match.
-      const unknown = tag.match(/\{[^}]*\}/g)?.filter((token) => token !== BUILD_ID_PLACEHOLDER);
-      if (unknown && unknown.length > 0) {
-        fail(
-          `case '${caseId}' requiredBuildTags '${tag}' uses unsupported placeholder(s) ${unknown.join(", ")}; only ${BUILD_ID_PLACEHOLDER} is supported`,
-        );
-      }
+      rejectUnknownPlaceholders(tag, `case '${caseId}' requiredBuildTags '${tag}'`);
     }
+  }
+
+  let requiredSafeOutputs: RequiredSafeOutput[] | undefined;
+  if (obj.requiredSafeOutputs !== undefined) {
+    const what = `case '${caseId}' assertions.requiredSafeOutputs`;
+    const entries = asArray(obj.requiredSafeOutputs, what);
+    if (entries.length === 0) fail(`${what} must declare at least one safe output`);
+    requiredSafeOutputs = entries.map((raw, i) => {
+      const entry = asRecord(raw, `${what}[${i}]`);
+      const unknownKeys = Object.keys(entry).filter(
+        (key) => key !== "name" && key !== "contextIncludes",
+      );
+      if (unknownKeys.length > 0) {
+        fail(`${what}[${i}] has unknown key(s): ${unknownKeys.join(", ")}`);
+      }
+      const name = asString(entry.name, `${what}[${i}].name`);
+      if (!SAFE_OUTPUT_NAME_RE.test(name)) {
+        fail(`${what}[${i}].name '${name}' must match ${SAFE_OUTPUT_NAME_RE}`);
+      }
+      if (entry.contextIncludes === undefined) return { name };
+      const contextIncludes = asString(entry.contextIncludes, `${what}[${i}].contextIncludes`);
+      rejectUnknownPlaceholders(contextIncludes, `${what}[${i}].contextIncludes '${contextIncludes}'`);
+      return { name, contextIncludes };
+    });
   }
 
   if (
     agentCommand === undefined &&
     pipelineText === undefined &&
-    requiredBuildTags === undefined
+    requiredBuildTags === undefined &&
+    requiredSafeOutputs === undefined
   ) {
     fail(
-      `case '${caseId}' assertions must declare agentCommand, pipelineText and/or requiredBuildTags`,
+      `case '${caseId}' assertions must declare agentCommand, pipelineText, requiredBuildTags and/or requiredSafeOutputs`,
     );
   }
-  return { agentCommand, pipelineText, requiredBuildTags };
+  return { agentCommand, pipelineText, requiredBuildTags, requiredSafeOutputs };
 }
 
-/** Expand `{buildId}` in a declared build tag. */
+/**
+ * Catch typo'd placeholders (e.g. `{buildid}`) rather than silently asserting
+ * a value that can never match.
+ */
+function rejectUnknownPlaceholders(value: string, what: string): void {
+  const unknown = value.match(/\{[^}]*\}/g)?.filter((token) => token !== BUILD_ID_PLACEHOLDER);
+  if (unknown && unknown.length > 0) {
+    fail(
+      `${what} uses unsupported placeholder(s) ${unknown.join(", ")}; only ${BUILD_ID_PLACEHOLDER} is supported`,
+    );
+  }
+}
+
+/** Expand `{buildId}` in a declared build tag or safe-output context. */
 export function expandBuildTag(tag: string, buildId: number): string {
   return tag.split(BUILD_ID_PLACEHOLDER).join(String(buildId));
 }

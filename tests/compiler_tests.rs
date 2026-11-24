@@ -5673,6 +5673,73 @@ fn test_default_excludes_debug_diagnostics() {
     );
 }
 
+/// The SafeOutputs readiness check is always on (not only under
+/// `--debug-pipeline`) and fails closed: it must sit after MCPG starts (and,
+/// with ado-proxy, after the topology-peer check) and before the agent runs,
+/// on every target.
+#[test]
+fn safeoutputs_backend_check_is_always_on_and_runs_before_the_agent() {
+    for fixture in [
+        "minimal-agent.md",
+        "1es-test-agent.md",
+        "job-agent.md",
+        "stage-agent.md",
+        "ado-proxy-read-only-agent.md",
+    ] {
+        let compiled = compile_fixture(fixture);
+        let check = "displayName: Verify SafeOutputs MCP backend";
+        assert_eq!(
+            compiled.matches(check).count(),
+            1,
+            "{fixture}: the SafeOutputs check must be emitted exactly once (Agent job only)"
+        );
+        let position = |needle: &str| {
+            compiled
+                .find(needle)
+                .unwrap_or_else(|| panic!("{fixture}: missing {needle}"))
+        };
+        let check_at = position(check);
+        assert!(
+            position("displayName: Start MCP Gateway (MCPG)") < check_at,
+            "{fixture}: the SafeOutputs check must run after MCPG starts"
+        );
+        assert!(
+            check_at < position("displayName: Run copilot (AWF network isolated)"),
+            "{fixture}: the SafeOutputs check must run before the agent"
+        );
+        if let Some(peers) = compiled.find("displayName: Verify trusted topology peers") {
+            assert!(
+                peers < check_at,
+                "{fixture}: the SafeOutputs check must follow the topology-peer check"
+            );
+        }
+        // The step spans from its `bash:` body (emitted before
+        // `displayName`) to the next list item (the following step).
+        let start = compiled[..check_at]
+            .rfind("bash: ")
+            .expect("SafeOutputs check must be a bash step");
+        let tail = &compiled[check_at..];
+        let end = tail
+            .lines()
+            .skip(1)
+            .find(|line| line.trim_start().starts_with("- "))
+            .and_then(|line| tail.find(line))
+            .map_or(compiled.len(), |offset| check_at + offset);
+        let step = &compiled[start..end];
+        for required in [
+            "SAFEOUTPUTS_SERVER='safeoutputs'",
+            "EXPECTED_TOOLS='noop missing-data missing-tool report-incomplete'",
+            "MCPG_API_KEY: $(MCP_GATEWAY_API_KEY)",
+            "exit 1",
+        ] {
+            assert!(
+                step.contains(required),
+                "{fixture}: SafeOutputs check is missing {required}"
+            );
+        }
+    }
+}
+
 /// Test that --debug-pipeline produces valid YAML and includes debug diagnostics
 /// for both standalone (complete-agent) and 1ES targets. The minimal-agent
 /// fixture already covers the individual debug signals; these tests exercise

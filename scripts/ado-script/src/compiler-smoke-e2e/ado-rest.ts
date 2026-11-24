@@ -12,6 +12,7 @@
  */
 import { redact } from "./process.js";
 import { sleep as defaultSleep } from "./process.js";
+import { listZipEntries, readZipEntryByBasename } from "./zip.js";
 
 export interface AdoRestOptions {
   orgUrl: string;
@@ -153,6 +154,70 @@ export class AdoRest {
     const res = await this.request<BuildSummary>(path);
     if (!res) throw new Error(`getBuild(${buildId}) returned no body`);
     return res;
+  }
+
+  /**
+   * Download a build artifact's zip and return one file from it, matched by
+   * basename (artifact zips wrap their content in a root directory named
+   * after the artifact). Returns `undefined` when the artifact exists but
+   * does not contain the file — a meaningful outcome for callers, e.g. a
+   * Stage 3 that executed nothing writes no execution log.
+   *
+   * Artifact visibility reuses {@link getArtifact}'s bounded retry; the
+   * download itself retries transient failures on the same budget.
+   */
+  async downloadArtifactFile(
+    buildId: number,
+    artifactName: string,
+    fileName: string,
+    opts: { retries?: number; retryDelayMs?: number } = {},
+  ): Promise<string | undefined> {
+    const retries = opts.retries ?? DEFAULT_ARTIFACT_RETRIES;
+    const retryDelayMs = opts.retryDelayMs ?? DEFAULT_ARTIFACT_RETRY_DELAY_MS;
+    const artifact = await this.getArtifact(buildId, artifactName, { retries, retryDelayMs });
+    const downloadUrl = artifact.resource?.downloadUrl;
+    if (!downloadUrl) {
+      throw new Error(`artifact '${artifactName}' on build #${buildId} has no downloadUrl`);
+    }
+
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const res = await this.fetchImpl(downloadUrl, {
+          headers: { Authorization: this.authHeader, Accept: "application/zip" },
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+        if (!res.ok) {
+          throw new Error(`artifact download -> HTTP ${res.status}`);
+        }
+        const zip = Buffer.from(await res.arrayBuffer());
+        const content = readZipEntryByBasename(zip, fileName);
+        if (content === undefined) {
+          this.log(
+            `[artifact-download] '${artifactName}' on build #${buildId} has no '${fileName}'; entries: ${
+              listZipEntries(zip).join(", ") || "<none>"
+            }`,
+          );
+          return undefined;
+        }
+        return content.toString("utf8");
+      } catch (err) {
+        lastErr = err;
+      }
+      if (attempt < retries) {
+        this.log(
+          `[artifact-download] build #${buildId} '${artifactName}' attempt ${attempt}/${retries} failed, retrying in ${retryDelayMs}ms: ${
+            (lastErr as Error).message
+          }`,
+        );
+        await this.sleepImpl(retryDelayMs);
+      }
+    }
+    throw new Error(
+      `could not download '${fileName}' from artifact '${artifactName}' on build #${buildId} after ${retries} attempts: ${
+        (lastErr as Error)?.message ?? "unknown error"
+      }`,
+    );
   }
 
   /** Read the observable tags on a completed child build. */
