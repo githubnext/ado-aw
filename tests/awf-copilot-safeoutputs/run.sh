@@ -231,7 +231,10 @@ chmod 600 "${TOOLS_DIR}/agent-prompt.md"
 
 readonly ALLOWED_DOMAINS="api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,github.com,telemetry.enterprise.githubcopilot.com,*.copilot.github.com,*.githubcopilot.com"
 # shellcheck disable=SC2016 # AWF expands the engine command inside the sandbox.
-readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt="$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model gpt-5-mini --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool safeoutputs --allow-all-paths'
+# No --model by default so the Copilot CLI picks its own default (mirrors the
+# compiler when engine.model is omitted). Set ADO_AW_CONTRACT_MODEL to pin one;
+# --env-all forwards it into the sandbox.
+readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt="$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json ${ADO_AW_CONTRACT_MODEL:+--model "$ADO_AW_CONTRACT_MODEL"} --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool safeoutputs --allow-all-paths'
 
 set +e
 "${AWF_BIN}" \
