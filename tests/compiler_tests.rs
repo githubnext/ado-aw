@@ -2298,15 +2298,14 @@ fn permissions_read_enables_proxy_and_wrapped_az_without_mcp() {
 
 /// The ado-proxy container is the trusted process holding the Stage 1 ADO
 /// credential (see `ado_proxy_container_invocation` in
-/// `src/compile/agentic_pipeline.rs`); its `docker run` hardening flags are
-/// the actual sandbox boundary keeping a compromised proxy process from
-/// escalating privileges, escaping capabilities, or exhausting host PIDs.
-/// Prior coverage only asserted the container's mounts/lifecycle and a
-/// single hardening flag (`no-new-privileges`) inside an unrelated MCPG
-/// test; nothing asserted the full hardened `docker run` invocation through
-/// the compiled `ado-proxy-read-only-agent.md` fixture end to end.
+/// `src/compile/agentic_pipeline.rs`). This pins the compiled `docker run`
+/// invocation from the `ado-proxy-read-only-agent.md` fixture end to end:
+/// detached lifecycle (no `--rm`), container name, network, entrypoint, and
+/// the expected read-only/read-write mounts. It deliberately makes no claim
+/// about runtime hardening flags (`--cap-drop`, `no-new-privileges`,
+/// `--pids-limit`), which the ado-proxy container does not currently set.
 #[test]
-fn ado_proxy_container_run_is_hardened_end_to_end() {
+fn ado_proxy_container_run_has_expected_lifecycle_and_mounts() {
     let compiled = compile_fixture_text("ado-proxy-read-only-agent.md");
 
     let docker_run_start = compiled
@@ -2746,76 +2745,60 @@ fn test_mcpg_container_azure_auth_emits_refresher_and_rotating_token_mount() {
 /// workflow author point the mount at an unintended container path (e.g. via
 /// `..` traversal) or the container root. `mount-path` is typed as
 /// `ContainerAbsolutePath` precisely to close that off at parse time; this
-/// test is the only place that exercises the rejection through the full CLI
-/// `compile` path (prior coverage only asserted the *valid* mount-path case).
+/// test exercises the rejection through the full CLI `compile` path (prior
+/// coverage only asserted the *valid* mount-path case).
+///
+/// `McpConfig` is an untagged enum, so serde replaces the specific
+/// `ContainerAbsolutePath` message with a generic "did not match any variant"
+/// error. The test therefore pins the failure to MCP server config parsing via
+/// stderr and uses one shared template whose only varying input is
+/// `mount-path`, with a control case proving the same template compiles when
+/// `mount-path` is valid.
 #[test]
 fn test_azure_auth_mount_path_rejects_traversal_and_relative_and_root_values() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "agentic-pipeline-mcpg-azure-auth-mount-path-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
-
-    let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_ado-aw"));
+    let source_with_mount_path = |case_name: &str, mount_path: &str| {
+        format!(
+            "---\nname: \"Azure Auth Mount Path {case_name}\"\ndescription: \"Tests mount-path validation\"\nmcp-servers:\n  kusto:\n    container: \"node:22-slim\"\n    azure-auth:\n      service-connection: \"my-arm-sc\"\n      mount-path: \"{mount_path}\"\n---\n\n## Test\n"
+        )
+    };
 
     for (case_name, mount_path) in [
         ("relative", "relative/path"),
         ("traversal", "/var/run/../secret"),
         ("root", "/"),
     ] {
-        let input = format!(
-            "---\nname: \"Azure Auth Mount Path {case_name}\"\ndescription: \"Tests invalid mount-path rejection\"\nmcp-servers:\n  kusto:\n    container: \"node:22-slim\"\n    azure-auth:\n      service-connection: \"my-arm-sc\"\n      mount-path: \"{mount_path}\"\n---\n\n## Test\n"
+        let (success, compiled, stderr) = compile_inline_source(
+            &format!("azure-auth-mount-path-{case_name}"),
+            &source_with_mount_path(case_name, mount_path),
         );
-        let input_path = temp_dir.join(format!("azure-auth-mount-path-{case_name}.md"));
-        let output_path = temp_dir.join(format!("azure-auth-mount-path-{case_name}.yml"));
-        fs::write(&input_path, &input).unwrap();
-
-        let output = std::process::Command::new(&binary_path)
-            .args([
-                "compile",
-                input_path.to_str().unwrap(),
-                "-o",
-                output_path.to_str().unwrap(),
-            ])
-            .output()
-            .expect("Failed to run compiler");
 
         assert!(
-            !output.status.success(),
+            !success,
             "mount-path {mount_path:?} ({case_name}) must be rejected at compile time"
         );
         assert!(
-            !output_path.exists(),
+            compiled.is_empty(),
             "mount-path {mount_path:?} ({case_name}) must not produce compiled output"
+        );
+        assert!(
+            stderr.contains("Failed to parse YAML front matter")
+                && stderr.contains("untagged enum McpConfig"),
+            "mount-path {mount_path:?} ({case_name}) must fail MCP server config parsing, got:\n{stderr}"
         );
     }
 
-    // Control case: a valid absolute path must still compile successfully,
-    // proving the rejections above are specific to the invalid values and
-    // not an unrelated regression.
-    let valid_input = "---\nname: \"Azure Auth Mount Path valid\"\ndescription: \"Control case\"\nmcp-servers:\n  kusto:\n    container: \"node:22-slim\"\n    azure-auth:\n      service-connection: \"my-arm-sc\"\n      mount-path: \"/var/run/custom-azure\"\n---\n\n## Test\n";
-    let valid_input_path = temp_dir.join("azure-auth-mount-path-valid.md");
-    let valid_output_path = temp_dir.join("azure-auth-mount-path-valid.yml");
-    fs::write(&valid_input_path, valid_input).unwrap();
-
-    let output = std::process::Command::new(&binary_path)
-        .args([
-            "compile",
-            valid_input_path.to_str().unwrap(),
-            "-o",
-            valid_output_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to run compiler");
-
-    assert!(
-        output.status.success(),
-        "a valid absolute mount-path must compile: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let (success, compiled, stderr) = compile_inline_source(
+        "azure-auth-mount-path-valid",
+        &source_with_mount_path("valid", "/var/run/custom-azure"),
     );
-    assert!(valid_output_path.exists());
-
-    let _ = fs::remove_dir_all(&temp_dir);
+    assert!(
+        success,
+        "a valid absolute mount-path must compile: {stderr}"
+    );
+    assert!(
+        compiled.contains("/var/run/custom-azure"),
+        "valid mount-path must reach the compiled pipeline"
+    );
 }
 
 /// Test that HTTP-based MCPs generate correct MCPG config JSON structure
