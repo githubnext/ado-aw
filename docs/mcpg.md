@@ -91,6 +91,12 @@ no bridge-gateway resolution, and no `host.docker.internal` mapping.
    ado-aw's stdio servers (`src/mcp_stdio.rs`) answer leading discovery
    requests with JSON-RPC "method not found" so rmcp still sees the legacy
    handshake.
+
+   MCPG v0.5+ also refuses stdio-backend mounts outside its mount allowlist,
+   which by default covers only `/tmp` (read-write) and its own working
+   directory. The compiler therefore sets `MCP_GATEWAY_ALLOWED_MOUNT_ROOTS` on
+   the MCPG container to `/tmp:rw` plus exactly the configured mount sources
+   and modes, including the read-write agent working directory.
 4. **AWF attaches `awmg-mcpg` to `awf-net`** (`--topology-attach awmg-mcpg`
    on the Agent's AWF invocation) so the agent, running inside the
    network-isolated container, can reach it directly at `awmg-mcpg:8080`.

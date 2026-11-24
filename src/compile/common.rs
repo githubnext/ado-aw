@@ -4037,6 +4037,7 @@ pub fn compile_mcpg(
     for (name, config) in &front_matter.mcp_servers {
         try_add_user_mcp(name, config, &mut mcp_servers, &mut launch_env)?;
     }
+    launch_env.bind_allowed_mount_roots(&mcp_servers)?;
 
     Ok(super::mcpg::McpgCompilation {
         config: McpgConfig {
@@ -8487,6 +8488,21 @@ safe-outputs:
         assert_eq!(config.gateway.domain, MCPG_DOMAIN);
         assert_eq!(config.gateway.agent_id, "${MCP_GATEWAY_API_KEY}");
         assert_eq!(config.gateway.payload_dir, "/tmp/gh-aw/mcp-payloads");
+    }
+
+    #[test]
+    fn test_compile_mcpg_allows_safeoutputs_mounts_through_mcpg_mount_policy() {
+        let fm = minimal_front_matter();
+        let compilation = compile_mcpg(&fm, &collect_exts_and_decls(&fm).1, false).unwrap();
+        // MCPG v0.5+ refuses stdio mounts outside its allowlist; the default
+        // allowlist does not cover the read-write ADO workspace mount.
+        assert!(matches!(
+            compilation
+                .launch_env
+                .get(super::super::mcpg::ALLOWED_MOUNT_ROOTS_ENV),
+            Some(crate::compile::ir::env::EnvValue::Literal(roots)) if roots
+                == "$(Build.SourcesDirectory):rw,/tmp:rw,/tmp/awf-tools/ado-aw:ro,/tmp/awf-tools/staging:rw"
+        ));
     }
 
     #[test]
