@@ -520,6 +520,119 @@ fn build_allowed_domains(
     Ok((allowed_domains, detection_allowed_domains))
 }
 
+/// Compile-time scalars resolved from front matter before the engine setup.
+struct PipelineScalars {
+    pipeline_name: String,
+    agent_display_name: String,
+    working_directory: String,
+    trigger_repo_directory: String,
+    self_repository_name: EnvValue,
+    pools: PerJobPools,
+}
+
+fn resolve_pipeline_scalars(
+    front_matter: &FrontMatter,
+    ctx: &CompileContext<'_>,
+) -> Result<PipelineScalars> {
+    let pipeline_name = format!(
+        "{}{}",
+        common::sanitize_pipeline_agent_name(&front_matter.name),
+        ADO_BUILD_ID_SUFFIX
+    );
+    let agent_display_name = front_matter.name.clone();
+    let effective_workspace = common::compute_effective_workspace(
+        &front_matter.workspace,
+        &front_matter.checkout,
+        &front_matter.name,
+    )?;
+    let working_directory = common::generate_working_directory(&effective_workspace);
+    let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
+    let self_repository_name = resolve_self_repository_name(ctx, &front_matter.name)?;
+    let pools = common::resolve_pool_overrides_typed(
+        front_matter.target.clone(),
+        front_matter.pool.as_ref(),
+        front_matter.pool_overrides(),
+    )?;
+    Ok(PipelineScalars {
+        pipeline_name,
+        agent_display_name,
+        working_directory,
+        trigger_repo_directory,
+        self_repository_name,
+        pools,
+    })
+}
+
+/// MCPG config plus the compiler-generated dynamic SafeOutputs tool
+/// definitions: `(custom_tools_json, resolved_execution_config_json,
+/// mcpg_config_json, mcpg_launch_env)`.
+fn build_mcpg_artifacts(
+    front_matter: &FrontMatter,
+    extension_declarations: &[crate::compile::extensions::Declarations],
+    debug_pipeline: bool,
+) -> Result<(
+    Option<String>,
+    String,
+    String,
+    super::mcpg::McpgLaunchEnvironment,
+)> {
+    let (custom_tools_json, resolved_execution_config_json) =
+        build_custom_tools_json(front_matter)?;
+    let mcpg_compilation =
+        common::compile_mcpg(front_matter, extension_declarations, debug_pipeline)?;
+    let mcpg_config_json = serde_json::to_string_pretty(&mcpg_compilation.config)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize MCPG config: {e}"))?;
+    Ok((
+        custom_tools_json,
+        resolved_execution_config_json,
+        mcpg_config_json,
+        mcpg_compilation.launch_env,
+    ))
+}
+
+/// Integrity-check step YAML; skipped by `--skip-integrity` or the debug
+/// front-matter override.
+fn build_integrity_check_yaml(front_matter: &FrontMatter, skip_integrity: bool) -> String {
+    common::generate_integrity_check(
+        skip_integrity
+            || front_matter
+                .ado_aw_debug
+                .as_ref()
+                .is_some_and(|d| d.skip_integrity),
+    )
+}
+
+fn self_checkout_fetch(front_matter: &FrontMatter) -> CheckoutFetchOpts {
+    front_matter
+        .checkout_fetch
+        .get(SELF_CHECKOUT_ALIAS)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Fan out the per-extension declarations and build the canonical job graph.
+/// The fanout runs after the (infallible, side-effect-free) `StandaloneCtx`
+/// construction, so error precedence is unchanged.
+fn build_jobs_with_extension_fanout(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    extension_declarations: Vec<crate::compile::extensions::Declarations>,
+    cfg: &StandaloneCtx,
+    prefix: Option<&str>,
+) -> Result<Vec<Job>> {
+    let (ext_setup_steps, ext_agent_prepare, ext_agent_conditions) =
+        fanout_extension_declarations(extensions, extension_declarations)?;
+    build_canonical_jobs(
+        front_matter,
+        extensions,
+        cfg,
+        &ext_setup_steps,
+        &ext_agent_prepare,
+        &ext_agent_conditions,
+        prefix,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pipeline_context(
     front_matter: &FrontMatter,
@@ -541,25 +654,14 @@ pub(crate) fn build_pipeline_context(
     let extension_declarations = collect_extension_declarations(extensions, ctx)?;
 
     // ─── Scalars ──────────────────────────────────────────────────
-    let pipeline_name = format!(
-        "{}{}",
-        common::sanitize_pipeline_agent_name(&front_matter.name),
-        ADO_BUILD_ID_SUFFIX
-    );
-    let agent_display_name = front_matter.name.clone();
-    let effective_workspace = common::compute_effective_workspace(
-        &front_matter.workspace,
-        &front_matter.checkout,
-        &front_matter.name,
-    )?;
-    let working_directory = common::generate_working_directory(&effective_workspace);
-    let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
-    let self_repository_name = resolve_self_repository_name(ctx, &front_matter.name)?;
-    let pools = common::resolve_pool_overrides_typed(
-        front_matter.target.clone(),
-        front_matter.pool.as_ref(),
-        front_matter.pool_overrides(),
-    )?;
+    let PipelineScalars {
+        pipeline_name,
+        agent_display_name,
+        working_directory,
+        trigger_repo_directory,
+        self_repository_name,
+        pools,
+    } = resolve_pipeline_scalars(front_matter, ctx)?;
 
     let engine_setup = build_engine_setup(
         front_matter,
@@ -582,25 +684,15 @@ pub(crate) fn build_pipeline_context(
     let awf_path_step_yaml = common::generate_awf_path_step(&engine_setup.awf_paths);
 
     // MCPG config + compiler-generated dynamic SafeOutputs tool definitions.
-    let (custom_tools_json, resolved_execution_config_json) =
-        build_custom_tools_json(front_matter)?;
-    let mcpg_compilation =
-        common::compile_mcpg(front_matter, &extension_declarations, debug_pipeline)?;
-    let mcpg_config_json = serde_json::to_string_pretty(&mcpg_compilation.config)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize MCPG config: {e}"))?;
+    let (custom_tools_json, resolved_execution_config_json, mcpg_config_json, mcpg_launch_env) =
+        build_mcpg_artifacts(front_matter, &extension_declarations, debug_pipeline)?;
 
     let (source_path, source_relative_path) =
         resolve_source_paths(input_path, &trigger_repo_directory)?;
     let pipeline_path = common::generate_pipeline_path(output_path);
 
     let (acquire_read_token, acquire_write_token) = build_token_steps(front_matter);
-    let integrity_check_yaml = common::generate_integrity_check(
-        skip_integrity
-            || front_matter
-                .ado_aw_debug
-                .as_ref()
-                .is_some_and(|d| d.skip_integrity),
-    );
+    let integrity_check_yaml = build_integrity_check_yaml(front_matter, skip_integrity);
 
     // Agent prompt content
     let agent_content_value = build_agent_content(
@@ -617,19 +709,11 @@ pub(crate) fn build_pipeline_context(
     let resources = build_resources(&front_matter.repositories, &front_matter.on_config)?;
     let triggers = build_triggers(&front_matter.on_config, front_matter)?;
 
-    // ─── Extension declaration fanout ─────────────────────────────
-    let (ext_setup_steps, ext_agent_prepare, ext_agent_conditions) =
-        fanout_extension_declarations(extensions, extension_declarations)?;
-
     // Aggregate config for per-job builders
     let cfg = StandaloneCtx {
         pools,
         agent_display_name: agent_display_name.clone(),
-        self_checkout_fetch: front_matter
-            .checkout_fetch
-            .get(SELF_CHECKOUT_ALIAS)
-            .cloned()
-            .unwrap_or_default(),
+        self_checkout_fetch: self_checkout_fetch(front_matter),
         working_directory: working_directory.clone(),
         trigger_repo_directory: trigger_repo_directory.clone(),
         self_repository_name,
@@ -650,7 +734,7 @@ pub(crate) fn build_pipeline_context(
         mcpg_config_json,
         custom_tools_json,
         resolved_execution_config_json,
-        mcpg_launch_env: mcpg_compilation.launch_env,
+        mcpg_launch_env,
         source_path,
         source_relative_path,
         pipeline_path: pipeline_path.clone(),
@@ -665,13 +749,11 @@ pub(crate) fn build_pipeline_context(
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
-    let jobs = build_canonical_jobs(
+    let jobs = build_jobs_with_extension_fanout(
         front_matter,
         extensions,
+        extension_declarations,
         &cfg,
-        &ext_setup_steps,
-        &ext_agent_prepare,
-        &ext_agent_conditions,
         prefix,
     )?;
 
