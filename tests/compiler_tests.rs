@@ -11007,7 +11007,7 @@ fn test_issue_1731_self_repository_name_is_resolved_at_compile_time() {
 fn test_issue_2482_encoded_remote_repository_name_is_decoded_in_pipeline() {
     let compiled = compile_inline_agent_with_env(
         "issue-2482-encoded-identity",
-        "---\nname: \"Create PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\nDo work.\n",
+        "---\nname: \"Create PR\"\ndescription: \"Create a PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\nDo work.\n",
         &[(
             "ADO_AW_COMPILE_REMOTE_URL",
             "https://dev.azure.com/org/My%20Project/_git/My%20Repo",
@@ -11025,7 +11025,11 @@ fn test_issue_2482_encoded_remote_repository_name_is_decoded_in_pipeline() {
 fn test_issue_2482_encoded_remote_rejects_pipeline_expressions() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("agent.md");
-    fs::write(&source, "---\nname: Test\n---\n\nDo work.\n").unwrap();
+    fs::write(
+        &source,
+        "---\nname: Test\ndescription: Test\n---\n\nDo work.\n",
+    )
+    .unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ado-aw"))
         .args(["compile", source.to_str().unwrap()])
         .env(
