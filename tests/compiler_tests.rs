@@ -199,7 +199,7 @@ fn test_compiled_output_no_unreplaced_markers() {
         "Compiled output should reference GitHub Releases for AWF"
     );
     assert!(
-        compiled.contains("AWF_VERSION='0.29.14'"),
+        compiled.contains("AWF_VERSION='0.27.32'"),
         "Compiled output should download the AWF version that provides strict topology isolation"
     );
     assert!(

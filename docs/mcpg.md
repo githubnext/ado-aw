@@ -116,7 +116,7 @@ The compiler generates MCPG configuration JSON from the `mcp-servers:` front mat
   "mcpServers": {
     "safeoutputs": {
       "type": "stdio",
-      "container": "ghcr.io/github/gh-aw-firewall/agent:0.29.14",
+      "container": "ghcr.io/github/gh-aw-firewall/agent:0.27.32",
       "entrypoint": "/usr/local/bin/ado-aw",
       "entrypointArgs": ["mcp", "--enabled-tools", "noop", "/safeoutputs", "/path/to/workdir"],
       "mounts": [
