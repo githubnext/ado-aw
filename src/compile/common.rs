@@ -3911,37 +3911,8 @@ fn add_http_user_mcp(
     Ok(())
 }
 
-/// Generate MCPG configuration from front matter.
-///
-/// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
-/// SafeOutputs is always included as a hardened stdio container. Other
-/// extension-contributed MCPG entries (e.g., azure-devops) are included via the
-/// `extensions` parameter.
-pub fn compile_mcpg(
-    front_matter: &FrontMatter,
-    extension_declarations: &[Declarations],
-    debug_pipeline: bool,
-) -> Result<super::mcpg::McpgCompilation> {
-    let mut mcp_servers = std::collections::BTreeMap::new();
-    let mut launch_env = super::mcpg::McpgLaunchEnvironment::default();
-
-    // Add extension-contributed MCPG server entries (safeoutputs, azure-devops, etc.)
-    for decl in extension_declarations {
-        for (name, config) in &decl.mcpg_servers {
-            mcp_servers.insert(name.clone(), config.clone());
-        }
-        for mapping in &decl.pipeline_env {
-            launch_env.bind_pipeline_variable(
-                mapping.container_var(),
-                mapping.pipeline_var(),
-                format!("extension pipeline_env.{}", mapping.container_var()),
-            )?;
-        }
-    }
-    if debug_pipeline {
-        launch_env.bind_literal("DEBUG", "*", "debug-pipeline")?;
-    }
-
+/// Build the hardened stdio container config for the always-on SafeOutputs MCP server.
+fn build_safeoutputs_mcpg_server(front_matter: &FrontMatter) -> Result<McpgServerConfig> {
     let effective_workspace = compute_effective_workspace(
         &front_matter.workspace,
         &front_matter.checkout,
@@ -4003,22 +3974,57 @@ pub fn compile_mcpg(
     }
     safeoutputs_runtime =
         safeoutputs_runtime.mount(Mount::read_write("/tmp/awf-tools/staging", "/safeoutputs")?);
+
+    Ok(McpgServerConfig {
+        server_type: "stdio".to_string(),
+        container: Some(safeoutputs_image),
+        entrypoint: Some("/usr/local/bin/ado-aw".to_string()),
+        entrypoint_args: Some(safeoutputs_entrypoint_args),
+        runtime: safeoutputs_runtime.build()?,
+        url: None,
+        headers: None,
+        env: Some(std::collections::BTreeMap::from([(
+            "HOME".to_string(),
+            "/tmp".to_string(),
+        )])),
+        tools: None,
+    })
+}
+
+/// Generate MCPG configuration from front matter.
+///
+/// Converts the front matter `mcp-servers` definitions into MCPG-compatible JSON.
+/// SafeOutputs is always included as a hardened stdio container. Other
+/// extension-contributed MCPG entries (e.g., azure-devops) are included via the
+/// `extensions` parameter.
+pub fn compile_mcpg(
+    front_matter: &FrontMatter,
+    extension_declarations: &[Declarations],
+    debug_pipeline: bool,
+) -> Result<super::mcpg::McpgCompilation> {
+    let mut mcp_servers = std::collections::BTreeMap::new();
+    let mut launch_env = super::mcpg::McpgLaunchEnvironment::default();
+
+    // Add extension-contributed MCPG server entries (safeoutputs, azure-devops, etc.)
+    for decl in extension_declarations {
+        for (name, config) in &decl.mcpg_servers {
+            mcp_servers.insert(name.clone(), config.clone());
+        }
+        for mapping in &decl.pipeline_env {
+            launch_env.bind_pipeline_variable(
+                mapping.container_var(),
+                mapping.pipeline_var(),
+                format!("extension pipeline_env.{}", mapping.container_var()),
+            )?;
+        }
+    }
+    if debug_pipeline {
+        launch_env.bind_literal("DEBUG", "*", "debug-pipeline")?;
+    }
+
     mcp_servers.insert(
         "safeoutputs".to_string(),
-        McpgServerConfig {
-            server_type: "stdio".to_string(),
-            container: Some(safeoutputs_image),
-            entrypoint: Some("/usr/local/bin/ado-aw".to_string()),
-            entrypoint_args: Some(safeoutputs_entrypoint_args),
-            runtime: safeoutputs_runtime.build()?,
-            url: None,
-            headers: None,
-            env: Some(std::collections::BTreeMap::from([(
-                "HOME".to_string(),
-                "/tmp".to_string(),
-            )])),
-            tools: None,
-        },
+        build_safeoutputs_mcpg_server(front_matter)?,
     );
 
     for (name, config) in &front_matter.mcp_servers {
