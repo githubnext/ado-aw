@@ -33,24 +33,25 @@ its own ref, and queues the lane. That work cannot live in a lane — it is what
 
 | Definition | Repository | YAML path | Triggers | Definition ID |
 | --- | --- | --- | --- | ---: |
-| `ado-aw candidate compiler smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-candidate.yml` | PR (comment-gated) + nightly 01:00 UTC | _pending_ |
-| `ado-aw released smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | scheduled daily 03:00 UTC | _pending_ |
+| `ado-aw candidate compiler smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-candidate.yml` | PR (comment-gated) + nightly 01:00 UTC | `2886` |
+| `ado-aw released smoke` | `githubnext/ado-aw` | `tests/smoke/azure-pipelines-release.yml` | scheduled daily 03:00 UTC | `2887` |
 
-Both use the project's GitHub service connection to `githubnext`.
+Both use the `github.com_githubnext` service connection (Azure Pipelines
+GitHub App, `InstallationToken` auth).
 
 ## Supporting definitions
 
 | Definition | Repository | YAML path | Purpose | Definition ID |
 | --- | --- | --- | --- | ---: |
-| `executor-e2e queue target` | `githubnext/ado-aw` | `tests/executor-e2e/queue-target.yml` | Queue target for the executor-e2e `queue-build` scenario (`E2E_QUEUE_PIPELINE_ID`) | _pending_ |
+| `executor-e2e queue target` | `githubnext/ado-aw` | `tests/executor-e2e/queue-target.yml` | Queue target for the executor-e2e `queue-build` scenario (`E2E_QUEUE_PIPELINE_ID`) | `2882` |
 
 The deterministic E2E definitions:
 
 | Pipeline | Folder | Repository | Definition ID |
 | --- | --- | --- | ---: |
-| ado-script e2e | `\ado-script-e2e` | `githubnext/ado-aw` | _pending_ |
-| executor e2e | `\executor-e2e` | `githubnext/ado-aw` | _pending_ |
-| trigger e2e | `\trigger-e2e` | `githubnext/ado-aw` | _pending_ |
+| ado-script e2e | `\ado-script-e2e` | `githubnext/ado-aw` | `2883` |
+| executor e2e | `\executor-e2e` | `githubnext/ado-aw` | `2884` |
+| trigger e2e | `\trigger-e2e` | `githubnext/ado-aw` | `2885` |
 | trigger e2e victim | `\trigger-e2e` | `ado-aw-mirror` | `2876` |
 
 ## Agent pool
@@ -94,8 +95,8 @@ organizations. Provision them explicitly on each definition with
 | Secret | On | Scope |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | `agentic` lane (`2875`) | Copilot CLI authentication |
-| `EXECUTOR_E2E_GITHUB_TOKEN` | executor e2e | Fine-grained PAT, Issues read/write on the failure-report repo |
-| `TRIGGER_E2E_GITHUB_TOKEN` | trigger e2e | Fine-grained PAT, Issues read/write on the failure-report repo |
+| `EXECUTOR_E2E_GITHUB_TOKEN` | executor e2e (`2884`) | Fine-grained PAT, Issues read/write on the failure-report repo |
+| `TRIGGER_E2E_GITHUB_TOKEN` | trigger e2e (`2885`) | Fine-grained PAT, Issues read/write on the failure-report repo |
 | `ADO_AW_GITHUB_TOKEN` | *(none)* | GitHub PAT for `create-github-issue`. No case files GitHub issues today; provision it on the `agentic` lane if one adopts that safe output. |
 
 The `infra` lane holds no secrets, and nothing should ever be provisioned onto
@@ -113,7 +114,7 @@ it. Do not put any of these tokens in a variable group or on an orchestrator.
 | Feed `ado-aw-ci-test-feed` | `permissions.packages` smoke target (npmjs, NuGet Gallery, PyPI upstreams). |
 | Service connection `ado-aw-ci-read` | Workload-identity Azure Resource Manager connection; read-only ADO token for Stage 1. |
 | Service connection `ado-aw-ci-write` | Workload-identity Azure Resource Manager connection; write-capable ADO token for Stage 3, ref staging, and queueing. |
-| GitHub service connection | `githubnext` via the Azure Pipelines GitHub App. |
+| Service connection `github.com_githubnext` | `githubnext` via the Azure Pipelines GitHub App (`InstallationToken`). Created by running the app's **Configure** flow on GitHub and choosing `outlookweb/Test` on the redirect. |
 
 ## Required permissions
 
@@ -180,28 +181,32 @@ with no logs.
    and `ado-aw-ci-test-feed` as described under *Project resources* and grant
    the roles under *Required permissions*. `ado-aw-ci-test-feed-not-granted`
    must **not** exist: the ungranted-feed check must be refused by policy,
-   never by a real feed.
-7. ⏳ **Service connections** — needs an Entra app owner and a project admin.
-   Create `ado-aw-ci-read` / `ado-aw-ci-write` (workload identity federation),
-   add each service principal to `outlookweb` with access to `Test`, grant
-   the permissions above, and authorize both connections on every definition
-   that names them (lane, victim, all three orchestrators, executor e2e). Then
-   create the GitHub connection to `githubnext` through the Azure Pipelines
-   GitHub App (interactive).
-8. ⏳ **GitHub-backed definitions** — register from `githubnext/ado-aw`:
-   queue target, executor e2e, trigger e2e, ado-script e2e, candidate and
-   released orchestrators. For each: authorize queue `930`, the service
-   connections it names, and `ado-aw-e2e-fixture` for ado-script e2e. Apply
-   the *Security record* settings to every PR-triggered one.
-9. ⏳ **Variables** — `SMOKE_LANE_AGENTIC_DEFINITION_ID=2875` on both
-   orchestrators; `E2E_QUEUE_PIPELINE_ID`, `EXECUTOR_E2E_ISSUE_REPO`,
-   `E2E_WORK_ITEM_ASSIGNEE` on executor e2e;
-   `TRIGGER_E2E_VICTIM_DEFINITION_ID=2876`, `TRIGGER_E2E_VICTIM_REPO=ado-aw-mirror`,
-   `TRIGGER_E2E_ISSUE_REPO`, `TRIGGER_E2E_BUILD_TIMEOUT_MS=1800000` on trigger
-   e2e.
-10. ⏳ **IDs recorded** — fill every _pending_ ID in this file,
-    [`trigger-policy.json`](trigger-policy.json) (an empty
-    `pr_definition_ids` fails the audit closed), and
+   never by a real feed. Until then, every pipeline that installs Rust
+   (candidate smoke, executor e2e) fails at `Install Rust toolchain`.
+7. ✅ **Service connections** `ado-aw-ci-read` / `ado-aw-ci-write` (workload
+   identity) and `github.com_githubnext` (GitHub App) created.
+   ⏳ Grant the `ado-aw-ci-*` service principals the permissions under
+   *Required permissions*.
+8. ✅ **GitHub-backed definitions registered** on `github.com_githubnext`:
+   queue target `2882`, ado-script e2e `2883`, executor e2e `2884`, trigger
+   e2e `2885`, candidate orchestrator `2886`, released orchestrator `2887`.
+   PR triggers on `2883`, `2884` and `2886` carry the *Security record* fork
+   settings (plus the comment gate on `2886`); the rest have no CI or PR
+   trigger. Authorized:
+   - queue `930` on every definition;
+   - `github.com_githubnext` on `2882`–`2887`;
+   - `ado-aw-ci-write` on `2875`, `2876`, `2884`–`2887`;
+   - `ado-aw-ci-read` on `2875`;
+   - repository `ado-aw-e2e-fixture` on `2875` and `2883`.
+9. ✅ **Variables** — `SMOKE_LANE_AGENTIC_DEFINITION_ID=2875` on `2886` and
+   `2887`; `E2E_QUEUE_PIPELINE_ID=2882`, `EXECUTOR_E2E_ISSUE_REPO`,
+   `E2E_WORK_ITEM_ASSIGNEE`, `EXECUTOR_E2E_REVIEWER` on `2884`;
+   `TRIGGER_E2E_VICTIM_DEFINITION_ID=2876`,
+   `TRIGGER_E2E_VICTIM_REPO=ado-aw-mirror`, `TRIGGER_E2E_ISSUE_REPO`,
+   `TRIGGER_E2E_BUILD_TIMEOUT_MS=1800000` on `2885`; queue-time
+   `ADO_AW_MODEL_AGENT_COPILOT` on `2875`.
+10. ✅ **IDs recorded** in this file,
+    [`trigger-policy.json`](trigger-policy.json), and
     [`rotate-ci-secrets.ps1`](../../scripts/rotate-ci-secrets.ps1).
 11. ⏳ **Secrets** — run `rotate-ci-secrets.ps1`.
 12. ⏳ **Live green runs** of the candidate orchestrator, released
@@ -209,7 +214,10 @@ with no logs.
     syncs `ado-aw-mirror` `main` fast-forward-only from GitHub `main`, so its
     first green run comes after this change merges.
 13. ⏳ **Cutover** — disable the AgentPlayground definitions (see
-    *Migration record*).
+    *Migration record*), then delete the unused `githubnext-oauth`
+    connection. GitHub delivers push and PR events for a repository to only
+    one Azure DevOps organization, so confirm afterwards that PR validation
+    (`2883`, `2884`, `/azp run` for `2886`) reports from `outlookweb`.
 
 ## Package-feed cases
 

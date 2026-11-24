@@ -205,7 +205,7 @@ does not apply:
 ```powershell
 $token = az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv
 $body = @{
-  definition         = @{ id = <candidate-orchestrator-id> }  # see REGISTERED.md
+  definition         = @{ id = 2886 }  # candidate orchestrator, see REGISTERED.md
   sourceBranch       = 'refs/heads/<branch>'
   templateParameters = @{ smokeCases = 'package-feeds,package-feeds-wif' }
 } | ConvertTo-Json

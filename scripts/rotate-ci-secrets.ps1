@@ -15,8 +15,8 @@ $ErrorActionPreference = "Stop"
 # files GitHub issues, so ADO_AW_GITHUB_TOKEN is not provisioned anywhere; add
 # the lane id to a new list here if a case ever adopts `create-github-issue`.
 $laneDefinitionIds = @(2875)
-$executorDefinitionIds = @()
-$triggerDefinitionIds = @()
+$executorDefinitionIds = @(2884)
+$triggerDefinitionIds = @(2885)
 $allDefinitionIds = @(
     $laneDefinitionIds
     $executorDefinitionIds
