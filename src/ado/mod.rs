@@ -2135,7 +2135,14 @@ fn artifact_zip_has_repeated_root(
         let entry = archive.by_index(index).with_context(|| {
             format!("Failed to read zip entry {index} from build artifact '{artifact_name}'")
         })?;
-        let entry_name = entry.name().to_string();
+        let entry_name = entry
+            .name()
+            .with_context(|| {
+                format!(
+                    "Failed to decode name of zip entry {index} from build artifact '{artifact_name}'"
+                )
+            })?
+            .into_owned();
         let relative_path = entry.enclosed_name().ok_or_else(|| {
             anyhow::anyhow!(
                 "Refusing to extract unsafe path '{}' from build artifact '{}'",
@@ -2161,17 +2168,19 @@ fn extract_zip_entry(
     artifact_dir: &std::path::Path,
     repeated_root: bool,
 ) -> Result<()> {
-    let entry_name = entry.name().to_string();
-    let relative_path = entry
-        .enclosed_name()
-        .map(|path| path.to_owned())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Refusing to extract unsafe path '{}' from build artifact '{}'",
-                entry_name,
-                artifact_name
-            )
-        })?;
+    let entry_name = entry
+        .name()
+        .with_context(|| {
+            format!("Failed to decode zip entry name from build artifact '{artifact_name}'")
+        })?
+        .into_owned();
+    let relative_path = entry.enclosed_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Refusing to extract unsafe path '{}' from build artifact '{}'",
+            entry_name,
+            artifact_name
+        )
+    })?;
     let relative_path = if repeated_root {
         relative_path
             .strip_prefix(artifact_name)
