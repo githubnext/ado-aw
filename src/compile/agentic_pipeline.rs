@@ -8210,7 +8210,7 @@ safe-outputs:
     #[test]
     fn agent_attaches_both_peers_when_the_policy_engine_is_enabled() {
         let script = agent_step_for_test(true);
-        // Verified against the pinned AWF v0.29.20 binary, whose --help states
+        // Verified against the pinned AWF v0.29.14 binary, whose --help states
         // the flag is "Repeatable" and gives a two-peer example.
         assert_eq!(script.matches("--topology-attach").count(), 2);
         assert!(script.contains(&format!("--topology-attach \"{MCPG_CONTAINER_NAME}\"")));
