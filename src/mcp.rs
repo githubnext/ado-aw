@@ -3,7 +3,6 @@ use log::{debug, error, info, warn};
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt, handler::server::tool::ToolRouter,
     handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
-    transport::stdio,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -1847,7 +1846,7 @@ pub async fn run(
         custom_tools,
     )
     .await?
-    .serve(stdio())
+    .serve(crate::mcp_stdio::stdio().await?)
     .await
     .inspect_err(|e| {
         error!("Error starting MCP server: {}", e);

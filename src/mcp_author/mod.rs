@@ -11,7 +11,6 @@ use log::{error, info};
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt, handler::server::tool::ToolRouter,
     handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
-    transport::stdio,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -378,7 +377,8 @@ impl ServerHandler for AuthorMcp {
 
 pub async fn run_stdio() -> Result<()> {
     info!("Starting author-facing MCP server over stdio");
-    let service = AuthorMcp::new().serve(stdio()).await.inspect_err(|e| {
+    let transport = crate::mcp_stdio::stdio().await?;
+    let service = AuthorMcp::new().serve(transport).await.inspect_err(|e| {
         error!("Error starting author MCP server: {}", e);
     })?;
     service
