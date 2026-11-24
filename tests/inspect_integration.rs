@@ -690,7 +690,14 @@ fn catalog_json_kind_filter_restricts_to_requested_category() {
         value.get("versions").is_some(),
         "expected 'versions' key in filtered catalog JSON, got:\n{value}"
     );
-    for absent in ["safe_outputs", "runtimes", "tools", "engines", "models"] {
+    for absent in [
+        "safe_outputs",
+        "runtimes",
+        "tools",
+        "engines",
+        "models",
+        "ado_proxy",
+    ] {
         assert!(
             value.get(absent).is_none(),
             "expected '{absent}' to be absent from --kind versions output, got:\n{value}"
