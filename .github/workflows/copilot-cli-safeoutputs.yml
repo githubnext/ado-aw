@@ -24,7 +24,6 @@ jobs:
       copilot-requests: write
     env:
       CARGO_TERM_COLOR: always
-      COPILOT_GITHUB_TOKEN: ${{ github.token }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -113,7 +112,7 @@ jobs:
           COPILOT_BIN: ${{ runner.temp }}/bin/copilot
           AWF_VERSION: ${{ steps.versions.outputs.awf }}
           MCPG_VERSION: ${{ steps.versions.outputs.mcpg }}
-          # Optional override for the contract run's model; empty uses run.sh's default.
+          # Optional override for the contract run's model; empty lets the Copilot CLI choose.
           ADO_AW_CONTRACT_MODEL: ${{ vars.ADO_AW_CONTRACT_MODEL }}
         run: bash tests/awf-copilot-safeoutputs/run.sh
 

@@ -9,7 +9,7 @@ umask 077
 : "${AWF_VERSION:?AWF_VERSION is required}"
 : "${MCPG_VERSION:?MCPG_VERSION is required}"
 : "${ADO_AW_COPILOT_CLI_ARTIFACT_DIR:?ADO_AW_COPILOT_CLI_ARTIFACT_DIR is required}"
-: "${COPILOT_GITHUB_TOKEN:?COPILOT_GITHUB_TOKEN is required}"
+: "${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
 
 readonly CONTRACT_CONTEXT="awf-copilot-safeoutputs-contract"
 readonly MCP_GATEWAY_PORT=8080
@@ -231,11 +231,12 @@ chmod 600 "${TOOLS_DIR}/agent-prompt.md"
 
 readonly ALLOWED_DOMAINS="api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,github.com,telemetry.enterprise.githubcopilot.com,*.copilot.github.com,*.githubcopilot.com"
 # shellcheck disable=SC2016 # AWF expands the engine command inside the sandbox.
-# AWF's api-proxy runs the Copilot CLI in offline+BYOK mode, which requires an
-# explicit model (and the pinned AWF rejects `auto`). When the default is
-# retired, set the ADO_AW_CONTRACT_MODEL repository variable to override it
-# without a code change; --env-all forwards it into the sandbox.
-readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt="$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model "${ADO_AW_CONTRACT_MODEL:-claude-haiku-4.5}" --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool safeoutputs --allow-all-paths'
+# Authenticate exactly like compiled pipelines: GITHUB_TOKEN (not
+# COPILOT_GITHUB_TOKEN, which switches AWF into offline+BYOK api-proxy mode
+# where the CLI demands an explicit model), and no --model so the Copilot CLI
+# picks its own default. ADO_AW_CONTRACT_MODEL (repository variable) optionally
+# pins a model; --env-all forwards it into the sandbox.
+readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt="$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json ${ADO_AW_CONTRACT_MODEL:+--model "$ADO_AW_CONTRACT_MODEL"} --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool safeoutputs --allow-all-paths'
 
 set +e
 "${AWF_BIN}" \
