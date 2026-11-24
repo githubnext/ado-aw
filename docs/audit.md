@@ -4,7 +4,7 @@ _Part of the [ado-aw documentation](../AGENTS.md)._
 
 ## Overview
 
-`ado-aw audit` audits one Azure DevOps build at a time. It downloads the selected build artifacts, runs the built-in analyzers (ADO proxy, firewall, MCP gateway, OTel, safe outputs, detection verdict, build timeline, and missing-tool / missing-data / noop extraction), and renders a structured console report or the raw `AuditData` JSON. The MVP is single-run only; diff mode and cross-run trend reporting are follow-ups.
+`ado-aw audit` audits one Azure DevOps build at a time. It downloads the selected build artifacts, runs the built-in analyzers (ADO proxy, firewall, MCP gateway, OTel, safe outputs, custom safe-output jobs, detection verdict, build timeline, and missing-tool / missing-data / noop extraction), and renders a structured console report or the raw `AuditData` JSON. The MVP is single-run only; diff mode and cross-run trend reporting are follow-ups.
 
 ## Usage
 
@@ -86,6 +86,7 @@ Current top-level keys include the following. Optional sections are omitted from
 | `engine_config` | Runtime engine configuration derived from `aw_info.json`. |
 | `safe_output_summary` | Counts of proposed / executed / rejected / not processed items. |
 | `safe_output_execution` | Per-item trace joining proposal + detection + execution. |
+| `custom_safe_output_jobs` | Per-tool audit record for configured custom safe-output jobs (`custom-tools.json` config + `aw_info.json` metadata), correlated with proposal counts, the local typed-IR graph, and the ADO build timeline. |
 | `rejected_safe_outputs` | Rollup of rejections by reason / threat flag. |
 | `detection_analysis` | `threat-analysis.json`. |
 | `mcp_server_health` | MCPG logs aggregated per server. |
