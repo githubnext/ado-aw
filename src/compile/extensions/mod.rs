@@ -70,7 +70,10 @@ pub struct McpgServerConfig {
 pub struct McpgGatewayConfig {
     pub port: u16,
     pub domain: String,
-    pub api_key: String,
+    /// Gateway client credential, serialized as gentId. MCPG v0.5+ rejects the
+    /// legacy piKey field in JSON stdin configs; clients still send the value
+    /// verbatim in the Authorization header.
+    pub agent_id: String,
     pub payload_dir: String,
 }
 

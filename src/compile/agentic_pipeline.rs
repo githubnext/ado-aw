@@ -4641,7 +4641,7 @@ echo "$MCPG_CONFIG" | docker run -i --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e MCP_GATEWAY_PORT="$MCPG_PORT" \
   -e MCP_GATEWAY_DOMAIN="$MCPG_DOMAIN" \
-  -e MCP_GATEWAY_API_KEY="$MCP_GATEWAY_API_KEY" \
+  -e MCP_GATEWAY_AGENT_ID="$MCP_GATEWAY_API_KEY" \
   "${MCPG_DOCKER_ENV_ARGS[@]}" \
   "$MCPG_IMAGE" \
   --routed --listen "0.0.0.0:$MCPG_PORT" --config-stdin --log-dir /tmp/gh-aw/mcp-logs \

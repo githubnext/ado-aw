@@ -4037,7 +4037,7 @@ pub fn compile_mcpg(
             gateway: McpgGatewayConfig {
                 port: MCPG_PORT,
                 domain: MCPG_DOMAIN.to_string(),
-                api_key: "${MCP_GATEWAY_API_KEY}".to_string(),
+                agent_id: "${MCP_GATEWAY_API_KEY}".to_string(),
                 payload_dir: "/tmp/gh-aw/mcp-payloads".to_string(),
             },
         },
@@ -8478,7 +8478,7 @@ safe-outputs:
         let config = generate_mcpg_config(&fm, &collect_exts_and_decls(&fm).1).unwrap();
         assert_eq!(config.gateway.port, MCPG_PORT);
         assert_eq!(config.gateway.domain, MCPG_DOMAIN);
-        assert_eq!(config.gateway.api_key, "${MCP_GATEWAY_API_KEY}");
+        assert_eq!(config.gateway.agent_id, "${MCP_GATEWAY_API_KEY}");
         assert_eq!(config.gateway.payload_dir, "/tmp/gh-aw/mcp-payloads");
     }
 
@@ -8510,7 +8510,11 @@ safe-outputs:
         let gw = parsed.get("gateway").unwrap();
         assert!(gw.get("port").is_some(), "Gateway should have port");
         assert!(gw.get("domain").is_some(), "Gateway should have domain");
-        assert!(gw.get("apiKey").is_some(), "Gateway should have apiKey");
+        assert!(gw.get("agentId").is_some(), "Gateway should have agentId");
+        assert!(
+            gw.get("apiKey").is_none(),
+            "MCPG v0.5+ rejects the legacy gateway apiKey field"
+        );
         assert!(
             gw.get("payloadDir").is_some(),
             "Gateway should have payloadDir"

@@ -120,7 +120,7 @@ jq -n \
     gateway: {
       port: $gateway_port,
       domain: $gateway_domain,
-      apiKey: $gateway_key,
+      agentId: $gateway_key,
       payloadDir: "/tmp/gh-aw/mcp-payloads"
     }
   }' >"${RUNTIME_DIR}/mcpg-config.json"
@@ -135,7 +135,7 @@ docker run -i --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e "MCP_GATEWAY_PORT=${MCP_GATEWAY_PORT}" \
   -e "MCP_GATEWAY_DOMAIN=${MCP_GATEWAY_CONTAINER}" \
-  -e "MCP_GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY}" \
+  -e "MCP_GATEWAY_AGENT_ID=${MCP_GATEWAY_API_KEY}" \
   "${MCPG_IMAGE}" \
   --routed \
   --listen "0.0.0.0:${MCP_GATEWAY_PORT}" \

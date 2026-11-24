@@ -141,7 +141,7 @@ The compiler generates MCPG configuration JSON from the `mcp-servers:` front mat
   "gateway": {
     "port": 8080,
     "domain": "awmg-mcpg",
-    "apiKey": "<gateway-api-key>",
+    "agentId": "<gateway-api-key>",
     "payloadDir": "/tmp/gh-aw/mcp-payloads"
   }
 }

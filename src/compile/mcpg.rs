@@ -34,6 +34,7 @@ impl McpgEnvName {
             || matches!(
                 value.as_str(),
                 "MCP_GATEWAY_API_KEY"
+                    | "MCP_GATEWAY_AGENT_ID"
                     | "MCP_GATEWAY_PORT"
                     | "MCP_GATEWAY_DOMAIN"
                     | "ADO_PROXY_IP"
@@ -261,6 +262,7 @@ mod tests {
         for destination in [
             "ADO_AW_MCPG_INTERNAL_IMAGE",
             "MCP_GATEWAY_API_KEY",
+            "MCP_GATEWAY_AGENT_ID",
             "MCP_GATEWAY_PORT",
             "MCP_GATEWAY_DOMAIN",
             "ADO_PROXY_IP",
