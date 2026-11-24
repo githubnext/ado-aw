@@ -2334,149 +2334,49 @@ impl FrontMatter {
         if !GITHUB_ISSUE_SAFE_OUTPUT_TOOLS.contains(&tool) {
             return Ok(None);
         }
+        // `$extra` lists fields copied verbatim (wrapped in `Some`) beyond the
+        // four common ones; `base` configs only carry the repo allowlist.
+        macro_rules! lower {
+            (base, $getter:ident) => {
+                Ok(self.$getter()?.map(|config| GithubIssueCompilerConfig {
+                    target_repo: config.target_repo,
+                    allowed_repos: config.allowed_repos,
+                    ..Default::default()
+                }))
+            };
+            ($getter:ident $(, $extra:ident)*) => {
+                Ok(self.$getter()?.map(|config| GithubIssueCompilerConfig {
+                    target_repo: config.target_repo,
+                    allowed_repos: config.allowed_repos,
+                    required_labels: config.required_labels,
+                    required_title_prefix: config.required_title_prefix,
+                    $($extra: Some(config.$extra),)*
+                    ..Default::default()
+                }))
+            };
+        }
         match tool {
-            "create-github-issue" => {
-                Ok(self
-                    .create_github_issue_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        ..Default::default()
-                    }))
-            }
-            "set-github-issue-type" => {
-                Ok(self
-                    .set_github_issue_type_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        ..Default::default()
-                    }))
-            }
+            "create-github-issue" => lower!(base, create_github_issue_config),
+            "set-github-issue-type" => lower!(set_github_issue_type_config),
             "comment-on-github-issue" => {
-                Ok(self
-                    .comment_on_github_issue_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        issues: Some(config.issues),
-                        pull_requests: Some(config.pull_requests),
-                        ..Default::default()
-                    }))
+                lower!(comment_on_github_issue_config, issues, pull_requests)
             }
-            "hide-github-issue-comment" => {
-                Ok(self.hide_github_issue_comment_config()?.map(|config| {
-                    GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        discussions: Some(config.discussions),
-                        ..Default::default()
-                    }
-                }))
-            }
+            "hide-github-issue-comment" => lower!(hide_github_issue_comment_config, discussions),
             "add-github-issue-labels" => {
-                Ok(self
-                    .add_github_issue_labels_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        issues: Some(config.issues),
-                        pull_requests: Some(config.pull_requests),
-                        ..Default::default()
-                    }))
+                lower!(add_github_issue_labels_config, issues, pull_requests)
             }
-            "remove-github-issue-labels" => {
-                Ok(self.remove_github_issue_labels_config()?.map(|config| {
-                    GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        ..Default::default()
-                    }
-                }))
-            }
-            "close-github-issue" => {
-                Ok(self
-                    .close_github_issue_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        ..Default::default()
-                    }))
-            }
+            "remove-github-issue-labels" => lower!(remove_github_issue_labels_config),
+            "close-github-issue" => lower!(close_github_issue_config),
             "update-github-issue" => {
-                Ok(self
-                    .update_github_issue_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        issues: Some(config.issues),
-                        pull_requests: Some(config.pull_requests),
-                        ..Default::default()
-                    }))
+                lower!(update_github_issue_config, issues, pull_requests)
             }
-            "set-github-issue-field" => {
-                Ok(self
-                    .set_github_issue_field_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        ..Default::default()
-                    }))
+            "set-github-issue-field" => lower!(set_github_issue_field_config),
+            "assign-github-issue-milestone" => lower!(assign_github_issue_milestone_config),
+            "assign-github-issue-to-user" => lower!(assign_github_issue_to_user_config),
+            "unassign-github-issue-from-user" => {
+                lower!(unassign_github_issue_from_user_config)
             }
-            "assign-github-issue-milestone" => Ok(self
-                .assign_github_issue_milestone_config()?
-                .map(|config| GithubIssueCompilerConfig {
-                    target_repo: config.target_repo,
-                    allowed_repos: config.allowed_repos,
-                    required_labels: config.required_labels,
-                    required_title_prefix: config.required_title_prefix,
-                    ..Default::default()
-                })),
-            "assign-github-issue-to-user" => {
-                Ok(self.assign_github_issue_to_user_config()?.map(|config| {
-                    GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        required_labels: config.required_labels,
-                        required_title_prefix: config.required_title_prefix,
-                        ..Default::default()
-                    }
-                }))
-            }
-            "unassign-github-issue-from-user" => Ok(self
-                .unassign_github_issue_from_user_config()?
-                .map(|config| GithubIssueCompilerConfig {
-                    target_repo: config.target_repo,
-                    allowed_repos: config.allowed_repos,
-                    required_labels: config.required_labels,
-                    required_title_prefix: config.required_title_prefix,
-                    ..Default::default()
-                })),
-            "link-github-sub-issue" => {
-                Ok(self
-                    .link_github_sub_issue_config()?
-                    .map(|config| GithubIssueCompilerConfig {
-                        target_repo: config.target_repo,
-                        allowed_repos: config.allowed_repos,
-                        ..Default::default()
-                    }))
-            }
+            "link-github-sub-issue" => lower!(base, link_github_sub_issue_config),
             _ => Ok(None),
         }
     }

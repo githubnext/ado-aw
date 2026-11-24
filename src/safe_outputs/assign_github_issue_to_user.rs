@@ -9,8 +9,8 @@ use url::Url;
 
 use crate::safe_outputs::{
     ExecutionContext, ExecutionResult, Executor, GithubClient, GithubIssueNumber,
-    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities, Validate,
-    resolve_github_issue_target, validate_blocked_first_globs,
+    GithubMutationFilters, GithubRepositoryPolicy, GithubTargetCapabilities,
+    ResolvedGithubIssueTarget, Validate, resolve_github_issue_target, validate_blocked_first_globs,
     validate_github_mutation_filter_config, validate_github_mutation_filters,
     validate_github_repository, validate_github_target_capability,
 };
@@ -191,6 +191,82 @@ fn repository_assignee_url(
     Ok(url)
 }
 
+/// Validates the live issue against capability and mutation filters, then
+/// verifies every assignee is assignable. The outer `Result` carries transport
+/// errors; the inner one carries policy/validation failures.
+async fn preflight_checks(
+    client: &GithubClient,
+    target: &ResolvedGithubIssueTarget,
+    filters: GithubMutationFilters<'_>,
+    assignees: &[String],
+) -> anyhow::Result<Result<(), ExecutionResult>> {
+    let metadata = match client.get_issue(&target.repository, target.number).await? {
+        Ok(metadata) => metadata,
+        Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+    };
+    if let Err(result) =
+        validate_github_target_capability(&metadata, GithubTargetCapabilities::ISSUES_ONLY)
+    {
+        return Ok(Err(result));
+    }
+    if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
+        return Ok(Err(result));
+    }
+    for assignee in assignees {
+        let response = client
+            .send(
+                Method::GET,
+                repository_assignee_url(client, &target.repository, assignee)?,
+                None,
+            )
+            .await?;
+        if let Err(error) = response.require_success("Failed to validate GitHub assignee") {
+            return Ok(Err(ExecutionResult::failure(error.to_string())));
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// Sends the assignment write: PATCH to replace assignees or POST to add them.
+async fn apply_assignees(
+    client: &GithubClient,
+    target: &ResolvedGithubIssueTarget,
+    assignees: &[String],
+    unassign_first: bool,
+) -> anyhow::Result<Result<(), ExecutionResult>> {
+    let (method, url, operation) = if unassign_first {
+        (
+            Method::PATCH,
+            client.issue_url(&target.repository, target.number)?,
+            "Failed to replace GitHub issue assignees",
+        )
+    } else {
+        (
+            Method::POST,
+            issue_assignees_url(client, &target.repository, target.number)?,
+            "Failed to assign GitHub issue users",
+        )
+    };
+    debug!(
+        "Assigning users [{}] to {}#{} (unassign-first={})",
+        assignees.join(", "),
+        target.repository,
+        target.number,
+        unassign_first
+    );
+    let response = client
+        .send(
+            method,
+            url,
+            Some(&serde_json::json!({ "assignees": assignees })),
+        )
+        .await?;
+    if let Err(error) = response.require_success(operation) {
+        return Ok(Err(ExecutionResult::failure(error.to_string())));
+    }
+    Ok(Ok(()))
+}
+
 #[async_trait::async_trait]
 impl Executor for AssignGithubIssueToUserResult {
     fn dry_run_summary(&self) -> String {
@@ -244,60 +320,13 @@ impl Executor for AssignGithubIssueToUserResult {
         };
 
         // Resolve the live target and all policy filters before the first write.
-        let metadata = match client.get_issue(&target.repository, target.number).await? {
-            Ok(metadata) => metadata,
-            Err(error) => return Ok(ExecutionResult::failure(error.to_string())),
-        };
+        if let Err(result) = preflight_checks(&client, &target, filters, &assignees).await? {
+            return Ok(result);
+        }
         if let Err(result) =
-            validate_github_target_capability(&metadata, GithubTargetCapabilities::ISSUES_ONLY)
+            apply_assignees(&client, &target, &assignees, config.unassign_first).await?
         {
             return Ok(result);
-        }
-        if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
-            return Ok(result);
-        }
-        for assignee in &assignees {
-            let response = client
-                .send(
-                    Method::GET,
-                    repository_assignee_url(&client, &target.repository, assignee)?,
-                    None,
-                )
-                .await?;
-            if let Err(error) = response.require_success("Failed to validate GitHub assignee") {
-                return Ok(ExecutionResult::failure(error.to_string()));
-            }
-        }
-
-        let (method, url, operation) = if config.unassign_first {
-            (
-                Method::PATCH,
-                client.issue_url(&target.repository, target.number)?,
-                "Failed to replace GitHub issue assignees",
-            )
-        } else {
-            (
-                Method::POST,
-                issue_assignees_url(&client, &target.repository, target.number)?,
-                "Failed to assign GitHub issue users",
-            )
-        };
-        debug!(
-            "Assigning users [{}] to {}#{} (unassign-first={})",
-            assignees.join(", "),
-            target.repository,
-            target.number,
-            config.unassign_first
-        );
-        let response = client
-            .send(
-                method,
-                url,
-                Some(&serde_json::json!({ "assignees": assignees })),
-            )
-            .await?;
-        if let Err(error) = response.require_success(operation) {
-            return Ok(ExecutionResult::failure(error.to_string()));
         }
 
         info!(

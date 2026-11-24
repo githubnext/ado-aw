@@ -705,17 +705,7 @@ pub async fn resolve_imports_with_repo_root(
         );
     }
 
-    let mut queue = VecDeque::new();
-    for entry in entries {
-        queue.push_back(PendingImport {
-            entry: entry.clone(),
-            context: ResolutionContext::Local {
-                base_dir: base_dir.clone(),
-            },
-            depth: 1,
-            ancestry: Vec::new(),
-        });
-    }
+    let mut queue = seed_queue(entries, &base_dir);
 
     let mut resolved = Vec::new();
     let mut seen: HashMap<ResolvedIdentity, serde_json::Map<String, serde_json::Value>> =
@@ -728,17 +718,7 @@ pub async fn resolve_imports_with_repo_root(
     let mut resolution_attempts = 0usize;
     while let Some(pending) = queue.pop_front() {
         resolution_attempts += 1;
-        anyhow::ensure!(
-            resolution_attempts <= MAX_IMPORT_RESOLUTIONS,
-            "resolving this import graph requires more than {MAX_IMPORT_RESOLUTIONS} lookups; \
-             reduce duplicate or fanned-out `imports:` entries"
-        );
-        if pending.depth > MAX_IMPORT_DEPTH {
-            anyhow::bail!(
-                "import nesting depth exceeds the maximum of {MAX_IMPORT_DEPTH}: {}",
-                display_chain(&pending.ancestry, &pending.entry.uses)
-            );
-        }
+        check_resolution_limits(resolution_attempts, &pending)?;
 
         let spec = parse_entry_in_context(&pending.entry, &pending.context)
             .with_context(|| format!("failed to parse import `{}`", pending.entry.uses))?;
@@ -762,30 +742,7 @@ pub async fn resolve_imports_with_repo_root(
             .entry(node.identity.clone())
             .or_insert_with(|| node.import.provenance.source.clone());
 
-        if pending
-            .ancestry
-            .iter()
-            .any(|ancestor| ancestor.identity == node.identity)
-        {
-            anyhow::bail!(
-                "import cycle detected: {}",
-                display_cycle(&pending.ancestry, &node.import.provenance.source)
-            );
-        }
-        if let Some(parent) = pending.ancestry.last() {
-            if let Some(path) = find_identity_path(&graph, &node.identity, &parent.identity) {
-                let mut cycle = vec![parent.identity.clone()];
-                cycle.extend(path);
-                anyhow::bail!(
-                    "import cycle detected: {}",
-                    display_identity_path(&cycle, &identity_displays)
-                );
-            }
-            let children = graph.entry(parent.identity.clone()).or_default();
-            if !children.contains(&node.identity) {
-                children.push(node.identity.clone());
-            }
-        }
+        record_edge_checking_cycles(&pending.ancestry, &node, &mut graph, &identity_displays)?;
 
         if let Some(previous_with) = seen.get(&node.identity) {
             if previous_with == &pending.entry.with {
@@ -802,23 +759,7 @@ pub async fn resolve_imports_with_repo_root(
         }
         seen.insert(node.identity.clone(), pending.entry.with.clone());
 
-        let (substituted_front_matter, _) = apply_import_inputs(
-            &node.import.front_matter,
-            &node.import.body,
-            &node.import.entry.with,
-        )
-        .with_context(|| {
-            format!(
-                "failed to apply import inputs for `{}`",
-                node.import.provenance.source
-            )
-        })?;
-        let nested = nested_import_entries(&substituted_front_matter).with_context(|| {
-            format!(
-                "failed to parse nested imports from `{}`",
-                node.import.provenance.source
-            )
-        })?;
+        let nested = nested_entries_of(&node.import)?;
 
         let mut ancestry = pending.ancestry;
         ancestry.push(Ancestor {
@@ -839,6 +780,85 @@ pub async fn resolve_imports_with_repo_root(
     Ok(resolved)
 }
 
+fn seed_queue(entries: &[ImportEntry], base_dir: &Path) -> VecDeque<PendingImport> {
+    entries
+        .iter()
+        .map(|entry| PendingImport {
+            entry: entry.clone(),
+            context: ResolutionContext::Local {
+                base_dir: base_dir.to_path_buf(),
+            },
+            depth: 1,
+            ancestry: Vec::new(),
+        })
+        .collect()
+}
+
+fn check_resolution_limits(resolution_attempts: usize, pending: &PendingImport) -> Result<()> {
+    anyhow::ensure!(
+        resolution_attempts <= MAX_IMPORT_RESOLUTIONS,
+        "resolving this import graph requires more than {MAX_IMPORT_RESOLUTIONS} lookups; \
+         reduce duplicate or fanned-out `imports:` entries"
+    );
+    if pending.depth > MAX_IMPORT_DEPTH {
+        anyhow::bail!(
+            "import nesting depth exceeds the maximum of {MAX_IMPORT_DEPTH}: {}",
+            display_chain(&pending.ancestry, &pending.entry.uses)
+        );
+    }
+    Ok(())
+}
+
+fn record_edge_checking_cycles(
+    ancestry: &[Ancestor],
+    node: &ResolvedNode,
+    graph: &mut HashMap<ResolvedIdentity, Vec<ResolvedIdentity>>,
+    identity_displays: &HashMap<ResolvedIdentity, String>,
+) -> Result<()> {
+    if ancestry
+        .iter()
+        .any(|ancestor| ancestor.identity == node.identity)
+    {
+        anyhow::bail!(
+            "import cycle detected: {}",
+            display_cycle(ancestry, &node.import.provenance.source)
+        );
+    }
+    if let Some(parent) = ancestry.last() {
+        if let Some(path) = find_identity_path(graph, &node.identity, &parent.identity) {
+            let mut cycle = vec![parent.identity.clone()];
+            cycle.extend(path);
+            anyhow::bail!(
+                "import cycle detected: {}",
+                display_identity_path(&cycle, identity_displays)
+            );
+        }
+        let children = graph.entry(parent.identity.clone()).or_default();
+        if !children.contains(&node.identity) {
+            children.push(node.identity.clone());
+        }
+    }
+    Ok(())
+}
+
+fn nested_entries_of(import: &ResolvedImport) -> Result<Vec<ImportEntry>> {
+    let (substituted_front_matter, _) =
+        apply_import_inputs(&import.front_matter, &import.body, &import.entry.with).with_context(
+            || {
+                format!(
+                    "failed to apply import inputs for `{}`",
+                    import.provenance.source
+                )
+            },
+        )?;
+    nested_import_entries(&substituted_front_matter).with_context(|| {
+        format!(
+            "failed to parse nested imports from `{}`",
+            import.provenance.source
+        )
+    })
+}
+
 async fn resolve_spec(
     entry: &ImportEntry,
     spec: ParsedImportSpec,
@@ -848,155 +868,180 @@ async fn resolve_spec(
     ref_cache: &mut HashMap<String, CommitSha>,
     ref_metadata: &mut RefMetadata,
 ) -> Result<Option<ResolvedNode>> {
-    match &spec {
-        ParsedImportSpec::Local {
-            path,
-            section,
-            optional,
-        } => {
-            let ResolutionContext::Local { base_dir } = context else {
-                anyhow::bail!("internal error: unresolved local import has a remote origin");
-            };
-            let local_path = resolve_local_path(base_dir, repo_root, path)?;
-            let canonical = match fs::canonicalize(&local_path) {
-                Ok(path) => path,
-                Err(error) if *optional && error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(None);
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to resolve local import {}", local_path.display())
-                    });
-                }
-            };
-            ensure_path_within_repo(&canonical, repo_root)?;
-            let bytes = match fs::read(&canonical) {
-                Ok(bytes) => bytes,
-                Err(error) if *optional && error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(None);
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to read local import {}", canonical.display())
-                    });
-                }
-            };
-            enforce_manifest_size(bytes.len(), &canonical.display().to_string())?;
-            let digest = sha256_hex(&bytes);
-            let (front_matter, body) = parse_manifest_bytes(&bytes, section.as_deref())?;
-            let identity_path = local_identity_path(&canonical);
-            Ok(Some(ResolvedNode {
-                import: ResolvedImport {
-                    entry: entry.clone(),
-                    spec: spec.clone(),
-                    front_matter,
-                    body,
-                    provenance: ImportProvenance {
-                        source: canonical.display().to_string(),
-                        requested_ref: None,
-                        sha: None,
-                        manifest_digest: digest,
-                    },
-                },
-                identity: ResolvedIdentity::Local {
-                    path: identity_path,
-                    section: section.clone(),
-                },
-                child_context: ResolutionContext::Local {
-                    base_dir: canonical
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .to_path_buf(),
-                },
-            }))
-        }
-        ParsedImportSpec::Remote {
-            source,
-            project,
-            repository,
-            path,
-            requested_ref,
-            section,
-            optional,
-        } => {
-            let remote_identity = fetcher.remote_identity(&spec).await?;
-            if *optional {
-                match fetcher.ensure_repository_accessible(&spec).await {
-                    Ok(()) => {}
-                    Err(error) if is_import_not_found(&error) => return Ok(None),
-                    Err(error) => return Err(error),
-                }
-            }
-            let ref_key = ref_metadata_key(&remote_identity, repository, requested_ref);
-            let resolved_sha = match resolve_remote_sha(
-                &spec,
-                &remote_identity,
-                &ref_key,
-                repo_root,
-                fetcher,
-                ref_cache,
-                ref_metadata,
-            )
-            .await
-            {
-                Ok(sha) => sha,
-                Err(error) if *optional && is_import_not_found(&error) => return Ok(None),
-                Err(error) => return Err(error),
-            };
-            // Persist the ref movement before fetching the path. If the new
-            // commit no longer contains an optional manifest, retaining the
-            // previous SHA here would let a later offline compile incorrectly
-            // resurrect stale cached content.
-            ref_metadata.record(&remote_identity, repository, requested_ref, &resolved_sha);
-            write_ref_metadata(repo_root, ref_metadata)?;
-            let bytes = match read_remote_manifest(
-                repo_root,
-                &spec,
-                &remote_identity,
-                &resolved_sha,
-                fetcher,
-            )
-            .await
-            {
-                Ok(bytes) => bytes,
-                Err(error) if *optional && is_import_not_found(&error) => return Ok(None),
-                Err(error) => return Err(error),
-            };
-
-            let digest = sha256_hex(&bytes);
-            let (front_matter, body) = parse_manifest_bytes(&bytes, section.as_deref())?;
-            let display = resolved_remote_display(&remote_identity, repository, path);
-            Ok(Some(ResolvedNode {
-                import: ResolvedImport {
-                    entry: entry.clone(),
-                    spec: spec.clone(),
-                    front_matter,
-                    body,
-                    provenance: ImportProvenance {
-                        source: display,
-                        requested_ref: Some(requested_ref.clone()),
-                        sha: Some(resolved_sha.as_str().to_string()),
-                        manifest_digest: digest,
-                    },
-                },
-                identity: ResolvedIdentity::Remote {
-                    source: remote_identity.source,
-                    project: remote_identity.project,
-                    repository: repository.clone(),
-                    sha: resolved_sha.as_str().to_string(),
-                    path: path.clone(),
-                    section: section.clone(),
-                },
-                child_context: ResolutionContext::Remote {
-                    source: source.clone(),
-                    project: project.clone(),
-                    repository: repository.clone(),
-                    manifest_path: path.clone(),
-                    resolved_sha,
-                },
-            }))
+    match spec {
+        ParsedImportSpec::Local { .. } => resolve_local_spec(entry, spec, context, repo_root),
+        ParsedImportSpec::Remote { .. } => {
+            resolve_remote_spec(entry, spec, repo_root, fetcher, ref_cache, ref_metadata).await
         }
     }
+}
+
+fn resolve_local_spec(
+    entry: &ImportEntry,
+    spec: ParsedImportSpec,
+    context: &ResolutionContext,
+    repo_root: &Path,
+) -> Result<Option<ResolvedNode>> {
+    let ParsedImportSpec::Local {
+        path,
+        section,
+        optional,
+    } = &spec
+    else {
+        anyhow::bail!("internal error: expected a local import spec");
+    };
+    let ResolutionContext::Local { base_dir } = context else {
+        anyhow::bail!("internal error: unresolved local import has a remote origin");
+    };
+    let local_path = resolve_local_path(base_dir, repo_root, path)?;
+    let canonical = match fs::canonicalize(&local_path) {
+        Ok(path) => path,
+        Err(error) if *optional && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to resolve local import {}", local_path.display())
+            });
+        }
+    };
+    ensure_path_within_repo(&canonical, repo_root)?;
+    let bytes = match fs::read(&canonical) {
+        Ok(bytes) => bytes,
+        Err(error) if *optional && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read local import {}", canonical.display()));
+        }
+    };
+    enforce_manifest_size(bytes.len(), &canonical.display().to_string())?;
+    let digest = sha256_hex(&bytes);
+    let (front_matter, body) = parse_manifest_bytes(&bytes, section.as_deref())?;
+    let identity_path = local_identity_path(&canonical);
+    Ok(Some(ResolvedNode {
+        import: ResolvedImport {
+            entry: entry.clone(),
+            spec: spec.clone(),
+            front_matter,
+            body,
+            provenance: ImportProvenance {
+                source: canonical.display().to_string(),
+                requested_ref: None,
+                sha: None,
+                manifest_digest: digest,
+            },
+        },
+        identity: ResolvedIdentity::Local {
+            path: identity_path,
+            section: section.clone(),
+        },
+        child_context: ResolutionContext::Local {
+            base_dir: canonical
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+        },
+    }))
+}
+
+async fn resolve_remote_spec(
+    entry: &ImportEntry,
+    spec: ParsedImportSpec,
+    repo_root: &Path,
+    fetcher: &dyn ManifestFetcher,
+    ref_cache: &mut HashMap<String, CommitSha>,
+    ref_metadata: &mut RefMetadata,
+) -> Result<Option<ResolvedNode>> {
+    let ParsedImportSpec::Remote {
+        source,
+        project,
+        repository,
+        path,
+        requested_ref,
+        section,
+        optional,
+    } = &spec
+    else {
+        anyhow::bail!("internal error: expected a remote import spec");
+    };
+    let remote_identity = fetcher.remote_identity(&spec).await?;
+    if *optional {
+        match fetcher.ensure_repository_accessible(&spec).await {
+            Ok(()) => {}
+            Err(error) if is_import_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    let ref_key = ref_metadata_key(&remote_identity, repository, requested_ref);
+    let resolved_sha = match resolve_remote_sha(
+        &spec,
+        &remote_identity,
+        &ref_key,
+        repo_root,
+        fetcher,
+        ref_cache,
+        ref_metadata,
+    )
+    .await
+    {
+        Ok(sha) => sha,
+        Err(error) if *optional && is_import_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    // Persist the ref movement before fetching the path. If the new
+    // commit no longer contains an optional manifest, retaining the
+    // previous SHA here would let a later offline compile incorrectly
+    // resurrect stale cached content.
+    ref_metadata.record(&remote_identity, repository, requested_ref, &resolved_sha);
+    write_ref_metadata(repo_root, ref_metadata)?;
+    let bytes = match read_remote_manifest(
+        repo_root,
+        &spec,
+        &remote_identity,
+        &resolved_sha,
+        fetcher,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) if *optional && is_import_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let digest = sha256_hex(&bytes);
+    let (front_matter, body) = parse_manifest_bytes(&bytes, section.as_deref())?;
+    let display = resolved_remote_display(&remote_identity, repository, path);
+    Ok(Some(ResolvedNode {
+        import: ResolvedImport {
+            entry: entry.clone(),
+            spec: spec.clone(),
+            front_matter,
+            body,
+            provenance: ImportProvenance {
+                source: display,
+                requested_ref: Some(requested_ref.clone()),
+                sha: Some(resolved_sha.as_str().to_string()),
+                manifest_digest: digest,
+            },
+        },
+        identity: ResolvedIdentity::Remote {
+            source: remote_identity.source,
+            project: remote_identity.project,
+            repository: repository.clone(),
+            sha: resolved_sha.as_str().to_string(),
+            path: path.clone(),
+            section: section.clone(),
+        },
+        child_context: ResolutionContext::Remote {
+            source: source.clone(),
+            project: project.clone(),
+            repository: repository.clone(),
+            manifest_path: path.clone(),
+            resolved_sha,
+        },
+    }))
 }
 
 fn parse_entry_in_context(

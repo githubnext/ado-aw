@@ -441,6 +441,95 @@ async fn fetch_work_item(
     }
 }
 
+/// Validate agent-provided tags against allowed-tags (if configured).
+fn check_allowed_tags(
+    params: &UpdateWorkItemResult,
+    config: &UpdateWorkItemConfig,
+) -> Option<ExecutionResult> {
+    let tags = params.tags.as_ref()?;
+    if config.allowed_tags.is_empty() {
+        return None;
+    }
+    let disallowed: Vec<&str> = tags
+        .iter()
+        .filter(|tag| {
+            !config
+                .allowed_tags
+                .iter()
+                .any(|pattern| super::tag_matches_pattern(tag, pattern))
+        })
+        .map(|t| t.as_str())
+        .collect();
+    if disallowed.is_empty() {
+        return None;
+    }
+    Some(ExecutionResult::failure(format!(
+        "Agent-provided tags not in allowed-tags: {}",
+        disallowed.join(", ")
+    )))
+}
+
+/// Build and send the PATCH request, mapping the response to a result.
+async fn send_patch(
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    id: u64,
+    params: &UpdateWorkItemResult,
+    config: &UpdateWorkItemConfig,
+) -> anyhow::Result<ExecutionResult> {
+    let patch_doc = build_patch_document(params, config);
+    let url = format!(
+        "{}/{}/_apis/wit/workitems/{}?api-version=7.0",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+        id,
+    );
+    debug!("PATCH URL: {}", url);
+
+    let response = client
+        .patch(&url)
+        .header("Content-Type", "application/json-patch+json")
+        .basic_auth("", Some(token))
+        .json(&patch_doc)
+        .send()
+        .await
+        .context("Failed to send update request to Azure DevOps")?;
+
+    if response.status().is_success() {
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse response JSON")?;
+        let work_item_url = body
+            .get("_links")
+            .and_then(|l| l.get("html"))
+            .and_then(|h| h.get("href"))
+            .and_then(|h| h.as_str())
+            .unwrap_or("");
+
+        info!("Work item #{} updated successfully", id);
+        Ok(ExecutionResult::success_with_data(
+            format!("Updated work item #{}", id),
+            serde_json::json!({
+                "id": id,
+                "url": work_item_url,
+            }),
+        ))
+    } else {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        Ok(ExecutionResult::failure(format!(
+            "Failed to update work item #{} (HTTP {}): {}",
+            id, status, error_body
+        )))
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for UpdateWorkItemResult {
     fn dry_run_summary(&self) -> String {
@@ -522,29 +611,8 @@ impl Executor for UpdateWorkItemResult {
             return Ok(ExecutionResult::failure(error.to_string()));
         }
 
-        // Validate agent-provided tags against allowed-tags (if configured)
-        if let Some(tags) = &self.tags
-            && !config.allowed_tags.is_empty()
-        {
-            let disallowed: Vec<_> = tags
-                .iter()
-                .filter(|tag| {
-                    !config
-                        .allowed_tags
-                        .iter()
-                        .any(|pattern| super::tag_matches_pattern(tag, pattern))
-                })
-                .collect();
-            if !disallowed.is_empty() {
-                return Ok(ExecutionResult::failure(format!(
-                    "Agent-provided tags not in allowed-tags: {}",
-                    disallowed
-                        .iter()
-                        .map(|t| t.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
+        if let Some(result) = check_allowed_tags(self, &config) {
+            return Ok(result);
         }
 
         let client = reqwest::Client::new();
@@ -556,56 +624,7 @@ impl Executor for UpdateWorkItemResult {
             return Ok(result);
         }
 
-        // Build and send the PATCH request
-        let patch_doc = build_patch_document(self, &config);
-        let url = format!(
-            "{}/{}/_apis/wit/workitems/{}?api-version=7.0",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            id,
-        );
-        debug!("PATCH URL: {}", url);
-
-        let response = client
-            .patch(&url)
-            .header("Content-Type", "application/json-patch+json")
-            .basic_auth("", Some(token))
-            .json(&patch_doc)
-            .send()
-            .await
-            .context("Failed to send update request to Azure DevOps")?;
-
-        if response.status().is_success() {
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse response JSON")?;
-            let work_item_url = body
-                .get("_links")
-                .and_then(|l| l.get("html"))
-                .and_then(|h| h.get("href"))
-                .and_then(|h| h.as_str())
-                .unwrap_or("");
-
-            info!("Work item #{} updated successfully", id);
-            Ok(ExecutionResult::success_with_data(
-                format!("Updated work item #{}", id),
-                serde_json::json!({
-                    "id": id,
-                    "url": work_item_url,
-                }),
-            ))
-        } else {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            Ok(ExecutionResult::failure(format!(
-                "Failed to update work item #{} (HTTP {}): {}",
-                id, status, error_body
-            )))
-        }
+        send_patch(&client, org_url, project, token, id, self, &config).await
     }
 }
 

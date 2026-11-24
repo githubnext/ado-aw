@@ -151,6 +151,133 @@ fn resolve_reference(
     }
 }
 
+/// Check numeric IDs against the configured `target` scope, returning the
+/// failure message when a link is not permitted.
+fn check_target_scope(
+    config: &LinkWorkItemsConfig,
+    (source_id, source_needs_target): (i64, bool),
+    (target_id, target_needs_target): (i64, bool),
+) -> Option<String> {
+    if !(source_needs_target || target_needs_target) {
+        return None;
+    }
+    let Some(target) = &config.target else {
+        return Some(
+            "link-work-items requires a 'target' field in safe-outputs configuration \
+             to scope which work items can be linked. Example:\n  safe-outputs:\n    \
+             link-work-items:\n      target: \"*\""
+                .to_string(),
+        );
+    };
+    if source_needs_target && target.allows_id(source_id) == Some(false) {
+        return Some(format!(
+            "Source work item #{source_id} is not allowed by the configured target scope"
+        ));
+    }
+    if target_needs_target && target.allows_id(target_id) == Some(false) {
+        return Some(format!(
+            "Target work item #{target_id} is not allowed by the configured target scope"
+        ));
+    }
+    // Area path validation is deferred — would need API calls for both IDs.
+    // For now, ID-based and wildcard scoping is enforced.
+    None
+}
+
+/// Build the JSON Patch document adding a relation to the target work item.
+fn build_patch_doc(
+    relation_type: &str,
+    target_url: &str,
+    comment: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let mut relation_value = serde_json::json!({
+        "rel": relation_type,
+        "url": target_url,
+    });
+    if let Some(comment) = comment {
+        relation_value["attributes"] = serde_json::json!({ "comment": comment });
+    }
+    vec![serde_json::json!({
+        "op": "add",
+        "path": "/relations/-",
+        "value": relation_value,
+    })]
+}
+
+/// Check `link_type` against the configured allow-list and resolve it to the
+/// ADO relation reference name, returning the failure message on rejection.
+fn check_and_resolve_link_type(
+    config: &LinkWorkItemsConfig,
+    link_type: &str,
+) -> Result<&'static str, String> {
+    if !config.allowed_link_types.is_empty()
+        && !config.allowed_link_types.iter().any(|t| t == link_type)
+    {
+        return Err(format!(
+            "Link type '{}' is not in the allowed set: {}",
+            link_type,
+            config.allowed_link_types.join(", ")
+        ));
+    }
+
+    resolve_link_type(link_type).ok_or_else(|| {
+        format!(
+            "Unknown link type '{}'; must be one of: {}",
+            link_type,
+            VALID_LINK_TYPES.join(", ")
+        )
+    })
+}
+
+/// Map the link PATCH response to the execution result.
+async fn link_response_result(
+    response: reqwest::Response,
+    (source_id, target_id): (i64, i64),
+    link_type: &str,
+    relation_type: &str,
+    project: &str,
+) -> anyhow::Result<ExecutionResult> {
+    if response.status().is_success() {
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse response JSON")?;
+
+        let work_item_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        info!(
+            "Linked work item #{} -> #{} ({})",
+            source_id, target_id, link_type
+        );
+
+        Ok(ExecutionResult::success_with_data(
+            format!(
+                "Linked work item #{} -> #{} ({})",
+                source_id, target_id, link_type
+            ),
+            serde_json::json!({
+                "source_id": source_id,
+                "target_id": target_id,
+                "link_type": link_type,
+                "relation_type": relation_type,
+                "work_item_id": work_item_id,
+                "project": project,
+            }),
+        ))
+    } else {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+
+        Ok(ExecutionResult::failure(format!(
+            "Failed to link work item #{} -> #{} (HTTP {}): {}",
+            source_id, target_id, status, error_body
+        )))
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for LinkWorkItemsResult {
     fn dry_run_summary(&self) -> String {
@@ -204,52 +331,18 @@ impl Executor for LinkWorkItemsResult {
             ));
         }
 
-        // Validate numeric work item IDs against target scope
-        if source_needs_target || target_needs_target {
-            let Some(target) = &config.target else {
-                return Ok(ExecutionResult::failure(
-                    "link-work-items requires a 'target' field in safe-outputs configuration \
-                     to scope which work items can be linked. Example:\n  safe-outputs:\n    \
-                     link-work-items:\n      target: \"*\""
-                        .to_string(),
-                ));
-            };
-            // Check source_id
-            if source_needs_target && target.allows_id(source_id) == Some(false) {
-                return Ok(ExecutionResult::failure(format!(
-                    "Source work item #{source_id} is not allowed by the configured target scope"
-                )));
-            }
-            // Check target_id
-            if target_needs_target && target.allows_id(target_id) == Some(false) {
-                return Ok(ExecutionResult::failure(format!(
-                    "Target work item #{target_id} is not allowed by the configured target scope"
-                )));
-            }
-            // Area path validation is deferred — would need API calls for both IDs.
-            // For now, ID-based and wildcard scoping is enforced.
+        if let Some(message) = check_target_scope(
+            &config,
+            (source_id, source_needs_target),
+            (target_id, target_needs_target),
+        ) {
+            return Ok(ExecutionResult::failure(message));
         }
 
-        // Validate link type against configured allow-list
-        if !config.allowed_link_types.is_empty()
-            && !config.allowed_link_types.contains(&self.link_type)
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Link type '{}' is not in the allowed set: {}",
-                self.link_type,
-                config.allowed_link_types.join(", ")
-            )));
-        }
-
-        let relation_type = match resolve_link_type(&self.link_type) {
-            Some(rt) => rt,
-            None => {
-                return Ok(ExecutionResult::failure(format!(
-                    "Unknown link type '{}'; must be one of: {}",
-                    self.link_type,
-                    VALID_LINK_TYPES.join(", ")
-                )));
-            }
+        // Validate link type against configured allow-list, then resolve it
+        let relation_type = match check_and_resolve_link_type(&config, &self.link_type) {
+            Ok(rt) => rt,
+            Err(message) => return Ok(ExecutionResult::failure(message)),
         };
 
         // Build the target work item URL for the relation
@@ -260,23 +353,7 @@ impl Executor for LinkWorkItemsResult {
             target_id,
         );
 
-        // Build the JSON Patch body
-        let mut relation_value = serde_json::json!({
-            "rel": relation_type,
-            "url": target_url,
-        });
-
-        if let Some(ref comment) = self.comment {
-            relation_value["attributes"] = serde_json::json!({
-                "comment": comment,
-            });
-        }
-
-        let patch_doc = vec![serde_json::json!({
-            "op": "add",
-            "path": "/relations/-",
-            "value": relation_value,
-        })];
+        let patch_doc = build_patch_doc(relation_type, &target_url, self.comment.as_deref());
 
         // PATCH https://dev.azure.com/{org}/{project}/_apis/wit/workitems/{id}?api-version=7.1
         let url = format!(
@@ -302,45 +379,14 @@ impl Executor for LinkWorkItemsResult {
             .await
             .context("Failed to send request to Azure DevOps")?;
 
-        if response.status().is_success() {
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse response JSON")?;
-
-            let work_item_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-
-            info!(
-                "Linked work item #{} -> #{} ({})",
-                source_id, target_id, self.link_type
-            );
-
-            Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Linked work item #{} -> #{} ({})",
-                    source_id, target_id, self.link_type
-                ),
-                serde_json::json!({
-                    "source_id": source_id,
-                    "target_id": target_id,
-                    "link_type": self.link_type,
-                    "relation_type": relation_type,
-                    "work_item_id": work_item_id,
-                    "project": project,
-                }),
-            ))
-        } else {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-
-            Ok(ExecutionResult::failure(format!(
-                "Failed to link work item #{} -> #{} (HTTP {}): {}",
-                source_id, target_id, status, error_body
-            )))
-        }
+        link_response_result(
+            response,
+            (source_id, target_id),
+            &self.link_type,
+            relation_type,
+            project,
+        )
+        .await
     }
 }
 

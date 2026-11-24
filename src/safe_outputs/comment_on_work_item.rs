@@ -306,70 +306,89 @@ impl Executor for CommentOnWorkItemResult {
             }
         }
 
-        // Build the Azure DevOps REST API URL for adding a comment
-        // POST https://dev.azure.com/{org}/{project}/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.4
-        let url = format!(
-            "{}/{}/_apis/wit/workItems/{}/comments?api-version=7.1-preview.4",
-            org_url.trim_end_matches('/'),
-            utf8_percent_encode(project, PATH_SEGMENT),
-            work_item_id,
-        );
-        debug!("API URL: {}", url);
-
         let body_with_stats =
             crate::agent_stats::append_stats_to_body(&self.body, ctx, config.include_stats);
-        let comment_body = serde_json::json!({
-            "text": body_with_stats,
-        });
+        post_comment(
+            &body_with_stats,
+            &client,
+            org_url,
+            project,
+            token,
+            work_item_id,
+        )
+        .await
+    }
+}
 
-        info!("Sending comment to work item #{}", work_item_id);
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&comment_body)
-            .send()
+async fn post_comment(
+    body_with_stats: &str,
+    client: &reqwest::Client,
+    org_url: &str,
+    project: &str,
+    token: &str,
+    work_item_id: i64,
+) -> anyhow::Result<ExecutionResult> {
+    // Build the Azure DevOps REST API URL for adding a comment
+    // POST https://dev.azure.com/{org}/{project}/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.4
+    let url = format!(
+        "{}/{}/_apis/wit/workItems/{}/comments?api-version=7.1-preview.4",
+        org_url.trim_end_matches('/'),
+        utf8_percent_encode(project, PATH_SEGMENT),
+        work_item_id,
+    );
+    debug!("API URL: {}", url);
+
+    let comment_body = serde_json::json!({
+        "text": body_with_stats,
+    });
+
+    info!("Sending comment to work item #{}", work_item_id);
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .basic_auth("", Some(token))
+        .json(&comment_body)
+        .send()
+        .await
+        .context("Failed to send request to Azure DevOps")?;
+
+    if response.status().is_success() {
+        let body: serde_json::Value = response
+            .json()
             .await
-            .context("Failed to send request to Azure DevOps")?;
+            .context("Failed to parse response JSON")?;
 
-        if response.status().is_success() {
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse response JSON")?;
+        let comment_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let comment_url = body.get("url").and_then(|h| h.as_str()).unwrap_or("");
 
-            let comment_id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-            let comment_url = body.get("url").and_then(|h| h.as_str()).unwrap_or("");
+        info!(
+            "Comment added to work item #{}: comment #{}",
+            work_item_id, comment_id
+        );
 
-            info!(
-                "Comment added to work item #{}: comment #{}",
-                work_item_id, comment_id
-            );
+        Ok(ExecutionResult::success_with_data(
+            format!(
+                "Added comment #{} to work item #{}",
+                comment_id, work_item_id
+            ),
+            serde_json::json!({
+                "comment_id": comment_id,
+                "work_item_id": work_item_id,
+                "url": comment_url,
+                "project": project,
+            }),
+        ))
+    } else {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
 
-            Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Added comment #{} to work item #{}",
-                    comment_id, work_item_id
-                ),
-                serde_json::json!({
-                    "comment_id": comment_id,
-                    "work_item_id": work_item_id,
-                    "url": comment_url,
-                    "project": project,
-                }),
-            ))
-        } else {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-
-            Ok(ExecutionResult::failure(format!(
-                "Failed to add comment to work item #{} (HTTP {}): {}",
-                work_item_id, status, error_body
-            )))
-        }
+        Ok(ExecutionResult::failure(format!(
+            "Failed to add comment to work item #{} (HTTP {}): {}",
+            work_item_id, status, error_body
+        )))
     }
 }
 

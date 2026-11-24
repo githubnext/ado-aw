@@ -216,34 +216,11 @@ impl Executor for CreateBranchResult {
             config.allowed_source_branches
         );
 
-        // Validate branch name against branch-pattern regex (if configured)
-        if let Some(ref pattern) = config.branch_pattern {
-            let re = regex_lite::Regex::new(pattern)
-                .context(format!("Invalid branch-pattern regex: '{}'", pattern))?;
-            if !re.is_match(&self.branch_name) {
-                return Ok(ExecutionResult::failure(format!(
-                    "Branch name '{}' does not match required pattern '{}'",
-                    self.branch_name, pattern
-                )));
-            }
-            debug!("Branch name matches pattern '{}'", pattern);
-        }
-
         // Determine repository alias
         let repo_alias = self.repository.as_deref().unwrap_or("self");
 
-        // Validate repository against config policy BEFORE resolving the name,
-        // so operators see a policy error rather than a confusing "not in checkout list" error.
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&repo_alias.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list: [{}]",
-                repo_alias,
-                config.allowed_repositories.join(", ")
-            )));
+        if let Some(failure) = self.check_name_and_repository_policy(&config, repo_alias)? {
+            return Ok(failure);
         }
 
         let target =
@@ -257,15 +234,8 @@ impl Executor for CreateBranchResult {
 
         // Validate source_branch against allowed-source-branches (if configured)
         let source_branch = self.source_branch.as_deref().unwrap_or("main");
-        if !config.allowed_source_branches.is_empty()
-            && !config
-                .allowed_source_branches
-                .contains(&source_branch.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Source branch '{}' is not in the allowed-source-branches list",
-                source_branch
-            )));
+        if let Some(failure) = check_source_branch_policy(&config, source_branch) {
+            return Ok(failure);
         }
 
         if ctx.dry_run {
@@ -282,26 +252,11 @@ impl Executor for CreateBranchResult {
             .context("No access token available (SYSTEM_ACCESSTOKEN or AZURE_DEVOPS_EXT_PAT)")?;
         let client = reqwest::Client::new();
 
-        // Resolve the source commit SHA
-        let source_sha = if let Some(ref commit) = self.source_commit {
-            debug!("Using explicit source commit: {}", commit);
-            commit.clone()
-        } else {
-            debug!("Resolving source branch '{}' to commit", source_branch);
-            resolve_branch_to_commit(
-                &client,
-                &target.organization_url,
-                &target.project,
-                token,
-                ctx.write_connection_type,
-                target.repository_locator(),
-                source_branch,
-            )
-            .await?
-        };
+        let source_sha = self
+            .resolve_source_sha(&client, &target, token, ctx, source_branch)
+            .await?;
         debug!("Source commit SHA: {}", source_sha);
 
-        // Build the refs update URL
         let url = format!(
             "{}/{}/_apis/git/repositories/{}/refs?api-version=7.1",
             target.organization_url,
@@ -310,13 +265,7 @@ impl Executor for CreateBranchResult {
         );
         debug!("API URL: {}", url);
 
-        // Build the ref update request body
-        let ref_name = if self.branch_name.starts_with("refs/heads/") {
-            self.branch_name.clone()
-        } else {
-            format!("refs/heads/{}", self.branch_name)
-        };
-
+        let ref_name = self.full_ref_name();
         let ref_updates = serde_json::json!([{
             "name": ref_name,
             "oldObjectId": "0000000000000000000000000000000000000000",
@@ -334,67 +283,162 @@ impl Executor for CreateBranchResult {
         .await
         .context("Failed to send request to Azure DevOps")?;
 
-        if response.status().is_success() {
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .context("Failed to parse response JSON")?;
+        if !response.status().is_success() {
+            return Ok(self.http_failure(response).await);
+        }
 
-            // Check for per-ref errors in the response
-            let success = body
-                .get("value")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|r| r.get("success"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse response JSON")?;
 
-            if !success {
-                let custom_message = body
-                    .get("value")
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|r| r.get("customMessage"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown error");
+        if let Some(failure) = self.check_ref_update_result(&body) {
+            return Ok(failure);
+        }
 
-                return Ok(ExecutionResult::failure(format!(
-                    "Failed to create branch '{}': {}",
-                    self.branch_name, custom_message
-                )));
-            }
+        info!("Branch '{}' created successfully", self.branch_name);
 
-            info!("Branch '{}' created successfully", self.branch_name);
+        Ok(ExecutionResult::success_with_data(
+            format!(
+                "Created branch '{}' in repository '{}' from commit {}",
+                self.branch_name,
+                repo_name,
+                &source_sha[..8]
+            ),
+            serde_json::json!({
+                "branch": self.branch_name,
+                "ref": ref_name,
+                "repository": repo_name,
+                "source_commit": source_sha,
+                "project": target.project,
+                "organization": target.organization,
+            }),
+        ))
+    }
+}
 
-            Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Created branch '{}' in repository '{}' from commit {}",
-                    self.branch_name,
-                    repo_name,
-                    &source_sha[..8]
-                ),
-                serde_json::json!({
-                    "branch": self.branch_name,
-                    "ref": ref_name,
-                    "repository": repo_name,
-                    "source_commit": source_sha,
-                    "project": target.project,
-                    "organization": target.organization,
-                }),
-            ))
+impl CreateBranchResult {
+    async fn resolve_source_sha(
+        &self,
+        client: &reqwest::Client,
+        target: &crate::safe_outputs::AdoRepositoryTarget,
+        token: &str,
+        ctx: &ExecutionContext,
+        source_branch: &str,
+    ) -> anyhow::Result<String> {
+        if let Some(ref commit) = self.source_commit {
+            debug!("Using explicit source commit: {}", commit);
+            return Ok(commit.clone());
+        }
+        debug!("Resolving source branch '{}' to commit", source_branch);
+        resolve_branch_to_commit(
+            client,
+            &target.organization_url,
+            &target.project,
+            token,
+            ctx.write_connection_type,
+            target.repository_locator(),
+            source_branch,
+        )
+        .await
+    }
+
+    fn full_ref_name(&self) -> String {
+        if self.branch_name.starts_with("refs/heads/") {
+            self.branch_name.clone()
         } else {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-
-            Ok(ExecutionResult::failure(format!(
-                "Failed to create branch '{}' (HTTP {}): {}",
-                self.branch_name, status, error_body
-            )))
+            format!("refs/heads/{}", self.branch_name)
         }
     }
+
+    async fn http_failure(&self, response: reqwest::Response) -> ExecutionResult {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+
+        ExecutionResult::failure(format!(
+            "Failed to create branch '{}' (HTTP {}): {}",
+            self.branch_name, status, error_body
+        ))
+    }
+
+    /// Check the per-ref result in a successful refs-update response.
+    fn check_ref_update_result(&self, body: &serde_json::Value) -> Option<ExecutionResult> {
+        let first_ref = body
+            .get("value")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first());
+        let success = first_ref
+            .and_then(|r| r.get("success"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if success {
+            return None;
+        }
+        let custom_message = first_ref
+            .and_then(|r| r.get("customMessage"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        Some(ExecutionResult::failure(format!(
+            "Failed to create branch '{}': {}",
+            self.branch_name, custom_message
+        )))
+    }
+
+    /// Validate the branch name against `branch-pattern` and the repository
+    /// against `allowed-repositories`. Returns a failure result on violation.
+    fn check_name_and_repository_policy(
+        &self,
+        config: &CreateBranchConfig,
+        repo_alias: &str,
+    ) -> anyhow::Result<Option<ExecutionResult>> {
+        if let Some(ref pattern) = config.branch_pattern {
+            let re = regex_lite::Regex::new(pattern)
+                .context(format!("Invalid branch-pattern regex: '{}'", pattern))?;
+            if !re.is_match(&self.branch_name) {
+                return Ok(Some(ExecutionResult::failure(format!(
+                    "Branch name '{}' does not match required pattern '{}'",
+                    self.branch_name, pattern
+                ))));
+            }
+            debug!("Branch name matches pattern '{}'", pattern);
+        }
+
+        // Checked BEFORE resolving the name, so operators see a policy error
+        // rather than a confusing "not in checkout list" error.
+        if !config.allowed_repositories.is_empty()
+            && !config
+                .allowed_repositories
+                .contains(&repo_alias.to_string())
+        {
+            return Ok(Some(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list: [{}]",
+                repo_alias,
+                config.allowed_repositories.join(", ")
+            ))));
+        }
+        Ok(None)
+    }
+}
+
+/// Validate the source branch against `allowed-source-branches` (if configured).
+fn check_source_branch_policy(
+    config: &CreateBranchConfig,
+    source_branch: &str,
+) -> Option<ExecutionResult> {
+    if !config.allowed_source_branches.is_empty()
+        && !config
+            .allowed_source_branches
+            .contains(&source_branch.to_string())
+    {
+        return Some(ExecutionResult::failure(format!(
+            "Source branch '{}' is not in the allowed-source-branches list",
+            source_branch
+        )));
+    }
+    None
 }
 
 #[cfg(test)]

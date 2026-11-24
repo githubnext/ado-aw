@@ -182,9 +182,156 @@ fn apply_title_prefix(path: &str, prefix: &str) -> String {
     }
 }
 
+/// Validate the requested path against traversal and the configured
+/// `path-prefix`, then apply the configured `title-prefix`.
+fn resolve_effective_path(raw_path: &str, config: &UpdateWikiPageConfig) -> Result<String, String> {
+    let effective_path = normalize_wiki_path(raw_path);
+
+    // Belt-and-suspenders: reject path traversal even after sanitize_fields()
+    if effective_path.contains("..") {
+        return Err("Wiki page path contains path traversal characters (..)".to_string());
+    }
+
+    if let Some(prefix) = &config.path_prefix {
+        let normalized_prefix = normalize_wiki_path(prefix);
+        // Path must be exactly the prefix or start with "<prefix>/"
+        let under_prefix = effective_path == normalized_prefix
+            || effective_path.starts_with(&format!("{normalized_prefix}/"));
+        if !under_prefix {
+            return Err(format!(
+                "Wiki page path '{}' is not under the configured path-prefix '{}'",
+                effective_path, normalized_prefix
+            ));
+        }
+    }
+
+    // Apply the title prefix (modifies only the last segment).
+    Ok(match &config.title_prefix {
+        Some(title_prefix) => apply_title_prefix(&effective_path, title_prefix),
+        None => effective_path,
+    })
+}
+
+/// Build the success result from the wiki PUT response body.
+fn update_success_result(
+    body: &serde_json::Value,
+    effective_path: &str,
+    wiki_name: &str,
+    project: &str,
+) -> ExecutionResult {
+    let page_id = body
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let remote_url = body.get("remoteUrl").and_then(|v| v.as_str()).unwrap_or("");
+
+    info!("Updated wiki page: {effective_path} (id={page_id})");
+
+    ExecutionResult::success_with_data(
+        format!("Updated wiki page: {effective_path}"),
+        serde_json::json!({
+            "id": page_id,
+            "path": effective_path,
+            "url": remote_url,
+            "wiki": wiki_name,
+            "project": project,
+            "action": "updated",
+        }),
+    )
+}
+
 // ============================================================================
 // Stage-2 executor
 // ============================================================================
+
+/// The page-scoped inputs shared by the existence probe and the update PUT.
+struct WikiPageRequest<'a> {
+    client: &'a reqwest::Client,
+    base_url: &'a str,
+    effective_path: &'a str,
+    resolved_branch: Option<&'a str>,
+    token: &'a str,
+}
+
+impl WikiPageRequest<'_> {
+    /// GET the page to confirm it exists and obtain its ETag. Returns the
+    /// failure message when the probe fails or the page does not exist.
+    async fn fetch_existing_etag(&self) -> anyhow::Result<Result<Option<String>, String>> {
+        let mut get_query: Vec<(&str, &str)> =
+            vec![("path", self.effective_path), ("api-version", "7.0")];
+        if let Some(branch) = self.resolved_branch {
+            get_query.push(("versionDescriptor.version", branch));
+            get_query.push(("versionDescriptor.versionType", "branch"));
+        }
+        let get_resp = self
+            .client
+            .get(self.base_url)
+            .query(&get_query)
+            .basic_auth("", Some(self.token))
+            .send()
+            .await
+            .context("Failed to check existing wiki page")?;
+
+        let get_status = get_resp.status();
+
+        if !get_status.is_success() && get_status.as_u16() != 404 {
+            let error_body = get_resp.text().await.unwrap_or_default();
+            return Ok(Err(format!(
+                "Failed to check wiki page (HTTP {get_status}): {error_body}"
+            )));
+        }
+
+        let page_exists = get_status.is_success();
+
+        if !page_exists {
+            return Ok(Err(format!(
+                "Wiki page '{}' does not exist. \
+                 Use a separate safe output to create new pages.",
+                self.effective_path
+            )));
+        }
+
+        Ok(Ok(get_resp
+            .headers()
+            .get("ETag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())))
+    }
+
+    /// PUT the updated page content, providing the ETag (when known) for
+    /// optimistic concurrency.
+    async fn put_content(
+        &self,
+        comment: &str,
+        content: String,
+        etag: Option<&str>,
+    ) -> anyhow::Result<reqwest::Response> {
+        let mut put_query: Vec<(&str, &str)> = vec![
+            ("path", self.effective_path),
+            ("comment", comment),
+            ("api-version", "7.0"),
+        ];
+        if let Some(branch) = self.resolved_branch {
+            put_query.push(("versionDescriptor.version", branch));
+            put_query.push(("versionDescriptor.versionType", "branch"));
+        }
+        let mut put_req = self
+            .client
+            .put(self.base_url)
+            .query(&put_query)
+            .header("Content-Type", "application/json")
+            .basic_auth("", Some(self.token))
+            .json(&serde_json::json!({ "content": content }));
+
+        // Provide the ETag for optimistic concurrency when updating an existing page.
+        if let Some(etag) = etag {
+            put_req = put_req.header("If-Match", etag);
+        }
+
+        put_req.send().await.context("Failed to write wiki page")
+    }
+}
 
 #[async_trait::async_trait]
 impl Executor for UpdateWikiPageResult {
@@ -224,34 +371,10 @@ impl Executor for UpdateWikiPageResult {
         // Use the wiki-project override if present, otherwise use the pipeline project.
         let project = config.wiki_project.as_deref().unwrap_or(pipeline_project);
 
-        // ── Path validation ───────────────────────────────────────────────────
-        let mut effective_path = normalize_wiki_path(&self.path);
-
-        // Belt-and-suspenders: reject path traversal even after sanitize_fields()
-        if effective_path.contains("..") {
-            return Ok(ExecutionResult::failure(
-                "Wiki page path contains path traversal characters (..)",
-            ));
-        }
-
-        // Enforce the configured path prefix restriction.
-        if let Some(prefix) = &config.path_prefix {
-            let normalized_prefix = normalize_wiki_path(prefix);
-            // Path must be exactly the prefix or start with "<prefix>/"
-            let under_prefix = effective_path == normalized_prefix
-                || effective_path.starts_with(&format!("{normalized_prefix}/"));
-            if !under_prefix {
-                return Ok(ExecutionResult::failure(format!(
-                    "Wiki page path '{}' is not under the configured path-prefix '{}'",
-                    effective_path, normalized_prefix
-                )));
-            }
-        }
-
-        // Apply the title prefix (modifies only the last segment).
-        if let Some(title_prefix) = &config.title_prefix {
-            effective_path = apply_title_prefix(&effective_path, title_prefix);
-        }
+        let effective_path = match resolve_effective_path(&self.path, &config) {
+            Ok(p) => p,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
+        };
 
         debug!("Effective wiki page path: {effective_path}");
 
@@ -281,43 +404,17 @@ impl Executor for UpdateWikiPageResult {
         };
 
         // ── GET: check whether the page exists and obtain its ETag ────────────
-        let mut get_query: Vec<(&str, &str)> =
-            vec![("path", effective_path.as_str()), ("api-version", "7.0")];
-        if let Some(branch) = &resolved_branch {
-            get_query.push(("versionDescriptor.version", branch.as_str()));
-            get_query.push(("versionDescriptor.versionType", "branch"));
-        }
-        let get_resp = client
-            .get(&base_url)
-            .query(&get_query)
-            .basic_auth("", Some(token))
-            .send()
-            .await
-            .context("Failed to check existing wiki page")?;
-
-        let get_status = get_resp.status();
-
-        if !get_status.is_success() && get_status.as_u16() != 404 {
-            let error_body = get_resp.text().await.unwrap_or_default();
-            return Ok(ExecutionResult::failure(format!(
-                "Failed to check wiki page (HTTP {get_status}): {error_body}"
-            )));
-        }
-
-        let page_exists = get_status.is_success();
-
-        if !page_exists {
-            return Ok(ExecutionResult::failure(format!(
-                "Wiki page '{effective_path}' does not exist. \
-                 Use a separate safe output to create new pages."
-            )));
-        }
-
-        let etag: Option<String> = get_resp
-            .headers()
-            .get("ETag")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        let request = WikiPageRequest {
+            client: &client,
+            base_url: &base_url,
+            effective_path: &effective_path,
+            resolved_branch: resolved_branch.as_deref(),
+            token,
+        };
+        let etag = match request.fetch_existing_etag().await? {
+            Ok(etag) => etag,
+            Err(msg) => return Ok(ExecutionResult::failure(msg)),
+        };
 
         let comment = self
             .comment
@@ -328,56 +425,19 @@ impl Executor for UpdateWikiPageResult {
         debug!("Updating existing wiki page: {effective_path}");
 
         // ── PUT: create or update the page ────────────────────────────────────
-        let mut put_query: Vec<(&str, &str)> = vec![
-            ("path", effective_path.as_str()),
-            ("comment", comment),
-            ("api-version", "7.0"),
-        ];
-        if let Some(branch) = &resolved_branch {
-            put_query.push(("versionDescriptor.version", branch.as_str()));
-            put_query.push(("versionDescriptor.versionType", "branch"));
-        }
-        let mut put_req = client
-            .put(&base_url)
-            .query(&put_query)
-            .header("Content-Type", "application/json")
-            .basic_auth("", Some(token))
-            .json(&serde_json::json!({
-                "content": crate::agent_stats::append_stats_to_body(
-                    &self.content,
-                    ctx,
-                    config.include_stats,
-                )
-            }));
-
-        // Provide the ETag for optimistic concurrency when updating an existing page.
-        if let Some(etag) = &etag {
-            put_req = put_req.header("If-Match", etag);
-        }
-
-        let put_resp = put_req.send().await.context("Failed to write wiki page")?;
+        let content =
+            crate::agent_stats::append_stats_to_body(&self.content, ctx, config.include_stats);
+        let put_resp = request
+            .put_content(comment, content, etag.as_deref())
+            .await?;
 
         if put_resp.status().is_success() {
             let body: serde_json::Value = put_resp.json().await.unwrap_or_default();
-            let page_id = body
-                .get("id")
-                .and_then(|v| v.as_i64())
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let remote_url = body.get("remoteUrl").and_then(|v| v.as_str()).unwrap_or("");
-
-            info!("Updated wiki page: {effective_path} (id={page_id})");
-
-            Ok(ExecutionResult::success_with_data(
-                format!("Updated wiki page: {effective_path}"),
-                serde_json::json!({
-                    "id": page_id,
-                    "path": effective_path,
-                    "url": remote_url,
-                    "wiki": wiki_name,
-                    "project": project,
-                    "action": "updated",
-                }),
+            Ok(update_success_result(
+                &body,
+                &effective_path,
+                wiki_name,
+                project,
             ))
         } else {
             let put_status = put_resp.status();

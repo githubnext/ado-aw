@@ -331,6 +331,74 @@ async fn post_review_comment_thread(
     Ok(Ok(thread_id))
 }
 
+impl SubmitPrReviewResult {
+    /// Returns a failure result if the event or repository is not permitted by config.
+    fn check_policy(&self, config: &SubmitPrReviewConfig) -> Option<ExecutionResult> {
+        // Validate event against allowed-events — REQUIRED.
+        // An empty allowed-events list means the operator hasn't opted in, so reject.
+        if config.allowed_events.is_empty() {
+            return Some(ExecutionResult::failure(
+                "submit-pr-review requires 'allowed-events' to be configured in \
+                 safe-outputs.submit-pr-review. This prevents agents from casting \
+                 unrestricted review votes. Example:\n  safe-outputs:\n    submit-pr-review:\n      \
+                 allowed-events:\n        - comment\n        - approve-with-suggestions"
+                    .to_string(),
+            ));
+        }
+        if !config.allowed_events.contains(&self.event) {
+            return Some(ExecutionResult::failure(format!(
+                "Event '{}' is not in the allowed-events list: [{}]",
+                self.event,
+                config.allowed_events.join(", ")
+            )));
+        }
+
+        // Validate repository against allowed-repositories config
+        let repo_alias = self.repository.as_deref().unwrap_or("self");
+        if !config.allowed_repositories.is_empty()
+            && !config
+                .allowed_repositories
+                .contains(&repo_alias.to_string())
+        {
+            return Some(ExecutionResult::failure(format!(
+                "Repository '{}' is not in the allowed-repositories list: [{}]",
+                repo_alias,
+                config.allowed_repositories.join(", ")
+            )));
+        }
+
+        None
+    }
+
+    fn success_result(
+        &self,
+        vote_value: i32,
+        repo_name: &str,
+        thread_id: Option<i64>,
+    ) -> ExecutionResult {
+        let mut data = serde_json::json!({
+            "pull_request_id": self.pull_request_id,
+            "event": self.event,
+            "vote_value": vote_value,
+            "repository": repo_name,
+        });
+        let message = match thread_id {
+            Some(id) => {
+                data["thread_id"] = serde_json::json!(id);
+                format!(
+                    "Review '{}' submitted on PR #{} with comment thread #{}",
+                    self.event, self.pull_request_id, id
+                )
+            }
+            None => format!(
+                "Review '{}' submitted on PR #{}",
+                self.event, self.pull_request_id
+            ),
+        };
+        ExecutionResult::success_with_data(message, data)
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for SubmitPrReviewResult {
     fn dry_run_summary(&self) -> String {
@@ -367,37 +435,8 @@ impl Executor for SubmitPrReviewResult {
         let config: SubmitPrReviewConfig = ctx.get_tool_config("submit-pr-review")?;
         debug!("Config: {:?}", config);
 
-        // Validate event against allowed-events — REQUIRED.
-        // An empty allowed-events list means the operator hasn't opted in, so reject.
-        if config.allowed_events.is_empty() {
-            return Ok(ExecutionResult::failure(
-                "submit-pr-review requires 'allowed-events' to be configured in \
-                 safe-outputs.submit-pr-review. This prevents agents from casting \
-                 unrestricted review votes. Example:\n  safe-outputs:\n    submit-pr-review:\n      \
-                 allowed-events:\n        - comment\n        - approve-with-suggestions"
-                    .to_string(),
-            ));
-        }
-        if !config.allowed_events.contains(&self.event) {
-            return Ok(ExecutionResult::failure(format!(
-                "Event '{}' is not in the allowed-events list: [{}]",
-                self.event,
-                config.allowed_events.join(", ")
-            )));
-        }
-
-        // Validate repository against allowed-repositories config
-        let repo_alias = self.repository.as_deref().unwrap_or("self");
-        if !config.allowed_repositories.is_empty()
-            && !config
-                .allowed_repositories
-                .contains(&repo_alias.to_string())
-        {
-            return Ok(ExecutionResult::failure(format!(
-                "Repository '{}' is not in the allowed-repositories list: [{}]",
-                repo_alias,
-                config.allowed_repositories.join(", ")
-            )));
+        if let Some(failure) = self.check_policy(&config) {
+            return Ok(failure);
         }
 
         // Resolve repo name
@@ -453,48 +492,26 @@ impl Executor for SubmitPrReviewResult {
         }
 
         // If body is provided, also POST a comment thread with the review rationale
-        if let Some(ref body) = self.body {
-            let thread_id = match post_review_comment_thread(
-                &client,
-                &base_url,
-                &encoded_repo,
-                self.pull_request_id,
-                body,
-                token,
-            )
-            .await?
-            {
-                Ok(id) => id,
-                Err(failure) => return Ok(failure),
-            };
+        let thread_id = match self.body.as_deref() {
+            Some(body) => {
+                match post_review_comment_thread(
+                    &client,
+                    &base_url,
+                    &encoded_repo,
+                    self.pull_request_id,
+                    body,
+                    token,
+                )
+                .await?
+                {
+                    Ok(id) => Some(id),
+                    Err(failure) => return Ok(failure),
+                }
+            }
+            None => None,
+        };
 
-            return Ok(ExecutionResult::success_with_data(
-                format!(
-                    "Review '{}' submitted on PR #{} with comment thread #{}",
-                    self.event, self.pull_request_id, thread_id
-                ),
-                serde_json::json!({
-                    "pull_request_id": self.pull_request_id,
-                    "event": self.event,
-                    "vote_value": vote_value,
-                    "thread_id": thread_id,
-                    "repository": repo_name,
-                }),
-            ));
-        }
-
-        Ok(ExecutionResult::success_with_data(
-            format!(
-                "Review '{}' submitted on PR #{}",
-                self.event, self.pull_request_id
-            ),
-            serde_json::json!({
-                "pull_request_id": self.pull_request_id,
-                "event": self.event,
-                "vote_value": vote_value,
-                "repository": repo_name,
-            }),
-        ))
+        Ok(self.success_result(vote_value, &repo_name, thread_id))
     }
 }
 

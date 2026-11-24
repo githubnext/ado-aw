@@ -393,6 +393,246 @@ fn build_engine_setup(
     })
 }
 
+/// Identity of the `self` repository, resolved at compile time.
+///
+/// `self` is the repository this workflow is compiled in, and (because the
+/// executor's `--source` resolves beneath the `self` checkout) also the
+/// repository whose pipeline runs it — for template targets that is the
+/// parent pipeline's repository. The compiler therefore already knows the
+/// name, and the `ado-aw-marker` extension already bakes it into the lock,
+/// so `ado-aw check` fails loudly if the baked value ever drifts from the
+/// repository the pipeline actually runs in.
+///
+/// The `$(Build.Repository.Name)` fallback is deliberately last: it names
+/// the *triggering* repository, which differs from `self` on
+/// repository-resource-triggered runs (issue #1731). Warn rather than fail,
+/// because compiling outside an ADO clone is a supported developer path.
+fn resolve_self_repository_name(ctx: &CompileContext<'_>, agent_name: &str) -> Result<EnvValue> {
+    let name = match ctx.ado_context.as_ref() {
+        Some(ado) => EnvValue::literal(ado.repo_name.clone()),
+        None => {
+            eprintln!(
+                "Warning: could not resolve the Azure DevOps repository for agent '{}' \
+                (no ADO git remote and no ADO_AW_COMPILE_REMOTE_URL). Falling back to \
+                $(Build.Repository.Name) for the 'self' repository identity, which names \
+                the TRIGGERING repository — safe-outputs targeting `repository: self` may \
+                resolve to the wrong repository on repository-resource-triggered runs. \
+                Compile from an Azure DevOps clone, or set ADO_AW_COMPILE_REMOTE_URL.",
+                agent_name
+            );
+            EnvValue::ado_macro("Build.Repository.Name")?
+        }
+    };
+    Ok(name)
+}
+
+/// Resolve the workflow source path (for integrity check + metadata).
+/// Returns `(source_path, source_relative_path)`.
+fn resolve_source_paths(
+    input_path: &Path,
+    trigger_repo_directory: &str,
+) -> Result<(String, String)> {
+    // `source_path` embeds `{{ trigger_repo_directory }}` which the
+    // legacy template fold substitutes — do the same eagerly so step
+    // bodies receive a fully-resolved scalar.
+    // Validate the exact user-controlled suffix produced by the canonical path
+    // generator before the final path is embedded into compiler-authored bash.
+    // The trigger-repository prefix itself is compiler-owned.
+    let source_path_raw = common::generate_source_path(input_path);
+    let source_path_suffix = source_path_raw
+        .strip_prefix("{{ trigger_repo_directory }}/")
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "compiler-generated workflow source path is missing the trigger-repository prefix"
+            )
+        })?;
+    crate::validate::reject_pipeline_injection(source_path_suffix, "workflow source path")?;
+    let source_relative_path = source_path_suffix.to_string();
+    let source_path =
+        source_path_raw.replace("{{ trigger_repo_directory }}", trigger_repo_directory);
+    Ok((source_path, source_relative_path))
+}
+
+/// Build the (read, write) ADO token acquisition steps from `permissions:`.
+fn build_token_steps(front_matter: &FrontMatter) -> (Option<Step>, Option<Step>) {
+    let acquire_read_token = common::acquire_ado_token_step(
+        front_matter
+            .permissions
+            .as_ref()
+            .and_then(|p| p.read.as_ref())
+            .map(crate::compile::types::ReadPermissionConfig::service_connection),
+        crate::compile::types::WriteConnectionType::AzureRm,
+        common::AdoTokenVariable::Read,
+    );
+    let write_permission = front_matter
+        .permissions
+        .as_ref()
+        .and_then(|p| p.write.as_ref());
+    let acquire_write_token = common::acquire_ado_token_step(
+        write_permission.map(crate::compile::types::WritePermissionConfig::service_connection),
+        write_permission
+            .map(crate::compile::types::WritePermissionConfig::connection_type)
+            .unwrap_or_default(),
+        common::AdoTokenVariable::Write,
+    );
+    (acquire_read_token, acquire_write_token)
+}
+
+/// Generate the optional custom-tools JSON and the resolved execution config JSON.
+fn build_custom_tools_json(front_matter: &FrontMatter) -> Result<(Option<String>, String)> {
+    let custom_tool_schemas = super::custom_tools::generate_custom_tool_schemas(front_matter)?;
+    let custom_tools_json = if custom_tool_schemas.is_empty() {
+        None
+    } else {
+        Some(super::custom_tools::custom_tools_json(
+            &custom_tool_schemas,
+        )?)
+    };
+    let resolved_execution_config_json =
+        super::custom_tools::resolved_execution_config_json(front_matter, &custom_tool_schemas)?;
+    Ok((custom_tools_json, resolved_execution_config_json))
+}
+
+/// Compute the Agent and Detection network allowlists.
+fn build_allowed_domains(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    extension_declarations: &[crate::compile::extensions::Declarations],
+    threat_detection: &crate::compile::types::ThreatDetectionConfig,
+    detection_engine_config: &crate::compile::types::EngineConfig,
+) -> Result<(String, String)> {
+    let allowed_domains =
+        common::generate_allowed_domains(front_matter, extensions, extension_declarations)?;
+    // With no engine overlay, Detection uses the same effective engine and
+    // network inputs as Agent, so the already-computed allowlist is identical.
+    // Any future detection-only network contributor must extend this branch
+    // rather than relying on the clone.
+    let detection_allowed_domains = if threat_detection.engine.is_some() {
+        common::generate_allowed_domains_for_engine(
+            front_matter,
+            extensions,
+            extension_declarations,
+            detection_engine_config,
+        )?
+    } else {
+        allowed_domains.clone()
+    };
+    Ok((allowed_domains, detection_allowed_domains))
+}
+
+/// Compile-time scalars resolved from front matter before the engine setup.
+struct PipelineScalars {
+    pipeline_name: String,
+    agent_display_name: String,
+    working_directory: String,
+    trigger_repo_directory: String,
+    self_repository_name: EnvValue,
+    pools: PerJobPools,
+}
+
+fn resolve_pipeline_scalars(
+    front_matter: &FrontMatter,
+    ctx: &CompileContext<'_>,
+) -> Result<PipelineScalars> {
+    let pipeline_name = format!(
+        "{}{}",
+        common::sanitize_pipeline_agent_name(&front_matter.name),
+        ADO_BUILD_ID_SUFFIX
+    );
+    let agent_display_name = front_matter.name.clone();
+    let effective_workspace = common::compute_effective_workspace(
+        &front_matter.workspace,
+        &front_matter.checkout,
+        &front_matter.name,
+    )?;
+    let working_directory = common::generate_working_directory(&effective_workspace);
+    let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
+    let self_repository_name = resolve_self_repository_name(ctx, &front_matter.name)?;
+    let pools = common::resolve_pool_overrides_typed(
+        front_matter.target.clone(),
+        front_matter.pool.as_ref(),
+        front_matter.pool_overrides(),
+    )?;
+    Ok(PipelineScalars {
+        pipeline_name,
+        agent_display_name,
+        working_directory,
+        trigger_repo_directory,
+        self_repository_name,
+        pools,
+    })
+}
+
+/// MCPG config plus the compiler-generated dynamic SafeOutputs tool
+/// definitions: `(custom_tools_json, resolved_execution_config_json,
+/// mcpg_config_json, mcpg_launch_env)`.
+fn build_mcpg_artifacts(
+    front_matter: &FrontMatter,
+    extension_declarations: &[crate::compile::extensions::Declarations],
+    debug_pipeline: bool,
+) -> Result<(
+    Option<String>,
+    String,
+    String,
+    super::mcpg::McpgLaunchEnvironment,
+)> {
+    let (custom_tools_json, resolved_execution_config_json) =
+        build_custom_tools_json(front_matter)?;
+    let mcpg_compilation =
+        common::compile_mcpg(front_matter, extension_declarations, debug_pipeline)?;
+    let mcpg_config_json = serde_json::to_string_pretty(&mcpg_compilation.config)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize MCPG config: {e}"))?;
+    Ok((
+        custom_tools_json,
+        resolved_execution_config_json,
+        mcpg_config_json,
+        mcpg_compilation.launch_env,
+    ))
+}
+
+/// Integrity-check step YAML; skipped by `--skip-integrity` or the debug
+/// front-matter override.
+fn build_integrity_check_yaml(front_matter: &FrontMatter, skip_integrity: bool) -> String {
+    common::generate_integrity_check(
+        skip_integrity
+            || front_matter
+                .ado_aw_debug
+                .as_ref()
+                .is_some_and(|d| d.skip_integrity),
+    )
+}
+
+fn self_checkout_fetch(front_matter: &FrontMatter) -> CheckoutFetchOpts {
+    front_matter
+        .checkout_fetch
+        .get(SELF_CHECKOUT_ALIAS)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Fan out the per-extension declarations and build the canonical job graph.
+/// The fanout runs after the (infallible, side-effect-free) `StandaloneCtx`
+/// construction, so error precedence is unchanged.
+fn build_jobs_with_extension_fanout(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    extension_declarations: Vec<crate::compile::extensions::Declarations>,
+    cfg: &StandaloneCtx,
+    prefix: Option<&str>,
+) -> Result<Vec<Job>> {
+    let (ext_setup_steps, ext_agent_prepare, ext_agent_conditions) =
+        fanout_extension_declarations(extensions, extension_declarations)?;
+    build_canonical_jobs(
+        front_matter,
+        extensions,
+        cfg,
+        &ext_setup_steps,
+        &ext_agent_prepare,
+        &ext_agent_conditions,
+        prefix,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pipeline_context(
     front_matter: &FrontMatter,
@@ -414,53 +654,14 @@ pub(crate) fn build_pipeline_context(
     let extension_declarations = collect_extension_declarations(extensions, ctx)?;
 
     // ─── Scalars ──────────────────────────────────────────────────
-    let pipeline_name = format!(
-        "{}{}",
-        common::sanitize_pipeline_agent_name(&front_matter.name),
-        ADO_BUILD_ID_SUFFIX
-    );
-    let agent_display_name = front_matter.name.clone();
-    let effective_workspace = common::compute_effective_workspace(
-        &front_matter.workspace,
-        &front_matter.checkout,
-        &front_matter.name,
-    )?;
-    let working_directory = common::generate_working_directory(&effective_workspace);
-    let trigger_repo_directory = common::generate_trigger_repo_directory(&front_matter.checkout);
-    // Identity of the `self` repository, resolved at compile time.
-    //
-    // `self` is the repository this workflow is compiled in, and (because the
-    // executor's `--source` resolves beneath the `self` checkout) also the
-    // repository whose pipeline runs it — for template targets that is the
-    // parent pipeline's repository. The compiler therefore already knows the
-    // name, and the `ado-aw-marker` extension already bakes it into the lock,
-    // so `ado-aw check` fails loudly if the baked value ever drifts from the
-    // repository the pipeline actually runs in.
-    //
-    // The `$(Build.Repository.Name)` fallback is deliberately last: it names
-    // the *triggering* repository, which differs from `self` on
-    // repository-resource-triggered runs (issue #1731). Warn rather than fail,
-    // because compiling outside an ADO clone is a supported developer path.
-    let self_repository_name = match ctx.ado_context.as_ref() {
-        Some(ado) => EnvValue::literal(ado.repo_name.clone()),
-        None => {
-            eprintln!(
-                "Warning: could not resolve the Azure DevOps repository for agent '{}' \
-                (no ADO git remote and no ADO_AW_COMPILE_REMOTE_URL). Falling back to \
-                $(Build.Repository.Name) for the 'self' repository identity, which names \
-                the TRIGGERING repository — safe-outputs targeting `repository: self` may \
-                resolve to the wrong repository on repository-resource-triggered runs. \
-                Compile from an Azure DevOps clone, or set ADO_AW_COMPILE_REMOTE_URL.",
-                front_matter.name
-            );
-            EnvValue::ado_macro("Build.Repository.Name")?
-        }
-    };
-    let pools = common::resolve_pool_overrides_typed(
-        front_matter.target.clone(),
-        front_matter.pool.as_ref(),
-        front_matter.pool_overrides(),
-    )?;
+    let PipelineScalars {
+        pipeline_name,
+        agent_display_name,
+        working_directory,
+        trigger_repo_directory,
+        self_repository_name,
+        pools,
+    } = resolve_pipeline_scalars(front_matter, ctx)?;
 
     let engine_setup = build_engine_setup(
         front_matter,
@@ -470,106 +671,28 @@ pub(crate) fn build_pipeline_context(
         &threat_detection,
         &detection_engine_config,
     )?;
-    let EngineSetup {
-        compiler_version,
-        engine_run,
-        engine_run_detection,
-        engine_install_steps_yaml,
-        detection_engine_install_steps_yaml,
-        engine_log_dir,
-        engine_env,
-        awf_paths,
-        byom_exclude_keys,
-        detection_byom_exclude_keys,
-        detection_engine_env,
-    } = engine_setup;
 
     // AWF mounts + allowlist
-    let allowed_domains =
-        common::generate_allowed_domains(front_matter, extensions, &extension_declarations)?;
-    // With no engine overlay, Detection uses the same effective engine and
-    // network inputs as Agent, so the already-computed allowlist is identical.
-    // Any future detection-only network contributor must extend this branch
-    // rather than relying on the clone.
-    let detection_allowed_domains = if threat_detection.engine.is_some() {
-        common::generate_allowed_domains_for_engine(
-            front_matter,
-            extensions,
-            &extension_declarations,
-            &detection_engine_config,
-        )?
-    } else {
-        allowed_domains.clone()
-    };
+    let (allowed_domains, detection_allowed_domains) = build_allowed_domains(
+        front_matter,
+        extensions,
+        &extension_declarations,
+        &threat_detection,
+        &detection_engine_config,
+    )?;
     let awf_mounts = common::generate_awf_mounts(extensions, &extension_declarations);
-    let awf_path_step_yaml = common::generate_awf_path_step(&awf_paths);
+    let awf_path_step_yaml = common::generate_awf_path_step(&engine_setup.awf_paths);
 
     // MCPG config + compiler-generated dynamic SafeOutputs tool definitions.
-    let custom_tool_schemas = super::custom_tools::generate_custom_tool_schemas(front_matter)?;
-    let custom_tools_json = if custom_tool_schemas.is_empty() {
-        None
-    } else {
-        Some(super::custom_tools::custom_tools_json(
-            &custom_tool_schemas,
-        )?)
-    };
-    let resolved_execution_config_json =
-        super::custom_tools::resolved_execution_config_json(front_matter, &custom_tool_schemas)?;
-    let mcpg_compilation =
-        common::compile_mcpg(front_matter, &extension_declarations, debug_pipeline)?;
-    let mcpg_config_json = serde_json::to_string_pretty(&mcpg_compilation.config)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize MCPG config: {e}"))?;
+    let (custom_tools_json, resolved_execution_config_json, mcpg_config_json, mcpg_launch_env) =
+        build_mcpg_artifacts(front_matter, &extension_declarations, debug_pipeline)?;
 
-    // Source / pipeline paths (for integrity check + metadata).
-    // `source_path` embeds `{{ trigger_repo_directory }}` which the
-    // legacy template fold substitutes — do the same eagerly so step
-    // bodies receive a fully-resolved scalar.
-    // Validate the exact user-controlled suffix produced by the canonical path
-    // generator before the final path is embedded into compiler-authored bash.
-    // The trigger-repository prefix itself is compiler-owned.
-    let source_path_raw = common::generate_source_path(input_path);
-    let source_path_suffix = source_path_raw
-        .strip_prefix("{{ trigger_repo_directory }}/")
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "compiler-generated workflow source path is missing the trigger-repository prefix"
-            )
-        })?;
-    crate::validate::reject_pipeline_injection(source_path_suffix, "workflow source path")?;
-    let source_relative_path = source_path_suffix.to_string();
-    let source_path =
-        source_path_raw.replace("{{ trigger_repo_directory }}", &trigger_repo_directory);
+    let (source_path, source_relative_path) =
+        resolve_source_paths(input_path, &trigger_repo_directory)?;
     let pipeline_path = common::generate_pipeline_path(output_path);
 
-    // Read / write tokens
-    let acquire_read_token = common::acquire_ado_token_step(
-        front_matter
-            .permissions
-            .as_ref()
-            .and_then(|p| p.read.as_ref())
-            .map(crate::compile::types::ReadPermissionConfig::service_connection),
-        crate::compile::types::WriteConnectionType::AzureRm,
-        common::AdoTokenVariable::Read,
-    );
-    let write_permission = front_matter
-        .permissions
-        .as_ref()
-        .and_then(|p| p.write.as_ref());
-    let acquire_write_token = common::acquire_ado_token_step(
-        write_permission.map(crate::compile::types::WritePermissionConfig::service_connection),
-        write_permission
-            .map(crate::compile::types::WritePermissionConfig::connection_type)
-            .unwrap_or_default(),
-        common::AdoTokenVariable::Write,
-    );
-    // Skip integrity check resolution
-    let skip_integrity = skip_integrity
-        || front_matter
-            .ado_aw_debug
-            .as_ref()
-            .map(|d| d.skip_integrity)
-            .unwrap_or(false);
-    let integrity_check_yaml = common::generate_integrity_check(skip_integrity);
+    let (acquire_read_token, acquire_write_token) = build_token_steps(front_matter);
+    let integrity_check_yaml = build_integrity_check_yaml(front_matter, skip_integrity);
 
     // Agent prompt content
     let agent_content_value = build_agent_content(
@@ -586,40 +709,32 @@ pub(crate) fn build_pipeline_context(
     let resources = build_resources(&front_matter.repositories, &front_matter.on_config)?;
     let triggers = build_triggers(&front_matter.on_config, front_matter)?;
 
-    // ─── Extension declaration fanout ─────────────────────────────
-    let (ext_setup_steps, ext_agent_prepare, ext_agent_conditions) =
-        fanout_extension_declarations(extensions, extension_declarations)?;
-
     // Aggregate config for per-job builders
     let cfg = StandaloneCtx {
         pools,
         agent_display_name: agent_display_name.clone(),
-        self_checkout_fetch: front_matter
-            .checkout_fetch
-            .get(SELF_CHECKOUT_ALIAS)
-            .cloned()
-            .unwrap_or_default(),
+        self_checkout_fetch: self_checkout_fetch(front_matter),
         working_directory: working_directory.clone(),
         trigger_repo_directory: trigger_repo_directory.clone(),
         self_repository_name,
-        compiler_version: compiler_version.clone(),
-        engine_install_steps_yaml,
-        detection_engine_install_steps_yaml,
-        engine_run,
-        engine_run_detection,
+        compiler_version: engine_setup.compiler_version,
+        engine_install_steps_yaml: engine_setup.engine_install_steps_yaml,
+        detection_engine_install_steps_yaml: engine_setup.detection_engine_install_steps_yaml,
+        engine_run: engine_setup.engine_run,
+        engine_run_detection: engine_setup.engine_run_detection,
         detection_engine_config,
         threat_detection,
-        engine_env,
-        engine_log_dir,
+        engine_env: engine_setup.engine_env,
+        engine_log_dir: engine_setup.engine_log_dir,
         allowed_domains,
         detection_allowed_domains,
         awf_mounts,
         awf_path_step_yaml,
-        awf_path_prepends: awf_paths,
+        awf_path_prepends: engine_setup.awf_paths,
         mcpg_config_json,
         custom_tools_json,
         resolved_execution_config_json,
-        mcpg_launch_env: mcpg_compilation.launch_env,
+        mcpg_launch_env,
         source_path,
         source_relative_path,
         pipeline_path: pipeline_path.clone(),
@@ -628,19 +743,17 @@ pub(crate) fn build_pipeline_context(
         integrity_check_yaml,
         agent_content_value,
         debug_pipeline,
-        byom_exclude_keys,
-        detection_byom_exclude_keys,
-        detection_engine_env,
+        byom_exclude_keys: engine_setup.byom_exclude_keys,
+        detection_byom_exclude_keys: engine_setup.detection_byom_exclude_keys,
+        detection_engine_env: engine_setup.detection_engine_env,
     };
 
     // ─── Build jobs ───────────────────────────────────────────────
-    let jobs = build_canonical_jobs(
+    let jobs = build_jobs_with_extension_fanout(
         front_matter,
         extensions,
+        extension_declarations,
         &cfg,
-        &ext_setup_steps,
-        &ext_agent_prepare,
-        &ext_agent_conditions,
         prefix,
     )?;
 
@@ -716,6 +829,54 @@ pub(crate) fn build_canonical_jobs(
     //   - no reviewed tools           → single default job (unchanged)
     //   - all reviewed tools          → single default job, gated by ManualReview
     //   - mixed (auto + reviewed)     → auto job + reviewed job
+    let safeoutputs_shape = push_safeoutputs_jobs(&mut jobs, front_matter, cfg, &p)?;
+    if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
+        jobs.push(teardown);
+    }
+    if let Some(conclusion) = build_conclusion_job(
+        front_matter,
+        cfg,
+        &p,
+        &custom_defs,
+        safeoutputs_shape.has_reviewed_job,
+    )? {
+        jobs.push(conclusion);
+    }
+
+    // Wire dependsOn between jobs (graph pass also derives but
+    // explicit edges make the YAML match committed lock files).
+    wire_explicit_dependencies(
+        &mut jobs,
+        &p,
+        &custom_defs,
+        &custom_direct_reviewed_job_ids,
+        &custom_automatic_job_ids,
+        &custom_job_ids,
+        safeoutputs_shape.waits_for_review,
+    )?;
+    Ok(jobs)
+}
+
+/// Outcome of [`push_safeoutputs_jobs`]: which downstream wiring/gating
+/// decisions depend on how safe-output execution was split.
+struct SafeOutputsShape {
+    /// Whether a separate `SafeOutputs_Reviewed` job was emitted (mixed
+    /// auto + reviewed tools).
+    has_reviewed_job: bool,
+    /// Whether the (single, unsplit) SafeOutputs job is itself gated behind
+    /// manual review (all configured tools are reviewed).
+    waits_for_review: bool,
+}
+
+/// Builds and pushes the Stage 3 safe-output execution job(s) onto `jobs`,
+/// splitting into automatic + manual-review-gated variants when the
+/// configured safe outputs mix reviewed and non-reviewed tools.
+fn push_safeoutputs_jobs(
+    jobs: &mut Vec<Job>,
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    p: &JobPrefix<'_>,
+) -> Result<SafeOutputsShape> {
     let (auto_all, reviewed_all) = front_matter.partition_safe_outputs_by_approval();
     let custom_tool_names = front_matter.custom_safe_output_tool_names();
     let custom_tool_set: std::collections::HashSet<&str> =
@@ -728,14 +889,14 @@ pub(crate) fn build_canonical_jobs(
         .into_iter()
         .filter(|tool| !custom_tool_set.contains(tool.as_str()))
         .collect();
-    let has_reviewed_safeoutputs_job = !reviewed.is_empty() && !auto.is_empty();
+    let has_reviewed_job = !reviewed.is_empty() && !auto.is_empty();
     // Which variant actually runs `create-pull-request` (and thus needs the
     // `prepare-pr-base` fetch/deepen — issue #1453). In a split it lives in
     // exactly one variant; the other filters it out, so only the running
     // variant should pay for the bundle download + prepare step.
     let create_pr_configured = front_matter.create_pr_config().is_some();
     let create_pr_reviewed = reviewed.iter().any(|t| t == CREATE_PULL_REQUEST_TOOL);
-    let safeoutputs_waits_for_review = !reviewed.is_empty() && auto.is_empty();
+    let waits_for_review = !reviewed.is_empty() && auto.is_empty();
     let github_issue_tools_configured = front_matter.github_issue_tool_names();
     let github_issue_tools_reviewed: Vec<String> = github_issue_tools_configured
         .iter()
@@ -751,7 +912,7 @@ pub(crate) fn build_canonical_jobs(
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
-            &p,
+            p,
             &SafeOutputsVariant::default_single(
                 create_pr_configured,
                 github_issue_tools_configured,
@@ -762,7 +923,7 @@ pub(crate) fn build_canonical_jobs(
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
-            &p,
+            p,
             &SafeOutputsVariant::automatic(
                 &reviewed,
                 create_pr_configured && !create_pr_reviewed,
@@ -773,7 +934,7 @@ pub(crate) fn build_canonical_jobs(
         jobs.push(build_safeoutputs_job(
             front_matter,
             cfg,
-            &p,
+            p,
             &SafeOutputsVariant::reviewed(
                 &reviewed,
                 create_pr_configured && create_pr_reviewed,
@@ -781,31 +942,10 @@ pub(crate) fn build_canonical_jobs(
             ),
         )?);
     }
-    if let Some(teardown) = build_teardown_job(front_matter, cfg, &p)? {
-        jobs.push(teardown);
-    }
-    if let Some(conclusion) = build_conclusion_job(
-        front_matter,
-        cfg,
-        &p,
-        &custom_defs,
-        has_reviewed_safeoutputs_job,
-    )? {
-        jobs.push(conclusion);
-    }
-
-    // Wire dependsOn between jobs (graph pass also derives but
-    // explicit edges make the YAML match committed lock files).
-    wire_explicit_dependencies(
-        &mut jobs,
-        &p,
-        &custom_defs,
-        &custom_direct_reviewed_job_ids,
-        &custom_automatic_job_ids,
-        &custom_job_ids,
-        safeoutputs_waits_for_review,
-    )?;
-    Ok(jobs)
+    Ok(SafeOutputsShape {
+        has_reviewed_job,
+        waits_for_review,
+    })
 }
 
 /// Job-id prefix helper. Encapsulates the legacy-template quirk that
@@ -1222,22 +1362,17 @@ fn build_setup_job(
     Ok(Some(job))
 }
 
-fn build_agent_job(
+/// Steps 1-2: `checkout: self` plus any additional named repo checkouts
+/// declared under front matter `checkout:`.
+fn push_agent_checkout_steps(
     front_matter: &FrontMatter,
-    extensions: &[Extension],
-    ext_agent_prepare: &[Step],
-    ext_agent_conditions: &[Condition],
     cfg: &StandaloneCtx,
-    prefix: &JobPrefix<'_>,
-) -> Result<Job> {
-    let mut steps: Vec<Step> = Vec::new();
-
-    // 1. checkout: self
+    steps: &mut Vec<Step>,
+) {
     steps.push(checkout_self_step(
         &cfg.self_checkout_fetch,
         !front_matter.checkout.is_empty(),
     ));
-    // 2. additional repo checkouts
     for repo in &front_matter.checkout {
         let fetch = front_matter
             .checkout_fetch
@@ -1254,7 +1389,18 @@ fn build_agent_job(
             persist_credentials: None,
         }));
     }
+}
 
+/// Steps 3-13: acquire the read token, install the engine, download the
+/// compiler, run the integrity check, stage MCPG/tooling/prompt, install
+/// Docker, download AWF, pre-pull images, and splice in extension/user
+/// `steps:`.
+fn push_agent_install_and_prepare_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    ext_agent_prepare: &[Step],
+    steps: &mut Vec<Step>,
+) -> Result<()> {
     // 3. acquire ADO read token (AzureCLI@3 task) — only when configured.
     if let Some(step) = &cfg.acquire_read_token {
         steps.push(step.clone());
@@ -1269,7 +1415,7 @@ fn build_agent_job(
     // 4. engine install steps (Copilot CLI install). YAML string from
     //    `Engine::install_steps`; lowered through `Step::RawYaml`
     //    until a typed `Engine::install_steps_typed` lands.
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.engine_install_steps_yaml)?;
+    push_raw_yaml_if_nonempty(steps, &cfg.engine_install_steps_yaml)?;
 
     // 5. Download agentic pipeline compiler.
     //    No NuGetAuthenticate@1 here: DownloadPackage@1 authenticates itself
@@ -1283,7 +1429,7 @@ fn build_agent_job(
 
     // 6. Integrity check (when not skipped)
     push_raw_yaml_if_nonempty(
-        &mut steps,
+        steps,
         &substitute_integrity_check(
             &cfg.integrity_check_yaml,
             &cfg.pipeline_path,
@@ -1320,8 +1466,22 @@ fn build_agent_job(
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
     }
 
+    Ok(())
+}
+
+/// Steps 14-16: AWF path step, renewable Azure WIF refresh sidecars, the
+/// credential-isolated ado-proxy policy engine, MCPG startup, the
+/// topology-peer liveness check, and the debug-only MCP backend check.
+///
+/// Returns whether ado-proxy was enabled, so the caller can gate the
+/// matching teardown steps later in the job.
+fn push_agent_mcp_startup_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    steps: &mut Vec<Step>,
+) -> Result<bool> {
     // 14. AWF path step (when extensions declare path prepends)
-    push_raw_yaml_if_nonempty(&mut steps, &cfg.awf_path_step_yaml)?;
+    push_raw_yaml_if_nonempty(steps, &cfg.awf_path_step_yaml)?;
 
     // 14a. Renewable Azure workload-identity assertions for user-defined
     //      stdio MCP servers. The ado-script bundle was delivered by the
@@ -1364,43 +1524,63 @@ fn build_agent_job(
         steps.push(Step::Bash(verify_mcp_backends_step()));
     }
 
-    // 17. Run copilot (AWF network isolated) — the big one.
-    //     When `create-pull-request` is configured, first fetch/deepen the
-    //     target branch so the containerized SafeOutputs MCP server can compute a
-    //     diff base on shallow-default agent pools (issue #1413). Runs after
-    //     `checkout: self` (step 1) so the clone exists, and before the Copilot
-    //     run so the refs are present when the agent proposes a PR. The
-    //     `prepare-pr-base.js` bundle is staged by the ado-script extension's
-    //     agent-prepare steps (`prepare_pr_base_active` is OR'd into that
-    //     extension's Agent-job download predicate), so it is guaranteed present.
-    if front_matter.create_pr_config().is_some() {
-        // The prepare step deepens every checkout dir the SafeOutputs MCP server
-        // may generate a patch from — see `create_pr_prepare_repos`. The
-        // compile-time target-inference advisory is emitted here (Agent job)
-        // only, so it never double-prints when the same step is also emitted in
-        // the SafeOutputs job (issue #1453).
-        warn_create_pr_target_inference(front_matter);
-        let repos = create_pr_prepare_repos(front_matter, &cfg.trigger_repo_directory);
-        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
-        if !local_repos.is_empty() {
-            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-                super::extensions::ado_script::PreparePrBaseMode::PatchBase,
-                &local_repos,
-                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
-            ));
-        }
-        if let Some(service_connection) =
-            cross_org_prepare_service_connection(front_matter, &cross_org_repos)
-        {
-            steps.push(
-                super::extensions::ado_script::prepare_pr_base_azure_devops_step_typed(
-                    super::extensions::ado_script::PreparePrBaseMode::PatchBase,
-                    &cross_org_repos,
-                    service_connection,
-                ),
-            );
-        }
+    Ok(ado_proxy_enabled)
+}
+
+/// Part of step 17: when `create-pull-request` is configured, fetch/deepen
+/// the target branch for every checkout dir the SafeOutputs MCP server may
+/// generate a patch from, so it can compute a diff base on shallow-default
+/// agent pools (issue #1413). Runs after `checkout: self` so the clone
+/// exists, and before the Copilot run so the refs are present when the agent
+/// proposes a PR. The `prepare-pr-base.js` bundle is staged by the
+/// ado-script extension's agent-prepare steps, so it is guaranteed present.
+///
+/// The compile-time target-inference advisory is emitted here (Agent job)
+/// only, so it never double-prints when the same step is also emitted in the
+/// SafeOutputs job (issue #1453).
+fn push_agent_create_pr_base_prep_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    steps: &mut Vec<Step>,
+) {
+    if front_matter.create_pr_config().is_none() {
+        return;
     }
+    warn_create_pr_target_inference(front_matter);
+    let repos = create_pr_prepare_repos(front_matter, &cfg.trigger_repo_directory);
+    let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+    if !local_repos.is_empty() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::PatchBase,
+            &local_repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ));
+    }
+    if let Some(service_connection) =
+        cross_org_prepare_service_connection(front_matter, &cross_org_repos)
+    {
+        steps.push(
+            super::extensions::ado_script::prepare_pr_base_azure_devops_step_typed(
+                super::extensions::ado_script::PreparePrBaseMode::PatchBase,
+                &cross_org_repos,
+                service_connection,
+            ),
+        );
+    }
+}
+
+/// Rest of step 17: mint the GitHub App installation token and/or the
+/// external provider token immediately before the Copilot run (so
+/// `copilot_env` can source them via masked same-job variables), then run
+/// the agent itself inside the AWF network-isolated sandbox.
+fn push_agent_run_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    ado_proxy_enabled: bool,
+    steps: &mut Vec<Step>,
+) -> Result<()> {
+    push_agent_create_pr_base_prep_steps(front_matter, cfg, steps);
+
     //     When GitHub App auth is configured, mint the installation token
     //     immediately before the Copilot run; `copilot_env` sources
     //     `GITHUB_TOKEN` from the masked same-job `GITHUB_APP_TOKEN` the mint
@@ -1440,6 +1620,18 @@ fn build_agent_job(
         &cfg.awf_path_prepends,
     )?));
 
+    Ok(())
+}
+
+/// Steps 18a-20b: revoke the GitHub App token, collect safe outputs from
+/// the AWF container, render the safe-outputs summary, and stop MCPG /
+/// WIF-refresh sidecars / the ado-proxy policy engine (+ its network) in
+/// reverse start order.
+fn push_agent_collect_and_stop_steps(
+    front_matter: &FrontMatter,
+    ado_proxy_enabled: bool,
+    steps: &mut Vec<Step>,
+) -> Result<()> {
     // 18a. Revoke the GitHub App token (best-effort, always) once the Copilot
     //      run has returned, so the minted installation token does not remain
     //      valid for its full lifetime. Skipped when `skip-token-revocation`.
@@ -1483,6 +1675,16 @@ fn build_agent_job(
         steps.push(Step::Bash(teardown_ado_proxy_network_step()));
     }
 
+    Ok(())
+}
+
+/// Steps 21-23: user `post_steps:` (finalize steps), log copy, and the
+/// `agent_outputs_$(Build.BuildId)` artifact publish.
+fn push_agent_finalize_steps(
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+    steps: &mut Vec<Step>,
+) -> Result<()> {
     // 21. User post_steps (finalize_steps)
     for user_step_val in &front_matter.post_steps {
         steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step_val)?));
@@ -1497,6 +1699,29 @@ fn build_agent_job(
         artifact: "agent_outputs_$(Build.BuildId)".to_string(),
         condition: Some(Condition::Always),
     }));
+
+    Ok(())
+}
+
+fn build_agent_job(
+    front_matter: &FrontMatter,
+    extensions: &[Extension],
+    ext_agent_prepare: &[Step],
+    ext_agent_conditions: &[Condition],
+    cfg: &StandaloneCtx,
+    prefix: &JobPrefix<'_>,
+) -> Result<Job> {
+    let mut steps: Vec<Step> = Vec::new();
+
+    push_agent_checkout_steps(front_matter, cfg, &mut steps);
+    push_agent_install_and_prepare_steps(front_matter, cfg, ext_agent_prepare, &mut steps)?;
+    let ado_proxy_enabled = push_agent_mcp_startup_steps(front_matter, cfg, &mut steps)?;
+
+    // 17. Run copilot (AWF network isolated) — the big one.
+    push_agent_run_steps(front_matter, cfg, ado_proxy_enabled, &mut steps)?;
+
+    push_agent_collect_and_stop_steps(front_matter, ado_proxy_enabled, &mut steps)?;
+    push_agent_finalize_steps(front_matter, cfg, &mut steps)?;
 
     let _ = extensions; // currently unused after typed declarations gather
     let _ = &cfg.agent_display_name; // friendly name is the pipeline `name:`, not the job displayName
@@ -1601,6 +1826,93 @@ fn detection_job_needs_ado_script_bundle(engine_config: &EngineConfig) -> bool {
     engine_config.github_app_token().is_some()
 }
 
+fn push_threat_analysis_steps(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+) -> Result<()> {
+    // Detection gets its own effective engine install/config path.
+    push_raw_yaml_if_nonempty(steps, &cfg.detection_engine_install_steps_yaml)?;
+    // No NuGetAuthenticate@1: this job also runs AWF with `--env-all`
+    // (see the Agent job's download step).
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
+    steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
+    steps.extend(download_awf_step(front_matter.supply_chain()));
+    steps.extend(prepull_images_step(false, front_matter.supply_chain()));
+
+    // include_str! may carry CRLF line endings on Windows; normalise to LF
+    // before marker substitution and appending operator instructions.
+    let threat_prompt_raw = include_str!("../data/threat-analysis.md");
+    let mut threat_prompt = threat_prompt_raw
+        .replace("\r\n", "\n")
+        .replace("{{ source_path }}", &cfg.source_path)
+        .replace("{{ agent_name }}", &cfg.agent_display_name)
+        .replace("{{ agent_description }}", &front_matter.description)
+        .replace("{{ working_directory }}", &cfg.working_directory);
+    if let Some(custom_prompt) = cfg
+        .threat_detection
+        .prompt
+        .as_deref()
+        .filter(|prompt| !prompt.is_empty())
+    {
+        threat_prompt.push_str("\n\n## Additional Instructions\n\n");
+        threat_prompt.push_str(&custom_prompt.replace("\r\n", "\n"));
+    }
+    steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
+        &threat_prompt,
+    )?));
+    steps.push(Step::Bash(setup_compiler_step()));
+
+    // Stage auth support before custom pre-steps, but mint credentials only
+    // after them so trusted setup code receives the least privilege needed.
+    if detection_job_needs_ado_script_bundle(&cfg.detection_engine_config) {
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
+    }
+    for user_step in &cfg.threat_detection.steps {
+        steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
+    }
+
+    if let Some(app_token) = cfg.detection_engine_config.github_app_token() {
+        steps.push(super::extensions::ado_script::github_app_token_step_typed(
+            app_token,
+        )?);
+    }
+    if let Some(token) = cfg
+        .detection_engine_config
+        .provider()
+        .and_then(|provider| provider.token.as_ref())
+    {
+        steps.push(Step::Task(provider_token_mint_step(token)));
+    }
+    steps.push(Step::Bash(run_threat_analysis_step(
+        &cfg.detection_allowed_domains,
+        &cfg.working_directory,
+        &cfg.engine_run_detection,
+        &cfg.detection_byom_exclude_keys,
+        &cfg.detection_engine_env,
+        crate::engine::github_token_source_var(&cfg.detection_engine_config),
+        front_matter.supply_chain(),
+    )?));
+    if let Some(app_token) = cfg.detection_engine_config.github_app_token()
+        && !app_token.skip_token_revocation
+    {
+        steps.push(super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?);
+    }
+    for user_step in &cfg.threat_detection.post_steps {
+        steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
+    }
+    steps.push(Step::Bash(prepare_analyzed_outputs_step()));
+    steps.push(Step::Bash(evaluate_threat_analysis_step()));
+    Ok(())
+}
+
 fn build_detection_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -1620,87 +1932,7 @@ fn build_detection_job(
         &cfg.working_directory,
     )));
     if cfg.threat_detection.is_enabled() {
-        // Detection gets its own effective engine install/config path.
-        push_raw_yaml_if_nonempty(&mut steps, &cfg.detection_engine_install_steps_yaml)?;
-        // No NuGetAuthenticate@1: this job also runs AWF with `--env-all`
-        // (see the Agent job's download step).
-        steps.extend(download_compiler_step(
-            &cfg.compiler_version,
-            front_matter.supply_chain(),
-        ));
-        steps.push(Step::Task(DockerInstaller::new("26.1.4").into_step()));
-        steps.extend(download_awf_step(front_matter.supply_chain()));
-        steps.extend(prepull_images_step(false, front_matter.supply_chain()));
-
-        // include_str! may carry CRLF line endings on Windows; normalise to LF
-        // before marker substitution and appending operator instructions.
-        let threat_prompt_raw = include_str!("../data/threat-analysis.md");
-        let mut threat_prompt = threat_prompt_raw
-            .replace("\r\n", "\n")
-            .replace("{{ source_path }}", &cfg.source_path)
-            .replace("{{ agent_name }}", &cfg.agent_display_name)
-            .replace("{{ agent_description }}", &front_matter.description)
-            .replace("{{ working_directory }}", &cfg.working_directory);
-        if let Some(custom_prompt) = cfg
-            .threat_detection
-            .prompt
-            .as_deref()
-            .filter(|prompt| !prompt.is_empty())
-        {
-            threat_prompt.push_str("\n\n## Additional Instructions\n\n");
-            threat_prompt.push_str(&custom_prompt.replace("\r\n", "\n"));
-        }
-        steps.push(Step::Bash(prepare_threat_analysis_prompt_step(
-            &threat_prompt,
-        )?));
-        steps.push(Step::Bash(setup_compiler_step()));
-
-        // Stage auth support before custom pre-steps, but mint credentials only
-        // after them so trusted setup code receives the least privilege needed.
-        if detection_job_needs_ado_script_bundle(&cfg.detection_engine_config) {
-            steps.extend(
-                super::extensions::ado_script::install_and_download_steps_typed(
-                    front_matter.supply_chain(),
-                ),
-            );
-        }
-        for user_step in &cfg.threat_detection.steps {
-            steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
-        }
-
-        if let Some(app_token) = cfg.detection_engine_config.github_app_token() {
-            steps.push(super::extensions::ado_script::github_app_token_step_typed(
-                app_token,
-            )?);
-        }
-        if let Some(token) = cfg
-            .detection_engine_config
-            .provider()
-            .and_then(|provider| provider.token.as_ref())
-        {
-            steps.push(Step::Task(provider_token_mint_step(token)));
-        }
-        steps.push(Step::Bash(run_threat_analysis_step(
-            &cfg.detection_allowed_domains,
-            &cfg.working_directory,
-            &cfg.engine_run_detection,
-            &cfg.detection_byom_exclude_keys,
-            &cfg.detection_engine_env,
-            crate::engine::github_token_source_var(&cfg.detection_engine_config),
-            front_matter.supply_chain(),
-        )?));
-        if let Some(app_token) = cfg.detection_engine_config.github_app_token()
-            && !app_token.skip_token_revocation
-        {
-            steps.push(
-                super::extensions::ado_script::github_app_token_revoke_step_typed(app_token)?,
-            );
-        }
-        for user_step in &cfg.threat_detection.post_steps {
-            steps.push(Step::RawYaml(step_to_raw_yaml_string(user_step)?));
-        }
-        steps.push(Step::Bash(prepare_analyzed_outputs_step()));
-        steps.push(Step::Bash(evaluate_threat_analysis_step()));
+        push_threat_analysis_steps(&mut steps, front_matter, cfg)?;
     } else {
         steps.push(Step::Bash(prepare_analyzed_outputs_passthrough_step()));
         steps.push(Step::Bash(threat_analysis_disabled_step()));
@@ -2545,6 +2777,178 @@ fn warn_create_pr_target_inference(front_matter: &FrontMatter) {
     }
 }
 
+/// Replicates the Agent job's multi-checkout layout into the SafeOutputs job
+/// when `create-pull-request` is configured and there are additional
+/// checked-out repos (issue #1731). Without these checkouts the additional
+/// repo directories don't exist in the SafeOutputs workspace, so
+/// `prepare-pr-base.js` and `ado-aw execute` fail. `self` uses the
+/// compiler-owned `s/self` path in this layout so neither a
+/// repository-resource trigger nor an additional alias can change where the
+/// executor finds the workflow source. Only emitted for the variant that
+/// actually runs `create-pull-request`; other variants (and split-approval
+/// auto-SafeOutputs) don't need them.
+fn push_safeoutputs_multi_checkout_steps(steps: &mut Vec<Step>, front_matter: &FrontMatter) {
+    for repo in &front_matter.checkout {
+        let fetch = front_matter
+            .checkout_fetch
+            .get(repo)
+            .cloned()
+            .unwrap_or_default();
+        steps.push(Step::Checkout(CheckoutStep {
+            repository: CheckoutRepo::Named(repo.clone()),
+            path: Some(format!("s/{repo}")),
+            clean: None,
+            submodules: None,
+            fetch_depth: fetch.depth_for_emit(),
+            fetch_tags: fetch.fetch_tags,
+            persist_credentials: None,
+        }));
+    }
+}
+
+/// Downloads the analyzed Stage-1 outputs artifact, then the compiler itself
+/// (feed-auth'd when a feed mirror is configured), adds it to `PATH`, and
+/// prepares the output staging directory. This is the common bootstrap every
+/// SafeOutputs variant needs before the executor can run.
+fn push_safeoutputs_compiler_bootstrap_steps(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    cfg: &StandaloneCtx,
+) {
+    steps.push(Step::Download(DownloadStep {
+        source: "current".to_string(),
+        artifact: "analyzed_outputs_$(Build.BuildId)".to_string(),
+        condition: None,
+    }));
+    // One NuGetAuthenticate@1 for the whole SafeOutputs job (feed mirror).
+    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
+        steps.push(auth);
+    }
+    steps.extend(download_compiler_step(
+        &cfg.compiler_version,
+        front_matter.supply_chain(),
+    ));
+    steps.push(Step::Bash(
+        ShellScript::new(&ADD_COMPILER_TO_PATH).into_step("Add agentic compiler to path"),
+    ));
+    steps.push(Step::Bash(
+        ShellScript::new(&PREPARE_OUTPUT_DIRECTORY)
+            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
+            .into_step("Prepare output directory"),
+    ));
+}
+
+/// When `create-pull-request` is configured, fetches/deepens each target
+/// branch in THIS job's checkout, immediately before the executor runs (issue
+/// #1453). The prepare step also runs in the Agent job (for the containerized
+/// SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
+/// the Agent-job fetch is invisible here — the `create-pull-request` executor
+/// (`ado-aw execute`) builds its worktree from `origin/<target>` in the
+/// SafeOutputs checkout and needs the ref landed locally. Stages the
+/// ado-script bundle in this job (it is otherwise only staged in the
+/// Agent/Setup jobs), then emits the same `prepare-pr-base` step. The bundle
+/// auth projects `System.AccessToken` (the build identity the checkout
+/// persists credentials for), so the git fetch is authenticated regardless of
+/// the write token.
+fn push_safeoutputs_prepare_pr_base_steps(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+    layout: &SafeOutputsCheckoutLayout,
+    github_app_configured: bool,
+) {
+    if variant.runs_create_pull_request || github_app_configured {
+        steps.extend(
+            super::extensions::ado_script::install_and_download_steps_typed(
+                front_matter.supply_chain(),
+            ),
+        );
+    }
+    if !variant.runs_create_pull_request {
+        return;
+    }
+    let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
+    let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
+    if !local_repos.is_empty() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+            &local_repos,
+            crate::compile::ado_bundle::TokenSource::SystemAccessToken,
+        ));
+    }
+    if !cross_org_repos.is_empty() {
+        steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
+            super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
+            &cross_org_repos,
+            crate::compile::ado_bundle::TokenSource::WriteServiceConnection,
+        ));
+    }
+}
+
+/// Whether the `comment-on-github-issue` safe output needs the GitHub App
+/// actor login (used to skip hiding the actor's own prior comments).
+fn safeoutputs_github_actor_required(
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+) -> Result<bool> {
+    Ok(variant
+        .github_issue_tools
+        .iter()
+        .any(|tool| tool == "comment-on-github-issue")
+        && front_matter
+            .comment_on_github_issue_config()?
+            .is_some_and(|config| config.hide_older_comments))
+}
+
+/// Mints the GitHub App installation token (when a GitHub App is configured
+/// for this variant's tools) immediately before the executor step.
+fn push_safeoutputs_github_app_token_step(
+    steps: &mut Vec<Step>,
+    front_matter: &FrontMatter,
+    variant: &SafeOutputsVariant,
+    github_app: Option<&crate::compile::types::GithubAppTokenConfig>,
+    github_actor_required: bool,
+) -> Result<()> {
+    let Some(app) = github_app else {
+        return Ok(());
+    };
+    let permissions = front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
+    let actor_output_var = github_actor_required
+        .then_some(crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR);
+    steps.push(
+        super::extensions::ado_script::github_app_token_step_typed_for(
+            app,
+            crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+            actor_output_var,
+            "Mint GitHub App token (SafeOutputs)",
+            &permissions,
+        )?,
+    );
+    Ok(())
+}
+
+/// Revokes the GitHub App installation token minted above, unless the app is
+/// configured to skip revocation.
+fn push_safeoutputs_github_app_token_revoke_step(
+    steps: &mut Vec<Step>,
+    github_app: Option<&crate::compile::types::GithubAppTokenConfig>,
+) -> Result<()> {
+    let Some(app) = github_app else {
+        return Ok(());
+    };
+    if app.skip_token_revocation {
+        return Ok(());
+    }
+    steps.push(
+        super::extensions::ado_script::github_app_token_revoke_step_typed_for(
+            app,
+            crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
+            "Revoke GitHub App token (SafeOutputs)",
+        )?,
+    );
+    Ok(())
+}
+
 fn build_safeoutputs_job(
     front_matter: &FrontMatter,
     cfg: &StandaloneCtx,
@@ -2565,124 +2969,29 @@ fn build_safeoutputs_job(
         &cfg.self_checkout_fetch,
         layout.multi_checkout,
     ));
-    // When `create-pull-request` is configured and there are additional
-    // checked-out repos, the SafeOutputs job must replicate the Agent job's
-    // multi-checkout layout (issue #1731). Without these checkouts:
-    //   • The additional repo directories don't exist in the SafeOutputs
-    //     workspace, so `prepare-pr-base.js` and `ado-aw execute` fail.
-    // `self` uses the compiler-owned `s/self` path in this layout so neither a
-    // repository-resource trigger nor an additional alias can change where the
-    // executor finds the workflow source.
-    // Only emit these for the variant that actually runs `create-pull-request`;
-    // other variants (and split-approval auto-SafeOutputs) don't need them.
     if variant.runs_create_pull_request {
-        for repo in &front_matter.checkout {
-            let fetch = front_matter
-                .checkout_fetch
-                .get(repo)
-                .cloned()
-                .unwrap_or_default();
-            steps.push(Step::Checkout(CheckoutStep {
-                repository: CheckoutRepo::Named(repo.clone()),
-                path: Some(format!("s/{repo}")),
-                clean: None,
-                submodules: None,
-                fetch_depth: fetch.depth_for_emit(),
-                fetch_tags: fetch.fetch_tags,
-                persist_credentials: None,
-            }));
-        }
+        push_safeoutputs_multi_checkout_steps(&mut steps, front_matter);
     }
     // Acquire write token (when configured)
     if let Some(step) = &cfg.acquire_write_token {
         steps.push(step.clone());
     }
-    // Download analyzed outputs
-    steps.push(Step::Download(DownloadStep {
-        source: "current".to_string(),
-        artifact: "analyzed_outputs_$(Build.BuildId)".to_string(),
-        condition: None,
-    }));
-    // Download compiler
-    //    One NuGetAuthenticate@1 for the whole SafeOutputs job (feed mirror).
-    if let Some(auth) = feed_auth_step(front_matter.supply_chain()) {
-        steps.push(auth);
-    }
-    steps.extend(download_compiler_step(
-        &cfg.compiler_version,
-        front_matter.supply_chain(),
-    ));
-    // Add compiler to path
-    steps.push(Step::Bash(
-        ShellScript::new(&ADD_COMPILER_TO_PATH).into_step("Add agentic compiler to path"),
-    ));
-    // Prepare output directory
-    steps.push(Step::Bash(
-        ShellScript::new(&PREPARE_OUTPUT_DIRECTORY)
-            .bind("AGENT_TEMP", Binding::ado_macro("Agent.TempDirectory"))
-            .into_step("Prepare output directory"),
-    ));
-    // When `create-pull-request` is configured, fetch/deepen each target branch
-    // in THIS job's checkout, immediately before the executor runs (issue
-    // #1453). The prepare step also runs in the Agent job (for the containerized
-    // SafeOutputs MCP diff base), but each ADO job gets an isolated checkout, so
-    // the Agent-job fetch is invisible here — the `create-pull-request` executor
-    // (`ado-aw execute`) builds its worktree from `origin/<target>` in the
-    // SafeOutputs checkout and needs the ref landed locally. Stage the ado-script
-    // bundle in this job (it is otherwise only staged in the Agent/Setup jobs),
-    // then emit the same `prepare-pr-base` step. The bundle auth projects
-    // `System.AccessToken` (the build identity the checkout persists credentials
-    // for), so the git fetch is authenticated regardless of the write token.
-    if variant.runs_create_pull_request || github_app.is_some() {
-        steps.extend(
-            super::extensions::ado_script::install_and_download_steps_typed(
-                front_matter.supply_chain(),
-            ),
-        );
-    }
-    if variant.runs_create_pull_request {
-        let repos = create_pr_prepare_repos(front_matter, &layout.self_repository_directory);
-        let (local_repos, cross_org_repos) = partition_prepare_repos(repos);
-        if !local_repos.is_empty() {
-            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
-                &local_repos,
-                crate::compile::ado_bundle::TokenSource::SystemAccessToken,
-            ));
-        }
-        if !cross_org_repos.is_empty() {
-            steps.push(super::extensions::ado_script::prepare_pr_base_step_typed(
-                super::extensions::ado_script::PreparePrBaseMode::TargetWorktree,
-                &cross_org_repos,
-                crate::compile::ado_bundle::TokenSource::WriteServiceConnection,
-            ));
-        }
-    }
-    let github_actor_required = variant
-        .github_issue_tools
-        .iter()
-        .any(|tool| tool == "comment-on-github-issue")
-        && front_matter
-            .comment_on_github_issue_config()?
-            .is_some_and(|config| config.hide_older_comments);
-    if let Some(app) = github_app {
-        let permissions =
-            front_matter.github_app_permissions_for_tools(&variant.github_issue_tools)?;
-        let actor_output_var = if github_actor_required {
-            Some(crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_ACTOR_LOGIN_VAR)
-        } else {
-            None
-        };
-        steps.push(
-            super::extensions::ado_script::github_app_token_step_typed_for(
-                app,
-                crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
-                actor_output_var,
-                "Mint GitHub App token (SafeOutputs)",
-                &permissions,
-            )?,
-        );
-    }
+    push_safeoutputs_compiler_bootstrap_steps(&mut steps, front_matter, cfg);
+    push_safeoutputs_prepare_pr_base_steps(
+        &mut steps,
+        front_matter,
+        variant,
+        &layout,
+        github_app.is_some(),
+    );
+    let github_actor_required = safeoutputs_github_actor_required(front_matter, variant)?;
+    push_safeoutputs_github_app_token_step(
+        &mut steps,
+        front_matter,
+        variant,
+        github_app,
+        github_actor_required,
+    )?;
     let executor_ado_env = common::generate_executor_ado_env(
         front_matter
             .permissions
@@ -2706,17 +3015,7 @@ fn build_safeoutputs_job(
         &executor_ado_env,
         &variant.filter_args,
     )?));
-    if let Some(app) = github_app
-        && !app.skip_token_revocation
-    {
-        steps.push(
-            super::extensions::ado_script::github_app_token_revoke_step_typed_for(
-                app,
-                crate::compile::types::SAFE_OUTPUTS_GITHUB_APP_TOKEN_VAR,
-                "Revoke GitHub App token (SafeOutputs)",
-            )?,
-        );
-    }
+    push_safeoutputs_github_app_token_revoke_step(&mut steps, github_app)?;
     // Copy logs
     steps.push(Step::Bash(copy_logs_safeoutputs_step(&cfg.engine_log_dir)));
     // Publish

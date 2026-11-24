@@ -513,39 +513,8 @@ async fn resolve_node_comment(
         .unwrap_or_default();
     match typename {
         "IssueComment" | "PullRequestReviewComment" => {
-            let Some(repository) = repository_from_node(node, "/repository/nameWithOwner") else {
-                return Ok(Err(ExecutionResult::failure(
-                    "GitHub comment node contained no repository",
-                )));
-            };
-            if let Err(result) = validate_actual_repository(selected_repository, &repository) {
-                return Ok(Err(result));
-            }
-            let Some(url) = node.get("url").and_then(Value::as_str) else {
-                return Ok(Err(ExecutionResult::failure(
-                    "GitHub comment node contained no target URL",
-                )));
-            };
-            let number = match parse_html_target_url(url, &repository) {
-                Ok(number) => number,
-                Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
-            };
-            let parent = match validate_issue_parent(
-                client,
-                repository,
-                number,
-                filters,
-                Some(url.to_string()),
-            )
-            .await?
-            {
-                Ok(parent) => parent,
-                Err(result) => return Ok(Err(result)),
-            };
-            Ok(Ok(ResolvedComment {
-                node_id: node_id.to_string(),
-                parent,
-            }))
+            resolve_issue_or_pr_comment_node(client, node, node_id, selected_repository, filters)
+                .await
         }
         "DiscussionComment" => {
             if !discussions {
@@ -553,56 +522,101 @@ async fn resolve_node_comment(
                     "GitHub discussion comments are disabled; set discussions: true",
                 )));
             }
-            let Some(repository) =
-                repository_from_node(node, "/discussion/repository/nameWithOwner")
-            else {
-                return Ok(Err(ExecutionResult::failure(
-                    "GitHub discussion comment contained no repository",
-                )));
-            };
-            if let Err(result) = validate_actual_repository(selected_repository, &repository) {
-                return Ok(Err(result));
-            }
-            let number = node
-                .pointer("/discussion/number")
-                .and_then(Value::as_u64)
-                .filter(|number| *number > 0);
-            let Some(number) = number else {
-                return Ok(Err(ExecutionResult::failure(
-                    "GitHub discussion comment contained no positive discussion number",
-                )));
-            };
-            let title = node
-                .pointer("/discussion/title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let metadata = GithubTargetMetadata {
-                number,
-                node_id: None,
-                title,
-                state: String::new(),
-                labels: Vec::new(),
-                kind: GithubTargetKind::Issue,
-                html_url: None,
-            };
-            if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
-                return Ok(Err(result));
-            }
-            Ok(Ok(ResolvedComment {
-                node_id: node_id.to_string(),
-                parent: CommentParent::Discussion {
-                    repository,
-                    number,
-                    url: None,
-                },
-            }))
+            resolve_discussion_comment_node(node, node_id, selected_repository, filters)
         }
         _ => Ok(Err(ExecutionResult::failure(format!(
             "GraphQL node '{}' is not a minimizable GitHub issue, pull-request, or discussion comment",
             crate::sanitize::neutralize_pipeline_commands(node_id)
         )))),
     }
+}
+
+async fn resolve_issue_or_pr_comment_node(
+    client: &GithubClient,
+    node: &Value,
+    node_id: &str,
+    selected_repository: &str,
+    filters: GithubMutationFilters<'_>,
+) -> anyhow::Result<Result<ResolvedComment, ExecutionResult>> {
+    let Some(repository) = repository_from_node(node, "/repository/nameWithOwner") else {
+        return Ok(Err(ExecutionResult::failure(
+            "GitHub comment node contained no repository",
+        )));
+    };
+    if let Err(result) = validate_actual_repository(selected_repository, &repository) {
+        return Ok(Err(result));
+    }
+    let Some(url) = node.get("url").and_then(Value::as_str) else {
+        return Ok(Err(ExecutionResult::failure(
+            "GitHub comment node contained no target URL",
+        )));
+    };
+    let number = match parse_html_target_url(url, &repository) {
+        Ok(number) => number,
+        Err(error) => return Ok(Err(ExecutionResult::failure(error.to_string()))),
+    };
+    let parent =
+        match validate_issue_parent(client, repository, number, filters, Some(url.to_string()))
+            .await?
+        {
+            Ok(parent) => parent,
+            Err(result) => return Ok(Err(result)),
+        };
+    Ok(Ok(ResolvedComment {
+        node_id: node_id.to_string(),
+        parent,
+    }))
+}
+
+fn resolve_discussion_comment_node(
+    node: &Value,
+    node_id: &str,
+    selected_repository: &str,
+    filters: GithubMutationFilters<'_>,
+) -> anyhow::Result<Result<ResolvedComment, ExecutionResult>> {
+    let Some(repository) = repository_from_node(node, "/discussion/repository/nameWithOwner")
+    else {
+        return Ok(Err(ExecutionResult::failure(
+            "GitHub discussion comment contained no repository",
+        )));
+    };
+    if let Err(result) = validate_actual_repository(selected_repository, &repository) {
+        return Ok(Err(result));
+    }
+    let number = node
+        .pointer("/discussion/number")
+        .and_then(Value::as_u64)
+        .filter(|number| *number > 0);
+    let Some(number) = number else {
+        return Ok(Err(ExecutionResult::failure(
+            "GitHub discussion comment contained no positive discussion number",
+        )));
+    };
+    let title = node
+        .pointer("/discussion/title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let metadata = GithubTargetMetadata {
+        number,
+        node_id: None,
+        title,
+        state: String::new(),
+        labels: Vec::new(),
+        kind: GithubTargetKind::Issue,
+        html_url: None,
+    };
+    if let Err(result) = validate_github_mutation_filters(&metadata, filters) {
+        return Ok(Err(result));
+    }
+    Ok(Ok(ResolvedComment {
+        node_id: node_id.to_string(),
+        parent: CommentParent::Discussion {
+            repository,
+            number,
+            url: None,
+        },
+    }))
 }
 
 #[async_trait::async_trait]
