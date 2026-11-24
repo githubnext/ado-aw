@@ -15,5 +15,10 @@
   },
   "devDependencies": {
     "playwright-chromium": "^1.61.0"
+  },
+  "overrides": {
+    "monaco-editor": {
+      "dompurify": "^3.4.17"
+    }
   }
 }
