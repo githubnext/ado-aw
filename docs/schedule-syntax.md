@@ -43,11 +43,15 @@ schedule: weekly on wednesday between 9:00 and 12:00  # Wednesday morning
 Valid weekdays: `sunday`, `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`.
 Short aliases are also accepted: `sun`, `mon`, `tue`/`tues`, `wed`, `thu`/`thurs`, `fri`, `sat`.
 
-A UTC offset (e.g. `weekly on friday around 17:00 utc-5`) is accepted
-syntactically but currently has **no effect** on weekly schedules — the parsed
-offset is discarded and the time is always treated as UTC. Timezone
-conversion via UTC offsets is only implemented for **daily** schedules; see
-[Timezone Support](#timezone-support) below.
+UTC offsets (e.g. `weekly on friday around 17:00 utc-5`) convert the time to
+UTC just like daily schedules, so that example runs Friday around 22:00 UTC.
+However, the weekday is **not** shifted when the UTC conversion crosses
+midnight: `weekly on friday around 02:00 utc+9` (Friday 02:00 local, which is
+Thursday 17:00 UTC) still emits a Friday cron (`* * 5`) and so runs on Friday
+~17:00 UTC — a day late in the local offset. Keep weekly offset times on the
+same UTC day, or use a raw cron expression (see
+[Raw Cron and Multiple Schedules](#raw-cron-and-multiple-schedules)) when the
+local time falls on a different UTC day.
 
 ### Hourly Schedules
 
@@ -95,9 +99,9 @@ Accepted day/week units: `days`, `day`, `d`, `weeks`, `week`, `w`.
 
 ### Timezone Support
 
-All **daily** time specifications support UTC offsets for timezone conversion
-(weekly schedules accept the same offset syntax but currently ignore it — see
-[Weekly Schedules](#weekly-schedules) above):
+All daily and weekly time specifications support UTC offsets for timezone
+conversion (weekly schedules do not shift the weekday when conversion crosses
+midnight — see [Weekly Schedules](#weekly-schedules) above):
 
 ```yaml
 schedule: daily around 14:00 utc+9      # 2 PM JST → 5 AM UTC
