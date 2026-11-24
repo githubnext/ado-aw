@@ -113,6 +113,8 @@ jobs:
           COPILOT_BIN: ${{ runner.temp }}/bin/copilot
           AWF_VERSION: ${{ steps.versions.outputs.awf }}
           MCPG_VERSION: ${{ steps.versions.outputs.mcpg }}
+          # Optional override for the contract run's model; empty uses run.sh's default.
+          ADO_AW_CONTRACT_MODEL: ${{ vars.ADO_AW_CONTRACT_MODEL }}
         run: bash tests/awf-copilot-safeoutputs/run.sh
 
       - name: Upload contract-test artifacts on failure

@@ -232,9 +232,10 @@ chmod 600 "${TOOLS_DIR}/agent-prompt.md"
 readonly ALLOWED_DOMAINS="api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.github.com,api.githubcopilot.com,api.individual.githubcopilot.com,config.edge.skype.com,copilot-proxy.githubusercontent.com,github.com,telemetry.enterprise.githubcopilot.com,*.copilot.github.com,*.githubcopilot.com"
 # shellcheck disable=SC2016 # AWF expands the engine command inside the sandbox.
 # AWF's api-proxy runs the Copilot CLI in offline+BYOK mode, which requires an
-# explicit model. Use `auto` (as gh-aw does) rather than pinning a model that
-# can be retired; set ADO_AW_CONTRACT_MODEL to override (--env-all forwards it).
-readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt="$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model "${ADO_AW_CONTRACT_MODEL:-auto}" --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool safeoutputs --allow-all-paths'
+# explicit model (and the pinned AWF rejects `auto`). When the default is
+# retired, set the ADO_AW_CONTRACT_MODEL repository variable to override it
+# without a code change; --env-all forwards it into the sandbox.
+readonly ENGINE_RUN='export NO_PROXY="${NO_PROXY:+$NO_PROXY,}awmg-mcpg"; export no_proxy="$NO_PROXY"; /tmp/awf-tools/copilot --prompt="$(cat /tmp/awf-tools/agent-prompt.md)" --additional-mcp-config @/tmp/awf-tools/mcp-config.json --model "${ADO_AW_CONTRACT_MODEL:-claude-haiku-4.5}" --disable-builtin-mcps --no-ask-user --allow-all-tools --allow-tool safeoutputs --allow-all-paths'
 
 set +e
 "${AWF_BIN}" \
