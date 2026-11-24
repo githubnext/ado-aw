@@ -98,7 +98,7 @@ name: "Dependency Updater"
 description: "Checks for outdated dependencies and opens PRs"
 engine:
   id: copilot
-  model: gpt-5-mini
+  model: claude-haiku-5.5
 on:
   schedule: weekly on monday around 9:00
 pool:

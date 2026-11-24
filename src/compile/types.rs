@@ -259,7 +259,7 @@ pub struct ScheduleListItem {
 /// # Object format (with additional options)
 /// engine:
 ///   id: copilot
-///   model: gpt-5-mini
+///   model: claude-haiku-5.5
 ///   timeout-minutes: 30
 ///   version: latest
 ///   agent: my-custom-agent

@@ -59,7 +59,7 @@ safe-outputs:
       - hardcoded credentials
     engine:
       id: copilot
-      model: gpt-5-mini
+      model: claude-haiku-5.5
       args: [--reasoning-effort=high]
       env:
         DETECTION_MODE: strict

@@ -180,7 +180,7 @@ preserves the normal chmod/move/unzip/PATH behavior.
   "source_version": "0123456789abcdef0123456789abcdef01234567",
   "reason": "IndividualCI",
   "compiler_version": "0.45.1",
-  "awf_version": "0.27.32"
+  "awf_version": "0.29.20"
 }
 ```
 
