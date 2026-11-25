@@ -429,8 +429,7 @@
     "api.individual.githubcopilot.com",
     "github.com",
     "host.docker.internal",
-    "registry.npmjs.org",
-    "telemetry.enterprise.githubcopilot.com"
+    "registry.npmjs.org"
   ],
   "zig": [
     "ziglang.org",
