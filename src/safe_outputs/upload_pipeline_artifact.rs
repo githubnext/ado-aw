@@ -585,6 +585,50 @@ async fn associate_artifact_with_build(
     }
 }
 
+/// Returns a failure result if `dedupe_key` was already published in this run.
+fn check_duplicate_artifact(
+    ctx: &ExecutionContext,
+    dedupe_key: &str,
+    final_name: &str,
+    effective_build_id: i64,
+) -> anyhow::Result<Option<ExecutionResult>> {
+    let seen = ctx
+        .uploaded_pipeline_artifact_keys
+        .lock()
+        .map_err(|e| anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e))?;
+    if !seen.contains(dedupe_key) {
+        return Ok(None);
+    }
+    Ok(Some(ExecutionResult::failure(format!(
+        "upload-pipeline-artifact: artifact_name '{}' was already used \
+         on build #{} in this run; require-unique-names is configured \
+         to reject reuse",
+        final_name, effective_build_id
+    ))))
+}
+
+impl UploadPipelineArtifactResult {
+    fn dry_run_result(
+        &self,
+        file_size: u64,
+        final_name: &str,
+        effective_build_id: i64,
+    ) -> ExecutionResult {
+        ExecutionResult::success(format!(
+            "[dry-run] would publish '{}' ({} bytes) as pipeline artifact '{}' on build #{}{}",
+            self.file_path,
+            file_size,
+            final_name,
+            effective_build_id,
+            if self.build_id.is_none() {
+                " (current build)"
+            } else {
+                ""
+            }
+        ))
+    }
+}
+
 #[async_trait::async_trait]
 impl Executor for UploadPipelineArtifactResult {
     fn dry_run_summary(&self) -> String {
@@ -640,18 +684,7 @@ impl Executor for UploadPipelineArtifactResult {
         };
 
         if ctx.dry_run {
-            return Ok(ExecutionResult::success(format!(
-                "[dry-run] would publish '{}' ({} bytes) as pipeline artifact '{}' on build #{}{}",
-                self.file_path,
-                staged.file_size,
-                final_name,
-                effective_build_id,
-                if self.build_id.is_none() {
-                    " (current build)"
-                } else {
-                    ""
-                }
-            )));
+            return Ok(self.dry_run_result(staged.file_size, &final_name, effective_build_id));
         }
 
         let file_bytes = tokio::fs::read(&staged.canonical)
@@ -669,25 +702,15 @@ impl Executor for UploadPipelineArtifactResult {
 
         let ado = resolve_ado_context(ctx)?;
 
-        // ── Per-run dedupe (when require-unique-names is set) ────────────
         // Reject reuse of (effective_build_id, final_name) before any HTTP
         // call so two cross-build calls sharing a name don't silently
         // overwrite each other's bytes in the shared container.
         let dedupe_key = format!("{}/{}", effective_build_id, final_name);
-        if config.require_unique_names {
-            let seen = ctx.uploaded_pipeline_artifact_keys.lock().map_err(|e| {
-                anyhow::anyhow!("uploaded_pipeline_artifact_keys mutex poisoned: {}", e)
-            })?;
-            if seen.contains(&dedupe_key) {
-                return Ok(ExecutionResult::failure(format!(
-                    "upload-pipeline-artifact: artifact_name '{}' was already used \
-                     on build #{} in this run; require-unique-names is configured \
-                     to reject reuse",
-                    final_name, effective_build_id
-                )));
-            }
-            // Note: the key is inserted only after the HTTP calls succeed below,
-            // so a transient network failure doesn't permanently block retries.
+        if config.require_unique_names
+            && let Some(failure) =
+                check_duplicate_artifact(ctx, &dedupe_key, &final_name, effective_build_id)?
+        {
+            return Ok(failure);
         }
 
         // Internal container folder. The user-visible artifact name is
@@ -737,9 +760,8 @@ impl Executor for UploadPipelineArtifactResult {
         )
         .await?;
 
-        // Record the successful publish in the dedupe set now that both
-        // HTTP steps have completed — done here (not before the calls) so
-        // a transient failure doesn't permanently block retries.
+        // Recorded only after both HTTP steps succeed so a transient
+        // failure doesn't permanently block retries.
         if result.success && config.require_unique_names {
             ctx.uploaded_pipeline_artifact_keys
                 .lock()
