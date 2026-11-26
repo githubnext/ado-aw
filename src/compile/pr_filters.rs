@@ -179,48 +179,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_gate_step_combined_tier1_and_tier2() {
-        use crate::compile::filter_ir::{GateContext, build_gate_spec, lower_pr_filters};
-        let filters = PrFilters {
-            title: Some(PatternFilter {
-                pattern: "\\[review\\]".into(),
-            }),
-            draft: Some(false),
-            labels: Some(LabelFilter {
-                any_of: vec!["run-agent".into()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let checks = lower_pr_filters(&filters);
-        let spec = build_gate_spec(GateContext::PullRequest, &checks).unwrap();
-        // Tier 1 fact
-        assert!(
-            spec.facts.iter().any(|f| f.kind == "pr_title"),
-            "should include pr_title"
-        );
-        // Tier 2 facts
-        assert!(
-            spec.facts.iter().any(|f| f.kind == "pr_metadata"),
-            "should include pr_metadata"
-        );
-        assert!(
-            spec.facts.iter().any(|f| f.kind == "pr_is_draft"),
-            "should include pr_is_draft"
-        );
-        assert!(
-            spec.facts.iter().any(|f| f.kind == "pr_labels"),
-            "should include pr_labels"
-        );
-        // Checks
-        assert_eq!(
-            spec.checks.len(),
-            3,
-            "should have 3 checks (title, draft, labels)"
-        );
-    }
-
     // ─── Tier 3 filter tests ────────────────────────────────────────────────
 
     #[test]

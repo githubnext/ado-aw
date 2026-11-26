@@ -2296,6 +2296,52 @@ fn permissions_read_enables_proxy_and_wrapped_az_without_mcp() {
     );
 }
 
+/// The ado-proxy container is the trusted process holding the Stage 1 ADO
+/// credential (see `ado_proxy_container_invocation` in
+/// `src/compile/agentic_pipeline.rs`). This pins the compiled `docker run`
+/// invocation from the `ado-proxy-read-only-agent.md` fixture end to end:
+/// detached lifecycle (no `--rm`), container name, network, entrypoint, and
+/// the expected read-only/read-write mounts. It deliberately makes no claim
+/// about runtime hardening flags (`--cap-drop`, `no-new-privileges`,
+/// `--pids-limit`), which the ado-proxy container does not currently set.
+#[test]
+fn ado_proxy_container_run_has_expected_lifecycle_and_mounts() {
+    let compiled = compile_fixture_text("ado-proxy-read-only-agent.md");
+
+    let docker_run_start = compiled
+        .find("docker run \\\n")
+        .expect("compiled pipeline must start the ado-proxy container with docker run");
+    let docker_run_block = &compiled[docker_run_start..];
+    let docker_run_end = docker_run_block
+        .find(">/dev/null")
+        .map(|index| index + ">/dev/null".len())
+        .expect("ado-proxy docker run invocation must discard stdout");
+    let docker_run = &docker_run_block[..docker_run_end];
+
+    for required in [
+        "-d \\",
+        "--name \"${PROXY_CONTAINER}\" \\",
+        "--network \"${PROXY_NETWORK}\" \\",
+        "--entrypoint 'sh' \\",
+        "-v \"${PROXY_SCRIPT_PATH}:/app/ado-proxy.js:ro\" \\",
+        "-v \"${PROXY_DIR}/policy:/etc/ado-proxy:ro\" \\",
+        "-v \"${AZ_WRAPPER_DIR}:/var/lib/ado-proxy:rw\" \\",
+        "-v '/tmp/gh-aw/ado-proxy-logs:/var/log/ado-proxy:rw' \\",
+    ] {
+        assert!(
+            docker_run.contains(required),
+            "ado-proxy docker run must contain {required:?}, got:\n{docker_run}"
+        );
+    }
+    // Attached (non-`--rm`) is intentional here: Azure Pipelines tears down
+    // task STDIO on task completion, which would remove a `--rm` container
+    // before the pipeline can stop it deliberately.
+    assert!(
+        !docker_run.contains("--rm"),
+        "ado-proxy container must not be `--rm`; lifecycle is managed explicitly"
+    );
+}
+
 #[test]
 fn no_read_permission_exposes_neither_proxy_nor_az() {
     let compiled = compile_fixture_text("no-ado-read-agent.md");
@@ -2691,6 +2737,68 @@ fn test_mcpg_container_azure_auth_emits_refresher_and_rotating_token_mount() {
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+/// The Azure workload-identity refresher mounts `mount-path` read-only into
+/// the credential container (see `azure_wif_refresh_container_invocation` in
+/// `src/compile/agentic_pipeline.rs`), so an unsanitized value could let a
+/// workflow author point the mount at an unintended container path (e.g. via
+/// `..` traversal) or the container root. `mount-path` is typed as
+/// `ContainerAbsolutePath` precisely to close that off at parse time; this
+/// test exercises the rejection through the full CLI `compile` path (prior
+/// coverage only asserted the *valid* mount-path case).
+///
+/// `McpConfig` is an untagged enum, so serde replaces the specific
+/// `ContainerAbsolutePath` message with a generic "did not match any variant"
+/// error. The test therefore pins the failure to MCP server config parsing via
+/// stderr and uses one shared template whose only varying input is
+/// `mount-path`, with a control case proving the same template compiles when
+/// `mount-path` is valid.
+#[test]
+fn test_azure_auth_mount_path_rejects_traversal_and_relative_and_root_values() {
+    let source_with_mount_path = |case_name: &str, mount_path: &str| {
+        format!(
+            "---\nname: \"Azure Auth Mount Path {case_name}\"\ndescription: \"Tests mount-path validation\"\nmcp-servers:\n  kusto:\n    container: \"node:22-slim\"\n    azure-auth:\n      service-connection: \"my-arm-sc\"\n      mount-path: \"{mount_path}\"\n---\n\n## Test\n"
+        )
+    };
+
+    for (case_name, mount_path) in [
+        ("relative", "relative/path"),
+        ("traversal", "/var/run/../secret"),
+        ("root", "/"),
+    ] {
+        let (success, compiled, stderr) = compile_inline_source(
+            &format!("azure-auth-mount-path-{case_name}"),
+            &source_with_mount_path(case_name, mount_path),
+        );
+
+        assert!(
+            !success,
+            "mount-path {mount_path:?} ({case_name}) must be rejected at compile time"
+        );
+        assert!(
+            compiled.is_empty(),
+            "mount-path {mount_path:?} ({case_name}) must not produce compiled output"
+        );
+        assert!(
+            stderr.contains("Failed to parse YAML front matter")
+                && stderr.contains("untagged enum McpConfig"),
+            "mount-path {mount_path:?} ({case_name}) must fail MCP server config parsing, got:\n{stderr}"
+        );
+    }
+
+    let (success, compiled, stderr) = compile_inline_source(
+        "azure-auth-mount-path-valid",
+        &source_with_mount_path("valid", "/var/run/custom-azure"),
+    );
+    assert!(
+        success,
+        "a valid absolute mount-path must compile: {stderr}"
+    );
+    assert!(
+        compiled.contains("/var/run/custom-azure"),
+        "valid mount-path must reach the compiled pipeline"
+    );
 }
 
 /// Test that HTTP-based MCPs generate correct MCPG config JSON structure
@@ -11758,4 +11866,49 @@ fn test_compile_warns_on_volume_arg_smuggling_sensitive_mount() {
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_compile_rejects_markdown_without_front_matter() {
+    let (success, _, stderr) =
+        compile_inline_source("no-front-matter", "## Just a heading\n\nNo front matter.\n");
+    assert!(
+        !success,
+        "compiler must reject markdown without front matter"
+    );
+    assert!(
+        stderr.contains("must start with YAML front matter"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_assign_work_item_rejects_non_positive_target_id() {
+    let (success, _, stderr) = compile_inline_source(
+        "assign-work-item-zero-target",
+        "---\nname: \"A\"\ndescription: \"d\"\npermissions:\n  write: my-write-sc\nsafe-outputs:\n  assign-work-item:\n    target: 0\n---\n\n## A\n\nDo it.\n",
+    );
+    assert!(!success, "compiler must reject assign-work-item.target: 0");
+    assert!(
+        stderr.contains("assign-work-item.target must be positive"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_assign_work_item_rejects_unknown_target_pattern() {
+    let (success, _, stderr) = compile_inline_source(
+        "assign-work-item-pattern-target",
+        "---\nname: \"A\"\ndescription: \"d\"\npermissions:\n  write: my-write-sc\nsafe-outputs:\n  assign-work-item:\n    target: \"abc\"\n---\n\n## A\n\nDo it.\n",
+    );
+    assert!(
+        !success,
+        "compiler must reject assign-work-item.target: \"abc\""
+    );
+    assert!(
+        stderr.contains(
+            "assign-work-item.target must be \"*\" or a positive work-item ID, got 'abc'"
+        ),
+        "unexpected stderr: {stderr}"
+    );
 }
