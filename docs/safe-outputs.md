@@ -101,6 +101,13 @@ top-level arguments for Detection. Install version, command, auth/provider,
 BYOK credential isolation, and firewall hosts are all resolved from the
 effective Detection engine.
 
+The compiler appends `--excluded-tools task run_dynamic_workflow` as the last
+argument of the Detection Copilot command, after any Detection `args`. This
+removes subagent delegation and multi-agent workflow tools so the detector
+answers itself: a delegated review replies in its own format and drops the
+`THREAT_DETECTION_RESULT:` line, which makes Detection fail closed. The Agent
+run keeps these tools.
+
 Detection inherits the top-level `engine.timeout-minutes`. Set
 `safe-outputs.threat-detection.engine.timeout-minutes` to override that limit
 for Detection only.
