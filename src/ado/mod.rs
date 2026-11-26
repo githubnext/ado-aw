@@ -2255,6 +2255,113 @@ fn extract_artifact_zip(
 mod tests {
     use super::*;
 
+    fn test_artifact(name: &str) -> BuildArtifact {
+        BuildArtifact {
+            id: 1,
+            name: name.to_string(),
+            source: None,
+            resource: BuildArtifactResource {
+                kind: "PipelineArtifact".to_string(),
+                data: None,
+                properties: None,
+                url: None,
+                download_url: None,
+            },
+        }
+    }
+
+    fn zip_with_entries(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
+        let temp_zip = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = zip::ZipWriter::new(temp_zip.reopen().unwrap());
+        for (path, contents) in entries {
+            writer
+                .start_file(*path, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut writer, contents).unwrap();
+        }
+        writer.finish().unwrap();
+        temp_zip
+    }
+
+    #[test]
+    fn extract_artifact_zip_extracts_entries_without_repeated_root() {
+        let temp_zip = zip_with_entries(&[
+            ("safe_outputs.ndjson", b"{\"name\":\"noop\"}\n"),
+            ("logs/agent.log", b"agent log"),
+        ]);
+        let out = tempfile::tempdir().unwrap();
+
+        extract_artifact_zip(temp_zip, &test_artifact("agent_outputs_42"), out.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(out.path().join("safe_outputs.ndjson")).unwrap(),
+            "{\"name\":\"noop\"}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.path().join("logs/agent.log")).unwrap(),
+            "agent log"
+        );
+    }
+
+    #[test]
+    fn extract_artifact_zip_strips_repeated_artifact_root() {
+        let temp_zip = zip_with_entries(&[
+            ("agent_outputs_42/safe_outputs.ndjson", b"ndjson"),
+            ("agent_outputs_42/logs/agent.log", b"agent log"),
+        ]);
+        let out = tempfile::tempdir().unwrap();
+
+        extract_artifact_zip(temp_zip, &test_artifact("agent_outputs_42"), out.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(out.path().join("safe_outputs.ndjson")).unwrap(),
+            "ndjson"
+        );
+        assert!(out.path().join("logs/agent.log").is_file());
+        assert!(!out.path().join("agent_outputs_42").exists());
+    }
+
+    #[test]
+    fn extract_artifact_zip_keeps_root_when_not_shared_by_every_entry() {
+        let temp_zip = zip_with_entries(&[
+            ("agent_outputs_42/safe_outputs.ndjson", b"ndjson"),
+            ("other.txt", b"other"),
+        ]);
+        let out = tempfile::tempdir().unwrap();
+
+        extract_artifact_zip(temp_zip, &test_artifact("agent_outputs_42"), out.path()).unwrap();
+
+        assert!(
+            out.path()
+                .join("agent_outputs_42/safe_outputs.ndjson")
+                .is_file()
+        );
+        assert!(out.path().join("other.txt").is_file());
+    }
+
+    #[test]
+    fn extract_artifact_zip_refuses_path_traversal_without_writing() {
+        let temp_zip = zip_with_entries(&[
+            ("safe_outputs.ndjson", b"ndjson"),
+            ("../escape.txt", b"escaped"),
+        ]);
+        let parent = tempfile::tempdir().unwrap();
+        let out = parent.path().join("artifact");
+        std::fs::create_dir(&out).unwrap();
+
+        let err = extract_artifact_zip(temp_zip, &test_artifact("agent_outputs_42"), &out)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("Refusing to extract unsafe path '../escape.txt'"),
+            "unexpected error: {err}"
+        );
+        assert!(!parent.path().join("escape.txt").exists());
+        // The whole archive is validated before any entry is written.
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+    }
+
     #[test]
     fn normalize_masked_secret_variable_values_rewrites_masked_secret_to_null() {
         let mut def = serde_json::json!({
