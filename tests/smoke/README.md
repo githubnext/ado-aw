@@ -105,7 +105,8 @@ GitHub githubnext/ado-aw @abc123
        commit (parent = abc123) -> push to .../8801/<caseId> -> verify
        git reset --hard abc123                 (next case starts clean)
   8  queue each case against its LANE definition with its own ref + SHA
-  9  poll, verify declared build tags, cancel non-terminal on timeout
+  9  poll, verify declared build tags and executed safe outputs,
+    cancel non-terminal on timeout
  10  delete each ref iff THAT case proved terminal
 ```
 
@@ -178,9 +179,26 @@ Optional per-case assertions, so novel checks stay out of the harness code:
     "required": ["displayName: Start ado-proxy policy engine"],
     "forbidden": ["--network host"]
   },
-  "requiredBuildTags": ["ado-aw-custom-job-{buildId}"]
+  "requiredBuildTags": ["ado-aw-custom-job-{buildId}"],
+  "requiredSafeOutputs": [
+    { "name": "noop", "contextIncludes": "build {buildId}" },
+    { "name": "create-work-item" }
+  ]
 }
 ```
+
+`requiredSafeOutputs` exists because **a green child build does not prove the
+agent emitted anything**: an agent that never received its safe-output tools,
+or that declined to call them, still finishes with Stage 3 reporting
+`Total: 0`. After a child succeeds, the harness downloads its `safe_outputs`
+artifact through the Build REST API (bounded retries) and reads
+`safe-outputs-executed.ndjson`, Stage 3's per-item execution log. Each entry
+needs a record with the same `name` (`-` and `_` are equivalent, since Stage 3
+records `create_work_item`), a status of `succeeded` or `warning`, and — when
+`contextIncludes` is set — a `context` containing that substring with
+`{buildId}` expanded. A missing artifact, a missing log, or no matching record
+fails the case. Declare it on every case whose prompt tells the agent to emit
+a specific safe output.
 
 ### `kind: raw`
 

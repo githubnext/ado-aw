@@ -167,8 +167,26 @@ The MCPG is automatically configured in generated standalone pipelines:
 
 1. **Config Generation**: The compiler generates `mcpg-config.json` from the agent's `mcp-servers:` front matter, including the compiler-owned `safeoutputs` stdio entry above.
 2. **MCPG Start**: The MCPG Docker container (`awmg-mcpg`) starts on Docker's bridge network, published to the host at `127.0.0.1:8080`, with config via stdin and the Docker socket mounted so it can spawn stdio children (including SafeOutputs) on demand.
-3. **Agent Execution**: AWF runs the Agent rootlessly with `--network-isolation --topology-attach awmg-mcpg`, attaching the MCPG container to `awf-net`; copilot connects to MCPG at `awmg-mcpg:8080` over HTTP, and reaches SafeOutputs tools transparently through MCPG's stdio routing.
-4. **Cleanup**: MCPG and any stdio children it spawned (including SafeOutputs)
+3. **SafeOutputs readiness check (fail closed)**: an always-on
+   `Verify SafeOutputs MCP backend` step runs after MCPG starts (and after the
+   ado-proxy topology-peer check, when ado-proxy is enabled) and before the
+   agent, on every target. Through MCPG at `127.0.0.1:8080/mcp/safeoutputs` it
+   performs the MCP `initialize` handshake and `tools/list`, and requires HTTP
+   2xx, at least one tool, and every always-on diagnostic tool (`noop`,
+   `missing-data`, `missing-tool`, `report-incomplete`). It retries for up to
+   60 seconds (3-second interval) while MCPG launches the SafeOutputs stdio
+   container. If the backend never becomes ready, it prints the probe
+   responses, MCPG health, `docker ps -a`, and the `awmg-mcpg` container logs,
+   raises a `##vso[task.logissue type=error]`, and **fails the Agent job**.
+   MCPG's `/health` endpoint passes even when it refused to launch a backend,
+   so without this check, an agent that had no safe-output tools still
+   produced a green pipeline with zero safe outputs. Only `safeoutputs` is
+   checked: user-defined `mcp-servers:` may be optional and never fail the
+   job here. (`--debug-pipeline` additionally adds the warning-only
+   `Verify MCP backends` probe for every backend; it now also warns when a
+   backend lists zero tools.)
+4. **Agent Execution**: AWF runs the Agent rootlessly with `--network-isolation --topology-attach awmg-mcpg`, attaching the MCPG container to `awf-net`; copilot connects to MCPG at `awmg-mcpg:8080` over HTTP, and reaches SafeOutputs tools transparently through MCPG's stdio routing.
+5. **Cleanup**: MCPG and any stdio children it spawned (including SafeOutputs)
    are stopped after the agent completes (condition: always). Renewable Azure
    assertion sidecars are then stopped and their private
    `$(Agent.TempDirectory)/ado-aw-azure-auth/` directories removed.

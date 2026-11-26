@@ -17,7 +17,14 @@
       "lane": "agentic",
       "kind": "compiled",
       "modes": ["candidate", "released"],
-      "source": "tests/safe-outputs/canary.md"
+      "source": "tests/safe-outputs/canary.md",
+      "assertions": {
+        "requiredSafeOutputs": [
+          { "name": "noop", "contextIncludes": "canary proof-of-life" },
+          { "name": "create-work-item" },
+          { "name": "add-build-tag" }
+        ]
+      }
     },
     {
       "id": "ado-proxy",
@@ -100,7 +107,12 @@
       "lane": "agentic",
       "kind": "compiled",
       "modes": ["candidate", "released"],
-      "source": "tests/safe-outputs/noop-target.md"
+      "source": "tests/safe-outputs/noop-target.md",
+      "assertions": {
+        "requiredSafeOutputs": [
+          { "name": "noop", "contextIncludes": "ado-aw-smoke-noop-target build {buildId}" }
+        ]
+      }
     },
     {
       "id": "custom-safe-output",
@@ -117,7 +129,12 @@
       "lane": "agentic",
       "kind": "compiled",
       "modes": ["candidate"],
-      "source": "tests/smoke/multi-repo.md"
+      "source": "tests/smoke/multi-repo.md",
+      "assertions": {
+        "requiredSafeOutputs": [
+          { "name": "noop", "contextIncludes": "multi-repo checkout layout verified" }
+        ]
+      }
     },
     {
       "id": "janitor",

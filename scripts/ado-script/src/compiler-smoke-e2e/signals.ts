@@ -3,13 +3,15 @@
  *
  * A successful child build is not sufficient for every case: e.g. a custom
  * safe-output job must leave its deterministic build tag on the actual child
- * run. Which tags are required is declared per case in `tests/smoke/cases.json`
- * rather than hardcoded here, so a new case with a tag assertion is a manifest
- * change and never a code change.
+ * run, and an agent that never reached its safe-output tools still produces a
+ * green build with nothing executed. Which tags and executed safe outputs are
+ * required is declared per case in `tests/smoke/cases.json` rather than
+ * hardcoded here, so a new case with a signal assertion is a manifest change
+ * and never a code change.
  *
  * Test-harness module; not shipped in `ado-script.zip`.
  */
-import { expandBuildTag, type ResolvedCase } from "./cases.js";
+import { expandBuildTag, type RequiredSafeOutput, type ResolvedCase } from "./cases.js";
 import type { FixtureBuildResult } from "./runner.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,14 +25,137 @@ export interface BuildTagClient {
   ): Promise<string[]>;
 }
 
+/** Reads one file out of a child build's published artifact. */
+export interface ArtifactFileClient {
+  downloadArtifactFile(
+    buildId: number,
+    artifactName: string,
+    fileName: string,
+  ): Promise<string | undefined>;
+}
+
+export type SignalClient = BuildTagClient & ArtifactFileClient;
+
+/** Artifact the (automatic) SafeOutputs job publishes its execution log in. */
+export const SAFE_OUTPUTS_ARTIFACT = "safe_outputs";
+/** Stage 3 execution log: one record per executed safe output. */
+export const EXECUTED_SAFE_OUTPUTS_FILE = "safe-outputs-executed.ndjson";
+/** Execution statuses that count as "the safe output ran". */
+const EXECUTED_STATUSES = new Set(["succeeded", "warning"]);
+
+export interface ExecutionRecord {
+  name: string;
+  status: string;
+  context: string;
+}
+
 export interface SignalVerificationOutcome {
   readonly ok: boolean;
   readonly results: FixtureBuildResult[];
 }
 
-/** Verify every declared `requiredBuildTags` assertion against the real child runs. */
-export async function verifyCaseSignals(
+/** Normalise a safe-output name; Stage 3 records `create-work-item` as `create_work_item`. */
+function normaliseToolName(name: string): string {
+  return name.replace(/-/g, "_");
+}
+
+/** Parse the execution log, skipping lines that are not well-formed records. */
+export function parseExecutionLog(ndjson: string): ExecutionRecord[] {
+  const records: ExecutionRecord[] = [];
+  for (const line of ndjson.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const value = JSON.parse(line) as Record<string, unknown>;
+      if (typeof value.name !== "string") continue;
+      records.push({
+        name: value.name,
+        status: typeof value.status === "string" ? value.status : "",
+        context: typeof value.context === "string" ? value.context : "",
+      });
+    } catch {
+      continue;
+    }
+  }
+  return records;
+}
+
+/**
+ * Return a failure message for every required safe output with no matching
+ * executed record, or an empty array when all are satisfied.
+ */
+export function missingSafeOutputs(
+  required: readonly RequiredSafeOutput[],
+  records: readonly ExecutionRecord[],
+  buildId: number,
+): string[] {
+  return required.flatMap((expected) => {
+    const name = normaliseToolName(expected.name);
+    const context =
+      expected.contextIncludes === undefined
+        ? undefined
+        : expandBuildTag(expected.contextIncludes, buildId);
+    const found = records.some(
+      (record) =>
+        normaliseToolName(record.name) === name &&
+        EXECUTED_STATUSES.has(record.status) &&
+        (context === undefined || record.context.includes(context)),
+    );
+    if (found) return [];
+    return [context === undefined ? expected.name : `${expected.name} (context containing '${context}')`];
+  });
+}
+
+function describeRecords(records: readonly ExecutionRecord[]): string {
+  if (records.length === 0) return "<none>";
+  return records.map((record) => `${record.name}:${record.status || "?"}`).join(", ");
+}
+
+async function verifyRequiredSafeOutputs(
+  client: ArtifactFileClient,
+  buildId: number,
+  required: readonly RequiredSafeOutput[],
+): Promise<string | undefined> {
+  const log = await client.downloadArtifactFile(
+    buildId,
+    SAFE_OUTPUTS_ARTIFACT,
+    EXECUTED_SAFE_OUTPUTS_FILE,
+  );
+  if (log === undefined) {
+    return (
+      `build #${buildId} executed no safe outputs: '${SAFE_OUTPUTS_ARTIFACT}' has no ${EXECUTED_SAFE_OUTPUTS_FILE}; ` +
+      `required: ${required.map((entry) => entry.name).join(", ")}`
+    );
+  }
+  const records = parseExecutionLog(log);
+  const missing = missingSafeOutputs(required, records, buildId);
+  if (missing.length === 0) return undefined;
+  return (
+    `build #${buildId} did not execute required safe output(s): ${missing.join(", ")}; ` +
+    `executed: ${describeRecords(records)}`
+  );
+}
+
+async function verifyRequiredTags(
   client: BuildTagClient,
+  buildId: number,
+  declared: readonly string[],
+): Promise<string | undefined> {
+  const expected = declared.map((tag) => expandBuildTag(tag, buildId));
+  const actual = await client.getBuildTags(buildId, { required: expected });
+  const missing = expected.filter((tag) => !actual.includes(tag));
+  if (missing.length === 0) return undefined;
+  return (
+    `build #${buildId} is missing required tag(s): ${missing.join(", ")}; ` +
+    `observed: ${actual.length > 0 ? actual.join(", ") : "<none>"}`
+  );
+}
+
+/**
+ * Verify every declared `requiredBuildTags` and `requiredSafeOutputs`
+ * assertion against the real child runs.
+ */
+export async function verifyCaseSignals(
+  client: SignalClient,
   cases: readonly ResolvedCase[],
   results: readonly FixtureBuildResult[],
 ): Promise<SignalVerificationOutcome> {
@@ -38,37 +163,49 @@ export async function verifyCaseSignals(
   const verified: FixtureBuildResult[] = [];
 
   for (const result of results) {
-    const declared = byId.get(result.caseId)?.assertions?.requiredBuildTags;
+    const assertions = byId.get(result.caseId)?.assertions;
+    const tags = assertions?.requiredBuildTags;
+    const safeOutputs = assertions?.requiredSafeOutputs;
     const buildId = result.buildId;
-    if (result.status !== "succeeded" || buildId === undefined || !declared?.length) {
+    if (
+      result.status !== "succeeded" ||
+      buildId === undefined ||
+      (!tags?.length && !safeOutputs?.length)
+    ) {
       verified.push({ ...result });
       continue;
     }
 
-    try {
-      const expected = declared.map((tag) => expandBuildTag(tag, buildId));
-      const actual = await client.getBuildTags(buildId, { required: expected });
-      const missing = expected.filter((tag) => !actual.includes(tag));
-      if (missing.length === 0) {
-        verified.push({ ...result });
-        continue;
+    const failures: string[] = [];
+    if (tags?.length) {
+      try {
+        const failure = await verifyRequiredTags(client, buildId, tags);
+        if (failure) failures.push(failure);
+      } catch (error) {
+        failures.push(
+          `build #${buildId} tag verification failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
-      verified.push({
-        ...result,
-        status: "failed",
-        message:
-          `build #${buildId} is missing required tag(s): ${missing.join(", ")}; ` +
-          `observed: ${actual.length > 0 ? actual.join(", ") : "<none>"}`,
-      });
-    } catch (error) {
-      verified.push({
-        ...result,
-        status: "failed",
-        message: `build #${buildId} tag verification failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      });
     }
+    if (safeOutputs?.length) {
+      try {
+        const failure = await verifyRequiredSafeOutputs(client, buildId, safeOutputs);
+        if (failure) failures.push(failure);
+      } catch (error) {
+        failures.push(
+          `build #${buildId} safe-output verification failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    verified.push(
+      failures.length === 0
+        ? { ...result }
+        : { ...result, status: "failed", message: failures.join("; ") },
+    );
   }
 
   return {

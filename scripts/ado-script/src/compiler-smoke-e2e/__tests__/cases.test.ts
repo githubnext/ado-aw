@@ -313,7 +313,55 @@ describe("parseManifest", () => {
             },
           ]),
         ),
-      ).toThrow(/must declare agentCommand, pipelineText and\/or requiredBuildTags/);
+      ).toThrow(
+        /must declare agentCommand, pipelineText, requiredBuildTags and\/or requiredSafeOutputs/,
+      );
+    });
+
+    function withSafeOutputs(requiredSafeOutputs: unknown) {
+      return cases([
+        {
+          id: "x",
+          lane: "agentic",
+          kind: "compiled",
+          modes: ["candidate", "released"],
+          source: "a.md",
+          assertions: { requiredSafeOutputs },
+        },
+      ]);
+    }
+
+    it("accepts requiredSafeOutputs on their own", () => {
+      const parsed = parseManifest(
+        withSafeOutputs([
+          { name: "noop", contextIncludes: "build {buildId}" },
+          { name: "create-work-item" },
+        ]),
+      );
+      expect(parsed.cases[0]?.assertions?.requiredSafeOutputs).toEqual([
+        { name: "noop", contextIncludes: "build {buildId}" },
+        { name: "create-work-item" },
+      ]);
+    });
+
+    it("rejects an empty requiredSafeOutputs list", () => {
+      expect(() => parseManifest(withSafeOutputs([]))).toThrow(/at least one safe output/);
+    });
+
+    it("rejects an unknown requiredSafeOutputs key", () => {
+      expect(() => parseManifest(withSafeOutputs([{ name: "noop", status: "ok" }]))).toThrow(
+        /unknown key\(s\): status/,
+      );
+    });
+
+    it("rejects a malformed safe-output name", () => {
+      expect(() => parseManifest(withSafeOutputs([{ name: "Noop Tool" }]))).toThrow(/must match/);
+    });
+
+    it("rejects an unsupported contextIncludes placeholder", () => {
+      expect(() =>
+        parseManifest(withSafeOutputs([{ name: "noop", contextIncludes: "build {buildid}" }])),
+      ).toThrow(/unsupported placeholder/);
     });
 
     it("rejects an agentCommand with no snippets", () => {

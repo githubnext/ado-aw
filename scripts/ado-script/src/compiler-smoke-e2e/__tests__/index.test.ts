@@ -118,6 +118,27 @@ vi.mock("../ado-rest.js", () => {
 
           `ado-aw-packages-wif-${buildId}`,
         ]),
+        // Likewise, one execution log satisfying every case's
+        // `requiredSafeOutputs` (contexts mirror the case prompts).
+        downloadArtifactFile: vi.fn(async (buildId: number) =>
+          [
+            { name: "noop", status: "warning", context: `ado-aw-smoke-${buildId}-canary proof-of-life` },
+            { name: "create_work_item", status: "succeeded" },
+            { name: "add_build_tag", status: "succeeded" },
+            {
+              name: "noop",
+              status: "warning",
+              context: `ado-aw-smoke-noop-target build ${buildId} queued from queue-build smoke`,
+            },
+            {
+              name: "noop",
+              status: "warning",
+              context: `ado-aw-smoke-${buildId}-multi-repo checkout layout verified`,
+            },
+          ]
+            .map((record) => JSON.stringify(record))
+            .join("\n"),
+        ),
         queueBuild: vi.fn(async () => ({ id: 1 })),
         cancelBuild: vi.fn(async () => {}),
         addBuildTags: vi.fn(async () => {}),

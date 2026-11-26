@@ -1471,7 +1471,8 @@ fn push_agent_install_and_prepare_steps(
 
 /// Steps 14-16: AWF path step, renewable Azure WIF refresh sidecars, the
 /// credential-isolated ado-proxy policy engine, MCPG startup, the
-/// topology-peer liveness check, and the debug-only MCP backend check.
+/// topology-peer liveness check, the always-on SafeOutputs backend check,
+/// and the debug-only MCP backend check.
 ///
 /// Returns whether ado-proxy was enabled, so the caller can gate the
 /// matching teardown steps later in the job.
@@ -1519,7 +1520,13 @@ fn push_agent_mcp_startup_steps(
         steps.push(Step::Bash(verify_trusted_topology_peers_step()));
     }
 
-    // 16. Verify MCP backends (debug-only)
+    // 16. Fail closed when MCPG cannot serve the SafeOutputs backend. MCPG's
+    //     health check passes even when it refused to launch a backend, and
+    //     an agent without safe-output tools would otherwise "succeed" with
+    //     zero proposals. Always on, for every target.
+    steps.push(Step::Bash(verify_safeoutputs_backend_step()));
+
+    // 16a. Verify every MCP backend (debug-only, warning-only)
     if cfg.debug_pipeline {
         steps.push(Step::Bash(verify_mcp_backends_step()));
     }
@@ -7149,8 +7156,15 @@ for server in $(jq -r '.mcpServers | keys[]' /tmp/awf-tools/mcp-config.json); do
   BODY=$(cat /tmp/probe-response.json 2>/dev/null || echo "(empty)")
   # Extract tool count from SSE data line
   TOOL_COUNT=$(echo "$BODY" | grep '^data:' | sed 's/^data: //' | jq -r '.result.tools | length' 2>/dev/null || echo "?")
+  TOOL_COUNT=${TOOL_COUNT:-?}
   echo "tools/list: HTTP $HTTP_CODE"
-  if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ "$TOOL_COUNT" != "?" ]; then
+  if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ "$TOOL_COUNT" = "0" ]; then
+    # A backend that answers but exposes nothing is as useless to the agent
+    # as one that is down; do not report it as healthy.
+    echo "##vso[task.logissue type=warning]MCP backend '$server' tools/list returned no tools"
+    echo "Response: $BODY"
+    PROBE_FAILED=true
+  elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && [ "$TOOL_COUNT" != "?" ]; then
     echo "✓ $server: $TOOL_COUNT tools available"
   else
     echo "##vso[task.logissue type=warning]MCP backend '$server' tools/list returned HTTP $HTTP_CODE"
@@ -7177,6 +7191,196 @@ fn verify_mcp_backends_step() -> BashStep {
         .into_step("Verify MCP backends")
         .with_env("MCPG_API_KEY", EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"))
 }
+
+/// Name of the always-present SafeOutputs entry in the MCPG config (see
+/// `common::compile_mcpg`). MCPG serves it at `/mcp/<name>`.
+const SAFEOUTPUTS_MCPG_SERVER: &str = "safeoutputs";
+
+/// Upper bound on how long [`verify_safeoutputs_backend_step`] keeps retrying
+/// while MCPG is still launching the SafeOutputs stdio container.
+const SAFEOUTPUTS_PROBE_TIMEOUT_SECS: u64 = 60;
+
+/// Pause between SafeOutputs probe attempts.
+const SAFEOUTPUTS_PROBE_INTERVAL_SECS: u64 = 3;
+
+shell_script! {
+    /// Always-on, fail-closed SafeOutputs readiness check. MCPG's `/health`
+    /// endpoint reports healthy even when it refused to launch a backend
+    /// (e.g. a mount-policy rejection of the SafeOutputs stdio container), and
+    /// an agent without safe-output tools otherwise "succeeds" with zero
+    /// proposals. Performs MCP `initialize` + `tools/list` against the
+    /// `safeoutputs` backend through MCPG, retrying for a bounded window, and
+    /// requires HTTP 2xx, at least one tool, and every always-on diagnostic
+    /// tool (`noop`, …). On failure prints the probe responses and the MCPG
+    /// container logs, then fails the Agent job before the agent runs.
+    VERIFY_SAFEOUTPUTS_BACKEND {
+        interpreter: Bash,
+        bindings: [
+            MCPG_PORT, MCPG_CONTAINER, SAFEOUTPUTS_SERVER, EXPECTED_TOOLS,
+            PROBE_TIMEOUT_SECS, PROBE_INTERVAL_SECS
+        ],
+        externals: [MCPG_API_KEY],
+        fragments: [],
+        body: r###"
+set -uo pipefail
+
+PROBE_DIR=$(mktemp -d)
+trap 'rm -rf "$PROBE_DIR"' EXIT
+PROBE_URL="http://localhost:$MCPG_PORT/mcp/$SAFEOUTPUTS_SERVER"
+INIT_PAYLOAD='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ado-aw-safeoutputs-probe","version":"1.0"}}}'
+INITIALIZED_PAYLOAD='{"jsonrpc":"2.0","method":"notifications/initialized"}'
+LIST_PAYLOAD='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# Print the JSON-RPC message carried by a response body, which MCPG may send
+# either as plain JSON or as an SSE stream of `data:` lines.
+jsonrpc_message() {
+  if grep -q '^data:' "$1" 2>/dev/null; then
+    grep '^data:' "$1" | sed 's/^data:[[:space:]]*//' | tail -n 1
+  else
+    cat "$1" 2>/dev/null || true
+  fi
+}
+
+# Exit 0 when TOOL is advertised, by exact name or with a gateway prefix.
+has_tool() {
+  printf '%s\n' "$TOOL_NAMES" | awk -v t="$1" '
+    $0 == t { found = 1 }
+    length($0) > length(t) + 3 && substr($0, length($0) - length(t) - 2) == "___" t { found = 1 }
+    END { exit !found }'
+}
+
+probe_once() {
+  TOOL_NAMES=""
+  TOOL_COUNT=0
+  rm -f "$PROBE_DIR"/*
+  INIT_HTTP=$(curl -sS -o "$PROBE_DIR/init-body" -D "$PROBE_DIR/init-headers" \
+    -w '%{http_code}' --max-time 30 -X POST \
+    -H "Authorization: $MCPG_API_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d "$INIT_PAYLOAD" "$PROBE_URL" 2>"$PROBE_DIR/init-curl") || INIT_HTTP="${INIT_HTTP:-000}"
+  case "$INIT_HTTP" in
+    2??) ;;
+    *) LAST_ERROR="initialize returned HTTP ${INIT_HTTP:-000} $(head -c 300 "$PROBE_DIR/init-curl" 2>/dev/null)"; return 1 ;;
+  esac
+  SESSION_ID=$(grep -i '^mcp-session-id:' "$PROBE_DIR/init-headers" | tail -n 1 | cut -d: -f2- | tr -d ' \r')
+  if [ -z "$SESSION_ID" ]; then
+    LAST_ERROR="initialize did not return an Mcp-Session-Id header"
+    return 1
+  fi
+
+  curl -sS -o /dev/null --max-time 15 -X POST \
+    -H "Authorization: $MCPG_API_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Mcp-Session-Id: $SESSION_ID" \
+    -d "$INITIALIZED_PAYLOAD" "$PROBE_URL" 2>/dev/null || true
+
+  LIST_HTTP=$(curl -sS -o "$PROBE_DIR/list-body" \
+    -w '%{http_code}' --max-time 15 -X POST \
+    -H "Authorization: $MCPG_API_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Mcp-Session-Id: $SESSION_ID" \
+    -d "$LIST_PAYLOAD" "$PROBE_URL" 2>"$PROBE_DIR/list-curl") || LIST_HTTP="${LIST_HTTP:-000}"
+  case "$LIST_HTTP" in
+    2??) ;;
+    *) LAST_ERROR="tools/list returned HTTP ${LIST_HTTP:-000} $(head -c 300 "$PROBE_DIR/list-curl" 2>/dev/null)"; return 1 ;;
+  esac
+  jsonrpc_message "$PROBE_DIR/list-body" > "$PROBE_DIR/list-message"
+  if ! jq -e '.result.tools | type == "array"' "$PROBE_DIR/list-message" > /dev/null 2>&1; then
+    LAST_ERROR="tools/list did not return a JSON-RPC result with a tools array"
+    return 1
+  fi
+  TOOL_NAMES=$(jq -r '.result.tools[].name // empty' "$PROBE_DIR/list-message")
+  TOOL_COUNT=$(jq -r '.result.tools | length' "$PROBE_DIR/list-message")
+  if [ "$TOOL_COUNT" -lt 1 ]; then
+    LAST_ERROR="tools/list returned no tools"
+    return 1
+  fi
+  MISSING_TOOLS=""
+  # shellcheck disable=SC2086 # EXPECTED_TOOLS is a compiler-validated word list.
+  for TOOL in $EXPECTED_TOOLS; do
+    has_tool "$TOOL" || MISSING_TOOLS="$MISSING_TOOLS $TOOL"
+  done
+  if [ -n "$MISSING_TOOLS" ]; then
+    LAST_ERROR="tools/list is missing required tool(s):$MISSING_TOOLS"
+    return 1
+  fi
+  return 0
+}
+
+echo "Verifying the SafeOutputs MCP backend through MCPG ($PROBE_URL)"
+echo "Required tools: $EXPECTED_TOOLS"
+DEADLINE=$(( $(date +%s) + PROBE_TIMEOUT_SECS ))
+ATTEMPT=0
+LAST_ERROR="not probed"
+while true; do
+  ATTEMPT=$((ATTEMPT + 1))
+  if probe_once; then
+    echo "SafeOutputs MCP backend is ready on attempt $ATTEMPT: $TOOL_COUNT tool(s)"
+    printf '%s\n' "$TOOL_NAMES" | sed 's/^/  - /'
+    exit 0
+  fi
+  echo "Attempt $ATTEMPT: $LAST_ERROR"
+  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    break
+  fi
+  sleep "$PROBE_INTERVAL_SECS"
+done
+
+echo "##vso[task.logissue type=error]SafeOutputs MCP backend '$SAFEOUTPUTS_SERVER' is not available through MCPG after $ATTEMPT attempt(s) (${PROBE_TIMEOUT_SECS}s): $LAST_ERROR. The agent would run without safe-output tools, so the Agent job fails instead of silently producing no outputs."
+echo "=== initialize response headers ==="
+cat "$PROBE_DIR/init-headers" 2>/dev/null || echo "(none)"
+echo "=== initialize response body ==="
+cat "$PROBE_DIR/init-body" 2>/dev/null || echo "(none)"
+echo ""
+echo "=== tools/list response body ==="
+cat "$PROBE_DIR/list-body" 2>/dev/null || echo "(none)"
+echo ""
+echo "=== MCPG health ==="
+curl -sS --max-time 10 "http://localhost:$MCPG_PORT/health" 2>&1 || true
+echo ""
+echo "=== MCPG container state ($MCPG_CONTAINER) ==="
+docker inspect -f '{{.State.Status}} (exit={{.State.ExitCode}})' "$MCPG_CONTAINER" 2>&1 || true
+docker ps -a --no-trunc 2>&1 || true
+echo "=== MCPG container logs ($MCPG_CONTAINER) ==="
+docker logs --tail 300 "$MCPG_CONTAINER" 2>&1 || true
+echo "##vso[task.complete result=Failed]SafeOutputs MCP backend is unavailable"
+exit 1
+"###,
+    }
+}
+
+/// Always-on Agent-job step that fails closed when MCPG cannot serve the
+/// SafeOutputs backend. See [`VERIFY_SAFEOUTPUTS_BACKEND`].
+fn verify_safeoutputs_backend_step() -> BashStep {
+    use super::ir::env::EnvValue;
+    ShellScript::new(&VERIFY_SAFEOUTPUTS_BACKEND)
+        .bind("MCPG_PORT", Binding::number(MCPG_PORT.into()))
+        .bind_text("MCPG_CONTAINER", MCPG_CONTAINER_NAME)
+        .bind_text("SAFEOUTPUTS_SERVER", SAFEOUTPUTS_MCPG_SERVER)
+        .bind(
+            "EXPECTED_TOOLS",
+            Binding::words(crate::safe_outputs::ALWAYS_ON_TOOLS.iter().copied()),
+        )
+        .bind(
+            "PROBE_TIMEOUT_SECS",
+            Binding::number(SAFEOUTPUTS_PROBE_TIMEOUT_SECS),
+        )
+        .bind(
+            "PROBE_INTERVAL_SECS",
+            Binding::number(SAFEOUTPUTS_PROBE_INTERVAL_SECS),
+        )
+        .into_step(VERIFY_SAFEOUTPUTS_BACKEND_DISPLAY_NAME)
+        .with_env(
+            "MCPG_API_KEY",
+            EnvValue::pipeline_var("MCP_GATEWAY_API_KEY"),
+        )
+}
+
+/// Display name of [`verify_safeoutputs_backend_step`].
+const VERIFY_SAFEOUTPUTS_BACKEND_DISPLAY_NAME: &str = "Verify SafeOutputs MCP backend";
 
 // ─────────────────────────────────────────────────────────────────────
 // Helpers

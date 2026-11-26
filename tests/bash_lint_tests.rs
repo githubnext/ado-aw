@@ -115,6 +115,7 @@ const REQUIRED_STEP_DISPLAY_NAMES: &[&str] = &[
     "Evaluate pipeline filters", // src/compile/extensions/ado_script.rs + src/compile/filter_ir.rs
     "Evaluate PR filters",       // src/compile/filter_ir.rs (GateContext::PullRequest)
     "Verify MCP backends",       // src/compile/common.rs (--debug-pipeline only)
+    "Verify SafeOutputs MCP backend", // src/compile/agentic_pipeline.rs (always on)
     "Verify pipeline integrity", // src/compile/common.rs generate_integrity_check
     "Resolve runtime imports (agent prompt)", // src/compile/extensions/ado_script.rs resolver_step()
     "Output copilot version", // src/engine.rs (copilot_install_from_nuget + copilot_install_from_github_release)

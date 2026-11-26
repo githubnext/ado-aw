@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AdoRest, redactToken } from "../ado-rest.js";
+import { makeZip } from "./zip-fixture.js";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -27,6 +28,59 @@ function makeRest(
     ...extra,
   });
 }
+
+describe("AdoRest.downloadArtifactFile", () => {
+  const artifactJson = {
+    name: "safe_outputs",
+    resource: { downloadUrl: "https://artprod.example/safe_outputs?format=zip" },
+  };
+
+  it("downloads the artifact zip with auth and returns the named file", async () => {
+    const zip = makeZip([
+      { name: "safe_outputs/safe-outputs-executed.ndjson", data: '{"name":"noop"}\n', deflate: true },
+    ]);
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      String(url).startsWith("https://artprod.example/")
+        ? new Response(new Uint8Array(zip), { status: 200 })
+        : jsonResponse(200, artifactJson),
+    );
+    const rest = makeRest(fetchImpl as unknown as typeof fetch);
+    const content = await rest.downloadArtifactFile(42, "safe_outputs", "safe-outputs-executed.ndjson");
+    expect(content).toBe('{"name":"noop"}\n');
+    const download = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect(download[0]).toBe(artifactJson.resource.downloadUrl);
+    expect((download[1].headers as Record<string, string>).Authorization).toMatch(/^Basic /);
+  });
+
+  it("returns undefined when the artifact lacks the file", async () => {
+    const zip = makeZip([{ name: "safe_outputs/logs/agent-output.txt", data: "x" }]);
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      String(url).startsWith("https://artprod.example/")
+        ? new Response(new Uint8Array(zip), { status: 200 })
+        : jsonResponse(200, artifactJson),
+    );
+    const rest = makeRest(fetchImpl as unknown as typeof fetch);
+    await expect(
+      rest.downloadArtifactFile(42, "safe_outputs", "safe-outputs-executed.ndjson"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("retries a failed download, then reports the last error", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      String(url).startsWith("https://artprod.example/")
+        ? emptyResponse(503)
+        : jsonResponse(200, artifactJson),
+    );
+    const rest = makeRest(fetchImpl as unknown as typeof fetch);
+    await expect(
+      rest.downloadArtifactFile(42, "safe_outputs", "safe-outputs-executed.ndjson", {
+        retries: 2,
+        retryDelayMs: 1,
+      }),
+    ).rejects.toThrow(/after 2 attempts: artifact download -> HTTP 503/);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe("AdoRest.getArtifact", () => {
   it("returns the artifact on the first successful attempt", async () => {
