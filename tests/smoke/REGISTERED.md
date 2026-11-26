@@ -183,8 +183,10 @@ with no logs.
    both. Verified serving through every upstream.
    `ado-aw-ci-test-feed-not-granted` must **not** exist: the ungranted-feed
    check must be refused by policy, never by a real feed.
-   ⏳ Grant the `ado-aw-ci-read` service principal Collaborator on
-   `ado-aw-ci-test-feed` (needs step 7's org membership first).
+   ✅ `ado-aw-ci-read` service principal granted Collaborator on
+   `ado-aw-ci-test-feed`. Feed permissions accept the Entra descriptor
+   directly, so this works before the principal joins the org (step 7), but
+   it only takes effect once that membership exists.
 7. ✅ **Service connections** `ado-aw-ci-read` / `ado-aw-ci-write` (workload
    identity) and `github.com_githubnext` (GitHub App) created. Their service
    principals are `outlookweb-Test-92998940-…` (app `7d87cc7d-…`) and
