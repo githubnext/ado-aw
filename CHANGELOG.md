@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.54.1](https://github.com/githubnext/ado-aw/compare/v0.54.0...v0.54.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **ci:** stop pinning retired gpt-5-mini in contract and smoke runs ([#2516](https://github.com/githubnext/ado-aw/issues/2516)) ([7177b5e](https://github.com/githubnext/ado-aw/commit/7177b5e03e478f1e2034bee71a995728a229d826))
+* **deps:** apply security dependency updates ([#2519](https://github.com/githubnext/ado-aw/issues/2519)) ([7975b9c](https://github.com/githubnext/ado-aw/commit/7975b9c2a3d5b7be4e2f703dbfe442b16b539d77))
+
 ## [0.54.0](https://github.com/githubnext/ado-aw/compare/v0.53.0...v0.54.0) (2026-10-27)
 
 
