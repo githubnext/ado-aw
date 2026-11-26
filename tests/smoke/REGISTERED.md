@@ -177,16 +177,22 @@ with no logs.
 5. ✅ **Trigger-e2e victim registered as `2876`** against `ado-aw-mirror`
    (`tests/trigger-e2e/victim-pipeline.yml`, default branch `main`), queue
    `930` authorized.
-6. ⏳ **Feeds** — needs an `outlookweb` feed creator. Create `ado-aw-ci-rust`
-   and `ado-aw-ci-test-feed` as described under *Project resources* and grant
-   the roles under *Required permissions*. `ado-aw-ci-test-feed-not-granted`
-   must **not** exist: the ungranted-feed check must be refused by policy,
-   never by a real feed. Until then, every pipeline that installs Rust
-   (candidate smoke, executor e2e) fails at `Install Rust toolchain`.
+6. ✅ **Feeds** — `ado-aw-ci-rust` (upstreams crates.io + DevDiv
+   `Rust.Sdk@Release`) and `ado-aw-ci-test-feed` (npmjs, NuGet Gallery, PyPI)
+   created in `Test`; `Test Build Service (outlookweb)` is Collaborator on
+   both. Verified serving through every upstream.
+   `ado-aw-ci-test-feed-not-granted` must **not** exist: the ungranted-feed
+   check must be refused by policy, never by a real feed.
+   ⏳ Grant the `ado-aw-ci-read` service principal Collaborator on
+   `ado-aw-ci-test-feed` (needs step 7's org membership first).
 7. ✅ **Service connections** `ado-aw-ci-read` / `ado-aw-ci-write` (workload
-   identity) and `github.com_githubnext` (GitHub App) created.
-   ⏳ Grant the `ado-aw-ci-*` service principals the permissions under
-   *Required permissions*.
+   identity) and `github.com_githubnext` (GitHub App) created. Their service
+   principals are `outlookweb-Test-92998940-…` (app `7d87cc7d-…`) and
+   `outlookweb-Test-1577d8d9-…` (app `4ef5b9ab-…`).
+   ⏳ **Add both service principals to the `outlookweb` org** with access to
+   `Test` (needs *Add Users*, i.e. Project Collection Administrator). Until
+   then every ADO REST call made with their tokens returns 401. Then grant the
+   permissions under *Required permissions*.
 8. ✅ **GitHub-backed definitions registered** on `github.com_githubnext`:
    queue target `2882`, ado-script e2e `2883`, executor e2e `2884`, trigger
    e2e `2885`, candidate orchestrator `2886`, released orchestrator `2887`.
