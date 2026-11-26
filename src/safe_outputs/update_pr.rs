@@ -1115,76 +1115,122 @@ async fn lookup_reviewer_id(
     connection_type: Option<crate::compile::types::WriteConnectionType>,
 ) -> Option<String> {
     if let Ok(reviewer_id) = Guid::parse(reviewer) {
-        let identity_url = format!("{}/_apis/identities", vssps_base);
-        debug!(
-            "Verifying reviewer identity GUID '{}': {}",
-            reviewer, identity_url
-        );
-        return match crate::safe_outputs::authenticate_ado_request(
-            client.get(&identity_url).query(&[
-                ("identityIds", reviewer_id.as_str()),
-                ("api-version", "7.1"),
-            ]),
+        return verify_reviewer_guid(
+            client,
+            vssps_base,
+            reviewer,
+            &reviewer_id,
             token,
             connection_type,
         )
-        .send()
-        .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
-                    Ok(body) => {
-                        let Some(identities) =
-                            body.get("value").and_then(serde_json::Value::as_array)
-                        else {
-                            warn!(
-                                "Identity lookup for GUID '{}' response missing 'value' array",
-                                reviewer
-                            );
-                            return None;
-                        };
-                        if identities.len() != 1 {
-                            warn!(
-                                "Identity lookup for GUID '{}' returned {} identities",
-                                reviewer,
-                                identities.len()
-                            );
-                            return None;
-                        }
-                        identities[0]
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .filter(|id| id.eq_ignore_ascii_case(reviewer_id.as_str()))
-                            .map(str::to_string)
-                    }
-                    Err(error) => {
-                        warn!(
-                            "Identity lookup for GUID '{}' returned invalid JSON: {}",
-                            reviewer, error
-                        );
-                        None
-                    }
-                }
-            }
-            Ok(resp) => {
-                warn!(
-                    "Identity lookup for GUID '{}' returned HTTP {}",
-                    reviewer,
-                    resp.status()
-                );
-                None
-            }
-            Err(e) => {
-                warn!("Identity lookup for GUID '{}' failed: {}", reviewer, e);
-                None
-            }
-        };
+        .await;
     }
+    search_reviewer_by_name(client, vssps_base, reviewer, token, connection_type).await
+}
 
+/// Confirm that the identity GUID `reviewer` exists, returning it on success.
+async fn verify_reviewer_guid(
+    client: &reqwest::Client,
+    vssps_base: &str,
+    reviewer: &str,
+    reviewer_id: &Guid,
+    token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
+) -> Option<String> {
+    let identity_url = format!("{}/_apis/identities", vssps_base);
+    debug!(
+        "Verifying reviewer identity GUID '{}': {}",
+        reviewer, identity_url
+    );
+    let resp = match crate::safe_outputs::authenticate_ado_request(
+        client.get(&identity_url).query(&[
+            ("identityIds", reviewer_id.as_str()),
+            ("api-version", "7.1"),
+        ]),
+        token,
+        connection_type,
+    )
+    .send()
+    .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            warn!("Identity lookup for GUID '{}' failed: {}", reviewer, e);
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        warn!(
+            "Identity lookup for GUID '{}' returned HTTP {}",
+            reviewer,
+            resp.status()
+        );
+        return None;
+    }
+    let body = match resp.json::<serde_json::Value>().await {
+        Ok(body) => body,
+        Err(error) => {
+            warn!(
+                "Identity lookup for GUID '{}' returned invalid JSON: {}",
+                reviewer, error
+            );
+            return None;
+        }
+    };
+    let Some(identities) = body.get("value").and_then(serde_json::Value::as_array) else {
+        warn!(
+            "Identity lookup for GUID '{}' response missing 'value' array",
+            reviewer
+        );
+        return None;
+    };
+    if identities.len() != 1 {
+        warn!(
+            "Identity lookup for GUID '{}' returned {} identities",
+            reviewer,
+            identities.len()
+        );
+        return None;
+    }
+    identities[0]
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| id.eq_ignore_ascii_case(reviewer_id.as_str()))
+        .map(str::to_string)
+}
+
+/// Whether an identity entry exactly matches `reviewer` by display name,
+/// account, or mail (case-insensitive).
+fn identity_matches_reviewer(identity: &serde_json::Value, reviewer: &str) -> bool {
+    let direct_match = ["providerDisplayName", "customDisplayName", "displayName"]
+        .iter()
+        .filter_map(|field| identity.get(field).and_then(serde_json::Value::as_str))
+        .any(|value| value.eq_ignore_ascii_case(reviewer));
+    direct_match
+        || ["Account", "Mail"]
+            .iter()
+            .filter_map(|field| {
+                identity
+                    .get("properties")
+                    .and_then(|properties| properties.get(field))
+                    .and_then(|property| property.get("$value"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .any(|value| value.eq_ignore_ascii_case(reviewer))
+}
+
+/// Search identities by name and return the id only if exactly one matches.
+async fn search_reviewer_by_name(
+    client: &reqwest::Client,
+    vssps_base: &str,
+    reviewer: &str,
+    token: &str,
+    connection_type: Option<crate::compile::types::WriteConnectionType>,
+) -> Option<String> {
     let identity_url = format!("{}/_apis/identities", vssps_base);
     debug!("Resolving identity for '{}': {}", reviewer, identity_url);
 
-    match crate::safe_outputs::authenticate_ado_request(
+    let resp = match crate::safe_outputs::authenticate_ado_request(
         client.get(&identity_url).query(&[
             ("searchFilter", "General"),
             ("filterValue", reviewer),
@@ -1196,56 +1242,39 @@ async fn lookup_reviewer_id(
     .send()
     .await
     {
-        Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            let matching_ids = body
-                .get("value")
-                .and_then(|v| v.as_array())
-                .into_iter()
-                .flatten()
-                .filter(|identity| {
-                    let direct_match = ["providerDisplayName", "customDisplayName", "displayName"]
-                        .iter()
-                        .filter_map(|field| identity.get(field).and_then(serde_json::Value::as_str))
-                        .any(|value| value.eq_ignore_ascii_case(reviewer));
-                    let property_match = ["Account", "Mail"]
-                        .iter()
-                        .filter_map(|field| {
-                            identity
-                                .get("properties")
-                                .and_then(|properties| properties.get(field))
-                                .and_then(|property| property.get("$value"))
-                                .and_then(serde_json::Value::as_str)
-                        })
-                        .any(|value| value.eq_ignore_ascii_case(reviewer));
-                    direct_match || property_match
-                })
-                .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
-                .collect::<std::collections::HashSet<_>>();
-            if matching_ids.len() == 1 {
-                matching_ids.into_iter().next().map(str::to_string)
-            } else {
-                if matching_ids.len() > 1 {
-                    warn!(
-                        "Identity lookup for '{}' returned multiple exact matches",
-                        reviewer
-                    );
-                }
-                None
-            }
-        }
-        Ok(resp) => {
-            warn!(
-                "Identity lookup for '{}' returned HTTP {}",
-                reviewer,
-                resp.status()
-            );
-            None
-        }
+        Ok(resp) => resp,
         Err(e) => {
             warn!("Identity lookup for '{}' failed: {}", reviewer, e);
-            None
+            return None;
         }
+    };
+    if !resp.status().is_success() {
+        warn!(
+            "Identity lookup for '{}' returned HTTP {}",
+            reviewer,
+            resp.status()
+        );
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    let matching_ids = body
+        .get("value")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|identity| identity_matches_reviewer(identity, reviewer))
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .collect::<std::collections::HashSet<_>>();
+    if matching_ids.len() > 1 {
+        warn!(
+            "Identity lookup for '{}' returned multiple exact matches",
+            reviewer
+        );
+    }
+    if matching_ids.len() == 1 {
+        matching_ids.into_iter().next().map(str::to_string)
+    } else {
+        None
     }
 }
 
