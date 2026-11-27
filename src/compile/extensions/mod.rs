@@ -295,12 +295,12 @@ mod compile_context_override_tests {
     #[test]
     fn ado_remote_override_resolves_exact_context() {
         let ctx = CompileContext::parse_ado_context_override(Some(
-            "https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror",
+            "https://dev.azure.com/outlookweb/Test/_git/ado-aw-mirror",
         ))
         .unwrap()
         .unwrap();
-        assert_eq!(ctx.org_url, "https://dev.azure.com/msazuresphere");
-        assert_eq!(ctx.project, "AgentPlayground");
+        assert_eq!(ctx.org_url, "https://dev.azure.com/outlookweb");
+        assert_eq!(ctx.project, "Test");
         assert_eq!(ctx.repo_name, "ado-aw-mirror");
     }
 

@@ -227,7 +227,7 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
-            .and(path("/AgentPlayground/_apis/build/builds/42/tags/verified"))
+            .and(path("/Test/_apis/build/builds/42/tags/verified"))
             .and(query_param("api-version", "7.1"))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
@@ -240,7 +240,7 @@ mod tests {
         };
         let mut ctx = ExecutionContext::from_env_lookup(|_| None);
         ctx.ado_org_url = Some(server.uri());
-        ctx.ado_project = Some("AgentPlayground".to_string());
+        ctx.ado_project = Some("Test".to_string());
         ctx.access_token = Some("token".to_string());
         ctx.build_id = Some(42);
 

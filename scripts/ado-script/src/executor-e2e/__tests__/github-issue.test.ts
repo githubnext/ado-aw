@@ -41,7 +41,7 @@ describe("renderIssueBody", () => {
     const body = renderIssueBody(results, {
       repo: "githubnext/ado-aw",
       labels: [],
-      project: "AgentPlayground",
+      project: "Test",
       buildId: "42",
       buildUrl: "https://example/build/42",
     });

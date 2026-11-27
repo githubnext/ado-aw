@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn ado_project_name_or_guid_rules() {
-        assert!(AdoProject::parse("Agent Playground").is_ok());
+        assert!(AdoProject::parse("Test Project").is_ok());
         assert!(AdoProject::parse("12345678-1234-1234-1234-1234567890ab").is_ok());
         assert!(AdoProject::parse("_reserved").is_err());
         assert!(AdoProject::parse("bad/project").is_err());

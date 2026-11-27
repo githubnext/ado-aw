@@ -3,7 +3,7 @@ name: "ado-aw candidate smoke: credential-isolated package feeds"
 description: "Proves npm, pip, and dotnet restore from an Azure Artifacts feed through ado-proxy with the build identity, and that no feed credential reaches the sandbox"
 target: standalone
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 engine:
   id: copilot
   timeout-minutes: 20
@@ -28,12 +28,12 @@ runtimes:
 permissions:
   packages:
     # No service connection: the job's build identity
-    # (AgentPlayground Build Service) is the feed credential.
+    # (Test Build Service) is the feed credential.
     feeds:
       - name: smoke
-        organization: msazuresphere
-        project: AgentPlayground
-        feed: AgentPlaygroundTestFeed
+        organization: outlookweb
+        project: Test
+        feed: ado-aw-ci-test-feed
         protocols: [npm, pypi, nuget]
         # The feed is empty and relies on its upstreams, so reads must be
         # allowed to save packages from them (Collaborator role).
@@ -104,7 +104,7 @@ fails because the proof tag is absent.
    and its output must contain `403`:
 
    ```bash
-   npm view is-number version --registry https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/AgentPlaygroundTestFeed-not-granted/npm/registry/
+   npm view is-number version --registry https://pkgs.dev.azure.com/outlookweb/Test/_packaging/ado-aw-ci-test-feed-not-granted/npm/registry/
    ```
 
 6. Prove the public npm registry is blocked. This command must fail without

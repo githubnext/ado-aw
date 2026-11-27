@@ -11,7 +11,7 @@ import {
 } from "../assertions.js";
 
 const EXPECTED = {
-  project: "AgentPlayground",
+  project: "Test",
   pipeline: "2560",
   runId: "630001",
   artifact: "ado-aw-candidate",

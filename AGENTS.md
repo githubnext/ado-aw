@@ -305,7 +305,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   └── debug-ado-agentic-workflow.md  # Guide for troubleshooting a failing agentic workflow (report-first; consent-gated filing)
 ├── scripts/              # Supporting scripts shipped as release artifacts
 │   ├── install/          # Platform install scripts (shipped as release assets): install-linux.sh, install-macos.sh, install-windows.ps1
-│   ├── rotate-agentplayground-secrets.ps1 # Ops utility: rotates GITHUB_TOKEN secrets on AgentPlayground smoke-test pipelines
+│   ├── rotate-ci-secrets.ps1 # Ops utility: rotates GitHub token secrets on the outlookweb/Test CI pipelines
 │   └── ado-script/       # TypeScript workspace for bundled gate/import helpers plus execution-context, conclusion, and approval-summary bundles
 │       └── src/
 │           ├── gate/     # Gate evaluator source (bundled to gate.js)

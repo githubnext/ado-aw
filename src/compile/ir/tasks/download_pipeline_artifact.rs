@@ -299,7 +299,7 @@ mod tests {
     fn exact_specific_run_inputs() {
         let t = DownloadPipelineArtifact::new("$(Pipeline.Workspace)/in")
             .source(ArtifactSource::Specific)
-            .project("AgentPlayground")
+            .project("Test")
             .pipeline("2560")
             .run_version(RunVersion::Specific)
             .run_id("630001")
@@ -312,7 +312,7 @@ mod tests {
         );
         assert_eq!(
             t.inputs.get("project").map(String::as_str),
-            Some("AgentPlayground")
+            Some("Test")
         );
         assert_eq!(t.inputs.get("pipeline").map(String::as_str), Some("2560"));
         assert_eq!(t.inputs.get("runId").map(String::as_str), Some("630001"));

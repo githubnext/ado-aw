@@ -5,7 +5,7 @@ checkout behavior. GitHub Actions covers TypeScript and local Git logic, but it
 cannot reproduce Azure Repos resource checkout, predefined variables, or
 `$(System.AccessToken)` authentication.
 
-The fixture repository is `msazuresphere/AgentPlayground/_git/ado-aw-e2e-fixture`.
+The fixture repository is `outlookweb/Test/_git/ado-aw-e2e-fixture`.
 Its normal test refs are immutable:
 
 | Pair | Source commits | Target commits | Purpose |
@@ -16,9 +16,12 @@ Its normal test refs are immutable:
 Both pairs diverge from commit
 `52cfa195595a85eedc7ad405575bd92be93fb0e3`.
 
-The registered definition is `\ado-script-e2e\ado-script e2e` (ID `2544`) in
-the `AgentPlayground` project. It uses Microsoft-hosted Ubuntu because the test
-needs only Node and Git; it does not depend on the internal executor E2E pool.
+The registered definition is `\ado-script-e2e\ado-script e2e` in the
+`outlookweb/Test` project (ID in
+[`tests/smoke/REGISTERED.md`](../smoke/REGISTERED.md)). It uses
+Microsoft-hosted Ubuntu because the test needs only Node and Git. Authorize
+the `ado-aw-e2e-fixture` repository resource on it, or both fixture checkouts
+stall at `notStarted`.
 
 Coverage:
 
@@ -32,7 +35,8 @@ Coverage:
   tip and does not make the merge-base locally reachable.
 
 The pre-fix baseline is build
-[`623611`](https://dev.azure.com/msazuresphere/AgentPlayground/_build/results?buildId=623611).
+[`623611`](https://dev.azure.com/msazuresphere/AgentPlayground/_build/results?buildId=623611),
+recorded in the project's previous home, `msazuresphere/AgentPlayground`.
 It records Azure's depth-1 checkout and the target-only bundle warning before
 failing with an unresolved merge-base.
 
@@ -41,8 +45,8 @@ queueable, and scheduled daily on `main`. Because excluded PRs receive no
 status, it is intentionally not configured as a global required GitHub check.
 
 Although this pipeline does not consume the candidate-smoke write connection,
-it is a GitHub-backed AgentPlayground PR definition with protected repository
+it is a GitHub-backed CI PR definition with protected repository
 access. Its live ADO trigger must keep fork builds and fork secrets disabled;
-definition `2544` is included in
+its definition id is listed in `pr_definition_ids` in
 [`tests/smoke/trigger-policy.json`](../smoke/trigger-policy.json)
-and the trusted candidate-smoke audit.
+and covered by the trusted candidate-smoke audit.

@@ -3,7 +3,7 @@ name: "ado-aw candidate smoke: credential-isolated ADO reads"
 description: "Proves the real runner topology, wrapped az path, ADO MCP path, and proxy bearer injection"
 target: standalone
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 engine:
   id: copilot
   timeout-minutes: 15
@@ -13,12 +13,12 @@ tools:
     - head
   edit: false
   azure-devops:
-    org: msazuresphere
+    org: outlookweb
     toolsets: [core]
     allowed: [core_list_projects]
 permissions:
   read:
-    service-connection: agent-playground-read
+    service-connection: ado-aw-ci-read
     capabilities: [core, repos]
 safe-outputs:
   add-build-tag:
@@ -83,14 +83,14 @@ output. The parent smoke orchestrator will fail because the proof tag is absent.
      --url "$(System.CollectionUri)$(System.TeamProject)/_apis/serviceendpoint/endpoints?api-version=7.1"
    ```
 
-6. Prove a real sibling project is refused. `msazuresphere/4x4` exists, but it
-   is not in this workflow's scope. This command must fail and its error must
-   contain `ado-proxy:` and `out-of-scope`:
+6. Prove a real sibling project is refused. `outlookweb/1ESPipelineTemplates`
+   exists, but it is not in this workflow's scope. This command must fail and
+   its error must contain `ado-proxy:` and `out-of-scope`:
 
    ```bash
    az rest \
      --method get \
-     --url "$(System.CollectionUri)_apis/projects/4x4?api-version=7.1"
+     --url "$(System.CollectionUri)_apis/projects/1ESPipelineTemplates?api-version=7.1"
    ```
 
 7. Prove an ungranted capability is refused. The front matter grants only

@@ -401,7 +401,7 @@ describe("the real shipped tests/smoke/cases.json", () => {
     expect(custom?.modes).toEqual(["candidate"]);
   });
 
-  it("covers the janitor in released mode so AgentPlayground keeps being pruned", () => {
+  it("covers the janitor in released mode so the CI project keeps being pruned", () => {
     const janitor = parsed.cases.find((entry) => entry.id === "janitor");
     expect(janitor?.modes).toEqual(["released"]);
   });

@@ -664,7 +664,7 @@ pub async fn run(opts: EnableOptions<'_>) -> Result<()> {
              The git remote identifies the GitHub source repo, but the ADO project that hosts the \
              registered build definitions must be supplied explicitly.\n\
              Example:\n  \
-             ado-aw enable --org msazuresphere --project AgentPlayground \\\n    \
+             ado-aw enable --org outlookweb --project Test \\\n    \
              --service-connection <github-conn-name> tests/safe-outputs/"
         );
     }

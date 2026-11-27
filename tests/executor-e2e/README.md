@@ -21,7 +21,7 @@ This suite removes the LLM from the loop. For every ADO-write safe output it:
 5. cleans up every object it created,
 
 and, on any failure, files a GitHub issue on the configured issue repository
-and fails the build. AgentPlayground currently uses
+and fails the build. The CI project currently uses
 `jamesadevine/ado-aw-issues` because a canonical-repository credential is not
 available.
 
@@ -29,7 +29,7 @@ available.
 
 | File | Purpose |
 | --- | --- |
-| `azure-pipelines.yml` | Hand-authored ADO pipeline (daily schedule on `main` + path-filtered PR validation + manual). Builds `ado-aw`, builds the harness, runs it against AgentPlayground. |
+| `azure-pipelines.yml` | Hand-authored ADO pipeline (daily schedule on `main` + path-filtered PR validation + manual). Builds `ado-aw`, builds the harness, runs it against the `outlookweb/Test` CI project. |
 | `README.md` | This file. |
 
 The harness itself lives in
@@ -332,7 +332,7 @@ The harness:
 5. clones the target repository, generates a patch, creates and abandons a PR,
    deletes its source branch, and removes the local checkout.
 
-The registered AgentPlayground pipeline does not currently mint this token:
+The registered CI pipeline does not currently mint this token:
 creating or authorizing the Azure DevOps WIF service connection, adding its
 identity to the target organization, and granting repository ACLs are
 administrative side effects that must be provisioned separately. After that,
@@ -384,8 +384,8 @@ You need a write-capable ADO token (PAT) and a checkout-built binary:
 cargo build --release --bin ado-aw
 cd scripts/ado-script && npm ci && npm run build:executor-e2e && npm run build:conclusion && cd ../..
 
-export SYSTEM_COLLECTIONURI="https://dev.azure.com/msazuresphere/"
-export SYSTEM_TEAMPROJECT="AgentPlayground"
+export SYSTEM_COLLECTIONURI="https://dev.azure.com/outlookweb/"
+export SYSTEM_TEAMPROJECT="Test"
 export SYSTEM_ACCESSTOKEN="<write-capable-PAT>"
 export EXECUTOR_E2E_ADO_AW_BIN="$PWD/target/release/ado-aw"
 export EXECUTOR_E2E_ADO_REPO="agent-definitions"
@@ -413,20 +413,21 @@ no current build. The harness exits non-zero if any scenario fails.
 
 ## Manual-handoff checklist (one-time ADO setup)
 
-In `https://dev.azure.com/msazuresphere/AgentPlayground`:
+In `https://dev.azure.com/outlookweb/Test`:
 
-> Current registration: definition `2550` in `\executor-e2e`, with
-> `E2E_QUEUE_PIPELINE_ID` pointing at the `queue-target` definition
-> registered from [`queue-target.yml`](queue-target.yml).
+> Current registration: see [`tests/smoke/REGISTERED.md`](../smoke/REGISTERED.md)
+> for the `\executor-e2e` definition IDs. `E2E_QUEUE_PIPELINE_ID` points at
+> the `queue-target` definition registered from
+> [`queue-target.yml`](queue-target.yml).
 
 1. **Register the pipeline.** New pipeline → GitHub through the
    `githubnext` service connection → existing YAML →
    `tests/executor-e2e/azure-pipelines.yml`. Place it in a `\executor-e2e`
    folder and skip the first run until variables are configured.
    In the live pull-request trigger settings, disable builds from forks and
-   disable fork access to secrets/full tokens. Definition `2550` is audited by
-   `tests/smoke/trigger-policy.json`.
-2. **Grant the principal behind `agent-playground-write` write access** on the
+   disable fork access to secrets/full tokens. List its ID in
+   `pr_definition_ids` in `tests/smoke/trigger-policy.json`.
+2. **Grant the principal behind `ado-aw-ci-write` write access** on the
    `agent-definitions` repo (Contribute, Create branch, Contribute to PRs) and
    on Build (add tags). The YAML maps its AAD token to
    `SYSTEM_ACCESSTOKEN` through `SC_WRITE_TOKEN`. See
@@ -435,7 +436,7 @@ In `https://dev.azure.com/msazuresphere/AgentPlayground`:
 3. **Set the GitHub PAT secret** on this pipeline only:
    ```powershell
    ado-aw secrets set EXECUTOR_E2E_GITHUB_TOKEN `
-     --org msazuresphere --project AgentPlayground `
+     --org outlookweb --project Test `
      --definition-ids <executor-e2e-pipeline-id> `
      --value <fine-grained-pat-Issues-rw-on-jamesadevine/ado-aw-issues>
    ```

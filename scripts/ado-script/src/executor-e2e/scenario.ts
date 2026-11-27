@@ -72,9 +72,9 @@ export interface ScenarioSource {
 }
 
 /** Shared, read-only context handed to every scenario phase. */export interface ScenarioContext {
-  /** ADO collection URI, e.g. https://dev.azure.com/msazuresphere/ */
+  /** ADO collection URI, e.g. https://dev.azure.com/outlookweb/ */
   readonly orgUrl: string;
-  /** ADO project name, e.g. AgentPlayground. */
+  /** ADO project name, e.g. Test. */
   readonly project: string;
   /** ADO Git repo used by PR/git scenarios (initialised `main`). */
   readonly adoRepo: string;

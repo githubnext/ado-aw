@@ -18,7 +18,7 @@
 #     also carries `scripts/ado-script/` to build the bundles from source.
 #   - The build identity ($(System.AccessToken)) needs: Code (read) on the repo
 #     for checkout and synth PR lookups. Gate evaluation uses a short-lived ADO
-#     token minted from `agent-playground-write`; that dedicated identity needs
+#     token minted from `ado-aw-ci-write`; that dedicated identity needs
 #     repo Read plus project-level Stop builds for gate self-cancel. See
 #     docs/safe-output-permissions.md if either path hits 401/403.
 #
@@ -31,7 +31,7 @@ trigger: none
 pr: none
 
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 
 parameters:
   # Required per queue: base64 GateSpec produced by the harness gate-spec.ts.
@@ -86,7 +86,7 @@ jobs:
       - task: AzureCLI@2
         displayName: Acquire ADO token for gate self-cancel
         inputs:
-          azureSubscription: agent-playground-write
+          azureSubscription: ado-aw-ci-write
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |

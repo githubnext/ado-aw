@@ -5436,10 +5436,10 @@ imports:
     #[test]
     fn test_supply_chain_pipeline_artifact_parses_and_validates() {
         let sc = parse_supply_chain(
-            "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n  service-connection: must-not-apply",
+            "supply-chain:\n  pipeline-artifact:\n    project: Test\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n  service-connection: must-not-apply",
         );
         let artifact = sc.pipeline_artifact.as_ref().unwrap();
-        assert_eq!(artifact.project.as_str(), "AgentPlayground");
+        assert_eq!(artifact.project.as_str(), "Test");
         assert_eq!(artifact.definition_id, 2560);
         assert_eq!(artifact.run_id, 630001);
         assert_eq!(artifact.artifact.as_str(), "ado-aw-candidate");
@@ -5459,7 +5459,7 @@ imports:
     #[test]
     fn test_supply_chain_rejects_feed_pipeline_artifact_conflict() {
         let sc = parse_supply_chain(
-            "supply-chain:\n  feed: my-feed\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate",
+            "supply-chain:\n  feed: my-feed\n  pipeline-artifact:\n    project: Test\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate",
         );
         assert!(sc.validate().is_err());
     }
@@ -5468,7 +5468,7 @@ imports:
     fn test_supply_chain_rejects_zero_pipeline_artifact_ids() {
         for field in ["definition-id", "run-id"] {
             let yaml = format!(
-                "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: {}\n    run-id: {}\n    artifact: ado-aw-candidate",
+                "supply-chain:\n  pipeline-artifact:\n    project: Test\n    definition-id: {}\n    run-id: {}\n    artifact: ado-aw-candidate",
                 if field == "definition-id" { 0 } else { 2560 },
                 if field == "run-id" { 0 } else { 630001 }
             );
@@ -5481,9 +5481,9 @@ imports:
     fn test_supply_chain_rejects_invalid_pipeline_artifact_values() {
         for yaml in [
             "supply-chain:\n  pipeline-artifact:\n    project: bad/project\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate",
-            "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: -1\n    run-id: 630001\n    artifact: ado-aw-candidate",
-            "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: bad/artifact",
-            "supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n    latest: true",
+            "supply-chain:\n  pipeline-artifact:\n    project: Test\n    definition-id: -1\n    run-id: 630001\n    artifact: ado-aw-candidate",
+            "supply-chain:\n  pipeline-artifact:\n    project: Test\n    definition-id: 2560\n    run-id: 630001\n    artifact: bad/artifact",
+            "supply-chain:\n  pipeline-artifact:\n    project: Test\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n    latest: true",
         ] {
             let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
             let result: Result<SupplyChainConfig, _> =

@@ -1,28 +1,24 @@
 [CmdletBinding()]
 param(
-    [string] $Organization = "msazuresphere",
-    [string] $Project = "AgentPlayground"
+    [string] $Organization = "outlookweb",
+    [string] $Project = "Test"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$copilotDefinitionIds = @(2545, 2546, 2547, 2548, 2549, 2554, 2555, 2556, 2558, 2564, 2565, 2567)
-
-# The issues-only PAT is still read by the committed release-owned locks that
-# definitions 2549 and 2558 run today, under the legacy
-# `ado-aw-debug.create-issue` variable name. Drop this list, and the
-# ADO_AW_DEBUG_GITHUB_TOKEN block below, when those definitions are deleted at
-# the end of the smoke cutover (tests/smoke/REGISTERED.md step 11).
+# Definition ids in outlookweb/Test. Keep in sync with tests/smoke/REGISTERED.md.
+# An empty list is skipped with a warning; fill it in when the definition is
+# registered.
 #
-# No smoke case files GitHub issues any more, so ADO_AW_GITHUB_TOKEN (the name
-# #1670 introduced for the public `create-github-issue` safe output) is not
-# provisioned anywhere. Add the lane id here if a case ever adopts it.
-$legacyReporterDefinitionIds = @(2549, 2558)
-$executorDefinitionIds = @(2550)
-$triggerDefinitionIds = @(2551)
+# GITHUB_TOKEN (Copilot CLI auth) lives on the smoke lane only. No smoke case
+# files GitHub issues, so ADO_AW_GITHUB_TOKEN is not provisioned anywhere; add
+# the lane id to a new list here if a case ever adopts `create-github-issue`.
+$laneDefinitionIds = @(2875)
+$executorDefinitionIds = @(2884)
+$triggerDefinitionIds = @(2885)
 $allDefinitionIds = @(
-    $copilotDefinitionIds
+    $laneDefinitionIds
     $executorDefinitionIds
     $triggerDefinitionIds
 ) | Sort-Object -Unique
@@ -35,9 +31,13 @@ function Set-AdoAwSecret {
         [Parameter(Mandatory)]
         [string] $Value,
 
-        [Parameter(Mandatory)]
-        [int[]] $DefinitionIds
+        [int[]] $DefinitionIds = @()
     )
+
+    if ($DefinitionIds.Count -eq 0) {
+        Write-Warning "Skipping ${Name}: no definition ids are registered for it yet."
+        return
+    }
 
     Write-Host "Setting $Name on definitions $($DefinitionIds -join ',')..."
     $Value | & cargo run --quiet -- secrets set $Name --value-stdin `
@@ -60,7 +60,7 @@ try {
     Set-AdoAwSecret `
         -Name "GITHUB_TOKEN" `
         -Value $copilotToken `
-        -DefinitionIds $copilotDefinitionIds
+        -DefinitionIds $laneDefinitionIds
 
     Remove-Variable copilotToken
 
@@ -72,11 +72,6 @@ try {
         Write-Host "Preserving existing issue-reporting tokens."
     }
     else {
-        Set-AdoAwSecret `
-            -Name "ADO_AW_GITHUB_TOKEN" `
-            -Value $issuesToken `
-            -DefinitionIds $legacyReporterDefinitionIds
-
         Set-AdoAwSecret `
             -Name "EXECUTOR_E2E_GITHUB_TOKEN" `
             -Value $issuesToken `

@@ -1,7 +1,7 @@
 # ado-aw smoke suite
 
 Agentic end-to-end coverage for `ado-aw`, run against the
-[AgentPlayground](https://dev.azure.com/msazuresphere/AgentPlayground) ADO
+[`outlookweb/Test`](https://dev.azure.com/outlookweb/Test) ADO
 sandbox.
 
 **Adding a smoke is two files: a markdown source and one entry in
@@ -35,7 +35,7 @@ credential class:
 
 | Lane | Secrets / service connections | Cases |
 | --- | --- | --- |
-| `agentic` | `GITHUB_TOKEN`, `agent-playground-read`/`-write` | canary, ado-proxy, noop-target, custom-safe-output, multi-repo, janitor |
+| `agentic` | `GITHUB_TOKEN`, `ado-aw-ci-read`/`-write` | canary, ado-proxy, noop-target, custom-safe-output, multi-repo, janitor |
 | `infra` | none | *(reserved for AWF and the ado-proxy sidecar)* |
 
 No case currently files GitHub issues, so the lane holds no GitHub PAT beyond
@@ -205,13 +205,13 @@ does not apply:
 ```powershell
 $token = az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv
 $body = @{
-  definition         = @{ id = 2559 }
+  definition         = @{ id = 2886 }  # candidate orchestrator, see REGISTERED.md
   sourceBranch       = 'refs/heads/<branch>'
   templateParameters = @{ smokeCases = 'package-feeds,package-feeds-wif' }
 } | ConvertTo-Json
 Invoke-RestMethod -Method Post -ContentType 'application/json' -Body $body `
   -Headers @{ Authorization = "Bearer $token" } `
-  'https://dev.azure.com/msazuresphere/AgentPlayground/_apis/build/builds?api-version=7.1'
+  'https://dev.azure.com/outlookweb/Test/_apis/build/builds?api-version=7.1'
 ```
 
 Run the full suite once before merging; a filtered run proves only the cases
@@ -277,7 +277,7 @@ malformed or mis-laned manifest fails locally rather than in ADO.
 ## Fork security boundary
 
 The candidate orchestrator executes PR-built code with protected
-AgentPlayground resources, so fork PRs are prohibited at the ADO definition
+CI-project resources, so fork PRs are prohibited at the ADO definition
 boundary. Every credentialed GitHub-backed PR definition must persist:
 
 ```text

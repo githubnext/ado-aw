@@ -2615,18 +2615,18 @@ mod tests {
                 { "id": "abc-123", "name": "ado-aw-github" }
             ]
         });
-        let id = pick_service_endpoint_id(&body, "ado-aw-github", "AgentPlayground").unwrap();
+        let id = pick_service_endpoint_id(&body, "ado-aw-github", "Test").unwrap();
         assert_eq!(id, "abc-123");
     }
 
     #[test]
     fn pick_service_endpoint_id_no_match_bails_with_useful_message() {
         let body = serde_json::json!({ "count": 0, "value": [] });
-        let err = pick_service_endpoint_id(&body, "missing-conn", "AgentPlayground")
+        let err = pick_service_endpoint_id(&body, "missing-conn", "Test")
             .unwrap_err()
             .to_string();
         assert!(err.contains("No GitHub service connection named 'missing-conn'"));
-        assert!(err.contains("'AgentPlayground'"));
+        assert!(err.contains("'Test'"));
         assert!(err.contains("Project settings"));
     }
 
@@ -2639,7 +2639,7 @@ mod tests {
                 { "id": "abc-2", "name": "shared-name" }
             ]
         });
-        let err = pick_service_endpoint_id(&body, "shared-name", "AgentPlayground")
+        let err = pick_service_endpoint_id(&body, "shared-name", "Test")
             .unwrap_err()
             .to_string();
         assert!(err.contains("2 GitHub service connections named 'shared-name'"));
@@ -2649,7 +2649,7 @@ mod tests {
     #[test]
     fn pick_service_endpoint_id_missing_value_array_bails() {
         let body = serde_json::json!({ "count": 0 });
-        let err = pick_service_endpoint_id(&body, "any", "AgentPlayground")
+        let err = pick_service_endpoint_id(&body, "any", "Test")
             .unwrap_err()
             .to_string();
         assert!(err.contains("missing `value` array"));

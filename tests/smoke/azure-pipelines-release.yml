@@ -25,7 +25,7 @@ schedules:
     always: true
 
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 
 variables:
   - template: orchestrator-variables.yml

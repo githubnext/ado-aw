@@ -4,7 +4,7 @@
   "lanes": {
     "agentic": {
       "definitionIdEnv": "SMOKE_LANE_AGENTIC_DEFINITION_ID",
-      "description": "GITHUB_TOKEN, ADO_AW_GITHUB_TOKEN, agent-playground-read/write."
+      "description": "GITHUB_TOKEN, ADO_AW_GITHUB_TOKEN, ado-aw-ci-read/write."
     },
     "infra": {
       "definitionIdEnv": "SMOKE_LANE_INFRA_DEFINITION_ID",

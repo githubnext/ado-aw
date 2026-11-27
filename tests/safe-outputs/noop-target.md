@@ -3,12 +3,12 @@ name: "ado-aw smoke noop target"
 description: "No-op target pipeline used by the queue-build smoke fixture"
 target: standalone
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 engine:
   id: copilot
   timeout-minutes: 10
 permissions:
-  read: agent-playground-read
+  read: ado-aw-ci-read
 safe-outputs:
   noop: {}
 ---

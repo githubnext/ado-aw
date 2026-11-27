@@ -8628,7 +8628,7 @@ fn test_supply_chain_pipeline_artifact_reroutes_all_binary_consumers() {
     for inputs in task_inputs {
         for (key, expected) in [
             ("source", "specific"),
-            ("project", "AgentPlayground"),
+            ("project", "Test"),
             ("pipeline", "2560"),
             ("runVersion", "specific"),
             ("runId", "630001"),
@@ -8711,7 +8711,7 @@ name: "Candidate and Registry"
 description: "pinned binaries and mirrored images"
 supply-chain:
   pipeline-artifact:
-    project: AgentPlayground
+    project: Test
     definition-id: 2560
     run-id: 630001
     artifact: ado-aw-candidate
@@ -8751,7 +8751,7 @@ fn test_supply_chain_pipeline_artifact_all_compile_targets() {
             .map(|value| format!("target: {value}\n"))
             .unwrap_or_default();
         let source = format!(
-            "---\nname: Candidate Target\ndescription: target coverage\n{target_field}supply-chain:\n  pipeline-artifact:\n    project: AgentPlayground\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n---\n\n## Body\n"
+            "---\nname: Candidate Target\ndescription: target coverage\n{target_field}supply-chain:\n  pipeline-artifact:\n    project: Test\n    definition-id: 2560\n    run-id: 630001\n    artifact: ado-aw-candidate\n---\n\n## Body\n"
         );
         let name = target.unwrap_or("standalone");
         let (ok, compiled, stderr) = compile_inline_source(&format!("candidate-{name}"), &source);
@@ -8913,7 +8913,7 @@ fn test_package_feeds_smoke_sources_compile() {
     )
     .expect("parse smoke manifest");
     let feed_url =
-        "https://pkgs.dev.azure.com/msazuresphere/AgentPlayground/_packaging/AgentPlaygroundTestFeed/npm/registry/";
+        "https://pkgs.dev.azure.com/outlookweb/Test/_packaging/ado-aw-ci-test-feed/npm/registry/";
 
     for (case_id, uses_wif) in [("package-feeds", false), ("package-feeds-wif", true)] {
         let case = manifest["cases"]
@@ -11097,7 +11097,7 @@ fn test_issue_1731_self_repository_name_is_resolved_at_compile_time() {
         "---\nname: \"Multi-repo PR\"\ndescription: \"Opens a PR in an additional repo\"\nworkspace: root\nrepos:\n  - my-org/tools\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\n## Agent\n\nDo work.\n",
         &[(
             "ADO_AW_COMPILE_REMOTE_URL",
-            "https://dev.azure.com/msazuresphere/AgentPlayground/_git/ado-aw-mirror",
+            "https://dev.azure.com/outlookweb/Test/_git/ado-aw-mirror",
         )],
     );
     let safeoutputs = job_block(&compiled, "SafeOutputs");

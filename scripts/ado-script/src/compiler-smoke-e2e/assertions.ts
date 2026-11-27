@@ -156,7 +156,7 @@ function singleStep(
  * whether the workflow configures `permissions.read`.
  *
  * `ADO_AW_GITHUB_TOKEN` is included because it is the only credential in the
- * suite that grants write access OUTSIDE the AgentPlayground project (Issues
+ * suite that grants write access OUTSIDE the CI project (Issues
  * write on an external GitHub repo). The compiler already confines it to the
  * Stage 3 executor env, but nothing else here would catch a regression that
  * projected it into Stage 1 — which is exactly the reach-outside-ADO escape

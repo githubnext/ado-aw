@@ -90,10 +90,10 @@ Both `--all-repos` and `--source` route through `ado-aw`'s `discover_ado_aw_pipe
 
   **GitHub-source pre-requisites:** create a GitHub service connection in the target ADO project (Project settings → Service connections → GitHub) before running `enable --service-connection ...`. ADO has no REST API for creating service connections — this is a one-time portal action. Then either install the Azure Pipelines GitHub App on the source repo or paste a fine-grained PAT.
 
-  **Example (smoke fixtures registered in `msazuresphere/AgentPlayground` from a `githubnext/ado-aw` checkout):**
+  **Example (smoke fixtures registered in `outlookweb/Test` from a `githubnext/ado-aw` checkout):**
   ```powershell
   ado-aw enable `
-    --org msazuresphere --project AgentPlayground `
+    --org outlookweb --project Test `
     --service-connection ado-aw-github `
     --folder '\smoke' `
     tests/safe-outputs/

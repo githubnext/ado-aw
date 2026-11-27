@@ -16,8 +16,8 @@ function baseEnv(): NodeJS.ProcessEnv {
   return {
     TRIGGER_E2E_SYNC_MIRROR: "true",
     TRIGGER_E2E_VICTIM_REPO: "ado-aw-mirror",
-    SYSTEM_COLLECTIONURI: "https://dev.azure.com/msazuresphere/",
-    SYSTEM_TEAMPROJECT: "Agent Playground",
+    SYSTEM_COLLECTIONURI: "https://dev.azure.com/outlookweb/",
+    SYSTEM_TEAMPROJECT: "Test Project",
     SYSTEM_ACCESSTOKEN: "secret-token",
     BUILD_SOURCESDIRECTORY: "/src",
     BUILD_SOURCEBRANCH: "refs/heads/main",
@@ -71,12 +71,12 @@ describe("trigger mirror sync", () => {
   it("builds an encoded ADO Git URL", () => {
     expect(
       mirrorRepoUrl(
-        "https://dev.azure.com/msazuresphere/",
-        "Agent Playground",
+        "https://dev.azure.com/outlookweb/",
+        "Test Project",
         "ado aw/mirror",
       ),
     ).toBe(
-      "https://dev.azure.com/msazuresphere/Agent%20Playground/_git/ado%20aw%2Fmirror",
+      "https://dev.azure.com/outlookweb/Test%20Project/_git/ado%20aw%2Fmirror",
     );
   });
 

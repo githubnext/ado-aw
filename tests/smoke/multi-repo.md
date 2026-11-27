@@ -3,12 +3,12 @@ name: "ado-aw candidate smoke: multi-repo checkout"
 description: "Proves Azure DevOps places multi-checkout repositories where the compiler says, and that the baked self identity matches the running repository"
 target: standalone
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 engine:
   id: copilot
   timeout-minutes: 5
 permissions:
-  read: agent-playground-read
+  read: ado-aw-ci-read
 repos:
   # A genuinely different repository from `self`, so the two checkouts cannot
   # contend for the agent's per-repository cache directory. (Checking out the

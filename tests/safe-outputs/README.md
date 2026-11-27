@@ -2,7 +2,7 @@
 
 Agentic pipeline sources that exercise the full Stage 1 → Stage 2 → Stage 3
 shape against the
-[AgentPlayground](https://dev.azure.com/msazuresphere/AgentPlayground) ADO
+[`outlookweb/Test`](https://dev.azure.com/outlookweb/Test) ADO
 sandbox.
 
 **These are markdown sources only.** There are no committed `*.lock.yml` files
@@ -30,7 +30,7 @@ A single successful run proves all three.
 | --- | --- |
 | `canary.md` | Omnibus canary: the agent emits `noop` + `create-work-item` + `add-build-tag` in one run. Proves the full agentic loop with two distinct ADO write paths. |
 | `noop-target.md` | Minimal agentic pipeline. (The executor-e2e `queue-build` target is now the separate, non-agentic [`tests/executor-e2e/queue-target.yml`](../executor-e2e/queue-target.yml).) |
-| `janitor.md` | Prunes `ado-aw-smoke-*` artifacts (work items, branches, wiki pages, tags, PRs) older than 30 days from AgentPlayground. Runs in released mode. |
+| `janitor.md` | Prunes `ado-aw-smoke-*` artifacts (work items, branches, wiki pages, tags, PRs) older than 30 days from the CI project. Runs in released mode. |
 
 Schedules in these sources' front matter are **stripped at staging time** — the
 orchestrator owns scheduling, because every case in a lane shares one

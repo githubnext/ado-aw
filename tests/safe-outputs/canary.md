@@ -5,13 +5,13 @@ on:
   schedule: daily around 03:00
 target: standalone
 pool:
-  name: AZS-1ES-L-Playground-ubuntu-22.04
+  vmImage: ubuntu-22.04
 engine:
   id: copilot
   timeout-minutes: 20
 permissions:
-  read: agent-playground-read
-  write: agent-playground-write
+  read: ado-aw-ci-read
+  write: ado-aw-ci-write
 safe-outputs:
   noop: {}
   create-work-item:
