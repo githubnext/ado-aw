@@ -69,7 +69,7 @@ no bridge-gateway resolution, and no `host.docker.internal` mapping.
      the pinned AWF `agent` image, `entrypoint: /usr/local/bin/ado-aw`)
    - Custom MCPs as stdio servers (`type: "stdio"`, spawned by MCPG) or HTTP
      backends (`type: "http"`), per the agent's `mcp-servers:` front matter
-   - Gateway settings (port 8080, API key, payload directory)
+   - Gateway settings (port 8080, `agentId` client credential, payload directory)
 3. **MCPG spawns the SafeOutputs child** on first use via the same Docker
    socket it uses for any other stdio backend, with:
    - the `ado-aw` binary downloaded to `/tmp/awf-tools/ado-aw` mounted
@@ -85,6 +85,18 @@ no bridge-gateway resolution, and no `host.docker.internal` mapping.
      `--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only`
      rootfs, `--tmpfs /tmp:rw,nosuid,nodev,noexec`, `--pids-limit 256`,
      `HOME=/tmp`
+
+   MCPG v0.5+ (Go MCP SDK 1.8) opens each stdio session with a stateless
+   `server/discover` request and falls back to `initialize` when that fails.
+   ado-aw's stdio servers (`src/mcp_stdio.rs`) answer leading discovery
+   requests with JSON-RPC "method not found" so rmcp still sees the legacy
+   handshake.
+
+   MCPG v0.5+ also refuses stdio-backend mounts outside its mount allowlist,
+   which by default covers only `/tmp` (read-write) and its own working
+   directory. The compiler therefore sets `MCP_GATEWAY_ALLOWED_MOUNT_ROOTS` on
+   the MCPG container to `/tmp:rw` plus exactly the configured mount sources
+   and modes, including the read-write agent working directory.
 4. **AWF attaches `awmg-mcpg` to `awf-net`** (`--topology-attach awmg-mcpg`
    on the Agent's AWF invocation) so the agent, running inside the
    network-isolated container, can reach it directly at `awmg-mcpg:8080`.
@@ -141,7 +153,7 @@ The compiler generates MCPG configuration JSON from the `mcp-servers:` front mat
   "gateway": {
     "port": 8080,
     "domain": "awmg-mcpg",
-    "apiKey": "<gateway-api-key>",
+    "agentId": "<gateway-api-key>",
     "payloadDir": "/tmp/gh-aw/mcp-payloads"
   }
 }

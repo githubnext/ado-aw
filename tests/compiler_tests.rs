@@ -2099,6 +2099,50 @@ Call the noop tool exactly once.
 }
 
 #[test]
+fn test_detection_copilot_invocation_excludes_subagent_tools_as_final_argument() {
+    let compiled = compile_inline_agent(
+        "copilot-cli-detection-excluded-tools",
+        r#"---
+name: "Copilot CLI Detection Tools"
+description: "Detection must not delegate threat analysis to subagents"
+engine:
+  id: copilot
+  args: [--reasoning-effort=high]
+safe-outputs:
+  noop: {}
+---
+
+## Agent
+
+Call the noop tool exactly once.
+"#,
+    );
+
+    let agent = extract_job_block(&compiled, "Agent").expect("Agent job should exist");
+    let detection = extract_job_block(&compiled, "Detection").expect("Detection job should exist");
+
+    let detection_run = detection
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("AWF_ARGS+=(-- '/tmp/awf-tools/copilot "))
+        .unwrap_or_else(|| panic!("Detection should run the Copilot CLI under AWF: {detection}"));
+    assert!(
+        detection_run
+            .ends_with(" --reasoning-effort=high --excluded-tools task run_dynamic_workflow')"),
+        "--excluded-tools must be the final Copilot argument, after user engine.args: {detection_run}"
+    );
+    assert_eq!(
+        detection_run.matches("--excluded-tools").count(),
+        1,
+        "{detection_run}"
+    );
+    assert!(
+        !agent.contains("--excluded-tools"),
+        "the Agent run keeps subagent and workflow tools: {agent}"
+    );
+}
+
+#[test]
 fn test_runtime_import_frontmatter_prompt_uses_attached_copilot_prompt_flag() {
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")

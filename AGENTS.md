@@ -150,6 +150,7 @@ fail-closed and only pauses when the agent actually proposed a reviewed output.
 │   ├── logging.rs        # File-based logging infrastructure
 │   ├── mcp.rs            # SafeOutputs stdio MCP server
 │   ├── mcp_custom_tools.rs # Dynamic SafeOutputs MCP tool registration from compiler-generated custom-tools JSON
+│   ├── mcp_stdio.rs      # Stdio transport for the rmcp servers: declines SEP-2575 `server/discover` before the legacy initialize handshake
 │   ├── mcp_author/       # Author-facing read-only MCP server for local IDE/Copilot Chat integrations
 │   │   ├── mod.rs        # Tool router + handlers for inspect/graph/deps/outputs/whatif/lint/catalog/trace/audit
 │   │   └── tests.rs      # MCP-author integration / contract tests

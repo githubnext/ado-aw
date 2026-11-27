@@ -3,9 +3,13 @@
 use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 
-use super::extensions::McpgConfig;
+use super::extensions::{McpgConfig, McpgServerConfig};
 use super::ir::env::EnvValue;
 use crate::secure::AdoVariableName;
+
+/// Environment variable MCPG v0.5+ reads to replace its default stdio-backend
+/// mount policy.
+pub const ALLOWED_MOUNT_ROOTS_ENV: &str = "MCP_GATEWAY_ALLOWED_MOUNT_ROOTS";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct McpgEnvName(String);
@@ -30,10 +34,12 @@ impl McpgEnvName {
                 "{origin} environment variable name '{value}' is invalid; expected [A-Za-z_][A-Za-z0-9_]*"
             );
         }
-        if (!allow_internal && value.starts_with("ADO_AW_MCPG_INTERNAL_"))
+        if (!allow_internal
+            && (value.starts_with("ADO_AW_MCPG_INTERNAL_") || value == ALLOWED_MOUNT_ROOTS_ENV))
             || matches!(
                 value.as_str(),
                 "MCP_GATEWAY_API_KEY"
+                    | "MCP_GATEWAY_AGENT_ID"
                     | "MCP_GATEWAY_PORT"
                     | "MCP_GATEWAY_DOMAIN"
                     | "ADO_PROXY_IP"
@@ -113,6 +119,46 @@ impl McpgLaunchEnvironment {
         origin: impl Into<String>,
     ) -> Result<()> {
         self.bind(destination, EnvValue::literal(value), origin, false, false)
+    }
+
+    fn bind_internal_literal(
+        &mut self,
+        destination: impl Into<String>,
+        value: impl Into<String>,
+        origin: impl Into<String>,
+    ) -> Result<()> {
+        self.bind(destination, EnvValue::literal(value), origin, true, false)
+    }
+
+    /// Replaces MCPG's default mount policy with `/tmp` (read-write, as in the
+    /// default) plus exactly the mount sources the configured stdio servers use.
+    ///
+    /// MCPG v0.5+ only lets backend containers bind-mount host paths under its
+    /// default roots: `GITHUB_WORKSPACE` and its own working directory read-only,
+    /// and `/tmp` read-write. SafeOutputs mounts the ADO workspace read-write, so
+    /// without this the gateway refuses to launch it and serves no tools.
+    pub fn bind_allowed_mount_roots(
+        &mut self,
+        servers: &BTreeMap<String, McpgServerConfig>,
+    ) -> Result<()> {
+        let mut roots = BTreeMap::from([("/tmp", true)]);
+        for (name, server) in servers {
+            for mount in server.runtime.mounts() {
+                let source = mount.source();
+                if source.contains(',') {
+                    bail!(
+                        "mcp-servers.{name} mount source '{source}' contains ',', which the MCPG mount allowlist cannot express"
+                    );
+                }
+                *roots.entry(source).or_default() |= !mount.is_read_only();
+            }
+        }
+        let value = roots
+            .into_iter()
+            .map(|(path, writable)| format!("{path}:{}", if writable { "rw" } else { "ro" }))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.bind_internal_literal(ALLOWED_MOUNT_ROOTS_ENV, value, "MCPG stdio mount policy")
     }
 
     fn bind(
@@ -261,11 +307,13 @@ mod tests {
         for destination in [
             "ADO_AW_MCPG_INTERNAL_IMAGE",
             "MCP_GATEWAY_API_KEY",
+            "MCP_GATEWAY_AGENT_ID",
             "MCP_GATEWAY_PORT",
             "MCP_GATEWAY_DOMAIN",
             "ADO_PROXY_IP",
             "MCPG_IMAGE",
             "MCPG_ENV_NAMES",
+            ALLOWED_MOUNT_ROOTS_ENV,
         ] {
             let error = McpgLaunchEnvironment::default()
                 .bind_pipeline_variable(destination, &source, "mcp-servers.one")

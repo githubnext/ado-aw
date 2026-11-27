@@ -80,6 +80,37 @@ for image in squid agent api-proxy; do
 done
 docker pull "${MCPG_IMAGE}"
 
+# Launch the SafeOutputs stdio server directly in the pinned agent image first.
+# MCPG reports a backend that dies at startup only as an EOF, so this surfaces
+# the server's own exit code and stderr.
+SAFEOUTPUTS_PREFLIGHT_STATUS=0
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ado-aw-contract-preflight","version":"1.0"}}}' |
+  timeout 60 docker run -i --rm \
+    --entrypoint /usr/local/bin/ado-aw \
+    -v "${TOOLS_DIR}/ado-aw:/usr/local/bin/ado-aw:ro" \
+    -v "${RUNTIME_DIR}:${RUNTIME_DIR}:rw" \
+    -v "${SAFE_OUTPUTS_DIR}:/safeoutputs:rw" \
+    -e HOME=/tmp \
+    --network none \
+    --user "$(id -u):$(id -g)" \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --read-only \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec \
+    --pids-limit 256 \
+    -w "${RUNTIME_DIR}" \
+    "${SAFEOUTPUTS_IMAGE}" \
+    mcp --enabled-tools noop /safeoutputs "${RUNTIME_DIR}" \
+    >"${ARTIFACT_DIR}/safeoutputs-preflight.stdout" \
+    2>"${ARTIFACT_DIR}/safeoutputs-preflight.stderr" ||
+  SAFEOUTPUTS_PREFLIGHT_STATUS=$?
+if ! grep -q '"result"' "${ARTIFACT_DIR}/safeoutputs-preflight.stdout"; then
+  echo "SafeOutputs failed to start in ${SAFEOUTPUTS_IMAGE} (exit ${SAFEOUTPUTS_PREFLIGHT_STATUS})" >&2
+  cat "${ARTIFACT_DIR}/safeoutputs-preflight.stderr" >&2 || true
+  cat "${ARTIFACT_DIR}/safeoutputs-preflight.stdout" >&2 || true
+  exit 1
+fi
+
 jq -n \
   --arg safeoutputs_image "${SAFEOUTPUTS_IMAGE}" \
   --arg ado_aw_bin "${TOOLS_DIR}/ado-aw" \
@@ -120,7 +151,7 @@ jq -n \
     gateway: {
       port: $gateway_port,
       domain: $gateway_domain,
-      apiKey: $gateway_key,
+      agentId: $gateway_key,
       payloadDir: "/tmp/gh-aw/mcp-payloads"
     }
   }' >"${RUNTIME_DIR}/mcpg-config.json"
@@ -135,7 +166,7 @@ docker run -i --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e "MCP_GATEWAY_PORT=${MCP_GATEWAY_PORT}" \
   -e "MCP_GATEWAY_DOMAIN=${MCP_GATEWAY_CONTAINER}" \
-  -e "MCP_GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY}" \
+  -e "MCP_GATEWAY_AGENT_ID=${MCP_GATEWAY_API_KEY}" \
   "${MCPG_IMAGE}" \
   --routed \
   --listen "0.0.0.0:${MCP_GATEWAY_PORT}" \

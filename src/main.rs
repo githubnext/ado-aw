@@ -20,6 +20,7 @@ mod logging;
 mod mcp;
 mod mcp_author;
 mod mcp_custom_tools;
+mod mcp_stdio;
 mod ndjson;
 mod remove;
 mod run;

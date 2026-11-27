@@ -24,6 +24,13 @@ const BLOCKED_ARG_PREFIXES: &[&str] = &[
     "--ask-user",
 ];
 
+/// Copilot CLI tools removed from the Detection run. `task` launches the
+/// built-in subagents (explore, general-purpose, code-review, security-review)
+/// and `run_dynamic_workflow` starts multi-agent workflows. A delegated review
+/// answers in its own format, so the detector would skip the
+/// `THREAT_DETECTION_RESULT:` line that Detection requires and fail closed.
+const COPILOT_DETECTION_EXCLUDED_TOOLS: &[&str] = &["task", "run_dynamic_workflow"];
+
 /// Environment variable keys that the compiler controls — users must not override these.
 pub const BLOCKED_ENV_KEYS: &[&str] = &[
     "GITHUB_TOKEN",
@@ -253,7 +260,7 @@ fn resolve_provider_base_url_host(engine_config: &EngineConfig) -> ProviderBaseU
 
 /// Default pinned version of the Copilot CLI.
 /// Override per-agent via `engine: { id: copilot, version: "1.0.35" }` in front matter.
-pub const COPILOT_CLI_VERSION: &str = "1.0.88";
+pub const COPILOT_CLI_VERSION: &str = "1.0.114";
 const COPILOT_CLI_RELEASES_BASE: &str = "https://github.com/github/copilot-cli/releases";
 
 /// Resolved engine — enum dispatch over supported engine identifiers.
@@ -434,17 +441,32 @@ impl Engine {
         )
     }
 
-    /// Generate an invocation using an explicit engine configuration.
-    pub fn invocation_with_config(
+    /// Generate the Detection (threat-analysis) invocation using the effective
+    /// Detection engine configuration. Detection has no MCP config, and the
+    /// engine gets flags that keep the analysis in the detector itself rather
+    /// than in delegated subagents.
+    pub fn detection_invocation_with_config(
         &self,
         engine_config: &EngineConfig,
         front_matter: &FrontMatter,
         extension_declarations: &[Declarations],
         prompt_path: &str,
-        mcp_config_path: Option<&str>,
     ) -> Result<String> {
-        let args = self.args_with_config(engine_config, front_matter, extension_declarations)?;
-        self.invocation_with_args(engine_config, prompt_path, mcp_config_path, &args)
+        let mut args =
+            self.args_with_config(engine_config, front_matter, extension_declarations)?;
+        match self {
+            Engine::Copilot => {
+                // Appended after user `engine.args` so it is the final argument:
+                // `--excluded-tools` is variadic and would otherwise swallow any
+                // following positional values.
+                if !args.is_empty() {
+                    args.push(' ');
+                }
+                args.push_str("--excluded-tools ");
+                args.push_str(&COPILOT_DETECTION_EXCLUDED_TOOLS.join(" "));
+            }
+        }
+        self.invocation_with_args(engine_config, prompt_path, None, &args)
     }
 
     fn invocation_with_args(

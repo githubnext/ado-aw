@@ -13,7 +13,7 @@ engine: copilot
 # Object format with additional options
 engine:
   id: copilot
-  model: gpt-5-mini
+  model: claude-haiku-5.5
   timeout-minutes: 30
 ```
 
@@ -22,12 +22,12 @@ engine:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `id` | string | `copilot` | Engine identifier. Currently only `copilot` (GitHub Copilot CLI) is supported. |
-| `model` | string | *(none)* | AI model to use (e.g., `gpt-5-mini`). When omitted, the compiler does not emit `--model` and the Copilot CLI chooses its own default. When set, the compiler passes the value directly to the Copilot CLI `--model` flag — any model identifier the Copilot CLI accepts is valid. |
+| `model` | string | *(none)* | AI model to use (e.g., `claude-haiku-5.5`). When omitted, the compiler does not emit `--model` and the Copilot CLI chooses its own default. When set, the compiler passes the value directly to the Copilot CLI `--model` flag — any model identifier the Copilot CLI accepts is valid. |
 | `timeout-minutes` | integer | *(none)* | Maximum time in minutes the agent job is allowed to run. Sets `timeoutInMinutes` on the `Agent` job in the generated pipeline. |
 | `version` | string | *(none)* | Engine CLI version to install (e.g., `"1.0.70"`, `"latest"`). Overrides the pinned `COPILOT_CLI_VERSION`. Set to `"latest"` to use the newest available version. |
 | `agent` | string | *(none)* | Custom agent file identifier (Copilot only). Adds `--agent <name>` to the CLI invocation, selecting a custom agent from `.github/agents/`. |
 | `api-target` | string | *(none)* | Custom API endpoint hostname for GHES/GHEC (e.g., `"api.acme.ghe.com"`). Adds `--api-target <hostname>` to the CLI invocation and adds the hostname to the AWF network allowlist. |
-| `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (`--prompt`, `--additional-mcp-config`, `--allow-tool`, `--allow-all-tools`, `--allow-all-paths`, `--disable-builtin-mcps`, `--no-ask-user`, `--ask-user`). |
+| `args` | list | `[]` | Custom CLI arguments appended after compiler-generated args. Subject to shell-safety validation and blocked from overriding compiler-controlled flags (`--prompt`, `--additional-mcp-config`, `--allow-tool`, `--allow-all-tools`, `--allow-all-paths`, `--disable-builtin-mcps`, `--no-ask-user`, `--ask-user`). In the Detection run the compiler appends `--excluded-tools task run_dynamic_workflow` after them (see [threat detection](safe-outputs.md#threat-detection-threat-detection)). |
 | `env` | map | *(none)* | Engine-specific environment variables merged into the sandbox step's `env:` block. Keys must be valid env var names. Values are literal-only and must not contain ADO expressions (`$(`, `${{`, `$[`) or pipeline command injection (`##vso[`), **except** the Copilot provider keys (`COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API`), which may carry an ADO macro (`$(...)`) expression. Prefer the typed [`provider`](#copilot-model-provider-byok-configuration) block over raw provider env keys. Compiler-controlled keys (`GITHUB_TOKEN`, `PATH`, `BASH_ENV`, etc.) are blocked. |
 | `provider` | map | *(none)* | Copilot external model-provider (BYOK) configuration: `base-url`, `type`, `wire-api`, `token` (compiler-minted bearer via a service connection), `api-key`. Maps to the `COPILOT_PROVIDER_*` env vars. See [Copilot model provider (BYOK) configuration](#copilot-model-provider-byok-configuration). |
 | `command` | string | *(none)* | Custom engine executable path (skips the default engine binary installation — NuGet for `target: 1es`, GitHub Releases for all other targets). The path must be accessible inside the AWF container (e.g., `/tmp/...` or workspace-mounted paths). |
@@ -52,7 +52,7 @@ used by the separate Detection job:
 ```yaml
 engine:
   id: copilot
-  model: gpt-5-mini
+  model: claude-haiku-5.5
   version: "1.0.70"
   args: [--reasoning-effort=high]
   env:
@@ -62,7 +62,7 @@ safe-outputs:
   create-pull-request: {}
   threat-detection:
     engine:
-      model: gpt-5-mini
+      model: claude-haiku-5.5
       args: []                 # explicitly clear inherited args
       env:
         SHARED_SETTING: detection
