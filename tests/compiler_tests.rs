@@ -11111,6 +11111,49 @@ fn test_issue_1731_self_repository_name_is_resolved_at_compile_time() {
     );
 }
 
+#[test]
+fn test_issue_2482_encoded_remote_repository_name_is_decoded_in_pipeline() {
+    let compiled = compile_inline_agent_with_env(
+        "issue-2482-encoded-identity",
+        "---\nname: \"Create PR\"\ndescription: \"Create a PR\"\nsafe-outputs:\n  create-pull-request:\n    target-branch: main\n---\n\nDo work.\n",
+        &[(
+            "ADO_AW_COMPILE_REMOTE_URL",
+            "https://dev.azure.com/org/My%20Project/_git/My%20Repo",
+        )],
+    );
+    assert!(
+        job_block(&compiled, "SafeOutputs").contains("ADO_AW_SELF_REPOSITORY_NAME: My Repo"),
+        "{compiled}"
+    );
+    assert!(compiled.contains(r#""repo":"my repo""#), "{compiled}");
+    assert!(!compiled.contains("My%20Repo"), "{compiled}");
+}
+
+#[test]
+fn test_issue_2482_encoded_remote_rejects_pipeline_expressions() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("agent.md");
+    fs::write(
+        &source,
+        "---\nname: Test\ndescription: Test\n---\n\nDo work.\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ado-aw"))
+        .args(["compile", source.to_str().unwrap()])
+        .env(
+            "ADO_AW_COMPILE_REMOTE_URL",
+            "https://dev.azure.com/org/project/_git/%24%28secret%29",
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ADO repository name"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Without a resolvable ADO remote the compiler falls back to the
 /// trigger-scoped macro. That is a degraded mode, so it must be accompanied by
 /// a warning rather than silently emitting a value that can name the wrong

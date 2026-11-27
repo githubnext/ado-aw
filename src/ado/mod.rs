@@ -113,6 +113,13 @@ impl AdoContext {
 pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
     let url = remote_url.trim();
 
+    fn decode_name(name: &str, kind: &str) -> Result<String> {
+        Ok(percent_encoding::percent_decode_str(name)
+            .decode_utf8()
+            .with_context(|| format!("ADO {kind} name is not valid UTF-8"))?
+            .into_owned())
+    }
+
     // SSH format: git@ssh.dev.azure.com:v3/{org}/{project}/{repo}
     // Also handles legacy: git@vs-ssh.visualstudio.com:v3/{org}/{project}/{repo}
     if let Some(rest) = url
@@ -124,8 +131,8 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
             let repo_name = parts[2].trim_end_matches(".git");
             return Ok(AdoContext {
                 org_url: format!("https://dev.azure.com/{}", parts[0]),
-                project: parts[1].to_string(),
-                repo_name: repo_name.to_string(),
+                project: decode_name(parts[1], "project")?,
+                repo_name: decode_name(repo_name, "repository")?,
             });
         }
     }
@@ -143,8 +150,8 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
             let repo_name = segments[3].trim_end_matches(".git");
             return Ok(AdoContext {
                 org_url: format!("https://dev.azure.com/{}", segments[0]),
-                project: segments[1].to_string(),
-                repo_name: repo_name.to_string(),
+                project: decode_name(segments[1], "project")?,
+                repo_name: decode_name(repo_name, "repository")?,
             });
         }
     }
@@ -174,8 +181,8 @@ pub fn parse_ado_remote(remote_url: &str) -> Result<AdoContext> {
             let repo_name = segments[repo_start + 2].trim_end_matches(".git");
             return Ok(AdoContext {
                 org_url: format!("https://dev.azure.com/{}", org),
-                project: segments[repo_start].to_string(),
-                repo_name: repo_name.to_string(),
+                project: decode_name(segments[repo_start], "project")?,
+                repo_name: decode_name(repo_name, "repository")?,
             });
         }
     }
@@ -2442,6 +2449,38 @@ mod tests {
         assert_eq!(ctx.org_url, "https://dev.azure.com/myorg");
         assert_eq!(ctx.project, "myproject");
         assert_eq!(ctx.repo_name, "myrepo");
+    }
+
+    #[test]
+    fn test_parse_ado_remote_percent_encoded_names() {
+        for url in [
+            "https://dev.azure.com/myorg/My%20Project/_git/My%20Repo.git",
+            "https://myorg.visualstudio.com/My%20Project/_git/My%20Repo.git",
+            "https://myorg.visualstudio.com/DefaultCollection/My%20Project/_git/My%20Repo.git",
+            "git@ssh.dev.azure.com:v3/myorg/My%20Project/My%20Repo.git",
+            "git@vs-ssh.visualstudio.com:v3/myorg/My%20Project/My%20Repo.git",
+        ] {
+            let ctx = parse_ado_remote(url).unwrap();
+            assert_eq!(ctx.org_url, "https://dev.azure.com/myorg", "{url}");
+            assert_eq!(ctx.project, "My Project", "{url}");
+            assert_eq!(ctx.repo_name, "My Repo", "{url}");
+        }
+    }
+
+    #[test]
+    fn test_parse_ado_remote_decodes_once_and_rejects_invalid_utf8() {
+        let ctx =
+            parse_ado_remote("https://dev.azure.com/myorg/Caf%C3%A9%20%2520/_git/100%25%20Repo")
+                .unwrap();
+        assert_eq!(ctx.project, "Café %20");
+        assert_eq!(ctx.repo_name, "100% Repo");
+        for url in [
+            "https://dev.azure.com/myorg/%FF/_git/repo",
+            "https://myorg.visualstudio.com/project/_git/%FF",
+            "git@ssh.dev.azure.com:v3/myorg/project/%FF",
+        ] {
+            assert!(parse_ado_remote(url).is_err(), "{url}");
+        }
     }
 
     #[test]

@@ -651,6 +651,10 @@ pub(crate) fn build_pipeline_context(
     // ─── Validations (reuse all shared validators) ────────────────
     validate_pipeline_front_matter(front_matter, &threat_detection, &detection_engine_config)?;
 
+    if let Some(ado) = &ctx.ado_context {
+        crate::validate::reject_pipeline_injection(&ado.repo_name, "ADO repository name")?;
+    }
+
     let extension_declarations = collect_extension_declarations(extensions, ctx)?;
 
     // ─── Scalars ──────────────────────────────────────────────────

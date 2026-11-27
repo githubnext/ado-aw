@@ -2685,6 +2685,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_repository_api_base_encodes_remote_names_once() {
+        let ctx =
+            crate::ado::parse_ado_remote("https://dev.azure.com/org/My%20Project/_git/My%20Repo")
+                .unwrap();
+        let target = crate::safe_outputs::result::AdoRepositoryTarget {
+            alias: "self".to_string(),
+            organization: "org".to_string(),
+            organization_url: ctx.org_url,
+            project: ctx.project,
+            repository: ctx.repo_name,
+            repository_id: None,
+            cross_organization: false,
+        };
+        assert_eq!(
+            format!("{}/pushes?api-version=7.1", repository_api_base(&target)),
+            "https://dev.azure.com/org/My%20Project/_apis/git/repositories/My%20Repo/pushes?api-version=7.1"
+        );
+    }
+
     fn cross_org_ctx(organization: Option<&str>, allow: bool) -> ExecutionContext {
         let mut ctx = ExecutionContext {
             ado_org_url: Some("https://dev.azure.com/current-org".to_string()),
