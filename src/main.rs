@@ -1659,44 +1659,55 @@ fn dispatch_export_command(command: Commands) -> Result<()> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
+async fn dispatch_compile_command(
+    path: Option<String>,
+    output: Option<String>,
+    force: bool,
+    skip_integrity: bool,
+    debug_pipeline: bool,
+) -> Result<()> {
+    // `--force` bypasses the GitHub-remote guard so maintainers can
+    // run `ado-aw compile` inside this repository (or other
+    // GitHub-hosted forks) for development and example regeneration.
+    if !force {
+        ensure_non_github_remote_for_ado_aw("compile", Path::new(".")).await?;
+    }
+    run_compile(path, output, skip_integrity, debug_pipeline).await
+}
 
-    // Determine command name for logging
-    let command_name = args
-        .command
-        .as_ref()
-        .map(Commands::command_name)
-        .unwrap_or("ado-aw");
+async fn dispatch_init_command(path: Option<PathBuf>, force: bool, agency: bool) -> Result<()> {
+    let init_path = path.as_deref().unwrap_or(Path::new("."));
+    // `--force` bypasses the GitHub-remote guard so maintainers can
+    // run `ado-aw init` inside this repository (or other GitHub-hosted
+    // forks) for development and example regeneration.
+    if !force {
+        ensure_non_github_remote_for_ado_aw("init", init_path).await?;
+    }
+    init::run(path.as_deref(), agency).await
+}
 
-    // Initialize file-based logging to a daily log file.
-    let _log_path = logging::init_logging(
-        command_name,
-        args.debug,
-        args.verbose,
-        args.log_output_dir.as_deref(),
-    );
+async fn run_configure_command(
+    token: Option<String>,
+    org: Option<String>,
+    project: Option<String>,
+    pat: Option<String>,
+    path: Option<PathBuf>,
+    dry_run: bool,
+    definition_ids: Option<Vec<u64>>,
+) -> Result<()> {
+    configure::run(
+        token.as_deref(),
+        org.as_deref(),
+        project.as_deref(),
+        pat.as_deref(),
+        path.as_deref(),
+        dry_run,
+        definition_ids.as_deref(),
+    )
+    .await
+}
 
-    let Some(command) = args.command else {
-        println!("No subcommand was used. Try `compile <path>`");
-        return Ok(());
-    };
-
-    // Check for a newer release on GitHub and nudge the user to update.
-    // Skipped for pipeline-internal commands (execute and mcp) that
-    // run inside network-isolated sandboxes and are not invoked by humans.
-    // Also skipped in CI environments to avoid unnecessary outbound calls.
-    let is_pipeline_internal = matches!(
-        command,
-        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpAuthor { .. }
-    );
-    let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
-        Some(tokio::spawn(update_check::check_for_update()))
-    } else {
-        None
-    };
-
+async fn dispatch_command(command: Commands) -> Result<()> {
     match command {
         Commands::Compile {
             path,
@@ -1708,17 +1719,8 @@ async fn main() -> Result<()> {
             debug_pipeline,
         } => {
             #[cfg(not(debug_assertions))]
-            let skip_integrity = false;
-            #[cfg(not(debug_assertions))]
-            let debug_pipeline = false;
-
-            // `--force` bypasses the GitHub-remote guard so maintainers can
-            // run `ado-aw compile` inside this repository (or other
-            // GitHub-hosted forks) for development and example regeneration.
-            if !force {
-                ensure_non_github_remote_for_ado_aw("compile", Path::new(".")).await?;
-            }
-            run_compile(path, output, skip_integrity, debug_pipeline).await?;
+            let (skip_integrity, debug_pipeline) = (false, false);
+            dispatch_compile_command(path, output, force, skip_integrity, debug_pipeline).await?;
         }
         Commands::Check { pipeline } => {
             compile::check_pipeline(&pipeline).await?;
@@ -1730,11 +1732,7 @@ async fn main() -> Result<()> {
             enabled_tools,
             custom_tools,
         } => {
-            let filter = if enabled_tools.is_empty() {
-                None
-            } else {
-                Some(enabled_tools)
-            };
+            let filter = (!enabled_tools.is_empty()).then_some(enabled_tools);
             mcp::run(
                 &output_directory,
                 &bounding_directory,
@@ -1778,15 +1776,16 @@ async fn main() -> Result<()> {
             force,
             agency,
         } => {
-            let init_path = path.as_deref().unwrap_or(Path::new("."));
-            // `--force` bypasses the GitHub-remote guard so maintainers can
-            // run `ado-aw init` inside this repository (or other GitHub-hosted
-            // forks) for development and example regeneration.
-            if !force {
-                ensure_non_github_remote_for_ado_aw("init", init_path).await?;
-            }
-            init::run(path.as_deref(), agency).await?;
+            dispatch_init_command(path, force, agency).await?;
         }
+        other => dispatch_management_command(other).await?,
+    }
+
+    Ok(())
+}
+
+async fn dispatch_management_command(command: Commands) -> Result<()> {
+    match command {
         Commands::Configure {
             token,
             org,
@@ -1796,16 +1795,7 @@ async fn main() -> Result<()> {
             dry_run,
             definition_ids,
         } => {
-            configure::run(
-                token.as_deref(),
-                org.as_deref(),
-                project.as_deref(),
-                pat.as_deref(),
-                path.as_deref(),
-                dry_run,
-                definition_ids.as_deref(),
-            )
-            .await?;
+            run_configure_command(token, org, project, pat, path, dry_run, definition_ids).await?;
         }
         Commands::Secrets { action } => {
             dispatch_secrets_command(action).await?;
@@ -1834,7 +1824,54 @@ async fn main() -> Result<()> {
         | Commands::Catalog { .. }) => {
             dispatch_inspect_group_command(command).await?;
         }
+        other => unreachable!(
+            "dispatch_management_command called with unexpected command: {:?}",
+            Commands::command_name(&other)
+        ),
     }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    // Determine command name for logging
+    let command_name = args
+        .command
+        .as_ref()
+        .map(Commands::command_name)
+        .unwrap_or("ado-aw");
+
+    // Initialize file-based logging to a daily log file.
+    let _log_path = logging::init_logging(
+        command_name,
+        args.debug,
+        args.verbose,
+        args.log_output_dir.as_deref(),
+    );
+
+    let Some(command) = args.command else {
+        println!("No subcommand was used. Try `compile <path>`");
+        return Ok(());
+    };
+
+    // Check for a newer release on GitHub and nudge the user to update.
+    // Skipped for pipeline-internal commands (execute and mcp) that
+    // run inside network-isolated sandboxes and are not invoked by humans.
+    // Also skipped in CI environments to avoid unnecessary outbound calls.
+    let is_pipeline_internal = matches!(
+        command,
+        Commands::Execute { .. } | Commands::Mcp { .. } | Commands::McpAuthor { .. }
+    );
+    let update_handle = if !is_pipeline_internal && std::env::var_os("CI").is_none() {
+        Some(tokio::spawn(update_check::check_for_update()))
+    } else {
+        None
+    };
+
+    dispatch_command(command).await?;
 
     // Wait for the background update check to finish so the advisory (if any)
     // is printed before the process exits.
